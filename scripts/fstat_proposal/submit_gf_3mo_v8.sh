@@ -437,12 +437,23 @@ echo "[V8-NOISE] modulation=${GALFOR_MODULATION_PATH} t0=${GALFOR_MODULATION_T0}
 # was exercised on GPU in job 376 -- the unequal-arm coarse basis path works
 # there. To fall back: COARSE_GPU_MODE=off restores the exact-fine likelihood
 # (job 369's configuration) and COARSE_USE_WS=0 swaps WS for Bartlett.
-export COARSE_Q=8
-export COARSE_GPU_MODE=delayed_acceptance
+# DIAGNOSTIC (2026-09-04): coarse->fine drift test. The chain was sampling
+# under coarse delayed_acceptance (Q=8). To check whether the coarse
+# likelihood biased the sampled noise params, resume the SAME chain under the
+# exact-fine likelihood and watch whether S_oms/S_tm drift (no drift => the
+# coarse likelihood is cleared of the ~1.4x instrument bias). Exact-fine =
+# mode off + Q=1 (Q>1 with mode off is rejected by the all-source validator).
+# COARSE_RESTAMP_IDENTITY=1 rewrites ONLY the coarse_* identity keys of the
+# store so the resume guard passes -- **COPY THE STORE FIRST**, it mutates the
+# identity record in place. To return to production coarse sampling: set
+# COARSE_Q=8, COARSE_GPU_MODE=delayed_acceptance, and drop the restamp line.
+export COARSE_Q=1
+export COARSE_GPU_MODE=off
 export COARSE_USE_WS=1
 export COARSE_FIDUCIAL=injection
+export COARSE_RESTAMP_IDENTITY=1
 echo "[V8-NOISE] coarse: Q=${COARSE_Q} mode=${COARSE_GPU_MODE} \
-use_ws=${COARSE_USE_WS} fiducial=${COARSE_FIDUCIAL}"
+use_ws=${COARSE_USE_WS} fiducial=${COARSE_FIDUCIAL} restamp=${COARSE_RESTAMP_IDENTITY}"
 
 # ---- sampler shape ---------------------------------------------------------
 export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
@@ -1979,36 +1990,21 @@ with h5py.File(noise_file, "r") as f:
     n = f["ltts"]["ltt_12"].shape[0]
 print(f"[V8-NOISE] delay table OK: {noise_file} (/ltts, {n} samples/link)")
 if os.path.exists(store):
-    with h5py.File(store, "r") as f:
-        grp = f.get("global_fit", {})
-        ident = grp.get("noise_model_identity") if hasattr(grp, "get") else None
-        if ident is None:
-            print(f"[V8-NOISE] REFUSING: {store!r} predates noise-model identity "
-                  "records -- it cannot have been sampled under the v8 noise "
-                  "model. Use a fresh STORE_DIR.")
-            raise SystemExit(2)
-        a = dict(ident.attrs)
-        # The coarse mode/Q are PART of the noise identity: they change the
-        # PSD/galfor transition kernel on identical array shapes, so a resume
-        # across them is refused by run.py. Check them here too, or the
-        # mismatch only surfaces minutes into the allocation.
-        want_mode = os.environ.get("COARSE_GPU_MODE", "delayed_acceptance")
-        want_q = int(os.environ.get("COARSE_Q", "8"))
-        mismatches = {}
-        if not bool(a.get("unequal_arm")):
-            mismatches["unequal_arm"] = (a.get("unequal_arm"), True)
-        if str(a.get("wdm_psd_method", "")) != method:
-            mismatches["wdm_psd_method"] = (a.get("wdm_psd_method"), method)
-        if str(a.get("coarse_mode", "")) != want_mode:
-            mismatches["coarse_mode"] = (a.get("coarse_mode"), want_mode)
-        if int(a.get("coarse_Q", 1)) != want_q:
-            mismatches["coarse_Q"] = (a.get("coarse_Q"), want_q)
-        if mismatches:
-            print(f"[V8-NOISE] REFUSING: stored noise identity does not match this "
-                  f"config (stored, wanted): {mismatches}. Full stored identity: {a}. "
-                  "Use a fresh STORE_DIR.")
-            raise SystemExit(2)
-        print(f"[V8-NOISE] resume identity OK: {a}")
+    # Resume-identity preflight (unequal_arm / wdm_psd_method / coarse mode+Q).
+    # With COARSE_RESTAMP_IDENTITY=1 a coarse-ONLY mismatch is rewritten in
+    # place instead of refused -- the deliberate coarse->fine drift test.
+    # Data-model keys stay strict. Logic lives in the unit-tested module
+    # (tests/test_coarse_resume_restamp.py). CWD is the repo root here.
+    sys.path.insert(0, "scripts/fstat_proposal")
+    import coarse_resume_restamp
+    coarse_resume_restamp.preflight(
+        store,
+        want_unequal_arm=True,
+        want_method=method,
+        want_mode=os.environ.get("COARSE_GPU_MODE", "delayed_acceptance"),
+        want_q=int(os.environ.get("COARSE_Q", "8")),
+        restamp_enabled=(os.environ.get("COARSE_RESTAMP_IDENTITY", "0") == "1"),
+    )
 PYEOF
 
 mpiexec -n 3 python scripts/fstat_proposal/run_combined_staged.py
