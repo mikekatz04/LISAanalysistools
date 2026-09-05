@@ -1059,9 +1059,16 @@ export VGB_BAND_LAYERS=8
 # regime the "NEVER raise SETUP_BATCH past 256->512 at 1yr full_pe" ruling
 # guards. During gb_search (the long phase this launch runs first) 1024 is
 # the memory-for-speed value.
-export GB_INMODEL_SETUP_BATCH=1024
-export GB_INFOMAT_MEMPOOL_FREE=0
-export GB_INMODEL_BATCH_MEMPOOL_FREE=0
+# gb_search OOM (2026-09-05): the FSTAT_GRID_MEM_MB fix cleared the F-stat setup
+# and the run REACHED GB sampling, but the FIRST proposal OOM'd building a
+# sub-band buffer -- 3 MB short at 88.5 GB resident (crash: "Out of memory
+# allocating 3,067,904 bytes; allocated so far 88,486,682,624"). The ~29.7
+# MB/source chunked-het stash at batch 1024 is ~30 GB; halving to 512 reclaims
+# ~15 GB and both MEMPOOL_FREE=1 trim the cupy pool -- so gb_search now takes
+# the memory-safe value too (was 1024-for-speed). Drop to 256 if it still OOMs.
+export GB_INMODEL_SETUP_BATCH=512
+export GB_INFOMAT_MEMPOOL_FREE=1
+export GB_INMODEL_BATCH_MEMPOOL_FREE=1
 # ######################################################################### #
 # ## SEAM-STRADDLING CAP CELLS (divisor 2 + stagger, 2026-08-29).        ## #
 # ## ⚠ DO NOT "FIX" THE CAP GRID BACK INTO ALIGNMENT WITH THE SUB-BANDS. ## #
