@@ -48,7 +48,7 @@ if not logger.handlers:
 #: per-class types means "take the data from here, but still read those
 #: classes' catalogues" (see ``load_data``). Listing it with ``NOISE`` is an
 #: error -- the noise is already in it.
-ALLOWED_SOURCES = ["NOISE", "COMBINED", "GB", "VGB", "MBHB", "EMRI", "SOBHB"]
+ALLOWED_SOURCES = ["NOISE", "COMBINED", "GALFOR", "GB", "VGB", "MBHB", "EMRI", "SOBHB"]
 
 
 def find_file(folder: str, source_type: str, source_id: int) -> str:
@@ -74,6 +74,50 @@ def find_file(folder: str, source_type: str, source_id: int) -> str:
     raise FileNotFoundError(
         f"No Mojito L1 file found for source type '{source_type}' and source ID '{source_id}' in folder '{folder}'."
     )
+
+
+def find_stream_file(folder: str, label: str, env_var: str) -> str:
+    """The single stream brick in ``folder``, whatever it is called.
+
+    Shared resolver for the whole-stream source types (``COMBINED``,
+    ``GALFOR``), which -- unlike the per-class bricks -- have no stable
+    ``{TYPE}_..._source{id}_`` naming and so cannot go through
+    :func:`find_file`. The mojito-light GALFOR brick, for instance, is
+    ``GALFOR_731d_2.5s_L1.h5``: right prefix, but no ``source0_`` infix.
+    Since these folders hold exactly one data file, resolve by folder.
+
+    ``env_var`` names an environment override with an explicit path
+    (absolute, or a basename inside ``folder``) for when one does hold more.
+    """
+    override = os.environ.get(env_var, "").strip()
+    if override:
+        path = override if os.path.isabs(override) else os.path.join(folder, override)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"{env_var}={override!r} does not exist (looked at {path})."
+            )
+        return path
+
+    if not os.path.isdir(folder):
+        raise FileNotFoundError(
+            f"No {label} data folder at {folder!r}. The {label} stream is "
+            f"expected under <mojito_data_path>/{label}/L1."
+        )
+    cands = sorted(
+        f for f in os.listdir(folder) if f.endswith(".h5") and not f.startswith(".")
+    )
+    if not cands:
+        raise FileNotFoundError(f"No .h5 file in {folder!r}.")
+    if len(cands) > 1:
+        # Prefer an explicitly-named one, else refuse to guess.
+        named = [f for f in cands if f.upper().startswith(f"{label}_")]
+        if len(named) == 1:
+            return os.path.join(folder, named[0])
+        raise ValueError(
+            f"{len(cands)} .h5 files in {folder!r} ({cands}); set "
+            f"{env_var} to pick one."
+        )
+    return os.path.join(folder, cands[0])
 
 
 def find_combined_file(folder: str) -> str:
@@ -382,6 +426,77 @@ class L1DataLoader:
                 logger.info(f"data, times and orbits initialized from NOISE file.")
                 logger.info(f"TDI time step: {tdi_dt} seconds")
                 logger.info(f"TDI sampling frequency: {tdi_fs} Hz")
+
+        # GALFOR: mojito's galactic-confusion foreground stream
+        # (``data/GALFOR/L1``). Handled HERE, next to NOISE, and NOT in the
+        # per-class loop below, because it is a STOCHASTIC STREAM, not a
+        # source class: it has no catalogue of binaries, no source ids, and
+        # its brick carries no ``source{id}_`` infix to resolve by. Like
+        # NOISE it either establishes ``xyz`` (and the orbits) or is SUMMED
+        # into it -- so NOISE + GALFOR is instrument noise plus the
+        # foreground, on the same grid.
+        #
+        # WHAT IT ACTUALLY CONTAINS (read the brick's own provenance before
+        # interpreting a fit against it): the mojito-light GALFOR brick is
+        # derived_from the GB brick with "GalacticStochastic resolvable
+        # binaries subtracted" -- it is the REAL unresolved-GB confusion
+        # residual, not a draw from the analytic tanh foreground the galfor
+        # branch fits. So a galfor fit against it is a MODEL-ADEQUACY test,
+        # and the branch's ``galfor_injection`` is a reference curve, not a
+        # truth to recover. The instrument ``psd_injection`` IS still truth.
+        if "GALFOR" in self.source_types:
+            if combined_base:
+                raise ValueError(
+                    "source_types lists both COMBINED and GALFOR: the "
+                    "combined stream already contains the galactic "
+                    "foreground, so adding the GALFOR brick would "
+                    "double-count it. Drop GALFOR."
+                )
+            subfolder = os.path.join(self.data_folder, "GALFOR", "L1")
+            file_path = find_stream_file(subfolder, "GALFOR", "MOJITO_GALFOR_FILE")
+
+            if orbits is None:
+                orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
+                orbits._ensure_configured()
+                logger.info("Initialized orbits from GALFOR file.")
+
+            with self._open(file_path) as f:
+                _t0 = _t.perf_counter()
+                _xyz = f.tdis.xyz_doppler[:]
+                logger.debug(
+                    f"[load_data] GALFOR f.tdis.xyz_doppler[:] took "
+                    f"{_t.perf_counter()-_t0:.2f}s shape={_xyz.shape}"
+                )
+                _tdi_dt = f.tdis.time_sampling.dt
+                _tdi_fs = f.tdis.time_sampling.fs
+                _tdi_times = f.tdis.time_sampling.t()
+
+                if xyz is None:
+                    xyz, tdi_dt, tdi_fs, tdi_times = _xyz, _tdi_dt, _tdi_fs, _tdi_times
+                else:
+                    # Same assertions the per-class loop makes: a GALFOR brick
+                    # on a different grid than the NOISE brick would sum into
+                    # nonsense silently.
+                    assert tdi_dt == _tdi_dt, "Time steps do not match between files."
+                    assert (
+                        tdi_fs == _tdi_fs
+                    ), "Sampling frequencies do not match between files."
+                    assert (
+                        tdi_times == _tdi_times
+                    ).all(), "Time arrays do not match between files."
+                    xyz = xyz + _xyz
+
+                if self.store_individual_timeseries:
+                    _individual_timeseries["GALFOR"] = _xyz.T.copy()
+
+            self.source_types.remove("GALFOR")
+
+            if self.verbose:
+                logger.info(f"Loaded GALFOR data from {file_path}")
+                logger.info(
+                    "galactic-foreground stream summed into the data "
+                    "(unresolved-GB confusion residual)."
+                )
 
         for source_type in self.source_types:
 

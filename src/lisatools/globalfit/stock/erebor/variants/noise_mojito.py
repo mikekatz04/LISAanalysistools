@@ -46,7 +46,7 @@ from ...base import env_default
 from ....moves import Move
 from ....recipe import Recipe, Stage
 from ..fit import EreborFit
-from ..noise import PSDSetup
+from ..noise import GalForSettings, GalForSetup, PSDSetup
 from .noise import NoiseGeneralSettings, NoisePSDSettings, _NoiseFitBase, setup_recipe
 
 logger = logging.getLogger(__name__)
@@ -193,3 +193,120 @@ class MojitoNoiseGlobalFit(_NoiseFitBase):
 
 
 MojitoNoiseGlobalFit.default_setup_function = staticmethod(setup_recipe)
+
+
+@dataclasses.dataclass
+class MojitoNoiseGalForGeneralSettings(MojitoNoiseGeneralSettings):
+    """General block for the joint instrument-PSD + foreground fit on real data.
+
+    Identical to :class:`MojitoNoiseGeneralSettings` except that the data is
+    the instrument-noise stream PLUS mojito's galactic-foreground stream, and
+    the store defaults are separate (the branch set differs, and a resume
+    across a branch-set change fails with a bare ``KeyError``).
+    """
+
+    # NOISE + GALFOR: data/INSTRUMENT/L1 summed with data/GALFOR/L1. Both are
+    # whole-stream types handled next to each other in L1DataLoader.load_data
+    # (GALFOR has no catalogue and no source ids -- see ALLOWED_SOURCES).
+    source_types: typing.Tuple[str, ...] = ("NOISE", "GALFOR")
+
+    file_store_dir: str = dataclasses.field(
+        default_factory=env_default("FILE_STORE_DIR", "./gf_output_noise_galfor_mojito/")
+    )
+    base_file_name: str = dataclasses.field(
+        default_factory=env_default("BASE_FILE_NAME", "noise_galfor_mojito")
+    )
+
+
+class MojitoNoiseGalForGlobalFit(MojitoNoiseGlobalFit):
+    """Joint instrument-PSD + galactic-foreground fit on mojito's real streams.
+
+    The two-branch sibling of :class:`MojitoNoiseGlobalFit`: same v8 noise
+    model, same grid, same exact-fine scoring, but the data is the instrument
+    stream **plus** ``data/GALFOR/L1`` and the fit carries a ``galfor`` branch
+    (5 params ``amp, fk, alpha, f_1, f_2``) alongside ``psd`` (2 params
+    ``Soms_d, Sa_a``), each on its own tempering ladder.
+
+    **What this tests, and what it does NOT.** The mojito-light GALFOR brick
+    is *derived_from* the GB brick with "GalacticStochastic resolvable
+    binaries subtracted" — it is the REAL unresolved-GB confusion residual,
+    not a draw from the analytic ``HyperbolicTangentGalacticForeground`` this
+    branch fits. So:
+
+    * ``general.psd_injection`` (from the NOISE brick) IS truth, and whether
+      the instrument PSD stays unbiased while galfor absorbs the confusion is
+      the headline result — the clean 2-branch version of the ~1.4x
+      instrument-PSD bias measured in the full GB production run.
+    * ``general.galfor_injection`` is a REFERENCE CURVE, not truth. There is
+      no "true" ``(amp, fk, alpha, f_1, f_2)`` for a real GB residual, so a
+      galfor parameter offset here is a statement about model adequacy, not
+      about recovery. Watch whether ``alpha`` rails at its cap
+      (``GALFOR_ALPHA_MAX``): a railed slope means the tanh form cannot take
+      the confusion's shape.
+
+    Usage::
+
+        fit = erebor.noise_galfor_mojito(nwalkers=24)
+        fit.build(); fit.run()   # or: run_global.py --stock noise_galfor_mojito
+
+    ``nwalkers`` must be at least ``2 * ndim = 10`` — the galfor move is a
+    plain stretch without ``live_dangerously``, so eryn refuses fewer.
+    """
+
+    option_name = "noise_galfor_mojito"
+    description = (
+        "Joint instrument-PSD (Soms_d, Sa_a) + galactic-foreground fit on "
+        "mojito's real L1 instrument-noise stream summed with the GALFOR "
+        "confusion-residual stream — no GW source branches."
+    )
+    general_settings_class = MojitoNoiseGalForGeneralSettings
+    setup_classes = {"psd": PSDSetup, "galfor": GalForSetup}
+
+    def default_branches(self) -> typing.Dict[str, Settings]:
+        return {"psd": NoisePSDSettings(), "galfor": GalForSettings()}
+
+    def default_recipe(self) -> Recipe:
+        # Mirrors NoiseOnlyGlobalFit.default_recipe: the noise-move split
+        # gives each branch its own move + ladder inside one PE stage
+        # (share_temperature_control=False is what keeps the ladders
+        # independent under GFCombineMove). ``general.joint_noise_move``
+        # collapses them into ONE move over both branches; honored here so
+        # JOINT_NOISE_MOVE=1 cannot leave the recipe asking for a stock name
+        # setup_recipe never built.
+        if getattr(self.general, "joint_noise_move", False):
+            moves = [Move("noise_pe", branch="psd")]
+        else:
+            moves = [
+                Move("psd_pe", branch="psd"),
+                Move("galfor_pe", branch="galfor"),
+            ]
+        return Recipe(
+            [
+                Stage(
+                    name="noise_pe",
+                    kind="pe",
+                    moves=moves,
+                    combine_kwargs=dict(share_temperature_control=False),
+                )
+            ]
+        )
+
+    def set_default_processor(self, gs: MojitoNoiseGalForGeneralSettings) -> None:
+        # The parent validates NOISE and builds the L1 processor kwargs from
+        # gs.source_types, which already carries GALFOR. Only the extra
+        # requirement is checked here: without the GALFOR stream this is just
+        # noise_mojito with an unfittable foreground branch bolted on, which
+        # would rail at its prior edge exactly as that variant's docstring
+        # warns.
+        if "GALFOR" not in [st.upper() for st in gs.source_types]:
+            raise ValueError(
+                f"noise_galfor_mojito source_types={gs.source_types!r} does "
+                "not include 'GALFOR' — there would be no foreground in the "
+                "data for the galfor branch to fit (it would rail at its "
+                "prior edge). Use the 'noise_mojito' variant for an "
+                "instrument-only fit."
+            )
+        super().set_default_processor(gs)
+
+
+MojitoNoiseGalForGlobalFit.default_setup_function = staticmethod(setup_recipe)
