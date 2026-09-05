@@ -103,7 +103,20 @@ for d in "${DIRS[@]}"; do
   ls -t *.log 2>/dev/null | head -"$N_JOB_LOGS" >> "$list" || true
 
   out=${d}_snapshot.tar.gz
-  tar -czf "$out" -T "$list"
+  # Live files (the append-only run log kept under LOG_CAP_MB, and the extract
+  # h5) can change while tar reads them, making tar exit 1 ("file changed as we
+  # read it"). That is BENIGN here: an append-only log gives a consistent
+  # prefix and the extract h5 is written atomically, so the archive is sound.
+  # Suppress the noisy warning and accept exit 1; only a real failure (>=2)
+  # aborts.
+  rc=0
+  tar --warning=no-file-changed -czf "$out" -T "$list" || rc=$?
+  if [ "$rc" -ge 2 ]; then
+    echo "== ERROR: tar failed for $out (exit $rc)" >&2
+    rm -f "$list"
+    exit "$rc"
+  fi
+  [ "$rc" -eq 1 ] && echo "== note: a live file changed while archiving $out (run log / extract h5) -- benign; the snapshot holds a consistent prefix."
   rm -f "$list"
   echo "== wrote $out ($(du -h "$out" | cut -f1)); largest members:"
   tar -tvzf "$out" | sort -rk3 -n | head -8 | awk '{printf "     %6.1f MB  %s\n", $3/1048576, $NF}'
