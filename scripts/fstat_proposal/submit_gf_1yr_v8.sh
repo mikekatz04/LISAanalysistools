@@ -1742,7 +1742,17 @@ export GB_FSTAT_REFIT_EVERY=50     # production cadence (5 was verify-only)
 # N_F0 auto, MC_ETA 1.0) if a finer grid is wanted once memory allows.
 export FSTAT_BATCH=1024            # SAFE memory lever: kernel rows/call, 4096->1024
                                    #   -> ~4x smaller per-batch scratch, SAME grid,
-                                   #   SAME result (pure chunking). Stops the OOM.
+                                   #   SAME result (pure chunking). Stops the eval-sweep OOM.
+# STAGE-B SETUP OOM (2026-09-05): a DIFFERENT OOM than FSTAT_BATCH. The stacked
+# proposal CONSTRUCTION (StackedFStatProposal4D.__init__, fstat_proposal.py) corner-
+# averages the ENTIRE K-box 4D grid in ONE allocation -- ~9 GB on the 1yr's 176x box
+# count -- which OOMs on top of the ~84 GB resident baseline (crash observed 09-05:
+# "Out of memory allocating 9,054,388,224 bytes; allocated so far 84,445,913,088").
+# FSTAT_GRID_MEM_MB feeds mem_budget_mb -> k_chunk so the build is chunked (SAME grid,
+# SAME result, pure chunking); unset builds the whole stack at once. It is a one-time
+# cost, then cached to <epoch>/..._peaks_stacked.npz so resumes skip it. Lower this
+# if it still OOMs; the baseline is tight, so also consider the MEMPOOL_FREE=1 levers.
+export FSTAT_GRID_MEM_MB=1500
 export FSTAT_N_F0=64               # f0 cells/box, auto-96 -> 64 (1.5x fewer; a peak
                                    #   box is +-2.5e-3 mHz, 64 cells is ample)
 export FSTAT_MC_ETA=1.5            # fdot/Mc node density 1.0->1.5 (~1.3x fewer fdot
