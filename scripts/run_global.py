@@ -103,6 +103,30 @@ if __name__ == "__main__":
         from lisatools.globalfit.stock import erebor
 
         fit = erebor.get_stock(args.stock)  # cheap: validation + defaults only
+        # TOBS_TARGET honored (ported from run_combined_staged.py's
+        # 2026-08-13 fix, which fixed this for the staged driver only).
+        # Several variants pin a FIXED WDM grid via the legacy (nf, nt)
+        # override -- all_sources 720x2160, noise_mojito 1440x2160, both
+        # 90 d -- and by the settings contract that BEATS
+        # general.tobs_target (fit.py: "if gs.nf is not None and gs.nt is
+        # not None"). So TOBS_TARGET was SILENTLY IGNORED on this driver,
+        # even though the --help epilog advertises it: the noise-only PSD
+        # run's TOBS_TARGET=7776000 export only "worked" because
+        # 1440*2160*2.5 s is 90 d anyway. When the env asks for a Tobs,
+        # clear the fixed grid so the build derives (Nf, Nt) from
+        # tobs_target + the wavelet-duration bounds -- the same machinery
+        # that reproduces 1440x2160 exactly at the 90-d default, so this
+        # is a no-op for every run that was already asking for 90 d.
+        # Unset env -> behavior unchanged.
+        if os.environ.get("TOBS_TARGET", "").strip():
+            fit.general.nf = None
+            fit.general.nt = None
+            print(
+                f"[stock] TOBS_TARGET={fit.general.tobs_target:.6g} s: "
+                "cleared any fixed-grid (nf, nt) override so the WDM grid "
+                "derives from tobs_target.",
+                flush=True,
+            )
         # Only the ranks that consume the built configuration pay for the
         # heavy data build: the main rank (sampler) and, at np >= 3, the
         # dedicated saver rank (it needs the backend spec). Spare ranks wait
