@@ -10544,6 +10544,93 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # the jump is rejected anyway.
         return chol
 
+    def _doppler_jump_should_fire(self, coords) -> bool:
+        """1-in-N gate for the sky-Doppler jump kind (search-only, default off).
+
+        ``GB_DOPPLER_JUMP_EVERY`` (0 = off). Per-call 1/N draw (restart-safe --
+        no persisted counter, unlike a deterministic cadence); confined to
+        search moves so the factors=0 (search-waiver) proposal never enters PE.
+        """
+        try:
+            n = int(os.environ.get("GB_DOPPLER_JUMP_EVERY", "0"))
+        except ValueError:
+            n = 0
+        if n <= 0 or "search" not in self.name:
+            return False
+        if coords is None or int(getattr(coords, "shape", (0,))[0]) == 0:
+            return False
+        return bool(np.random.rand() < (1.0 / float(n)))
+
+    def _doppler_orbit_window(self):
+        """Cached ``(v_over_c, times)`` over the observation window from the
+        run's orbit configured grid (ICRS, aligned to data_t0 by the engine).
+
+        ``(None, None)`` if no orbit is available -- the jump then no-ops. The
+        window is subsampled to <=240 points (the annual Doppler is slow).
+        """
+        cache = getattr(self, "_doppler_orbit_cache", None)
+        if cache is not None:
+            return cache
+        orb = (self._proposal_orbits if self._proposal_orbits is not None
+               else getattr(self.gb, "orbits", None))
+        vc = tt = None
+        try:
+            if orb is not None:
+                t = np.asarray(_to_numpy(orb.t), dtype=float)
+                v = np.asarray(_to_numpy(orb.v), dtype=float)   # (N,3sc,3) m/s
+                cen = v.mean(axis=1) if v.ndim == 3 else v       # (N,3) center
+                N = t.shape[0]
+                idx = np.unique(np.linspace(0, N - 1, min(N, 240)).astype(int))
+                vc = self.xp.asarray(cen[idx] / 299792458.0)
+                tt = self.xp.asarray(t[idx] - float(t[idx][0]))
+        except Exception as exc:
+            logger.warning("%s: Doppler-jump orbit window unavailable (%s); "
+                           "jump no-ops.", self.name, str(exc)[:80])
+            vc = tt = None
+        self._doppler_orbit_cache = (vc, tt)
+        return self._doppler_orbit_cache
+
+    def _doppler_jump_proposal(self, coords):
+        """Sky-Doppler jump proposal -> ``(new_coords, factors=0)``.
+
+        Draws a symmetric large sky step (annulus: mode-sized magnitude, random
+        direction, small spread -- not pinned to any target fdot), maps it to
+        the compensating (f0, fdot) that preserve the observed Doppler track,
+        and writes the sampling-basis coords (f0 mHz col 1; alpha col 6;
+        sin_delta col 7; fdot ratio col 8 via ``fdot = fdot_gr*(1+r)``). Mc
+        (col 2) is unchanged. factors=0 (search waiver).
+        """
+        from ...sampling.gb_observable_basis import (
+            fdot_gr, sky_doppler_alias_jump_batch)
+        xp = self.xp
+        n = coords.shape[0]
+        vc, tt = self._doppler_orbit_window()
+        if vc is None:
+            return coords.copy(), xp.zeros(n)
+        f0_hz = coords[:, 1] * 1e-3
+        mc = coords[:, 2]
+        r = coords[:, 8]
+        al = coords[:, 6]
+        sd = coords[:, 7]
+        fdot = fdot_gr(f0_hz, mc) * (1.0 + r)
+        try:
+            scale = float(os.environ.get("GB_DOPPLER_SKY_SCALE", "0.5"))
+        except ValueError:
+            scale = 0.5
+        ang = xp.asarray(np.random.rand(n) * (2.0 * np.pi))
+        mag = xp.asarray(scale * (1.0 + 0.25 * np.random.randn(n)))
+        step = xp.stack([mag * xp.cos(ang), 0.5 * mag * xp.sin(ang)], axis=-1)
+        f0n, fdn, aln, sdn = sky_doppler_alias_jump_batch(
+            f0_hz, fdot, al, sd, sky_step=step, v_over_c=vc, times=tt)
+        new = coords.copy()
+        new[:, 1] = f0n * 1e3
+        new[:, 6] = aln
+        new[:, 7] = xp.clip(sdn, -1.0, 1.0)
+        new[:, 8] = fdn / xp.maximum(fdot_gr(f0n, mc), 1e-300) - 1.0
+        new = self.periodic.wrap(
+            {self.branch_name: new[:, None, :]}, xp=xp)[self.branch_name][:, 0]
+        return new, xp.zeros(n)
+
     def in_model_proposal(self, coords, chol, band_sorter, source_ids, model):
         """Default in-model proposal: group-stretch / info-matrix mix.
 
@@ -10568,6 +10655,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         makes a same-seed comparison against the v7 baseline possible.
         """
         xp = self.xp
+        # Sky-Doppler degeneracy jump (GB_DOPPLER_JUMP_EVERY, default off): a
+        # first-class in-model proposal kind, mixed in 1-in-N. It hops a walker
+        # to the second (sky-alias) mode by shifting the sky and compensating
+        # f0/fdot to preserve the observed Doppler track -- the mode-jump the
+        # local observable step cannot make. SEARCH-ONLY (factors=0; the map is
+        # only first-order reversible, exact DB would need the sky Jacobian);
+        # gated to search moves. See sky_doppler_alias_jump in gb_observable_basis.
+        if self._doppler_jump_should_fire(coords):
+            self._last_im_kind = "doppler"
+            return self._doppler_jump_proposal(coords)
         if self._observable_basis_ready():
             self._last_im_kind = "obs_basis"
             return self._observable_proposal(coords, chol, source_ids)

@@ -71,6 +71,7 @@ __all__ = [
     "mc_floor_for_fdot",
     "n_fdot_nodes",
     "r_from_fdot",
+    "sky_doppler_alias_jump",
 ]
 
 # Constants taken from the SAME source as gbgpu.utils.utility.get_fdot /
@@ -141,6 +142,93 @@ def fdot_shear_hz(mc, f0_ref_hz, tobs, *, c_t=None):
     1, a needless inexactness.
     """
     return _shear_coeff(tobs, c_t) * fdot_gr(f0_ref_hz, mc)
+
+
+def sky_doppler_alias_jump(f0_hz, fdot_hz_s, alpha, sin_delta, *, sky_step,
+                           v_over_c, times):
+    """Sky-Doppler degeneracy jump: shift the sky, return the compensating (f0, fdot).
+
+    A GB's OBSERVED instantaneous frequency carries the orbital-Doppler (Roemer)
+    term ``f_obs(t) = f0 + fdot*t + f0*(v(t)·n̂)/c``. Over a short (< 1 yr) window
+    the quarter-annual ``v·n̂`` is ~offset+slope in ``t`` -- indistinguishable
+    from an f0/fdot change -- so a source has a *second mode* at a shifted sky
+    whose Doppler mimics the true chirp (verified on band 1100: 23 deg sky shift
+    reproduces the +7.6-bin f0 offset).
+
+    This shifts the sky by ``sky_step`` and returns the intrinsic ``(Δf0, Δfdot)``
+    that cancel the OFFSET and SLOPE of the induced Doppler over ``times``, so
+    the jumped template shares the same observed track to first order and lands
+    on the alias. The residual curvature (what a linear f0/fdot cannot cancel)
+    is the imperfect overlap -- the measured ~9-nat gap the MH ratio then judges.
+    It is a deterministic map given ``sky_step``; the reverse jump (negated step
+    from the new point) returns the original to first order. An exact-detailed-
+    balance caller multiplies by the sky-draw Jacobian; a search caller may drop
+    it (search waiver).
+
+    Args:
+        f0_hz, fdot_hz_s, alpha, sin_delta: current source parameters (scalars).
+        sky_step: ``(Δalpha, Δsin_delta)``.
+        v_over_c: ``(N, 3)`` constellation velocity / c over the window, in the
+            SAME frame as ``alpha``/``sin_delta`` (ICRS for the production run).
+        times: ``(N,)`` window times (s), aligned with ``v_over_c`` rows.
+
+    Returns:
+        ``(f0_new, fdot_new, alpha_new, sin_delta_new)``.
+    """
+    xp = get_array_module(v_over_c)
+    da, dsd = float(sky_step[0]), float(sky_step[1])
+    sd1 = min(1.0, max(-1.0, float(sin_delta)))
+    sd2 = min(1.0, max(-1.0, float(sin_delta) + dsd))
+    a2 = alpha + da
+
+    def _nh(al, sd):
+        cd = np.sqrt(max(0.0, 1.0 - sd * sd))
+        return xp.asarray([cd * np.cos(al), cd * np.sin(al), sd],
+                          dtype=getattr(v_over_c, "dtype", float))
+
+    dn = _nh(a2, sd2) - _nh(alpha, sd1)          # Δn̂ (3,)
+    D = v_over_c @ dn                             # (N,) = Δ(v·n̂)/c
+    rhs = -float(f0_hz) * D                        # target: Δf0 + Δfdot*t = rhs
+    A = xp.stack([xp.ones_like(times), times], axis=-1)
+    coef = xp.linalg.lstsq(A, rhs, rcond=None)[0]
+    df0 = float(coef[0])
+    dfdot = float(coef[1])
+    return f0_hz + df0, fdot_hz_s + dfdot, a2, sd2
+
+
+def sky_doppler_alias_jump_batch(f0_hz, fdot_hz_s, alpha, sin_delta, *,
+                                 sky_step, v_over_c, times):
+    """Vectorized :func:`sky_doppler_alias_jump` over a batch of ``n`` sources.
+
+    ``f0_hz``/``fdot_hz_s``/``alpha``/``sin_delta`` are ``(n,)``; ``sky_step`` is
+    ``(n, 2)`` (``[Δalpha, Δsin_delta]``); ``v_over_c`` is ``(N, 3)`` and
+    ``times`` ``(N,)`` (shared window). Returns four ``(n,)`` arrays
+    ``(f0_new, fdot_new, alpha_new, sin_delta_new)``. Matches the scalar
+    function row-for-row; used by the GB in-model Doppler-jump proposal.
+    """
+    xp = get_array_module(v_over_c)
+    f0 = xp.asarray(f0_hz)
+    fd = xp.asarray(fdot_hz_s)
+    al = xp.asarray(alpha)
+    sd = xp.asarray(sin_delta)
+    st = xp.asarray(sky_step)
+    da = st[:, 0]
+    dsd = st[:, 1]
+    sd1 = xp.clip(sd, -1.0, 1.0)
+    sd2 = xp.clip(sd + dsd, -1.0, 1.0)
+    al2 = al + da
+
+    def _nh(a, s):
+        cd = xp.sqrt(xp.clip(1.0 - s * s, 0.0, None))
+        return xp.stack([cd * xp.cos(a), cd * xp.sin(a), s], axis=-1)  # (n,3)
+
+    dn = _nh(al2, sd2) - _nh(al, sd1)             # (n, 3) Δn̂
+    D = dn @ v_over_c.T                            # (n, N) = Δ(v·n̂)/c
+    rhs = -(f0[:, None]) * D                        # (n, N): Δf0 + Δfdot t = rhs
+    A = xp.stack([xp.ones_like(times), times], axis=-1)   # (N, 2)
+    pinvA = xp.linalg.pinv(A)                      # (2, N); shared across sources
+    coef = (pinvA @ rhs.T).T                        # (n, 2) -> [Δf0, Δfdot]
+    return f0 + coef[:, 0], fd + coef[:, 1], al2, sd2
 
 
 def fdot_coherence_width(tobs, *, aligned=False, eta=1.0):
