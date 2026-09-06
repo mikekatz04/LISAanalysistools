@@ -53,6 +53,16 @@ sys.path.insert(0, os.path.join(REPO, "scripts", "fstat_proposal"))
 INJECTION = [1.5e-11, 3e-15]
 
 
+def _np(x):
+    """Host numpy view of a possibly-cupy array (the run builds on GPU)."""
+    if x is None:
+        return None
+    get = getattr(x, "get", None)
+    if callable(get) and type(x).__module__.startswith("cupy"):
+        return np.asarray(get())
+    return np.asarray(x)
+
+
 def _periodic_free_priors(gf):
     """Priors dict, mirroring the loop in ``GlobalFit.prepare_main``.
 
@@ -121,15 +131,25 @@ def main() -> int:
     ac = acs.acs[0]                                   # cold chain, walker 0
     data = getattr(ac, "data", None)
     dom = getattr(data, "data_res_arr", data)
-    W = np.asarray(getattr(dom, "arr", dom))
+    W = _np(getattr(dom, "arr", dom))
     print(f"[probe] residual array {W.shape} {W.dtype}", flush=True)
+    # WHICH branches actually got subtracted. `setup_acs(rebuild_residuals=True)`
+    # only subtracts branches carrying a params-based signal_gen; anything else
+    # is skipped with a warning and normally subtracts inside its own move,
+    # which this probe never runs. vgb is the known case. It does NOT touch the
+    # verdict -- VGB power is <=8% of the noise below 8 mHz and EXACTLY zero
+    # above 12 mHz -- but it does inflate the low-f rows, so say so.
+    print("[probe] NOTE any branch logged above as 'skipped' by "
+          "rebuild_residuals is STILL IN the residual (vgb is the usual one). "
+          "Harmless for the 18-25 mHz verdict row (zero VGB power there); "
+          "it does inflate the low-frequency rows.", flush=True)
 
     # --- the two covariances -------------------------------------------------
     psd_fit = gal_fit = None
     for br, tgt in (("psd", "psd"), ("galfor", "galfor")):
         try:
             coords = state.branches[br].coords
-            v = np.asarray(coords[0, 0, 0])           # cold, walker 0, leaf 0
+            v = _np(coords)[0, 0, 0]                  # cold, walker 0, leaf 0
             if tgt == "psd":
                 psd_fit = list(v)
             else:
@@ -139,8 +159,8 @@ def main() -> int:
     print(f"[probe] fitted psd={psd_fit}  galfor={gal_fit}", flush=True)
 
     sb = gi.sensitivity_backend
-    C_fit = np.asarray(sb("probe_fit", psd_fit, gal_fit).sens_mat) if psd_fit else None
-    C_true = np.asarray(sb("probe_true", INJECTION, gal_fit).sens_mat)
+    C_fit = _np(sb("probe_fit", psd_fit, gal_fit).sens_mat) if psd_fit else None
+    C_true = _np(sb("probe_true", INJECTION, gal_fit).sens_mat)
 
     dom_s = getattr(dom, "settings", None)
     nf = getattr(dom_s, "Nf", None)
