@@ -20,8 +20,9 @@ WHAT IS ALREADY ESTABLISHED (do not re-derive):
 
 THE MEASUREMENT. Rebuild the residual for the stored state (the run's own last
 sample, mostly-but-not-entirely subtracted) with the run's own machinery
-(``setup_acs(rebuild_residuals=True)``), then per WDM layer form the exact
-multivariate whitened statistic over the 3 TDI channels
+(``GlobalFit.prepare_main`` -- see the note below on why setup_acs alone is not
+enough), then per WDM layer form the exact multivariate whitened statistic over
+the 3 TDI channels
 
     q = w^T C^-1 w ,    E[q] = 3 under a correct model
 
@@ -35,6 +36,15 @@ and report ``q/3`` against TWO covariances:
                 problem in how the residual is assembled -- not physics. If it
                 comes back ~1.0 then the run's stored state does NOT reproduce
                 its own fitted noise, which points at state handling instead.
+
+WHY prepare_main AND NOT setup_acs ALONE. ``setup_acs(rebuild_residuals=True)``
+does NOT subtract gb or vgb -- neither registers a params-based ``signal_gen``,
+so both are skipped with a warning (the PRODUCTION run logs the same skip).
+GB templates come off in the LEGACY block inside ``build_gb_moves``
+(recipe.py, guarded on ``signal_gen is None``), which runs only when the recipe
+is materialized. Calling setup_acs by itself leaves the entire galaxy in the
+array, so q would measure raw-data/model and look like a perfectly good number.
+A subtraction gate below refuses to report if that happens.
 
 SAFETY: point FILE_STORE_DIR at a COPY of the store. Building a
 ``GlobalFitSetup`` opens the HDF backend, and the production run may be live.
@@ -61,28 +71,6 @@ def _np(x):
     if callable(get) and type(x).__module__.startswith("cupy"):
         return np.asarray(get())
     return np.asarray(x)
-
-
-def _periodic_free_priors(gf):
-    """Priors dict, mirroring the loop in ``GlobalFit.prepare_main``.
-
-    Only needed so ``load_info`` can fall back to a prior draw; on a resume it
-    returns ``backend.get_last_sample()`` and these are not consulted.
-    """
-    from lisatools.globalfit.engine import Setup
-
-    priors = {}
-    for name in gf.engine_info.branch_names:
-        info = gf.curr.source_info.get(name)
-        if info is None:
-            continue
-        if isinstance(info, dict):
-            for k, v in info["priors"].items():
-                priors[k] = v
-        elif isinstance(info, Setup):
-            for k, v in info.priors.items():
-                priors[k] = v
-    return priors
 
 
 def per_layer_q(W, C):
@@ -119,30 +107,68 @@ def main() -> int:
     curr = fit.build()
     print("[probe] build done", flush=True)
 
-    gf = GlobalFit(curr, MPI.COMM_WORLD)
-    priors = _periodic_free_priors(gf)
-    state = gf.load_info(priors)
-    print("[probe] state loaded", flush=True)
-
-    acs = gf.setup_acs(state, rebuild_residuals=True)
-    print("[probe] residual rebuilt", flush=True)
-
     gi = curr.general_info
+    # The pristine input data, BEFORE any template subtraction. Kept so the
+    # gate below can prove the residual is actually a residual.
+    raw_dom = getattr(gi, "input_data_residual_array", None)
+    W_raw = _np(getattr(raw_dom, "arr", raw_dom))
+
+    gf = GlobalFit(curr, MPI.COMM_WORLD)
+
+    # ⚠ prepare_main(), NOT the light priors->load_info->setup_acs path.
+    # `setup_acs(rebuild_residuals=True)` does NOT subtract gb or vgb: neither
+    # branch registers a params-based signal_gen, so both are skipped with a
+    # warning (verified in the PRODUCTION log too, slurm_stdout_438:382-383).
+    # The GB templates are subtracted by the LEGACY path inside
+    # build_gb_moves (recipe.py ~2420, guarded on `signal_gen is None`), which
+    # only runs when the recipe is materialized. Taking the light path leaves
+    # the full galaxy in the array and would silently measure raw data --
+    # a confident, wrong answer. prepare_main runs the setup_function, so the
+    # subtraction happens. It also builds the engine; the F-stat epoch cache in
+    # the copied store is loaded rather than refitted (GB_FSTAT_REFIT_EVERY is
+    # pinned huge by the submit script).
+    gf.prepare_main()
+    state, acs = gf.state, gf.acs
+    print("[probe] prepare_main done: state + residual ready", flush=True)
+
     ac = acs.acs[0]                                   # cold chain, walker 0
     data = getattr(ac, "data", None)
     dom = getattr(data, "data_res_arr", data)
     W = _np(getattr(dom, "arr", dom))
     print(f"[probe] residual array {W.shape} {W.dtype}", flush=True)
+
+    # ---- SUBTRACTION GATE ---------------------------------------------------
+    # Prove templates were removed. If the residual still equals the raw data
+    # the measurement is meaningless, and the failure is SILENT otherwise.
+    if W_raw is not None and W_raw.shape == W.shape:
+        pr, pw = np.nansum(np.abs(W_raw) ** 2), np.nansum(np.abs(W) ** 2)
+        frac = pw / pr if pr > 0 else np.nan
+        print(f"[probe] total power  raw={pr:.6e}  residual={pw:.6e}  "
+              f"residual/raw={frac:.6f}", flush=True)
+        if not np.isfinite(frac) or frac > 0.999:
+            print("[probe] REFUSING: the residual is indistinguishable from the "
+                  "raw data -- no templates were subtracted, so q would just be "
+                  "data/model. Check that the recipe materialized and that "
+                  "build_gb_moves ran its legacy subtraction block.")
+            return 2
+    else:
+        print("[probe] WARNING: could not compare against the raw data "
+              f"(raw={None if W_raw is None else W_raw.shape}); the "
+              "subtraction gate is NOT active.", flush=True)
+    nlv = int(_np(state.branches["gb"].inds)[0].sum())
+    print(f"[probe] gb leaves alive in the loaded state (cold): {nlv}", flush=True)
     # WHICH branches actually got subtracted. `setup_acs(rebuild_residuals=True)`
     # only subtracts branches carrying a params-based signal_gen; anything else
     # is skipped with a warning and normally subtracts inside its own move,
     # which this probe never runs. vgb is the known case. It does NOT touch the
     # verdict -- VGB power is <=8% of the noise below 8 mHz and EXACTLY zero
     # above 12 mHz -- but it does inflate the low-f rows, so say so.
-    print("[probe] NOTE any branch logged above as 'skipped' by "
-          "rebuild_residuals is STILL IN the residual (vgb is the usual one). "
-          "Harmless for the 18-25 mHz verdict row (zero VGB power there); "
-          "it does inflate the low-frequency rows.", flush=True)
+    print("[probe] NOTE gb/vgb are skipped by rebuild_residuals (no signal_gen) "
+          "and come off in their build_*_moves legacy blocks instead; the "
+          "residual/raw ratio above is the authority on what actually got "
+          "subtracted. Any branch still in the residual inflates the LOW-f "
+          "rows only -- the 18-25 mHz verdict row has zero GB/VGB power.",
+          flush=True)
 
     # --- the two covariances -------------------------------------------------
     psd_fit = gal_fit = None
