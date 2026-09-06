@@ -72,8 +72,33 @@ cp -a "${SRC}/." "${PROBE}/"
 # job will fail loudly here with "unbound variable"; define it below.
 STORE_DIR=${PROBE}/
 PROD=scripts/fstat_proposal/submit_gf_3mo_v8.sh
-eval "$(grep -E '^[[:space:]]*export [A-Z_]+=' "$PROD")"
-eval "$(grep -E '^[[:space:]]*: "\$\{[A-Z_]+:=' "$PROD" || true)"
+
+# The production script sets config in THREE forms and the harvest must cover
+# all of them. Variable names CONTAIN DIGITS (GALFOR_MODULATION_T0,
+# GB_SIGHET_SWEEP_F0), so the name class is [A-Z_][A-Z_0-9]* -- a bare
+# [A-Z_]+ silently drops them, which is how the first attempt lost
+# GALFOR_MODULATION_T0 and died 20 minutes in on the modulation-epoch check.
+#   1. export VAR=value
+#   2. : "${VAR:=default}"      soft default, set but NOT exported
+#   3. export VAR               bare, exports what (2) defaulted
+# Order matters: (2) before (3).
+eval "$(grep -E '^[[:space:]]*export [A-Z_][A-Z_0-9]*=' "$PROD")"
+eval "$(grep -E '^[[:space:]]*: "\$\{[A-Z_][A-Z_0-9]*:=' "$PROD" || true)"
+eval "$(grep -E '^[[:space:]]*export [A-Z_][A-Z_0-9]*[[:space:]]*$' "$PROD" || true)"
+
+# COMPLETENESS GATE. Every name the production script exports must now be set
+# in this environment. A silently-dropped knob changes the model being probed
+# without changing the answer's appearance, so fail here rather than measure
+# the wrong thing.
+_missing=""
+for _v in $(grep -oE '^[[:space:]]*export [A-Z_][A-Z_0-9]*' "$PROD" | awk '{print $2}' | sort -u); do
+  eval "test \"\${${_v}+set}\" = set" || _missing="${_missing} ${_v}"
+done
+if [ -n "${_missing}" ]; then
+  echo "[probe] REFUSING: these production knobs were not inherited:${_missing}"
+  exit 2
+fi
+echo "[probe] config completeness gate PASSED ($(grep -cE '^[[:space:]]*export [A-Z_][A-Z_0-9]*' "$PROD") exported names)"
 echo "[probe] inherited config from ${PROD}"
 echo "[probe] TOBS_TARGET=${TOBS_TARGET:-unset} MIN_FREQ=${MIN_FREQ:-unset} MAX_FREQ=${MAX_FREQ:-unset}"
 echo "[probe] UNEQUAL_ARM=${UNEQUAL_ARM:-unset} WDM_PSD_METHOD=${WDM_PSD_METHOD:-unset}"
