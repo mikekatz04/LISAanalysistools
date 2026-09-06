@@ -45,11 +45,32 @@ cd /shared/home/mlkatz1/lisa-analysis-tools
 SRC=${SRC:-/shared/data/global_fit_output/gf_prod_3mo_v8}
 PROBE=/shared/data/global_fit_output/kappa_probe_store
 
+# ---- take the COPY first ----------------------------------------------------
+# Before anything else, because the config harvest below resolves
+# ${STORE_DIR} and we want it pointing at the copy from the very first
+# expansion -- never at the (possibly live) production dir.
+rm -rf "${PROBE}"
+mkdir -p "${PROBE}"
+echo "[probe] copying ${SRC} -> ${PROBE} (source is read-only; run may be live)"
+cp -a "${SRC}/." "${PROBE}/"
+
 # ---- inherit the PRODUCTION config verbatim --------------------------------
 # Pull the export lines straight out of the production submit script rather
 # than restating them: the probe MUST resolve the same grid, band, noise model
 # and branch set as the run it is measuring, and a hand-copied block would
 # drift. (The `: "${VAR:=...}"` soft-defaults are picked up too.)
+#
+# ⚠ The harvest is EXPORT lines only, so any PLAIN assignment they reference
+# must be defined HERE first or `set -u` aborts the job. Today that is exactly
+# one variable: the production script does
+#     STORE_DIR=/shared/data/global_fit_output/gf_prod_3mo_v8/   (plain)
+#     export FILE_STORE_DIR=${STORE_DIR}                          (harvested)
+# so STORE_DIR must exist. We deliberately bind it to the COPY -- that is what
+# redirects the whole run at the probe store, and it is a safety property, not
+# a convenience. (`$PWD` is the only other reference and is fine after the cd.)
+# If a future edit to the production script adds another such reference the
+# job will fail loudly here with "unbound variable"; define it below.
+STORE_DIR=${PROBE}/
 PROD=scripts/fstat_proposal/submit_gf_3mo_v8.sh
 eval "$(grep -E '^[[:space:]]*export [A-Z_]+=' "$PROD")"
 eval "$(grep -E '^[[:space:]]*: "\$\{[A-Z_]+:=' "$PROD" || true)"
@@ -61,11 +82,13 @@ echo "[probe]       exported MIN_FREQ is IGNORED -- the run really analyses"
 echo "[probe]       from WDM layer 1. The probe reproduces that faithfully."
 
 # ---- probe-only overrides ---------------------------------------------------
-rm -rf "${PROBE}"
-mkdir -p "${PROBE}"
-echo "[probe] copying ${SRC} -> ${PROBE} (read-only source; run may be live)"
-cp -a "${SRC}/." "${PROBE}/"
+# FILE_STORE_DIR is already ${PROBE}/ via STORE_DIR above; re-exported here so
+# the redirection is explicit and survives a change to the harvest.
 export FILE_STORE_DIR=${PROBE}/
+echo "[probe] FILE_STORE_DIR=${FILE_STORE_DIR}  (must NOT be ${SRC})"
+case "${FILE_STORE_DIR}" in
+  "${SRC}"|"${SRC}/") echo "[probe] REFUSING: store dir points at the source."; exit 2;;
+esac
 export GPUS=0
 export USE_GPU=1
 export OMP_NUM_THREADS=1
