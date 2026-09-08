@@ -674,6 +674,35 @@ def _cap_ramp_pending_total(moves) -> int:
     return total
 
 
+def _cap_headroom_deficit_total(moves) -> int:
+    """Sum of ``_cap_headroom_deficit`` over a move tree (GFCombineMove nests).
+
+    GB moves publish, while ``GB_SEARCH_CAP_HEADROOM`` is armed, the count of
+    OCCUPIED sub-bands that lack the required cap headroom (cap - maxocc <
+    headroom, below the ceiling); anything without the attribute contributes
+    0. Weighted ``(move, weight)`` entries are unwrapped.
+    """
+    total = 0
+    for m in list(moves or []):
+        if isinstance(m, (tuple, list)) and m:
+            m = m[0]
+        total += int(getattr(m, "_cap_headroom_deficit", 0) or 0)
+        total += _cap_headroom_deficit_total(getattr(m, "moves", None))
+    return total
+
+
+def _arm_cap_headroom_grant(moves) -> None:
+    """Set the one-shot ``_grant_cap_headroom`` flag on every move in the tree
+    that publishes a headroom deficit, so the next cap update grants +1 slot to
+    saturated occupied cells (letting the search try to fill the new headroom)."""
+    for m in list(moves or []):
+        if isinstance(m, (tuple, list)) and m:
+            m = m[0]
+        if hasattr(m, "_cap_headroom_deficit"):
+            m._grant_cap_headroom = True
+        _arm_cap_headroom_grant(getattr(m, "moves", None))
+
+
 class RJRecipeStep(BaseRecipeStep):
     """Reversible-jump recipe step that stops once GB leaf count plateaus.
 
@@ -771,6 +800,27 @@ class RJRecipeStep(BaseRecipeStep):
                     "patience window -- holding the stage open for the cap "
                     "ramp.", _pending,
                 )
+                stop = False
+
+        # CAP-HEADROOM veto (user 2026-09-06): additionally hold the stage
+        # while any OCCUPIED sub-band lacks the required cap headroom (cap -
+        # maxocc < GB_SEARCH_CAP_HEADROOM, below the ceiling). The lnL-gated
+        # ramp can leave a converged-at-cap band saturated and invisible to
+        # the ramp-pending veto above; this confirms every occupied band was
+        # given >= headroom free slots and chose not to fill them. Arms the
+        # one-shot grant so the caps ramp toward the headroom over the next
+        # iterations -- the search either fills the new slots (plateau breaks,
+        # search continues honestly) or leaves them (converged). Off by
+        # default (GB_SEARCH_CAP_HEADROOM=0) -> deficit ignored, bit-identical.
+        if stop and int(os.environ.get("GB_SEARCH_CAP_HEADROOM", "0") or 0) > 0:
+            _deficit = _cap_headroom_deficit_total(getattr(sampler, "moves", None))
+            if _deficit:
+                logger.info(
+                    "nleaves plateau + cap-quiescent, but %d occupied "
+                    "sub-band(s) lack the required cap headroom -- arming a "
+                    "+1 grant and holding the stage open.", _deficit,
+                )
+                _arm_cap_headroom_grant(getattr(sampler, "moves", None))
                 stop = False
 
         return stop

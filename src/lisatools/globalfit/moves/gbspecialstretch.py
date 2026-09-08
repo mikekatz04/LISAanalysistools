@@ -460,6 +460,22 @@ def _prop_timer_sync_fn(xp, gpus, mode):
     return _sync_all_devices
 
 
+def _cap_headroom_short_mask(cap, occ, ceiling, headroom):
+    """Occupied cap cells short of ``headroom`` free slots, below the ceiling.
+
+    A cell is SHORT when it holds >= 1 cold leaf (``occ >= 1``), has fewer
+    than ``headroom`` free slots (``cap - occ < headroom``), and is below the
+    per-cell ceiling (``cap < ceiling``). Empty cells (``occ == 0``) and
+    at-ceiling cells are never short. ``headroom <= 0`` -> all-False (the
+    cap-headroom stop gate is off). Pure array logic (user 2026-09-06).
+    """
+    cap = np.asarray(cap)
+    occ = np.asarray(occ)
+    if headroom <= 0:
+        return np.zeros(np.shape(cap), dtype=bool)
+    return (occ >= 1) & ((cap - occ) < headroom) & (cap < ceiling)
+
+
 def _compact_index_ranges(indices, max_groups: int = 12) -> str:
     """``[0-3, 17, 40-44, ...]`` -- collapse an index list into runs.
 
@@ -16083,6 +16099,45 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             f"{self.name}: leaf caps min/max = {int(cap.min())}/{int(cap.max())}"
             f" over {len(cap)} {_unit}{_tail}."
         )
+
+        # CAP-HEADROOM stop gate (user 2026-09-06): before gb_search may
+        # advance, every OCCUPIED sub-band must carry >= GB_SEARCH_CAP_HEADROOM
+        # free slots (cap - maxocc >= headroom) or sit at the ceiling. The
+        # lnL-gated ramp above can leave a converged-at-cap band saturated
+        # and -- if it never engaged -- invisible to the ramp-pending veto,
+        # so the stage can hand off with sub-bands pinned at their cap. The
+        # DEFICIT (published every iteration while armed) drives the stopping
+        # veto in recipe.RJRecipeStep; the +1 GRANT fires ONLY when the recipe
+        # set the one-shot ``_grant_cap_headroom`` flag -- i.e. the stage is
+        # otherwise ready to stop -- so the anti-confusion cap throttle is
+        # untouched during active search. GB_SEARCH_CAP_HEADROOM=0 (default)
+        # -> deficit 0, no grant: bit-identical.
+        _headroom = int(os.environ.get("GB_SEARCH_CAP_HEADROOM", "0") or 0)
+        if _headroom > 0:
+            _occ_hr = _occ_max
+            if _occ_hr is None or np.shape(_occ_hr) != np.shape(cap):
+                _occ_hr = _to_numpy(
+                    self._cold_occupancy(band_counts, new_state)
+                ).max(axis=0)
+            if getattr(self, "_grant_cap_headroom", False):
+                _short = _cap_headroom_short_mask(
+                    cap, _occ_hr, _ceiling, _headroom)
+                if np.any(_short):
+                    cap[_short] += 1
+                    iters[_short] = 0
+                    best[_short] = -np.inf
+                    self._mirror_band_leaf_cap(bi)
+                    logger.info(
+                        f"{self.name}: cap HEADROOM grant (+1) for "
+                        f"{int(_short.sum())} occupied {_unit} short of "
+                        f"{_headroom} free slots (stage-stop confirmation)."
+                    )
+                self._grant_cap_headroom = False
+            self._cap_headroom_deficit = int(np.sum(
+                _cap_headroom_short_mask(cap, _occ_hr, _ceiling, _headroom)
+            ))
+        else:
+            self._cap_headroom_deficit = 0
 
     def propose(self, model, state):
         """Use the move to generate a proposal and compute the acceptance

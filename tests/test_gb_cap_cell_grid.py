@@ -20,6 +20,7 @@ import numpy as np
 
 from lisatools.globalfit.moves.gbspecialstretch import (
     GBSpecialStretchMove,
+    _cap_headroom_short_mask,
     _compact_index_ranges,
 )
 from lisatools.globalfit.state import (
@@ -1888,3 +1889,147 @@ class LadderDebugLineTest(unittest.TestCase):
         self.assertEqual(m._ladder_debug_target(), (1142, 19))
         for k in ("GB_LADDER_DEBUG_BAND", "GB_LADDER_DEBUG_WALKER"):
             os.environ.pop(k, None)
+
+
+class CapHeadroomMaskTest(unittest.TestCase):
+    """Pure logic of the cap-headroom stop test (user 2026-09-06): an
+    OCCUPIED cell short of ``headroom`` free slots (cap - occ < headroom)
+    and below the ceiling. Empty and at-ceiling cells never count."""
+
+    def test_headroom_zero_is_all_false(self):
+        cap = np.array([1, 5, 3]); occ = np.array([1, 5, 1])
+        m = _cap_headroom_short_mask(cap, occ, ceiling=10, headroom=0)
+        self.assertFalse(m.any())
+
+    def test_empty_cells_never_short(self):
+        cap = np.array([1, 1]); occ = np.array([0, 0])
+        m = _cap_headroom_short_mask(cap, occ, ceiling=10, headroom=2)
+        self.assertFalse(m.any())
+
+    def test_saturated_and_one_free_are_short_two_free_is_not(self):
+        # free slots = cap - occ = 0, 1, 3
+        cap = np.array([2, 3, 4]); occ = np.array([2, 2, 1])
+        m = _cap_headroom_short_mask(cap, occ, ceiling=10, headroom=2)
+        np.testing.assert_array_equal(m, [True, True, False])
+
+    def test_cell_at_ceiling_not_short(self):
+        cap = np.array([10, 9]); occ = np.array([10, 9])  # both saturated
+        m = _cap_headroom_short_mask(cap, occ, ceiling=10, headroom=2)
+        np.testing.assert_array_equal(m, [False, True])  # cap==ceiling excluded
+
+    def test_gradual_grant_saturated_needs_two(self):
+        cap = np.array([2]); occ = np.array([2])
+        m = _cap_headroom_short_mask(cap, occ, ceiling=10, headroom=2)
+        cap[m] += 1                                  # 2 -> 3
+        m2 = _cap_headroom_short_mask(cap, occ, ceiling=10, headroom=2)
+        self.assertTrue(m2[0])                        # 3-2=1 < 2, still short
+        cap[m2] += 1                                 # 3 -> 4
+        m3 = _cap_headroom_short_mask(cap, occ, ceiling=10, headroom=2)
+        self.assertFalse(m3[0])                       # 4-2=2 >= 2, satisfied
+
+
+class CapHeadroomGrantTest(unittest.TestCase):
+    """``_update_band_leaf_caps`` publishes ``_cap_headroom_deficit`` when
+    armed (GB_SEARCH_CAP_HEADROOM>0) and grants +1 to short OCCUPIED cells
+    ONLY when the one-shot ``_grant_cap_headroom`` flag is set (so the cap
+    throttle is untouched during active search)."""
+
+    CELL = 5
+
+    def tearDown(self):
+        os.environ.pop("GB_SEARCH_CAP_HEADROOM", None)
+
+    def _occ(self, m, n):
+        o = np.zeros((1, m.num_cap_cells), dtype=int)
+        o[0, self.CELL] = n
+        return o
+
+    def test_off_by_default_no_deficit_no_grant(self):
+        m = _gate_move(); state, bi = _gate_state(m)
+        bi["cap_cell_leaf_cap"][self.CELL] = 2
+        m._grant_cap_headroom = True                  # ignored while feature off
+        _gate_step(m, state, np.zeros(m.num_cap_cells), self._occ(m, 2))
+        self.assertEqual(int(getattr(m, "_cap_headroom_deficit", 0)), 0)
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 2)
+
+    def test_deficit_published_but_no_grant_without_flag(self):
+        os.environ["GB_SEARCH_CAP_HEADROOM"] = "2"
+        m = _gate_move(); state, bi = _gate_state(m)
+        bi["cap_cell_leaf_cap"][self.CELL] = 2        # occ==cap -> saturated
+        _gate_step(m, state, np.zeros(m.num_cap_cells), self._occ(m, 2))
+        self.assertEqual(int(m._cap_headroom_deficit), 1)
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 2)   # not granted
+
+    def test_grant_fires_when_flagged_and_is_one_shot(self):
+        os.environ["GB_SEARCH_CAP_HEADROOM"] = "2"
+        m = _gate_move(); state, bi = _gate_state(m)
+        bi["cap_cell_leaf_cap"][self.CELL] = 2
+        m._grant_cap_headroom = True
+        _gate_step(m, state, np.zeros(m.num_cap_cells), self._occ(m, 2))
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 3)   # +1 granted
+        self.assertFalse(getattr(m, "_grant_cap_headroom"))            # reset
+        self.assertEqual(int(m._cap_headroom_deficit), 1)             # 3-2=1<2 still short
+
+    def test_empty_cell_never_counts_or_grants(self):
+        os.environ["GB_SEARCH_CAP_HEADROOM"] = "2"
+        m = _gate_move(); state, bi = _gate_state(m)
+        m._grant_cap_headroom = True
+        _gate_step(m, state, np.zeros(m.num_cap_cells), self._occ(m, 0))
+        self.assertEqual(int(m._cap_headroom_deficit), 0)
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 1)   # unchanged
+
+
+class StageCapHeadroomVetoTest(unittest.TestCase):
+    """The gb_search stop is additionally vetoed while any occupied sub-band
+    lacks the required cap headroom (GB_SEARCH_CAP_HEADROOM>0); the veto also
+    arms the one-shot grant. Off by default -> deficit ignored."""
+
+    def _step_obj(self):
+        from lisatools.globalfit.recipe import RJRecipeStep
+        s = RJRecipeStep.__new__(RJRecipeStep)
+        s.convergence_fn = None
+        s.convergence_iter = 2
+        s.plateau_branch = "gb"
+        s._stage_start_iter = 0
+        return s
+
+    def _sampler(self, moves):
+        nl = np.array([0, 1, 2, 2, 2, 2, 2, 2, 2, 2])
+        backend = SimpleNamespace(
+            iteration=10,
+            get_nleaves=lambda branch_names, temp_index: {"gb": nl},
+        )
+        return SimpleNamespace(backend=backend, moves=moves)
+
+    def tearDown(self):
+        os.environ.pop("GB_SEARCH_CAP_HEADROOM", None)
+
+    def test_off_ignores_deficit(self):
+        s = self._step_obj()
+        sampler = self._sampler(
+            [SimpleNamespace(_cap_ramp_pending=0, _cap_headroom_deficit=5)])
+        self.assertTrue(s.stopping_function(0, None, sampler))
+
+    def test_deficit_vetoes_and_arms_grant(self):
+        os.environ["GB_SEARCH_CAP_HEADROOM"] = "2"
+        s = self._step_obj()
+        mv = SimpleNamespace(_cap_ramp_pending=0, _cap_headroom_deficit=3)
+        sampler = self._sampler([mv])
+        self.assertFalse(s.stopping_function(0, None, sampler))
+        self.assertTrue(getattr(mv, "_grant_cap_headroom", False))
+
+    def test_no_deficit_stops(self):
+        os.environ["GB_SEARCH_CAP_HEADROOM"] = "2"
+        s = self._step_obj()
+        sampler = self._sampler(
+            [SimpleNamespace(_cap_ramp_pending=0, _cap_headroom_deficit=0)])
+        self.assertTrue(s.stopping_function(0, None, sampler))
+
+    def test_nested_moves_scanned_for_deficit(self):
+        os.environ["GB_SEARCH_CAP_HEADROOM"] = "2"
+        s = self._step_obj()
+        inner = SimpleNamespace(_cap_ramp_pending=0, _cap_headroom_deficit=1)
+        sampler = self._sampler(
+            [SimpleNamespace(_cap_ramp_pending=0, moves=[inner])])
+        self.assertFalse(s.stopping_function(0, None, sampler))
+        self.assertTrue(getattr(inner, "_grant_cap_headroom", False))
