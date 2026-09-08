@@ -51,6 +51,22 @@ class EMRISettings(Settings):
     fill_values: Optional[np.ndarray] = None
     betas: Optional[np.ndarray] = None
     inner_moves: Optional[typing.List[Move]] = None
+    # default inner-move stack when ``inner_moves`` is unset: "eigen"
+    # (information-matrix eigen-axis jump) or "stretch" (legacy escape)
+    inner_move_kind: str = dataclasses.field(
+        default_factory=env_default("EMRI_INNER_MOVE_KIND", "eigen", str)
+    )
+    # leaf-visit cadence for the eigen inner-move table refresh — SPARSE:
+    # EMRI likelihood rows are per-row dense (~1 s), so a table build is
+    # minutes; it happens on the first visit and then every N-th
+    eigen_refresh_every: int = dataclasses.field(
+        default_factory=env_default("EMRI_EIGEN_REFRESH", 100, int)
+    )
+    # table scope: per-row-dense likelihood -> ONE table, built at the
+    # max-lnL cold-chain walker
+    eigen_table_scope: str = dataclasses.field(
+        default_factory=env_default("EMRI_EIGEN_SCOPE", "walker_max", str)
+    )
     num_prop_repeats: Optional[int] = 10
     emri_search_file_key: Optional[str] = "_emri_search_tmp_file"
 
@@ -156,9 +172,9 @@ class EMRISetup(Setup):
             self.initialize_kwargs = {}
 
         if self.inner_moves is None:
-            from eryn.moves import StretchMove
+            from .common import resolve_inner_moves
 
-            self.inner_moves = [(StretchMove(), 1.0)]
+            resolve_inner_moves(self)
 
     def setup_priors(self, input_basis):
         """Build the EMRI prior dictionary, overriding intrinsic ranges from settings.

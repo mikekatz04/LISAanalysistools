@@ -41,12 +41,32 @@ class SOBBHSettings(Settings):
     f_low_lims: typing.List[float] = dataclasses.field(default_factory=list)
     waveform_kwargs: Optional[dict] = None
     injection: Optional[np.ndarray] = None
+    # external eigen-table builder for the addremove eigen inner move:
+    # ``builder(move, leaf, widths) -> (axes, sigmas)``. None (default)
+    # uses likelihood second differences on the branch's own scorer
+    # (eigen_refresh.eigen_table_from_ll); eigen_table_from_waveform is
+    # the Gram-form alternative a builder can wrap.
     info_matrix_gen: Optional[Any] = None
     # No fill_values used by default; keep the dataclass field for parity
     # with EMRISettings so settings files can opt-in without breakage.
     fill_values: np.ndarray = dataclasses.field(default_factory=lambda: np.array([]))
     betas: Optional[np.ndarray] = None
     inner_moves: Optional[typing.List[Move]] = None
+    # default inner-move stack when ``inner_moves`` is unset: "eigen"
+    # (information-matrix eigen-axis jump) or "stretch" (legacy escape)
+    inner_move_kind: str = dataclasses.field(
+        default_factory=env_default("SOBBH_INNER_MOVE_KIND", "eigen", str)
+    )
+    # leaf-visit cadence for the eigen inner-move table refresh (the SOBBH
+    # information matrix costs ~0.7 s on the batched chunked scorer)
+    eigen_refresh_every: int = dataclasses.field(
+        default_factory=env_default("SOBBH_EIGEN_REFRESH", 10, int)
+    )
+    # table scope: SOBBH's batched chunked scorer makes per-(temperature,
+    # walker) information matrices affordable — every point its own table
+    eigen_table_scope: str = dataclasses.field(
+        default_factory=env_default("SOBBH_EIGEN_SCOPE", "per_walker", str)
+    )
     num_prop_repeats: Optional[int] = 10
     sobbh_search_file_key: Optional[str] = "_sobbh_search_tmp_file"
 
@@ -130,9 +150,9 @@ class SOBBHSetup(Setup):
             self.initialize_kwargs = {}
 
         if self.inner_moves is None:
-            from eryn.moves import StretchMove
+            from .common import resolve_inner_moves
 
-            self.inner_moves = [(StretchMove(), 1.0)]
+            resolve_inner_moves(self)
 
     def setup_priors(self, input_basis):
         """Build the SOBBH prior dictionary, overriding intrinsic ranges from settings."""

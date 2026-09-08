@@ -28,6 +28,22 @@ class MBHSettings(Settings):
     ntemps: int = dataclasses.field(default_factory=env_default("MBH_NTEMPS", 24, int))
     betas: Optional[np.ndarray] = None
     inner_moves: Optional[typing.List[Move]] = None
+    # default inner-move stack when ``inner_moves`` is unset: "eigen"
+    # (information-matrix eigen-axis jump) or "stretch" (legacy escape)
+    inner_move_kind: str = dataclasses.field(
+        default_factory=env_default("MBH_INNER_MOVE_KIND", "eigen", str)
+    )
+    # leaf-visit cadence for the eigen inner-move table refresh — SPARSE:
+    # MBH likelihood rows are per-row dense (~1.4 s), so a table build is
+    # minutes; it happens on the first visit and then every N-th
+    eigen_refresh_every: int = dataclasses.field(
+        default_factory=env_default("MBH_EIGEN_REFRESH", 100, int)
+    )
+    # table scope: per-row-dense likelihood -> ONE table, built at the
+    # max-lnL cold-chain walker
+    eigen_table_scope: str = dataclasses.field(
+        default_factory=env_default("MBH_EIGEN_SCOPE", "walker_max", str)
+    )
     num_prop_repeats: Optional[int] = 200
     mbh_search_file_key: Optional[str] = "_mbh_search_tmp_file"
     injection: Optional[np.ndarray] = None
@@ -167,7 +183,7 @@ class MBHSetup(Setup):
             )
 
         if self.inner_moves is None:
-            from eryn.moves import StretchMove
+            from .common import resolve_inner_moves
 
             # TODO(post-merge): re-enable SkyMove hops once the move
             # supports the ICRS sampling basis — the stock MBH basis is
@@ -178,9 +194,7 @@ class MBHSetup(Setup):
             #   from lisatools.sampling.moves.skymodehop import SkyMove
             #   angles_map = dict(cosinc=6, psi=7, lam=8, sinbeta=9)
             #   ... (SkyMove(ind_map=angles_map, which=...), w) ...
-            self.inner_moves = [
-                (StretchMove(), 1.0),
-            ]
+            resolve_inner_moves(self)
 
     def init_setup(self):
         """Run sampling-info and state-backend initialization."""

@@ -3872,6 +3872,20 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
                     "path.", self.branch_name,
                 )
 
+        # eigen inner-move plumbing: the per-branch refresh cadence rides
+        # the settings field; an explicit move_kwargs entry wins. A
+        # configured ``info_matrix_gen`` becomes the external table builder
+        # (``builder(move, leaf, widths) -> (axes, sigmas)``).
+        _extra_kwargs = dict(dcga_kwargs)
+        _extra_kwargs.update(self.move_kwargs)
+        _extra_kwargs.setdefault(
+            "eigen_refresh_every",
+            getattr(info, "eigen_refresh_every", None),
+        )
+        _extra_kwargs.setdefault(
+            "eigen_table_scope",
+            getattr(info, "eigen_table_scope", None),
+        )
         move = self.move_class(
             self.branch_name,
             coords_shape,
@@ -3887,9 +3901,10 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
             betas_all=betas_all,
             permute_every=self.permute_every,
             name=self.move_name,
-            **dcga_kwargs,
-            **self.move_kwargs,
+            **_extra_kwargs,
         )
+        if getattr(info, "info_matrix_gen", None) is not None:
+            move.eigen_table_builder = info.info_matrix_gen
         move.accepted = np.zeros((ntemps, nwalkers))
         return [], [move]
 

@@ -351,5 +351,184 @@ class SOBBHChunkedRoutingTest(unittest.TestCase):
         self.assertEqual(sorted(set(acs.xp.device_log)), [0, 1])
 
 
+class SOBBHEigenInnerMoveTest(unittest.TestCase):
+    """The eigen inner-move chain against the REAL chunked kernel.
+
+    End-to-end minus the outer accept loop: the per-leaf refresh hook
+    builds an information-matrix table from ``compute_like`` second
+    differences (sampling basis, real transform container), installs it on
+    the :class:`eryn.moves.EigenAxisMove` inner move, and the proposal
+    seam then produces symmetric, scoreable jumps.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.acs, cls.gen, cls.comp, cls.wdm, cls.td_set = _build_toy()
+        except Exception as exc:  # missing compiled deps etc.
+            raise unittest.SkipTest(f"toy setup unavailable: {exc}")
+
+    def _eigen_move(self):
+        from eryn.moves import EigenAxisMove
+        from eryn.prior import ProbDistContainer, uniform_dist
+
+        from lisatools.globalfit.moves import SOBBHChunkedLikeMove
+        from lisatools.globalfit.stock.erebor.transforms import (
+            make_sobbh_transform_container,
+        )
+
+        tc = make_sobbh_transform_container()
+        betas = 1 / 1.2 ** np.arange(NTEMPS)
+        # the stock sampling-basis priors (widths feed the whitening)
+        priors = {
+            "sobbh": ProbDistContainer({
+                0: uniform_dist(np.log(2.0), np.log(100.0)),   # logm1
+                1: uniform_dist(np.log(2.0), np.log(100.0)),   # logm2
+                2: uniform_dist(-0.99, 0.99),                  # s1z
+                3: uniform_dist(-0.99, 0.99),                  # s2z
+                4: uniform_dist(0.01, 10.0),                   # dist (Gpc)
+                5: uniform_dist(-1.0, 1.0),                    # cosinc
+                6: uniform_dist(1.0e-3, 1.0e-1),               # f_low
+                7: uniform_dist(0.0, 2 * np.pi),               # phiS
+                8: uniform_dist(-1.0, 1.0),                    # cosqS
+                9: uniform_dist(0.0, np.pi),                   # psi
+                10: uniform_dist(0.0, 2 * np.pi),              # phi0
+            })
+        }
+        move = SOBBHChunkedLikeMove(
+            "sobbh",
+            (NTEMPS, NWALKERS, 1, 11),
+            None,
+            {},
+            {},
+            self.acs,
+            1,
+            tc,
+            priors,
+            [(EigenAxisMove(mode="axis"), 1.0)],
+            betas_all=np.tile(1 / 1.2 ** np.arange(NTEMPS), (1, 1)),
+            chunked_comp=self.comp,
+            m_band_half_width=2,
+            name="sobbh eigen test",
+            eigen_refresh_every=5,
+        )
+        return move, tc
+
+    def test_refresh_and_proposal_chain_on_real_kernel(self):
+        from types import SimpleNamespace
+
+        from lisatools.globalfit.moves import eigen_refresh
+
+        move, tc = self._eigen_move()
+        move.setup_likelihood_here(None)
+        move._current_leaf = 0
+
+        x0 = np.asarray(tc.both_inverse_transforms(REF_STOCK.copy()))
+        work = SimpleNamespace(
+            coords=np.tile(x0, (NTEMPS, NWALKERS, 1, 1))
+        )
+
+        # the real route must succeed — no eigen_refresh fallback warning
+        with self.assertNoLogs(eigen_refresh.logger, level="WARNING"):
+            move.refresh_inner_move_tables(0, work)
+
+        inner = move.moves[0]
+        axes, sigmas = inner._tables["sobbh"]
+        self.assertEqual(axes.shape, (11, 11))
+        self.assertTrue(np.all(np.isfinite(axes)))
+        self.assertTrue(np.all(np.isfinite(sigmas)))
+        self.assertTrue(np.all(sigmas > 0))
+        # a real curvature table, not the identity fallback
+        self.assertFalse(np.array_equal(axes, np.eye(11)))
+
+        # THE SEAM, exactly as propose() drives an MH-signature inner move
+        s = {"sobbh": work.coords.copy()}
+        q, factors = inner.get_proposal(s, np.random.RandomState(7))
+        np.testing.assert_array_equal(factors, 0.0)
+        self.assertEqual(factors.shape, (NTEMPS, NWALKERS))
+
+        new = q["sobbh"].reshape(-1, 11)
+        self.assertFalse(np.array_equal(new, work.coords.reshape(-1, 11)))
+        # 1-sigma curvature steps from truth must stay scoreable
+        walker_idx = np.tile(
+            np.arange(NWALKERS, dtype=np.int32), NTEMPS
+        )
+        ll = move.compute_like(move._to_phys(new), walker_idx)
+        self.assertTrue(np.all(np.isfinite(ll)))
+        self.assertTrue(np.all(ll > -1e299))
+
+    def test_per_walker_tables_on_real_kernel_through_the_split_seam(self):
+        from types import SimpleNamespace
+
+        from lisatools.globalfit.moves import eigen_refresh
+
+        move, tc = self._eigen_move()
+        move.eigen_table_scope = "per_walker"
+        move.setup_likelihood_here(None)
+        move._current_leaf = 0
+
+        x0 = np.asarray(tc.both_inverse_transforms(REF_STOCK.copy()))
+        rng = np.random.default_rng(101)
+        coords4 = np.tile(x0, (NTEMPS, NWALKERS, 1, 1))
+        # distinct points per (temp, walker): small angle/distance scatter
+        coords4[..., 0, 10] = rng.uniform(0, 2 * np.pi, (NTEMPS, NWALKERS))
+        coords4[..., 0, 4] *= rng.uniform(0.8, 1.2, (NTEMPS, NWALKERS))
+        work = SimpleNamespace(coords=coords4)
+
+        with self.assertNoLogs(eigen_refresh.logger, level="WARNING"):
+            move.refresh_inner_move_tables(0, work)
+
+        inner = move.moves[0]
+        # stashed full-shape, not yet installed
+        axes, sigmas = move._eigen_tables[0]
+        self.assertEqual(axes.shape, (NTEMPS, NWALKERS, 11, 11))
+        self.assertEqual(sigmas.shape, (NTEMPS, NWALKERS, 11))
+        self.assertTrue(np.all(np.isfinite(axes)))
+        self.assertTrue(np.all(sigmas > 0))
+        self.assertNotIn("sobbh", inner._tables)
+
+        # the seam: slice to one red/blue split and propose on its rows
+        inds = move.get_split_inds()
+        split = 0
+        mask = inds == split
+        move._install_eigen_split_table(inner, 0, mask)
+        ax5, sg4 = inner._tables["sobbh"]
+        nw_here = int(mask[0].sum())
+        self.assertEqual(ax5.shape, (NTEMPS, nw_here, 1, 11, 11))
+        self.assertEqual(sg4.shape, (NTEMPS, nw_here, 1, 11))
+
+        s = {"sobbh": coords4[mask].reshape(NTEMPS, nw_here, 1, 11)}
+        q, factors = inner.get_proposal(s, np.random.RandomState(17))
+        np.testing.assert_array_equal(factors, 0.0)
+        new = q["sobbh"].reshape(-1, 11)
+        walker_idx = np.tile(
+            np.arange(NWALKERS, dtype=np.int32), (NTEMPS, 1)
+        )[mask].astype(np.int32)
+        ll = move.compute_like(move._to_phys(new), walker_idx)
+        self.assertTrue(np.all(np.isfinite(ll)))
+        self.assertTrue(np.all(ll > -1e299))
+
+    def test_cadence_respected_on_real_move(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from lisatools.globalfit.moves import eigen_refresh
+
+        move, tc = self._eigen_move()
+        move.setup_likelihood_here(None)
+        move._current_leaf = 0
+        x0 = np.asarray(tc.both_inverse_transforms(REF_STOCK.copy()))
+        work = SimpleNamespace(coords=np.tile(x0, (NTEMPS, NWALKERS, 1, 1)))
+
+        with mock.patch.object(
+            eigen_refresh, "eigen_table_from_ll",
+            wraps=eigen_refresh.eigen_table_from_ll,
+        ) as spy:
+            for _ in range(6):
+                move.refresh_inner_move_tables(0, work)
+        # visits 0..5 at cadence 5 -> compute on visit 0 and visit 5
+        self.assertEqual(spy.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

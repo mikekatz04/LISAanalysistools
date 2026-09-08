@@ -129,3 +129,43 @@ def tdi_generation_info(tdi_chan: str) -> typing.Tuple[int, str]:
     """``(tdi_gen, tdi_gen_str)`` derived from the TDI channel string."""
     tdi_gen = tdi_generation_from_channel(tdi_chan)
     return tdi_gen, f"{tdi_gen}{'nd' if tdi_gen == 2 else 'st'} generation"
+
+
+def make_default_inner_moves(kind: str = "eigen") -> list:
+    """Default single-source PE inner-move stack for an addremove branch.
+
+    ``"eigen"`` — the eryn :class:`~eryn.moves.EigenAxisMove`
+    (information-matrix eigen-axis jump; its per-leaf tables are fed by
+    ``ResidualAddOneRemoveOneMove.refresh_inner_move_tables``).
+    ``"stretch"`` — the legacy affine-invariant stretch.
+
+    The single implementation behind every branch's ``inner_moves``
+    fallback; the knob is the branch Settings field ``inner_move_kind``
+    (env ``{BRANCH}_INNER_MOVE_KIND``).
+    """
+    kind_in = kind
+    kind = str(kind).strip().lower()
+    if kind == "eigen":
+        from eryn.moves import EigenAxisMove
+
+        return [(EigenAxisMove(mode="axis"), 1.0)]
+    if kind == "stretch":
+        from eryn.moves import StretchMove
+
+        return [(StretchMove(), 1.0)]
+    raise ValueError(
+        f"unknown inner_move_kind {kind_in!r} (use 'eigen' or 'stretch')"
+    )
+
+
+def resolve_inner_moves(settings) -> list:
+    """Fill ``settings.inner_moves`` from ``inner_move_kind`` when unset.
+
+    An explicitly provided ``inner_moves`` list always wins; a missing
+    ``inner_move_kind`` attribute defaults to ``"eigen"``.
+    """
+    if settings.inner_moves is None:
+        settings.inner_moves = make_default_inner_moves(
+            getattr(settings, "inner_move_kind", "eigen")
+        )
+    return settings.inner_moves

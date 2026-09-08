@@ -52,6 +52,7 @@ from ...recipe import (
     mbh_catalogue_to_sampling_basis,
 )
 from ..base import env_default
+from .common import resolve_inner_moves
 from .emri import EMRISettings
 from .injections import (
     make_emri_injections,
@@ -778,7 +779,7 @@ def prepare_emri_branch(emri, general_setup: GeneralSetup, gs):
     if emri.waveform_kwargs is None:
         emri.waveform_kwargs = dict()
     if emri.inner_moves is None:
-        emri.inner_moves = [(StretchMove(), 1.0)]
+        resolve_inner_moves(emri)
     emri.nleaves_max = n
     emri.nleaves_min = n
     return emri
@@ -838,7 +839,7 @@ def prepare_sobbh_branch(sobbh, general_setup: GeneralSetup, gs):
     if sobbh.waveform_kwargs is None:
         sobbh.waveform_kwargs = dict()
     if sobbh.inner_moves is None:
-        sobbh.inner_moves = [(StretchMove(), 1.0)]
+        resolve_inner_moves(sobbh)
     sobbh.nleaves_max = n
     sobbh.nleaves_min = n
     return sobbh
@@ -930,7 +931,7 @@ def prepare_mbh_branch(mbh, general_setup: GeneralSetup, gs):
     if mbh.inner_moves is None:
         # TODO(post-merge): re-enable SkyMove hops once the move supports
         # the ICRS sampling basis.
-        mbh.inner_moves = [(StretchMove(), 1.0)]
+        resolve_inner_moves(mbh)
     mbh.nleaves_max = n
     mbh.nleaves_min = n
     return mbh
