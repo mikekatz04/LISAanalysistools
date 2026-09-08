@@ -1093,8 +1093,14 @@ export VGB_BAND_LAYERS=8
 # allocating 3,067,904 bytes; allocated so far 88,486,682,624"). The ~29.7
 # MB/source chunked-het stash at batch 1024 is ~30 GB; halving to 512 reclaims
 # ~15 GB and both MEMPOOL_FREE=1 trim the cupy pool -- so gb_search now takes
-# the memory-safe value too (was 1024-for-speed). Drop to 256 if it still OOMs.
-export GB_INMODEL_SETUP_BATCH=512
+# the memory-safe value too (was 1024-for-speed).
+# 2026-09-06/08 (matches the 24w submit_gf_1yr_v8.sh, commit ec570bbb): 512 then
+# OOM'd one allocation later in the IN-MODEL sig-het setup
+# (gbsignalhetcomputations._expand_B: xp.zeros((n,3,3,Nf_active,N_sparse_t)) =
+# 1.54 GB at n=512, on top of the ~89 GB dev0 baseline). Dropped 512->256
+# (env-read at runtime -> a RESUME applies it, no fresh store needed). ~89 GB
+# baseline is the real ceiling (dev0/dev1 imbalance) -- go to 128 if 256 OOMs.
+export GB_INMODEL_SETUP_BATCH=256
 export GB_INFOMAT_MEMPOOL_FREE=1
 export GB_INMODEL_BATCH_MEMPOOL_FREE=1
 # ######################################################################### #
@@ -1792,6 +1798,34 @@ export FSTAT_N_F0=64               # f0 cells/box, auto-96 -> 64 (1.5x fewer; a 
                                    #   box is +-2.5e-3 mHz, 64 cells is ample)
 export FSTAT_MC_ETA=1.5            # fdot/Mc node density 1.0->1.5 (~1.3x fewer fdot
                                    #   nodes; the aligned width is already 13.4x coarse)
+# ==== 1yr F-STAT GRID REDUCTION (2026-09-08) — solves BOTH the too-slow FIT
+# and the dev0 grid memory (~9 GB loaded). The FIT has two stages with two
+# different dominant costs, hit here by two ORTHOGONAL knobs (the comb uses its
+# own _sky_grid(nsky); the stacked grid uses n_alpha/n_sd — they don't overlap):
+#   Stage 1 COMB SCAN (run_comb_scan) — the fit-time hog ("~250 GB of writes").
+#     Cost = sum over ~1M f0 nodes of nsky_per_node, which is ADAPTIVE and
+#     hard-PINNED at nsky_max on the high-f nodes (the true Doppler-ridge
+#     requirement ~8192 >> the cap, so high-f nodes dominate the eval budget).
+#     512->256 halves the evals on those nodes. Kept at 256 (NOT 128) so the
+#     high-f ridge stays resolved enough to DETECT the peak above the SNR-8
+#     floor; sky is refined afterward by the stacked grid + the in-model
+#     obs-basis MH, so the comb only needs detection, not sky precision.
+export FSTAT_COMB_NSKY_MAX=256
+#   Stage 2 STACKED GRID (StackedFStatProposal4D) — the ~9 GB dev0 load AND the
+#     stacked-sweep eval count. Grid = K boxes x n_f0 x n_Mc x n_alpha x n_sd.
+#     The sky axis n_alpha x n_sd = 8 x 8 = 64 is the biggest factor after K;
+#     8->4 each is 4x smaller (~9 -> ~2.3 GB, frees ~6.7 GB of dev0 headroom on
+#     top of GB_N_SUBBANDS 2048->1024) and 4x fewer stacked evals. Sky is
+#     "per-band unmeasurable, so coarse" already (the code default is 8); the
+#     birth just needs to land close and the obs-basis MH refines it.
+export FSTAT_N_ALPHA=4
+export FSTAT_N_SINDELTA=4
+# RE-FIT REQUIRED: these change the grid the fit PRODUCES, so the existing
+# gb_fstat_fit/shared/epoch_* (fitted at 8/8 sky + nsky 512) is STALE and must
+# NOT be reused — move it aside and let the run re-fit at the coarser resolution
+# (the re-fit IS the thing being sped up; it is then cached + reused across
+# resumes). Further levers if still too slow/big: FSTAT_COMB_NSKY_MAX=128,
+# FSTAT_N_F0 64->48, FSTAT_MC_ETA 1.5->2.0. Revert = delete these three exports.
 export FSTAT_PEAKS_PER_BAND=200    # DEFAULT (2026-09-04: measured the cap does NOT
                                    #   bind -- busiest group averages 31 boxes/band,
                                    #   group 6 only 6.7, both far below 200; lowering
