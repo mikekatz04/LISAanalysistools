@@ -51,7 +51,7 @@ from .stochastic import (
     check_stochastic,
 )
 from .utils.constants import *
-from .utils.device import current_device
+from .utils.device import current_device, to_current_device
 from .utils.parallelbase import LISAToolsParallelModule
 from .utils.utility import AET, get_array_module
 
@@ -2043,18 +2043,27 @@ def _wdm_stationary_psd_column(
         else basis_settings
     )
     xp = get_array_module(basis_settings.f_arr)
+    # Multi-GPU (P2P-disabled nodes): the frequency arrays below are cached on
+    # the settings object's home device, but the per-walker sensitivity build
+    # runs in the WALKER's owning-device context (run.setup_acs). Land the freq
+    # nodes (and the quadrature weights) on the current device -- via host if
+    # they reside on another GPU -- so the galfor f/f_1 ufunc and the weighted
+    # sum stay single-device. No-op on CPU / single-GPU / already-current arrays.
     if wdm_psd_method == "layer_constant":
         return _wdm_layer_constant_psd(
-            sensitivity.get_Sn(fold_settings.f_arr, *args, **kwargs)
+            sensitivity.get_Sn(
+                to_current_device(xp, fold_settings.f_arr), *args, **kwargs)
         )
     if wdm_psd_method == "layer_calibrated":
         f_nodes, weights = fold_settings.wdm_layer_quadrature_data(
             STOCHASTIC_WDM_QUADRATURE_NODES
         )
+        f_nodes = to_current_device(xp, f_nodes)
+        weights = to_current_device(xp, weights)
         values = xp.asarray(sensitivity.get_Sn(f_nodes, *args, **kwargs))
         return xp.sum(values * weights[None, :], axis=-1)
     if wdm_psd_method == "fold":
-        f_active = fold_settings.fold_frequency_arr
+        f_active = to_current_device(xp, fold_settings.fold_frequency_arr)
         psd_active = xp.asarray(
             sensitivity.get_Sn(f_active, *args, **kwargs)
         )

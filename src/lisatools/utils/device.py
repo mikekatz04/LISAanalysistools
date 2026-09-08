@@ -25,6 +25,7 @@ __all__ = [
     "device_context",
     "pin_main_device",
     "current_device",
+    "to_current_device",
     "jax_device_context",
 ]
 
@@ -69,6 +70,29 @@ def current_device(xp) -> Optional[int]:
     if not hasattr(xp, "cuda"):
         return None
     return int(xp.cuda.runtime.getDevice())
+
+
+def to_current_device(xp, arr):
+    """Return ``arr`` resident on the process-current device under ``xp``.
+
+    On the CuPy path, if ``arr`` lives on a DIFFERENT GPU than the current
+    device -- the multi-GPU per-shard build, where a shared settings object's
+    cached arrays live on its home device while a walker builds inside its own
+    owning device's context (run.setup_acs) -- copy ``arr`` to the current
+    device VIA HOST so the move needs no peer access (P2P is unavailable
+    between GPUs on some nodes; a same-device ufunc against it then raises
+    "device where the array resides differs from the current device").
+
+    No-op for NumPy/CPU and for arrays already on the current device.
+    """
+    if not hasattr(xp, "cuda"):
+        return arr
+    dev = getattr(arr, "device", None)
+    if dev is None:
+        return arr
+    if int(dev.id) == int(xp.cuda.runtime.getDevice()):
+        return arr
+    return xp.asarray(xp.asnumpy(arr))
 
 
 def jax_device_context(device: Optional[int], *, kind: str = "gpu"):
