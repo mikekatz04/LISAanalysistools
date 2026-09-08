@@ -294,7 +294,7 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=0                   # whole-node memory
 #SBATCH --time=24:00:00
-#SBATCH --output=/shared/data/global_fit_output/gf1yr_v8_%j.log     # combined stdout+stderr (captures [MAXLOGL]/[BENCH])
+#SBATCH --output=/shared/data/global_fit_output/gf1yr_v8_10w_%j.log     # combined stdout+stderr (captures [MAXLOGL]/[BENCH])
 # ----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -309,7 +309,7 @@ cd /shared/home/mlkatz1/lisa-analysis-tools
 # stay intact for comparison and nothing can silently resume. BASE_FILE_NAME
 # stays gf_prod_3mo so every analysis tool (monitor generator, digests) works
 # unchanged -- they take the DIRECTORY as their argument.
-STORE_DIR=/shared/data/global_fit_output/gf_prod_1yr_v8/
+STORE_DIR=/shared/data/global_fit_output/gf_prod_1yr_v8_10walkers/
 
 # ---- GPU telemetry ---------------------------------------------------------
 # Background nvidia-smi sampler: one CSV row per GPU into the run store
@@ -445,7 +445,7 @@ echo "[V8-NOISE] coarse: Q=${COARSE_Q} mode=${COARSE_GPU_MODE} \
 use_ws=${COARSE_USE_WS} fiducial=${COARSE_FIDUCIAL}"
 
 # ---- sampler shape ---------------------------------------------------------
-export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
+export NWALKERS=10                 # 10-walker fresh v8 1yr run (folder _10walkers); fresh store so GB_N_SUBBANDS=1024 takes effect (resume trap)
 export NUM_ITERATIONS=2000         # total engine iterations (resume-safe; NITER was a dead name)
 
 # ---- band + domain ---------------------------------------------------------
@@ -1094,14 +1094,7 @@ export VGB_BAND_LAYERS=8
 # MB/source chunked-het stash at batch 1024 is ~30 GB; halving to 512 reclaims
 # ~15 GB and both MEMPOOL_FREE=1 trim the cupy pool -- so gb_search now takes
 # the memory-safe value too (was 1024-for-speed). Drop to 256 if it still OOMs.
-# 2026-09-06 (10-walker fresh run): GB_N_SUBBANDS=1024 cleared the rj_fstat_search
-# OOM, but the run then OOM'd one allocation later in the IN-MODEL sig-het setup
-# (gbsignalhetcomputations._expand_B: xp.zeros((n,3,3,Nf_active,N_sparse_t)) = 1.54
-# GB at n=512, on top of the ~89 GB dev0 baseline). Dropped 512->256 (env-read at
-# runtime -> a RESUME applies it, no fresh store needed). ~89 GB baseline is the
-# real ceiling (dev0/dev1 imbalance) -- go to 128 or land the F-stat-grid device-pin
-# if 256 still OOMs.
-export GB_INMODEL_SETUP_BATCH=256
+export GB_INMODEL_SETUP_BATCH=512
 export GB_INFOMAT_MEMPOOL_FREE=1
 export GB_INMODEL_BATCH_MEMPOOL_FREE=1
 # ######################################################################### #

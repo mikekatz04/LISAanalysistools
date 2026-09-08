@@ -475,7 +475,35 @@ export NUM_ITERATIONS=2000         # total engine iterations (resume-safe; NITER
 # and a stale TOBS_TARGET export (a 3-day one was found live in the shell)
 # would silently re-grid this run. Pin the 90-d production value.
 export TOBS_TARGET=7776000
-export MIN_FREQ=4e-4
+# ⚠ MIN_FREQ 4e-4 -> 2.5e-4 (2026-09-06). This is the LAYER-1 FIX, and the
+# value is set by the VGBs, not by taste.
+#
+# WHY IT MOVED AT ALL. all_sources pinned min_freq as a PLAIN default 1e-4 that
+# shadowed the env-backed field, so THIS EXPORT NEVER TOOK EFFECT (fixed in
+# 7ad3b0bd). The run therefore analysed from WDM layer 1 -- support
+# 0.069-0.208 mHz, sharing an edge with DC, where the instrument model diverges
+# and instrument_fill_nans=0.0 zeroes the covariance. Measured on this store
+# (kappa probe, job 459): det(C)=0 there, q = w^T C^-1 w / 3 = 150.3 against an
+# expected 1.0, i.e. 43% of the fit's ENTIRE chi^2 budget. That alone produced
+# the instrument-PSD bias: the exact ML alpha = sqrt(mean(q/3)) = 1.389 vs the
+# 1.3874 observed (0.21%).
+#
+# WHY 2.5e-4 AND NOT 4e-4. Only layer 1 is pathological; layer 2 measured
+# q/3 = 1.0203, as clean as anything in the band. Both choices cure the bias
+# identically (alpha 1.0490 at layer 2 vs 1.0493 at layer 3) -- but the VGB
+# catalogue's four lowest sources sit at 0.3117/0.3364/0.3365/0.3392 mHz, and
+# layer 3's support starts at 0.34722 mHz, so MIN_FREQ=4e-4 would DROP FOUR
+# VGBs. 2.5e-4 lands on layer 2 (support from 0.20833 mHz), keeps all 55 VGBs,
+# and retains 93.8% of the S_tm information against 87.9% at layer 3.
+#
+# Valid range for layer 2: 1.3889e-4 < MIN_FREQ <= 2.7778e-4. 2.5e-4 sits
+# comfortably inside (2.7778e-4 is the exact boundary and can tip to layer 3 on
+# floating-point rounding -- do not use it).
+#
+# RESUME-SAFE: band_edges/cap_edges are stored in absolute Hz and start at
+# layer 4 (5.5556e-4), entirely above the new floor, so they recompute
+# bit-identically and the leaf-cap guard passes.
+export MIN_FREQ=2.5e-4
 export MAX_FREQ=2.5e-2
 export GB_MIN_FREQ=5.5e-4
 export GB_MAX_FREQ=2.2e-2

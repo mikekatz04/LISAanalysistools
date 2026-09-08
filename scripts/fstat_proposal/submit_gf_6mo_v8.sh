@@ -53,8 +53,16 @@
 # ##     tars -- their chain slabs are keep-window extracts):              ##
 # ##       warmstart_fit_from_store.py --last-k 10 -> warmstart_match_    ##
 # ##       referee.py -> warmstart_referee_apply.py                        ##
-# ##   * git pull + ./install.sh (native headers) + the wiring tests:      ##
-# ##       python -m unittest tests.test_staged_sources_wiring            ##
+# ##   * EIGEN INNER MOVES (2026-09-08): first cluster exposure of the     ##
+# ##     EigenAxisMove defaults pinned below (sobbh per-walker tables,     ##
+# ##     mbh/emri max-lnL-walker tables). Requires Eryn dev >= the        ##
+# ##     eryn.moves.eigenaxis commit PULLED TOGETHER WITH LAT (LAT dev     ##
+# ##     imports it). Watch the "[eigen_refresh]" WARNING lines; the       ##
+# ##     stretch escape is {BRANCH}_INNER_MOVE_KIND=stretch.               ##
+# ##   * git pull BOTH repos + ./install.sh (native headers) + the tests:  ##
+# ##       python -m unittest tests.test_staged_sources_wiring \          ##
+# ##           tests.test_eigen_refresh tests.test_inner_move_kind \      ##
+# ##           tests.test_vgb_eigen_inmodel                                ##
 # ## Store gf_prod_6mo_v8/ is NEW -- nothing to migrate; the RELAUNCH      ##
 # ## block below is 3mo_v8 history only.                                   ##
 # ############################################################################
@@ -487,7 +495,35 @@ export TOBS_TARGET=15552000        # 180 d; grid resolves Nf 1440 x Nt 4320 x dt
 # 6-mo sig-het layer stride (6mo_v1 derivation): 120 divides Nt=4320 and
 # keeps the validated 36-h stride parity the 3-mo default gave.
 export SIGHET_NT_LAYER=120
-export MIN_FREQ=4e-4
+# ⚠ MIN_FREQ 4e-4 -> 2.5e-4 (2026-09-06). This is the LAYER-1 FIX, and the
+# value is set by the VGBs, not by taste.
+#
+# WHY IT MOVED AT ALL. all_sources pinned min_freq as a PLAIN default 1e-4 that
+# shadowed the env-backed field, so THIS EXPORT NEVER TOOK EFFECT (fixed in
+# 7ad3b0bd). The run therefore analysed from WDM layer 1 -- support
+# 0.069-0.208 mHz, sharing an edge with DC, where the instrument model diverges
+# and instrument_fill_nans=0.0 zeroes the covariance. Measured on this store
+# (kappa probe, job 459): det(C)=0 there, q = w^T C^-1 w / 3 = 150.3 against an
+# expected 1.0, i.e. 43% of the fit's ENTIRE chi^2 budget. That alone produced
+# the instrument-PSD bias: the exact ML alpha = sqrt(mean(q/3)) = 1.389 vs the
+# 1.3874 observed (0.21%).
+#
+# WHY 2.5e-4 AND NOT 4e-4. Only layer 1 is pathological; layer 2 measured
+# q/3 = 1.0203, as clean as anything in the band. Both choices cure the bias
+# identically (alpha 1.0490 at layer 2 vs 1.0493 at layer 3) -- but the VGB
+# catalogue's four lowest sources sit at 0.3117/0.3364/0.3365/0.3392 mHz, and
+# layer 3's support starts at 0.34722 mHz, so MIN_FREQ=4e-4 would DROP FOUR
+# VGBs. 2.5e-4 lands on layer 2 (support from 0.20833 mHz), keeps all 55 VGBs,
+# and retains 93.8% of the S_tm information against 87.9% at layer 3.
+#
+# Valid range for layer 2: 1.3889e-4 < MIN_FREQ <= 2.7778e-4. 2.5e-4 sits
+# comfortably inside (2.7778e-4 is the exact boundary and can tip to layer 3 on
+# floating-point rounding -- do not use it).
+#
+# RESUME-SAFE: band_edges/cap_edges are stored in absolute Hz and start at
+# layer 4 (5.5556e-4), entirely above the new floor, so they recompute
+# bit-identically and the leaf-cap guard passes.
+export MIN_FREQ=2.5e-4
 export MAX_FREQ=2.5e-2
 export GB_MIN_FREQ=5.5e-4
 export GB_MAX_FREQ=2.2e-2
@@ -1836,6 +1872,22 @@ export VGB_CHIRP_MASS_BASIS=0
 # with the matching "8" argument (it recreates every rung-dimensioned
 # vgb dataset: temps ladder, counters zeroed, 7 swap pairs).
 export VGB_NTEMPS=8
+# VGB IN-MODEL PROPOSAL -- DELIBERATE DIVERGENCE FROM THE NEW CODE DEFAULT
+# (which is =eigen since 2026-09-05: per-block EXACT per-(temp,walker,leaf)
+# information matrices + a generic one-axis eigen draw, stretch fallback on
+# any factor failure). Pinned =stretch FOR THIS RUN because:
+#   (a) VGB_SIGHET_INMODEL=0 above (loud-VGB sig-het accuracy unverified)
+#       forces the matrices through the CHUNKED engine at ~29-46 ms per
+#       source INSTANCE, and VGB has 55 leaves x 8 rungs x 24 walkers
+#       ~ 10.6k instances ~ 5-8 min of factor builds EVERY vgb propose;
+#       with the sig-het route validated that drops ~12-19x (~25-40 s).
+#   (b) the vgb reduced-basis factor path has ZERO cluster exposure (it
+#       degrades to stretch with one warning, but the build attempts are
+#       then pure cost).
+# ARMING GATE: validate VGB_SIGHET_INMODEL=1 at the loudest-VGB SNRs (or
+# accept the chunked cost on a probe first), then delete this pin or set
+# =eigen. =stretch is bit-identical to the pre-eigen pure-stretch config.
+export VGB_INMODEL_PROPOSAL=stretch
 # GB rung count. 24 is already the code default (stock/erebor/gb.py
 # env_default("GB_NTEMPS", 24)) -- pinned here anyway because the rung count
 # is the one knob whose failure mode is completely silent: resume derives it
@@ -1885,6 +1937,13 @@ fi
 # finite at every leaf) and the p floor: recipe defaults, pinned for the
 # run record.
 export GB_WARM_START_FLOOR_EPS=${GB_WARM_START_FLOOR_EPS:-0.05}
+# The knob also arms the PE twin rj_warm_pe (IMMEDIATELY BEFORE
+# rj_fstat_pe in full_pe; user ruling 2026-09-07). Its container charges
+# the EXACT wrapped-normal density (detailed balance) via +-K period
+# images per wide circular column; the search twin keeps the cheaper
+# minimal-image charge (no DB requirement). 0 would restore minimal
+# image on the PE side too -- never do that in a real PE run.
+export GB_WARM_START_CIRC_IMAGES=${GB_WARM_START_CIRC_IMAGES:-3}
 
 # ============================================================================
 # CHANGE 3 OF 3 vs 3mo_v8 -- MBHB + EMRI + SOBHB (campaign S6). Non-empty
@@ -1920,6 +1979,43 @@ export SOBBH_M_BAND_HALF_WIDTH=3
 # Thin the slow-path A/B re-score (per-row TDI-on-the-fly x all rungs);
 # it still fails loudly past tolerance when it fires.
 export SOBBH_CHECK_LL_EVERY=30
+
+# ---- EIGEN INNER MOVE (2026-09-05/08 work; code defaults, pinned) ----------
+# The addremove branches' in-model proposal is the eryn EigenAxisMove: a
+# one-axis jump along eigenvectors of each source's own information matrix
+# (per-axis curvature widths, prior-capped, factors=0 -- tables frozen
+# between refreshes). Replaces the stretch as the DEFAULT inner move; the
+# laptop A/B on the real chunked SOBBH kernel measured acceptance 0.544 vs
+# stretch 0.156 at equal per-step cost. {BRANCH}_INNER_MOVE_KIND=stretch
+# is the per-branch escape back to the legacy stretch, exactly.
+export SOBBH_INNER_MOVE_KIND=eigen
+export MBH_INNER_MOVE_KIND=eigen
+export EMRI_INNER_MOVE_KIND=eigen
+# TABLE SCOPE (user ruling 2026-09-08). SOBBH: per-(temperature, walker)
+# -- every point its own matrix against its own walker's data, ONE batched
+# corner sweep (the red/blue seam slices the full table per split). Cost
+# at this shape: 12 rungs x 24 walkers = 288 points x ~245 rows ~ 70k
+# batched likelihood rows ~ 3.3 min per LEAF REFRESH at the measured
+# 2.78 ms/row -- first visit + every SOBBH_EIGEN_REFRESH-th (10), i.e.
+# ~+2 min/iteration averaged over 6 leaves, concentrated in refresh
+# iterations. If that bites: SOBBH_EIGEN_SCOPE=walker_max drops a refresh
+# to ~245 rows (~0.7 s); SOBBH_EIGEN_REFRESH stretches the cadence.
+export SOBBH_EIGEN_SCOPE=per_walker
+export SOBBH_EIGEN_REFRESH=10
+# MBH/EMRI: ONE table per leaf, built at the max-lnL COLD walker (their
+# likelihood rows are per-row dense, ~1.4 / ~1.0 s). A refresh is
+# (nwalkers selection + ~245 build) rows ~ 6.4 min/leaf (MBH) /
+# ~4.6 min/leaf (EMRI) -- paid on the FIRST visit per leaf (~26 min MBH,
+# ~37 min EMRI, one-time) and then every 100th visit. Escape:
+# {BRANCH}_INNER_MOVE_KIND=stretch above.
+export MBH_EIGEN_SCOPE=walker_max
+export EMRI_EIGEN_SCOPE=walker_max
+export MBH_EIGEN_REFRESH=100
+export EMRI_EIGEN_REFRESH=100
+# WATCH ON FIRST LAUNCH: any "[eigen_refresh] ... fallback" WARNING means
+# a table build failed and that leaf is sampling on identity/1%-width
+# tables (correct but slow -- MH corrects the shape); a steady stream of
+# them means arm the stretch escape and file the traceback.
 
 # ============================================================================
 # FRESH-RUN GUARD (2026-08-15). This submission starts a NEW run in a NEW
