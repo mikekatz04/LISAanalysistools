@@ -26,7 +26,7 @@ def _free_pool() -> None:
         xp.get_default_memory_pool().free_all_blocks()
 
 
-from eryn.moves import Move, StretchMove, TemperatureControl
+from eryn.moves import EigenAxisMove, Move, StretchMove, TemperatureControl
 from eryn.prior import ProbDistContainer
 from eryn.utils.transform import TransformContainer
 
@@ -37,6 +37,7 @@ from ...domaincomputation import DomainComputationGroupArray
 from ...domains import DomainBase, DomainBaseArray
 from ...utils.utility import asnumpy, get_array_module
 from .. import midit_checkpoint
+from . import eigen_refresh
 from .globalfitmove import GlobalFitMove
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         waveform_like_method: str = None,
         run_async: bool = False,
         run_threaded: bool = False,
+        eigen_refresh_every: int = None,
+        eigen_eps_rel: float = None,
+        eigen_table_scope: str = None,
         **kwargs,
     ):
 
@@ -191,6 +195,13 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         self.permute_every = permute_every
         self.pad_out_of_prior = pad_out_of_prior
 
+        # eigen inner-move table refresh (see refresh_inner_move_tables):
+        # kwarg > {BRANCH}_EIGEN_REFRESH / {BRANCH}_EIGEN_EPS_REL /
+        # {BRANCH}_EIGEN_SCOPE env > default
+        self.eigen_refresh_every = eigen_refresh_every
+        self.eigen_eps_rel = eigen_eps_rel
+        self.eigen_table_scope = eigen_table_scope
+
         self._setup_debug()
 
         # make sure to propagate the periodic information to the inner moves if it is included in kwargs
@@ -199,6 +210,212 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         if self._dcga is not None and self._waveform_gen_obj is not None:
             self.create_waveform_gen_replicas()
+
+    # ------------------------------------------------------------------
+    # eigen inner-move table refresh
+    # ------------------------------------------------------------------
+
+    def _eigen_refresh_cadence(self):
+        """kwarg > ``{BRANCH}_EIGEN_REFRESH`` env > 10 leaf-visits."""
+        val = getattr(self, "eigen_refresh_every", None)
+        if val is None:
+            val = os.environ.get(
+                f"{str(self.branch_name).upper()}_EIGEN_REFRESH", None
+            )
+        if val is None:
+            val = 10
+        return max(1, int(val))
+
+    def _eigen_eps_rel(self):
+        """kwarg > ``{BRANCH}_EIGEN_EPS_REL`` env > 1e-4 of the prior box."""
+        val = getattr(self, "eigen_eps_rel", None)
+        if val is None:
+            val = os.environ.get(
+                f"{str(self.branch_name).upper()}_EIGEN_EPS_REL", None
+            )
+        if val is None:
+            val = 1e-4
+        return float(val)
+
+    def _eigen_scope(self):
+        """kwarg > ``{BRANCH}_EIGEN_SCOPE`` env > ``"walker_max"``.
+
+        ``"per_walker"``: one table per (temperature, walker) point of the
+        leaf — stashed full-shape; the red/blue seam installs the
+        split-sliced view (:meth:`_install_eigen_split_table`).
+        ``"walker_max"``: ONE shared table, built at the max-lnL
+        cold-chain walker.
+        """
+        val = getattr(self, "eigen_table_scope", None)
+        if val is None:
+            val = os.environ.get(
+                f"{str(self.branch_name).upper()}_EIGEN_SCOPE", None
+            )
+        if val is None:
+            return "walker_max"
+        val = str(val).strip().lower()
+        if val not in ("per_walker", "walker_max"):
+            eigen_refresh.logger.warning(
+                "[eigen_refresh] %s: unknown eigen_table_scope %r (use "
+                "'per_walker' or 'walker_max'); using 'walker_max'",
+                self.branch_name, val,
+            )
+            return "walker_max"
+        return val
+
+    def refresh_inner_move_tables(self, leaf, work):
+        """Feed per-leaf ``(axes, sigmas)`` tables to eigen inner moves.
+
+        Called once per leaf visit in ``propose`` — after
+        ``setup_likelihood_here`` (the leaf is exposed, so ``compute_like``
+        scores against the right residual) and after ``self._current_leaf``
+        is set (per-leaf transform fills resolve). No-op unless one of
+        ``self.moves`` is an :class:`eryn.moves.EigenAxisMove`.
+
+        ONE table per leaf, built at the COLD-CHAIN walker-0 row and shared
+        across walkers/temperatures, recomputed every
+        :meth:`_eigen_refresh_cadence` visits. Between refreshes the table
+        is frozen, which is what keeps the inner move's ``factors == 0``
+        honest (the same adaptive-kernel status the GB in-model tables
+        carry: refresh only at block boundaries, never inside the repeat
+        sweep).
+        """
+        eigen_moves = [m for m in self.moves if isinstance(m, EigenAxisMove)]
+        if not eigen_moves:
+            return
+        if not hasattr(self, "_eigen_tables"):
+            self._eigen_tables = {}
+            self._eigen_visit_count = {}
+        leaf = int(leaf)
+        visits = self._eigen_visit_count.get(leaf, 0)
+        self._eigen_visit_count[leaf] = visits + 1
+        if (leaf not in self._eigen_tables
+                or visits % self._eigen_refresh_cadence() == 0):
+            self._eigen_tables[leaf] = self._build_eigen_table(leaf, work)
+        axes, sigmas = self._eigen_tables[leaf]
+        if getattr(axes, "ndim", 2) == 4:
+            # per-(temp, walker) tables: the red/blue seam installs the
+            # split-sliced view right before each get_proposal call
+            return
+        for move in eigen_moves:
+            move.set_axes(self.branch_name, axes, sigmas)
+
+    def _install_eigen_split_table(self, move_here, leaf, split_mask):
+        """Install the (temp, walker)-sliced eigen table for one split.
+
+        ``split_mask`` is the same ``(ntemps, nwalkers)`` boolean the
+        proposal ``sets`` are built with, so the sliced table rows line up
+        with the coords rows exactly. No-op for shared tables (installed
+        at refresh time) and for non-eigen inner moves.
+        """
+        if not isinstance(move_here, EigenAxisMove):
+            return
+        tabs = getattr(self, "_eigen_tables", None)
+        if not tabs or int(leaf) not in tabs:
+            return
+        axes, sigmas = tabs[int(leaf)]
+        if getattr(axes, "ndim", 2) != 4:
+            return
+        ndim = axes.shape[-1]
+        ax = axes[split_mask].reshape(self.ntemps, -1, 1, ndim, ndim)
+        sg = sigmas[split_mask].reshape(self.ntemps, -1, 1, ndim)
+        move_here.set_axes(self.branch_name, ax, sg)
+
+    def _build_eigen_table(self, leaf, work):
+        """One refresh product for ``leaf``, never raising.
+
+        An ``eigen_table_builder`` attribute (installed by a branch setup,
+        e.g. from a Settings ``info_matrix_gen``) overrides the default
+        likelihood-difference routes — signature
+        ``builder(move, leaf, widths) -> (axes, sigmas)`` (any shape
+        :meth:`eryn.moves.EigenAxisMove.set_axes` accepts, or the stashed
+        ``(ntemps, nwalkers, ndim[, ndim])`` per-walker form).
+        Otherwise :meth:`_eigen_scope` picks the route.
+        """
+        widths = eigen_refresh.prior_box_widths(
+            self.priors[self.branch_name], self.ndim
+        )
+        builder = getattr(self, "eigen_table_builder", None)
+        if builder is not None:
+            try:
+                return builder(self, leaf, widths)
+            except Exception as exc:  # degrade, never crash the sampler
+                eigen_refresh.logger.warning(
+                    "[eigen_refresh] %s leaf %d custom builder failed (%r); "
+                    "using the identity fallback table",
+                    self.branch_name, leaf, exc,
+                )
+                return eigen_refresh._fallback_table(widths)
+
+        if self._eigen_scope() == "per_walker":
+            return self._build_eigen_tables_per_walker(leaf, work, widths)
+        return self._build_eigen_table_walker_max(leaf, work, widths)
+
+    def _build_eigen_table_walker_max(self, leaf, work, widths):
+        """ONE shared table, built at the max-lnL COLD-chain walker.
+
+        The corner sweep scores against that walker's own data/noise
+        (``data_index``). Selection failure degrades to walker 0 with a
+        warning — never to a crash.
+        """
+        cold = np.asarray(asnumpy(work.coords[0, :, leaf]), dtype=np.float64)
+        best = 0
+        try:
+            idx = np.arange(self.nwalkers, dtype=np.int32)
+            ll = np.asarray(
+                asnumpy(self.compute_like(self._to_phys(cold), data_index=idx)),
+                dtype=float,
+            )
+            best = int(np.nanargmax(ll))
+        except Exception as exc:
+            eigen_refresh.logger.warning(
+                "[eigen_refresh] %s leaf %d max-lnL walker selection failed "
+                "(%r); using walker 0", self.branch_name, leaf, exc,
+            )
+        x0 = cold[best]
+
+        def call_ll(x):
+            x = np.atleast_2d(x)
+            data_index = np.full(x.shape[0], best, dtype=np.int32)
+            return self.compute_like(
+                self._to_phys(x), data_index=data_index
+            )
+
+        return eigen_refresh.eigen_table_from_ll(
+            call_ll, x0, widths, eps_rel=self._eigen_eps_rel()
+        )
+
+    def _build_eigen_tables_per_walker(self, leaf, work, widths):
+        """Per-(temperature, walker) tables for the leaf, ONE batched sweep.
+
+        Every point gets its OWN information matrix at its own coords
+        against its own walker's data/noise (no borrowing). Rows reach
+        ``compute_like`` as whole (ntemps*nwalkers)-point blocks, so the
+        per-walker ``data_index`` tiles by ``rows // n`` (the
+        information_matrix_from_ll batching invariant). Returns the
+        stashed ``(ntemps, nwalkers, ndim, ndim)`` / ``(..., ndim)`` form
+        the red/blue seam slices per split.
+        """
+        nt, nw = self.ntemps, self.nwalkers
+        pts = np.asarray(
+            asnumpy(work.coords[:nt, :, leaf]), dtype=np.float64
+        ).reshape(nt * nw, -1)
+        point_walker = np.tile(np.arange(nw, dtype=np.int32), nt)
+
+        def call_ll(x):
+            x = np.atleast_2d(x)
+            reps = x.shape[0] // point_walker.size
+            data_index = np.tile(point_walker, reps)
+            return self.compute_like(
+                self._to_phys(x), data_index=data_index
+            )
+
+        axes, sigmas = eigen_refresh.eigen_tables_from_ll_batch(
+            call_ll, pts, widths, eps_rel=self._eigen_eps_rel()
+        )
+        ndim = axes.shape[-1]
+        return (axes.reshape(nt, nw, ndim, ndim),
+                sigmas.reshape(nt, nw, ndim))
 
     # ------------------------------------------------------------------
     # DCGA (multi-device) spread — absorbed from the legacy
@@ -1329,6 +1546,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
             self.setup_likelihood_here(removal_coords_in)
 
+            # per-leaf eigen tables for EigenAxisMove inner moves (no-op for
+            # stretch-only stacks); must run with the leaf exposed and
+            # _current_leaf set
+            self.refresh_inner_move_tables(leaf, work)
+
             old_coords = (
                 work.coords[: self.ntemps, :, leaf].reshape(-1, ndim)
             )
@@ -1424,6 +1646,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     # setup s and c based on splits
                     s = {self.branch_name: sets[split]}
                     c = {self.branch_name: sets[:split] + sets[split + 1 :]}
+
+                    # per-(temp, walker) eigen tables are sliced to THIS
+                    # split's rows (no-op for shared tables / other moves)
+                    self._install_eigen_split_table(
+                        move_here, leaf, inds == split
+                    )
 
                     # Get the move-specific proposal.
                     if isinstance(move_here, StretchMove):
