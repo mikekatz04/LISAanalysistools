@@ -174,6 +174,56 @@ def _validate_resume_readable(path: str) -> None:
                 else:
                     dset[()]
 
+        # ---- SEMANTIC completeness of the last row ------------------------
+        # Readability is not enough. The main backend and each sub-backend are
+        # NOT flushed atomically, so a kill BETWEEN them (a spot preemption --
+        # ~1.7/day on the 3-month partition) leaves a row whose main half is
+        # written and whose sub-backend half is still zeros. That row
+        # decompresses perfectly, so every check above passes; the run then
+        # resumes into it and MPI-ABORTS at the first propose with
+        #   [vgb] cold-chain inds mismatch between the main state and its
+        #   sub-state (550 differing leaf slots)
+        # from GFState.check_cold_row -- after the ranks are up, minutes in,
+        # and with no self-heal because the promotion path never fired.
+        # (Observed: 3mo v8 10-walker, job 464, stored iteration 1.)
+        #
+        # So run that same cold-row comparison HERE, on the h5, where raising
+        # hands the store to promote_backup_if_store_unreadable() -- the
+        # backup lags by at most one save step, so recovery costs one
+        # iteration instead of a dead job.
+        #
+        # Comparing inds (rather than "is the row all zeros") is what keeps
+        # this free of false positives: a branch that legitimately holds zero
+        # leaves early in a run has all-False inds on BOTH sides, which agree.
+        main_inds = root.get("inds")
+        if main_inds is not None:
+            for branch in root["sub_backend"]:
+                sub = root["sub_backend"][branch]
+                if branch not in main_inds or "inds" not in sub:
+                    continue
+                m, s = main_inds[branch], sub["inds"]
+                if m.shape[0] <= row or s.shape[0] <= row:
+                    continue
+                a = np.asarray(m[row])
+                b = np.asarray(s[row])
+                # main: (ntemps_main, nsamplers, nwalkers, nleaves) -> cold row
+                # sub : (ntemps_sub, nwalkers, nleaves)             -> cold row
+                while a.ndim > b.ndim - 1:
+                    a = a[0]
+                b = b[0]
+                if a.shape != b.shape:
+                    continue
+                n_diff = int(np.count_nonzero(a != b))
+                if n_diff:
+                    raise ValueError(
+                        f"[{branch}] stored row {row} is INCOMPLETE: the main "
+                        f"backend and the sub-backend disagree on "
+                        f"{n_diff} cold leaf slots. This is a torn save -- the "
+                        "two halves are not flushed atomically, so a job killed "
+                        "between them (spot preemption) leaves exactly this. "
+                        "Resuming it would MPI-abort at the first propose."
+                    )
+
 
 def promote_backup_if_store_unreadable(path: str) -> bool:
     """Self-heal a torn store by promoting the running backup copy.
