@@ -60,6 +60,19 @@ except ModuleNotFoundError:
     gpu_available = False
 
 from eryn.moves import GroupStretchMove, Move, StretchMove
+# The generic eigen-axis primitives were extracted to eryn (2026-09-05);
+# this module is their historical home, so they are re-exported here under
+# their original names (tests and wiring import them from this module).
+# Only the GB-specific injections (gb_fiber_tangent, gb_shear_ridge_axis,
+# gb_lnfdot_gradient, gb_ridge_axis) and the old-signature eigen_axis_set
+# shim below stay local.
+from eryn.moves.eigenaxis import (
+    axis_prior_bounds,
+    draw_axis_step,
+    eigen_axis_set as _eigen_axis_set_generic,
+    prior_box_scales as gb_prior_box_scales,
+    project_out_direction,
+)
 from eryn.moves.multipletry import get_mt_computations, logsumexp
 from eryn.paraensemble import ParaEnsembleSampler
 from eryn.priors import ProbDistContainer, UniformDistribution
@@ -1186,26 +1199,6 @@ def _observable_knob(name, default):
         return float(default)
 
 
-def gb_prior_box_scales(lo, hi):
-    """Per-column whitening scales = prior box widths.
-
-    The information matrix is eigendecomposed with a RELATIVE floor
-    (``1e-10 * lambda_max``), which is not scale invariant: in raw sampling
-    units (f0 ~ 20 mHz, dist ~ 9 kpc, Mc ~ 0.47, angles ~ 1) *which*
-    directions fall under the floor is decided by the unit choice rather
-    than by curvature. Whitening to the prior box makes every coordinate
-    O(1) so the spectrum reflects real anisotropy.
-
-    Degenerate columns (a fixed / per-leaf-filled parameter has zero prior
-    width) keep a scale of 1.0 rather than dividing by zero.
-    """
-    lo = np.asarray(lo, dtype=float)
-    hi = np.asarray(hi, dtype=float)
-    s = np.abs(hi - lo)
-    s[~np.isfinite(s) | (s <= 0.0)] = 1.0
-    return s
-
-
 def gb_fiber_tangent(coords, dist_col, mc_col, r_col):
     """Unit tangent of the EXACT ``(dist, Mc, r)`` likelihood fiber.
 
@@ -1235,22 +1228,6 @@ def gb_fiber_tangent(coords, dist_col, mc_col, r_col):
     t[:, dist_col] = (5.0 / 3.0) * coords[:, dist_col] / safe_mc
     nrm = xp.sqrt((t * t).sum(axis=-1, keepdims=True))
     return t / xp.where(nrm > 0, nrm, xp.ones_like(nrm))
-
-
-def project_out_direction(info, t):
-    """``P F P`` with ``P = I - t t^T``, batched over sources.
-
-    Removes one direction from the information matrix. Written out rather
-    than materialising ``P`` so the cost stays O(ndim^2) per source.
-    """
-    xp = get_array_module(info)
-    Ft = xp.einsum("nij,nj->ni", info, t)
-    tFt = xp.einsum("ni,ni->n", t, Ft)
-    out = (info
-           - t[:, :, None] * Ft[:, None, :]
-           - Ft[:, :, None] * t[:, None, :]
-           + t[:, :, None] * t[:, None, :] * tFt[:, None, None])
-    return 0.5 * (out + xp.swapaxes(out, -1, -2))
 
 
 def gb_lnfdot_gradient(coords, f0_col, mc_col, r_col):
@@ -1365,112 +1342,35 @@ def gb_ridge_axis(evals, evecs, grad):
                     fallback)
 
 
-def axis_prior_bounds(axes, widths):
-    """Largest sensible 1-sigma step along each axis, from the prior box.
-
-    For unit axis ``a`` the step that just leaves the box is
-    ``min_i (width_i / |a_i|)`` over the components it actually moves. This
-    is the scale-correct way to bound a step WITHOUT re-expressing the
-    information matrix in whitened coordinates: a bare ``sigma_max = 1``
-    only means "one prior width" if the coordinates were whitened first,
-    and whitening would change the conditioning of the existing joint draw
-    (which is live in production). Bounding per axis achieves the same end
-    -- prior-aware, unit-correct step sizes -- and touches nothing else.
-
-    ``widths`` is the per-column prior box width from
-    :func:`gb_prior_box_scales`. Components below ``1e-12`` of the axis
-    norm are ignored so a direction that barely touches a narrow parameter
-    is not bounded by it.
-    """
-    xp = get_array_module(axes)
-    aa = xp.abs(axes)
-    big = aa > 1e-12
-    ratio = xp.where(big, widths[None, :, None] / xp.where(big, aa,
-                                                           xp.ones_like(aa)),
-                     xp.full(aa.shape, xp.inf))
-    return ratio.min(axis=1)
-
-
 def eigen_axis_set(info, t_fiber, coords, f0_col, mc_col, r_col,
                    dist_col, tobs, sigma_max=1.0):
-    """Per-source proposal axes and their own 1-sigma widths.
+    """Per-source proposal axes and their own 1-sigma widths (GB shim).
 
-    Returns ``(axes, sigmas)`` with ``axes`` shaped ``(n, ndim, ndim)``
-    (column ``k`` is axis ``k``) and ``sigmas`` shaped ``(n, ndim)``.
+    Old-signature wrapper around the generic
+    :func:`eryn.moves.eigenaxis.eigen_axis_set`: it builds the GB-specific
+    injections here — the analytic shear ridge from
+    :func:`gb_shear_ridge_axis` — and delegates the eigendecomposition,
+    fiber projection, column ordering, and curvature widths to eryn.
+    Bit-identical to the pre-extraction implementation (pinned by
+    ``tests/test_eigen_axis_eryn_parity.py``).
 
     The set is the ``ndim - 1`` eigenvectors of the fiber-projected
     information matrix PLUS the explicit ridge axis in the LAST column (it
-    replaces the fiber-aligned eigenvector). The ridge axis is
-    orthogonalised against the fiber -- that component changes ``fdot``
-    not at all and belongs to ``gb_ridge_gibbs``. Removing it is free for
-    the observables too: the fiber holds ``A`` and ``fdot`` fixed and does
-    not touch ``f0``, so ``f_mid`` is fixed along it as well.
+    replaces the fiber-aligned eigenvector). The ridge column is the
+    ANALYTIC shear ridge (:func:`gb_shear_ridge_axis`), not ``F^+ g``:
+    this ``F``'s ``f0`` block is 34% off, so the "optimal" axis built from
+    it pointed 80% too steep. ``dist_col`` and ``tobs`` are required for
+    that construction -- deliberately not defaulted, since a silently
+    omitted ``tobs`` would give a plausible-looking axis along the wrong
+    ridge, which is the exact failure being retired.
 
-    The ridge column is the ANALYTIC shear ridge
-    (:func:`gb_shear_ridge_axis`), not ``F^+ g``: this ``F``'s ``f0``
-    block is 34% off, so the "optimal" axis built from it pointed 80% too
-    steep. ``dist_col`` and ``tobs`` are required for that construction --
-    deliberately not defaulted, since a silently omitted ``tobs`` would
-    give a plausible-looking axis along the wrong ridge, which is the
-    exact failure being retired.
-
-    ``sigma_k = 1 / sqrt(a_k^T F a_k)`` uses the ORIGINAL information
-    matrix, so each axis is scaled by its own curvature. A 1-D move pays no
-    ``d``-dimensional cost penalty, which is why no relative eigen-floor is
-    needed: that floor exists only because a joint draw must share one
-    global scale, and on the flagship it shrinks the true steps by 645x
-    (dist), 95x (Mc, r), 43x (phi0) and 22x (psi).
-
-    ``sigma_max`` bounds a genuinely flat direction instead of letting
-    ``1/sqrt(~0)`` explode. In prior-box-whitened coordinates the natural
-    bound is 1.0 = one prior width; it binds only on near-null axes.
+    ``sigma_max`` bounds a genuinely flat direction; see the eryn
+    docstring for the ``sigma_k = 1 / sqrt(a_k^T F a_k)`` rationale.
     """
-    xp = get_array_module(info)
-    Fp = project_out_direction(info, t_fiber)
-    evals, evecs = xp.linalg.eigh(Fp)
-    # Order columns by |overlap with the fiber| so the fiber-aligned
-    # eigenvector lands last, then overwrite it with the ridge axis.
-    ov = xp.abs(xp.einsum("ni,nij->nj", t_fiber, evecs))
-    order = xp.argsort(ov, axis=-1)
-    axes = xp.take_along_axis(evecs, order[:, None, :], axis=-1)
     ridge = gb_shear_ridge_axis(coords, f0_col, mc_col, r_col, dist_col,
                                 tobs)
-    ridge = ridge - t_fiber * (t_fiber * ridge).sum(axis=-1, keepdims=True)
-    rn = xp.sqrt((ridge * ridge).sum(axis=-1, keepdims=True))
-    ridge = ridge / xp.where(rn > 0, rn, xp.ones_like(rn))
-    axes[:, :, -1] = ridge
-    quad = xp.einsum("nik,nij,njk->nk", axes, info, axes)
-    sigmas = 1.0 / xp.sqrt(xp.maximum(quad, 1e-300))
-    return axes, xp.minimum(sigmas, float(sigma_max))
-
-
-def draw_axis_step(axes, sigmas, rng, jump_factor=1.0):
-    """Draw a 1-D Gaussian step along ONE uniformly chosen axis per source.
-
-    Cost-neutral against the joint draw (still one likelihood call per
-    repeat), but each direction is scaled by its own width and reports its
-    own acceptance. The proposal is symmetric along a fixed axis, so the
-    Metropolis-Hastings factor stays zero -- the axis set is built once per
-    block from a fixed information matrix, so the basis does not depend on
-    the current point within a repeat sweep.
-
-    Returns ``(dy, picked_axis)``; ``picked_axis`` is host numpy for the
-    per-axis acceptance counters.
-    """
-    xp = get_array_module(axes)
-    n, _, naxes = axes.shape
-    if hasattr(rng, "integers"):
-        pick = np.asarray(rng.integers(naxes, size=n))
-        z = np.asarray(rng.standard_normal(n))
-    else:                                   # legacy RandomState / cupy
-        pick = np.asarray(rng.randint(0, naxes, n))
-        z = np.asarray(rng.randn(n))
-    pick_x = pick if xp is np else xp.asarray(pick)
-    z_x = z if xp is np else xp.asarray(z)
-    rows = xp.arange(n)
-    a = axes[rows, :, pick_x]
-    s = sigmas[rows, pick_x]
-    return (float(jump_factor) * s * z_x)[:, None] * a, pick
+    return _eigen_axis_set_generic(info, t_fiber=t_fiber, ridge_axis=ridge,
+                                   sigma_max=sigma_max)
 
 
 def _resolve_inmodel_repeats(branch_name, class_name, kwarg_value, default):
@@ -9924,7 +9824,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # ~2.4 ms/source instead of 46.44, which makes per-block
                 # exact CHEAPER than the borrowed table (54 s vs 115 s per
                 # proposal) as well as correct.
-                if os.environ.get("GB_INFOMAT_PER_BLOCK", "0") == "1":
+                if (os.environ.get("GB_INFOMAT_PER_BLOCK", "0") == "1"
+                        or getattr(self, "infomat_per_block", False)):
                     self._infomat_freqs_sorted = None
                     self._infomat_chol_sorted = None
                     logger.info(
@@ -10173,6 +10074,45 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             v[2] / max(v[0], 1.0), v[3] / max(v[1], 1.0),
             v[4] / max(v[0], 1.0), v[5] / max(v[1], 1.0))
         self._obs_motion = None
+
+    #: Opt-in for the GENERIC (no-fiber) eigen-axis table on bases without
+    #: the GB dist/Mc/r columns (e.g. VGB's reduced basis). OFF here so a
+    #: narrow GB basis keeps its historical fallback to the joint draw.
+    eigen_axis_generic_ok = False
+
+    #: Force the per-block EXACT info-matrix route (skip the cold-chain
+    #: nearest-in-frequency table) regardless of GB_INFOMAT_PER_BLOCK.
+    infomat_per_block = False
+
+    def _eigen_axes_from_info(self, info_y, coords, ndim):
+        """Per-axis ``sigma_k * a_k`` table from the conditioned info matrix.
+
+        GB branch (fiber columns resolved + eigen armed): fiber-projected
+        axes with the analytic shear ridge — bit-identical to the
+        pre-refactor inline block (pinned by
+        ``tests/test_gb_inmodel_eigen_axis*``). GENERIC branch
+        (``eigen_axis_generic_ok``, e.g. VGB): plain eigenvectors of the
+        conditioned matrix, no fiber, no ridge. ``None`` when neither
+        branch applies (callers fall through to the joint draw).
+        """
+        xp = self.xp
+        if (self._eigen_axis_ready()
+                and int(self._eigen_axis_min_dim) <= int(ndim)):
+            t_fiber = gb_fiber_tangent(
+                coords, self._dist_col, self._mc_col,
+                self._fdot_astro_col)
+            axes, sig = eigen_axis_set(
+                info_y, t_fiber, coords, self._f0_col, self._mc_col,
+                self._fdot_astro_col, self._dist_col,
+                1.0 / float(self.df), sigma_max=xp.inf)
+        elif getattr(self, "eigen_axis_generic_ok", False):
+            axes, sig = _eigen_axis_set_generic(info_y, sigma_max=xp.inf)
+        else:
+            return None
+        bounds = axis_prior_bounds(axes, self._eigen_axis_widths(ndim))
+        sig = xp.minimum(sig, bounds)
+        self._last_axis_sigmas = sig
+        return axes * sig[:, None, :]
 
     def _eigen_axis_ready(self) -> bool:
         """Armed AND the basis exposes the columns the fiber tangent needs.
@@ -10517,20 +10457,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # ``chol[sl]`` slicing in the repeat loop) works untouched; only
         # ``in_model_proposal`` reads it differently, picking one column
         # instead of contracting all of them against a normal draw.
-        if (self._eigen_axis_ready()
-                and int(self._eigen_axis_min_dim) <= int(ndim)):
+        if ((self._eigen_axis_ready()
+                and int(self._eigen_axis_min_dim) <= int(ndim))
+                or getattr(self, "eigen_axis_generic_ok", False)):
             with _tspan(_tm, "infomat_eigen_axis"):
-                t_fiber = gb_fiber_tangent(
-                    coords, self._dist_col, self._mc_col,
-                    self._fdot_astro_col)
-                axes, sig = eigen_axis_set(
-                    info_y, t_fiber, coords, self._f0_col, self._mc_col,
-                    self._fdot_astro_col, self._dist_col,
-                    1.0 / float(self.df), sigma_max=xp.inf)
-                bounds = axis_prior_bounds(axes, self._eigen_axis_widths(ndim))
-                sig = xp.minimum(sig, bounds)
-                self._last_axis_sigmas = sig
-                return axes * sig[:, None, :]
+                _eigen_tab = self._eigen_axes_from_info(info_y, coords, ndim)
+            if _eigen_tab is not None:
+                return _eigen_tab
 
         with _tspan(_tm, "infomat_eigh"):
             evals, evecs = xp.linalg.eigh(info_y)
@@ -16930,15 +16863,54 @@ class GBSpecialStretchMove(GBSpecialBase):
     """
 
 
+def _vgb_inmodel_defaults(kwargs):
+    """Apply the ``VGB_INMODEL_PROPOSAL`` env default to a VGB move's kwargs.
+
+    ``stretch`` (DEFAULT): the legacy pure-stretch configuration, identical
+    to the pre-eigen behavior — the default is deliberately the no-change
+    option because live campaigns (3mo_v8, 1yr_v8) pull dev mid-run with
+    submit scripts that predate this knob. ``eigen`` (opt-in): arm the
+    inherited info-matrix machinery (``use_info_mat_proposal=True``) with
+    the one-axis generic eigen draw (``stretch_probability=0.0``); its
+    arming gate is the VGB sig-het accuracy validation (or accepting the
+    chunked per-instance factor cost) — see the 6mo_v8 submit script's
+    VGB block. Explicitly passed kwargs always win (``setdefault``).
+    """
+    kind = os.environ.get("VGB_INMODEL_PROPOSAL", "stretch").strip().lower()
+    if kind not in ("eigen", "stretch"):
+        logger.warning(
+            "VGB_INMODEL_PROPOSAL=%r not recognized (use 'eigen' or "
+            "'stretch'); using 'stretch'", kind)
+        kind = "stretch"
+    if kind == "eigen":
+        kwargs.setdefault("use_info_mat_proposal", True)
+        kwargs.setdefault("stretch_probability", 0.0)
+    else:
+        kwargs.setdefault("use_info_mat_proposal", False)
+        kwargs.setdefault("stretch_probability", 1.0)
+    return kwargs
+
+
 class VGBSpecialStretchMove(GBSpecialBase):
     """In-model move for known (verification) galactic binaries.
 
     Fixed-dimensional (``nleaves_min == nleaves_max``, leaf i = one specific
-    physical source at every walker/temperature), NO RJ. The proposal is a
-    plain Goodman-Weare affine-invariant stretch over the sampled columns:
-    each picked source is stretched against a random OTHER walker of the
-    SAME physical source (same leaf, same temperature). No friend table, no
-    info-matrix Cholesky, no phase maximization.
+    physical source at every walker/temperature), NO RJ. Two proposal
+    components, selected by ``VGB_INMODEL_PROPOSAL`` (default ``stretch``
+    — the no-change option for live campaigns; ``eigen`` is the opt-in):
+
+    * **eigen** — the inherited GB info-matrix machinery computes a
+      per-block EXACT information matrix for every vgb source (the
+      cold-chain borrow table is skipped: every leaf is a DIFFERENT
+      physical source, so nearest-in-frequency borrowing would hand one
+      source another's covariance) and the draw steps along ONE generic
+      eigen-axis (no GB fiber/ridge — the reduced basis pins f0/sky per
+      leaf, so the f0-shear disease those exist for is absent). Any
+      failure to build the factor degrades to stretch with one warning.
+    * **stretch** — a plain Goodman-Weare affine-invariant stretch over
+      the sampled columns: each picked source is stretched against a
+      random OTHER walker of the SAME physical source (same leaf, same
+      temperature). No friend table, no phase maximization.
 
     The move stores nothing that feeds the proposal: it hands the CURRENT
     ensemble to stock :meth:`eryn.moves.StretchMove.get_proposal`, which does
@@ -16978,6 +16950,66 @@ class VGBSpecialStretchMove(GBSpecialBase):
     # kernels, so the repeat count is free.
     sequential_parity_repeats = True
 
+    # Generic (no-fiber) eigen axes: the reduced VGB basis has no
+    # dist/Mc/r columns, so the GB fiber/ridge construction cannot apply;
+    # the plain whitened eigenbasis of each source's own matrix can.
+    eigen_axis_generic_ok = True
+
+    # Per-block EXACT info matrices always: every vgb leaf is a DIFFERENT
+    # physical source, so the cold-chain nearest-in-frequency borrow table
+    # would hand one source another's covariance.
+    infomat_per_block = True
+
+    def _proposal_cholesky(self, model, band_sorter, ids, slots=None,
+                           buffer_obj=None):
+        """Inherited exact per-block factor, degrading to ``None`` (stretch).
+
+        The vgb flow shares the GB engine machinery, but its reduced basis
+        and comp wiring are exercised far less; a failure here must cost
+        the eigen draw for the block — never the run. Warns once.
+        """
+        try:
+            return GBSpecialBase._proposal_cholesky(
+                self, model, band_sorter, ids, slots=slots,
+                buffer_obj=buffer_obj)
+        except Exception as exc:
+            if not getattr(self, "_vgb_chol_warned", False):
+                logger.warning(
+                    "%s: info-matrix factor unavailable for the vgb basis "
+                    "(%r); falling back to the stretch proposal",
+                    self.name, exc)
+                self._vgb_chol_warned = True
+            return None
+
+    def _vgb_use_eigen_draw(self, chol):
+        """Eigen one-axis draw iff armed, a table exists, and the
+        per-repeat stretch mix does not claim this round."""
+        if not self.use_info_mat_proposal or chol is None:
+            return False
+        if self.stretch_probability >= 1.0:
+            return False
+        if self.stretch_probability <= 0.0:
+            return True
+        return bool(np.random.rand() >= self.stretch_probability)
+
+    def _vgb_eigen_axis_draw(self, coords, chol):
+        """One-axis symmetric step: column ``k`` of ``chol`` is
+        ``sigma_k * a_k`` (built once per block, frozen across the
+        repeats), so one column times one normal IS the 1-D jump and the
+        detailed-balance factors are exactly zero."""
+        xp = self.xp
+        n = coords.shape[0]
+        naxes = chol.shape[-1]
+        pick = xp.asarray(np.random.randint(0, naxes, size=n))
+        _z = xp.random.randn(n)
+        dy = chol[xp.arange(n), :, pick] * _z[:, None]
+        self._last_axis_pick = pick
+        self._last_im_kind = "eigen_axis"
+        new_coords = (coords
+                      + self.jump_factor * dy
+                      * self._proposal_param_scales[None, :])
+        return new_coords, xp.zeros(coords.shape[0])
+
     def __init__(self, *args, **kwargs):
         if kwargs.get("rj_proposal_distribution") is not None or kwargs.get(
             "is_rj_prop"
@@ -16986,10 +17018,11 @@ class VGBSpecialStretchMove(GBSpecialBase):
         if kwargs.get("phase_maximize"):
             raise ValueError("Phase maximization is not used for VGBs.")
         kwargs.setdefault("branch_name", "vgb")
-        kwargs.setdefault("use_info_mat_proposal", False)
+        # VGB_INMODEL_PROPOSAL: eigen (default) arms use_info_mat_proposal
+        # + one-axis draw; stretch restores the legacy pure-stretch config.
+        _vgb_inmodel_defaults(kwargs)
         # No RJ move carries the band-temperature swaps for this branch.
         kwargs.setdefault("swap_on_in_model", True)
-        kwargs.setdefault("stretch_probability", 1.0)
         super().__init__(*args, **kwargs)
         # Eryn's stretch picks the complement itself; no friend table needed.
         self._build_friend_table = False
@@ -17014,7 +17047,14 @@ class VGBSpecialStretchMove(GBSpecialBase):
         The class-level ``choose_c_vals`` / ``get_new_points`` aliases keep
         ``get_proposal``'s internal dispatch on the plain stretch rather
         than GroupMove's friend-table overrides.
+
+        Under ``VGB_INMODEL_PROPOSAL=eigen`` (the default) the eigen
+        one-axis draw runs instead whenever the per-block info-matrix
+        table was built (see :meth:`_vgb_eigen_axis_draw`); the stretch
+        below remains the mix-in / fallback component.
         """
+        if self._vgb_use_eigen_draw(chol):
+            return self._vgb_eigen_axis_draw(coords, chol)
         self._last_im_kind = "stretch"
         xp = self.xp
         nw = self.nwalkers

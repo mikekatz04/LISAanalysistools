@@ -56,6 +56,9 @@ def _stub(**over):
     s._observable_basis_ready = (
         lambda: GBSpecialStretchMove._observable_basis_ready(s))
     s._observable_map = lambda: GBSpecialStretchMove._observable_map(s)
+    s._doppler_jump_should_fire = (
+        lambda coords: GBSpecialStretchMove._doppler_jump_should_fire(
+            s, coords))
     return s
 
 

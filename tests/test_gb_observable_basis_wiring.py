@@ -97,7 +97,8 @@ def _stub(**over):
         setattr(s, k, v)
     for meth in ("_observable_basis_ready", "_observable_map",
                  "_observable_step_scales", "_observable_proposal",
-                 "_eigen_axis_ready", "_eigen_axis_widths"):
+                 "_eigen_axis_ready", "_eigen_axis_widths",
+                 "_doppler_jump_should_fire"):
         setattr(s, meth, getattr(GBSpecialStretchMove, meth).__get__(s))
     return s
 
