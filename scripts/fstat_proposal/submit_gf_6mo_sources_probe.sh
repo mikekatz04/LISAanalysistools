@@ -288,6 +288,31 @@ export MBH_PERMUTE_EVERY=10
 export EMRI_PERMUTE_EVERY=10
 export SOBBH_PERMUTE_EVERY=10
 
+# ---- EIGEN INNER MOVE (2026-09-05/08 work; code defaults, pinned) ----------
+# THIS PROBE IS THE FIRST CLUSTER EXPOSURE of the EigenAxisMove defaults:
+# the in-model proposal for all three branches is the one-axis
+# information-matrix eigen jump (laptop A/B on the real chunked SOBBH
+# kernel: acceptance 0.544 vs stretch 0.156 at equal per-step cost).
+# SOBBH builds per-(temperature, walker) tables in ONE batched sweep
+# (12 x 24 = 288 points x ~245 rows ~ 3.3 min per leaf refresh at
+# 2.78 ms/row, first visit + every 10th); MBH/EMRI build ONE table per
+# leaf at the max-lnL cold walker (~6.4 / ~4.6 min per leaf, first visit
+# + every 100th -- a one-time ~26 + ~37 min on the first iteration).
+# WATCH: "[eigen_refresh]" WARNING lines (= a build failed; that leaf
+# samples on identity/1%-width fallback tables -- correct, just slow) and
+# the per-branch acceptance lines vs the stretch numbers banked from jobs
+# 355-373. Escapes: {BRANCH}_INNER_MOVE_KIND=stretch (exact legacy),
+# SOBBH_EIGEN_SCOPE=walker_max (~0.7 s refreshes), {BRANCH}_EIGEN_REFRESH.
+export SOBBH_INNER_MOVE_KIND=eigen
+export MBH_INNER_MOVE_KIND=eigen
+export EMRI_INNER_MOVE_KIND=eigen
+export SOBBH_EIGEN_SCOPE=per_walker
+export MBH_EIGEN_SCOPE=walker_max
+export EMRI_EIGEN_SCOPE=walker_max
+export SOBBH_EIGEN_REFRESH=10
+export MBH_EIGEN_REFRESH=100
+export EMRI_EIGEN_REFRESH=100
+
 # ---- start scatter (user ruling 2026-08-26) ---------------------------------
 # The default 1e-5 multiplicative truth scatter produced wildly spread
 # initial lnL across walkers (-5.6e6 .. -2.2e7) -- at 6-mo source SNRs
