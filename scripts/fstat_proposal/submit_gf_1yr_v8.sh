@@ -1066,7 +1066,14 @@ export VGB_BAND_LAYERS=8
 # MB/source chunked-het stash at batch 1024 is ~30 GB; halving to 512 reclaims
 # ~15 GB and both MEMPOOL_FREE=1 trim the cupy pool -- so gb_search now takes
 # the memory-safe value too (was 1024-for-speed). Drop to 256 if it still OOMs.
-export GB_INMODEL_SETUP_BATCH=512
+# 2026-09-06 (10-walker fresh run): GB_N_SUBBANDS=1024 cleared the rj_fstat_search
+# OOM, but the run then OOM'd one allocation later in the IN-MODEL sig-het setup
+# (gbsignalhetcomputations._expand_B: xp.zeros((n,3,3,Nf_active,N_sparse_t)) = 1.54
+# GB at n=512, on top of the ~89 GB dev0 baseline). Dropped 512->256 (env-read at
+# runtime -> a RESUME applies it, no fresh store needed). ~89 GB baseline is the
+# real ceiling (dev0/dev1 imbalance) -- go to 128 or land the F-stat-grid device-pin
+# if 256 still OOMs.
+export GB_INMODEL_SETUP_BATCH=256
 export GB_INFOMAT_MEMPOOL_FREE=1
 export GB_INMODEL_BATCH_MEMPOOL_FREE=1
 # ######################################################################### #
