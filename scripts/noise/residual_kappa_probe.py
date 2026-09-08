@@ -188,12 +188,49 @@ def main() -> int:
     C_fit = _np(sb("probe_fit", psd_fit, gal_fit).sens_mat) if psd_fit else None
     C_true = _np(sb("probe_true", INJECTION, gal_fit).sens_mat)
 
+    # ---- frequency axis ----------------------------------------------------
+    # Job 457 silently fell back to bare layer INDEX here (printing "4000 mHz"
+    # and NaN band medians) because Nf/dt were not readable off dom.settings
+    # under those names. Try several sources, say which one won, and dump the
+    # candidate attributes if they all fail so the next run is fixable.
     dom_s = getattr(dom, "settings", None)
-    nf = getattr(dom_s, "Nf", None)
-    dt = getattr(dom_s, "dt", None)
-    df = 1.0 / (2 * nf * dt) if (nf and dt) else None
-    imin = int(getattr(dom_s, "_ind_min_f", 1) or 1)
-    lay = (np.arange(W.shape[1]) + imin) * df if df else np.arange(W.shape[1])
+    gsb = curr.general_info
+
+    def _first(obj, names):
+        for n in names:
+            v = getattr(obj, n, None)
+            if v:
+                return float(v), n
+        return None, None
+
+    nf, nf_src = _first(dom_s, ("Nf", "nf", "N_f"))
+    dt, dt_src = _first(dom_s, ("dt", "delta_t", "DT"))
+    src = f"dom.settings.{nf_src}/{dt_src}"
+    if nf is None or dt is None:
+        nf2, n2 = _first(gsb, ("nf", "Nf"))
+        dt2, d2 = _first(gsb, ("dt", "delta_t"))
+        if nf2 and dt2:
+            nf, dt, src = nf2, dt2, f"general_info.{n2}/{d2}"
+    if nf and dt:
+        df = 1.0 / (2 * nf * dt)
+    else:
+        df = None
+        print("[probe] WARNING: could not resolve Nf/dt for the frequency axis. "
+              f"dom.settings type={type(dom_s).__name__}; candidates present: "
+              f"{[a for a in dir(dom_s) if not a.startswith('__')][:40]}")
+    imin, _ = _first(dom_s, ("_ind_min_f", "ind_min_f"))
+    imin = int(imin) if imin else 1
+    if df:
+        lay = (np.arange(W.shape[1]) + imin) * df
+        print(f"[probe] frequency axis from {src}: Nf={nf:.0f} dt={dt} "
+              f"layer_df={df:.6e} Hz, first layer index={imin} -> "
+              f"{lay[0]*1e3:.4f} .. {lay[-1]*1e3:.3f} mHz", flush=True)
+    else:
+        lay = np.arange(W.shape[1], dtype=float)
+        print("[probe] frequency axis UNRESOLVED -- 'f [mHz]' below is the bare "
+              "LAYER INDEX and the band medians will be NaN. The q arrays in "
+              "the npz are still correct; rebuild the axis offline as "
+              "(k + ind_min_f) / (2*Nf*dt).", flush=True)
 
     q_true = per_layer_q(W, C_true) / 3.0
     q_fit = per_layer_q(W, C_fit) / 3.0 if C_fit is not None else None
@@ -215,7 +252,71 @@ def main() -> int:
         print(f"  {lo*1e3:5.1f}-{hi*1e3:5.1f}  | {band(q_true, lo, hi):9.4f}  | {a}")
     print("\n  EXPECT if kappa is real : q_true/3 ~ 1.84 at 18-25 mHz")
     print("  EXPECT if kappa is not  : q_true/3 ~ 1.00 at 18-25 mHz")
+    # ========================================================================
+    # WHICH ANSWER DOES THE RUN'S OWN LIKELIHOOD PREFER?
+    # ========================================================================
+    # The residual measured above is CORRECT (q_true/3 -> 1.00 at 12-25 mHz),
+    # and an honest ML on it lands near S_oms ~ 1.0 -- yet the run sits at
+    # 1.39. So ask the code directly: evaluate ITS likelihood on THIS residual
+    # along the line through the injection, and see where it peaks.
+    #
+    #   peak at alpha ~ 1.39  -> the LIKELIHOOD is mis-weighted. The sampler is
+    #                            doing its job on a wrong objective; the bug is
+    #                            in how chi^2, logdet and pixel counts combine.
+    #   peak at alpha ~ 1.00  -> the likelihood is fine and the sampler never
+    #                            reached its own optimum, OR the psd move scores
+    #                            a different array than the one measured here.
+    #
+    # The source_only / noise_only split is the diagnostic: if the chi^2 term
+    # alone prefers the injection while the TOTAL prefers the fitted params,
+    # the noise-normalization term is carrying the wrong weight.
+    print("\n" + "=" * 72)
+    print(" lnL SCAN along psd = alpha * injection, on THIS residual")
+    print(" (walker 0; galfor held at the run's fitted values)")
+    print("=" * 72)
+    saved_sens = ac.sens_mat
+    alphas = [0.85, 0.95, 1.0, 1.05, 1.15, 1.25, 1.3879, 1.5, 1.7]
+    rows = []
+    try:
+        for a in alphas:
+            p = [INJECTION[0] * a, INJECTION[1] * a]
+            ac.sens_mat = sb(f"lnl_a{a}", p, gal_fit)
+            tot = float(np.real(_np(ac.likelihood(source_only=False))))
+            src = float(np.real(_np(ac.likelihood(source_only=True))))
+            rows.append((a, tot, src, tot - src))
+        # the run's ACTUAL fitted point (not necessarily on the alpha line)
+        ac.sens_mat = sb("lnl_fitted", psd_fit, gal_fit)
+        tot_f = float(np.real(_np(ac.likelihood(source_only=False))))
+        src_f = float(np.real(_np(ac.likelihood(source_only=True))))
+    finally:
+        ac.sens_mat = saved_sens
+
+    base = max(r[1] for r in rows)
+    print("  alpha | S_oms      | lnL_total - max | chi2 term (-<r|r>/2) | noise-norm term")
+    for a, tot, src, nz in rows:
+        mark = "  <- alpha=1 (INJECTION)" if a == 1.0 else (
+               "  <- the run's S_oms ratio" if abs(a - 1.3879) < 1e-6 else "")
+        print(f" {a:6.4f} | {INJECTION[0]*a:.4e} | {tot-base:15.2f} | "
+              f"{src:20.6e} | {nz:15.6e}{mark}")
+    print(f"\n  the run's ACTUAL fitted psd {psd_fit}:")
+    print(f"     lnL_total = {tot_f:.6e}   (relative to scan max: {tot_f-base:+.2f})")
+    print(f"     chi2 term = {src_f:.6e}   noise-norm = {tot_f-src_f:.6e}")
+    best = max(rows, key=lambda r: r[1])
+    print(f"\n  >>> the code's likelihood PEAKS at alpha = {best[0]:.4f} <<<")
+    if abs(best[0] - 1.0) < 0.1:
+        print("  => likelihood is FINE at alpha~1; the fitted params do NOT maximize")
+        print("     it, so this is a SAMPLER or wrong-array problem, not weighting.")
+    elif best[0] > 1.2:
+        print("  => the likelihood ITSELF prefers the biased params: the objective")
+        print("     is mis-weighted (chi^2 vs logdet vs pixel counts).")
+    print("=" * 72)
+
     np.savez(os.environ.get("KAPPA_OUT", "kappa_probe.npz"),
+             lnl_alphas=np.asarray([r[0] for r in rows]),
+             lnl_total=np.asarray([r[1] for r in rows]),
+             lnl_chi2=np.asarray([r[2] for r in rows]),
+             lnl_noisenorm=np.asarray([r[3] for r in rows]),
+             lnl_fitted_total=tot_f, lnl_fitted_chi2=src_f,
              lay=lay, q_true=q_true, q_fit=q_fit if q_fit is not None else [],
              psd_fit=np.asarray(psd_fit if psd_fit else []),
              gal_fit=np.asarray(gal_fit if gal_fit else []))
