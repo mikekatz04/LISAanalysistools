@@ -538,6 +538,34 @@ class EreborFit(StockGlobalFit):
         )
         gs.edge_crop_wavelets = edge_crop
 
+        # ---- DC-ADJACENT LOW-FREQUENCY LAYER GUARD --------------------------
+        # WDMSettings sets ind_min_f = ceil(min_freq / layer_df), so a min_freq
+        # below ~1.5*layer_df admits layer 1, whose support shares an edge with
+        # the DC layer. The analytic instrument model diverges as f -> 0 (Sa_d
+        # goes as (2 pi f)^-4), the fold picks that up, and
+        # instrument_fill_nans=0.0 turns the resulting NaN into a HARD ZERO --
+        # a singular covariance INSIDE the analysed band.
+        #
+        # This is not hypothetical. Measured on the 3mo v8 store (kappa probe,
+        # job 459) with min_freq=1e-4: layer 1 had det(C)=0 and carried
+        # q = w^T C^-1 w / 3 = 150.3, i.e. 43% of the whole fit's chi^2 budget,
+        # dragging the ML to alpha = sqrt(mean(q/3)) = 1.389 -- the entire
+        # observed instrument-PSD bias. It was silent for the whole campaign.
+        # The WDM audit's rule is min_freq >= 2 * layer_df.
+        _layer_df = 1.0 / (2.0 * Nf * gs.dt)
+        _ind_min_f = int(-(-float(gs.min_freq) // _layer_df))  # ceil
+        if _ind_min_f < 2:
+            logger.warning(
+                "min_freq=%.6g Hz resolves to WDM layer %d (layer_df=%.6g Hz). "
+                "Layer 1 borders DC, where the instrument model diverges and "
+                "fill_nans zeroes the covariance -- a SINGULAR layer inside the "
+                "analysed band, measured to carry ~43%% of the chi^2 budget and "
+                "to bias the fitted instrument PSD by ~1.39x in amplitude. Set "
+                "MIN_FREQ >= %.6g Hz (2 * layer_df) to start at layer 2 or "
+                "above; production uses 4e-4.",
+                float(gs.min_freq), _ind_min_f, _layer_df, 2.0 * _layer_df,
+            )
+
         # Domain: WDM factory from the grid knobs unless the user swapped in
         # their own DomainSettings instance/factory.
         if gs.domain_settings is None:

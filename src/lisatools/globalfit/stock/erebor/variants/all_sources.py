@@ -137,8 +137,26 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     dt: float = 5.0
     nf: typing.Optional[int] = 720
     nt: typing.Optional[int] = 2160
-    min_freq: float = 1e-4
-    max_freq: float = 2.5e-2
+    # env-wired (2026-09-06, THIRD shadow of the same bug -- see the
+    # EDGE_CROP_WAVELETS note just below, and nf/nt before it). A plain
+    # ``= 1e-4`` here SHADOWED the base EreborGeneralSettings env factory, so
+    # the MIN_FREQ=4e-4 that every production submit script exports has NEVER
+    # taken effect on this path. Consequence measured on the 3mo v8 store
+    # (kappa probe, job 459): min_freq=1e-4 -> ind_min_f=1, putting WDM layer 1
+    # (support 0.069-0.208 mHz, sharing an edge with DC) inside the analysed
+    # band. Its covariance is singular there -- det(C)=0, because the analytic
+    # model diverges as f->0 and instrument_fill_nans=0.0 turns the NaN into a
+    # hard zero -- and it carries q = w^T C^-1 w / 3 = 150.3, i.e. **43% of the
+    # entire chi^2 budget of the fit**. The ML then returns
+    # alpha = sqrt(mean(q/3)) = 1.389, which IS the observed S_oms bias
+    # (1.3874 measured, 0.21% agreement). MIN_FREQ=4e-4 -> layer 3 predicts
+    # alpha -> 1.049.
+    min_freq: float = dataclasses.field(
+        default_factory=env_default("MIN_FREQ", 1e-4, float)
+    )
+    max_freq: float = dataclasses.field(
+        default_factory=env_default("MAX_FREQ", 2.5e-2, float)
+    )
     window_tukey_alpha: float = 0.0  # rectangular window
     # env-wired (2026-08-19, second shadow of the same bug fixed in
     # full_year_combined 7d537d32): a plain ``= 20`` here shadowed the base
