@@ -524,7 +524,17 @@ export GB_NLEAVES_MAX=10000
 # 2.4s host round-trips. ~4.2 GB buffer; post-fix profile at 4096 was
 # flat 42-45/31 GB on 96 GB cards. If the unit-open lines stay flat,
 # full residency (50000 -> 44,352 slots, ~11.3 GB) is the next step.
-export GB_N_SUBBANDS=8192  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @3mo, ~8 MB @23mo) x 2 move caches -- job-183 sizing   # PER GPU (LAT >= this commit): total = x n_gpus
+# 8192 -> 16384 (2026-09-09, RESUME RELAUNCH -- read the gate block by
+# GB_INMODEL_SETUP_BATCH before resubmitting). Probing how the limitations
+# evolve now that the windowed sig-het stash (~0.21 MB/source here vs ~11
+# MB before) no longer eats the headroom. Cost: +8192 slots x 1.02 MB
+# (3 mo slab: 0.25 MB data + 0.76 MB invC) = +8.4 GB (RJ buffer 16.7 ->
+# 33.4 GB); dev0 sat at ~37-42 GB at buffer build on job 465, so this is
+# well inside the card. Capacity total becomes 32768 -> GB_RJ_INMODEL_CHUNK
+# below is raised to match so it cannot silently re-cap the pool. WATCH:
+# "GPU pool used X / total Y" plateau and the first rj_fstat_search after
+# resume. ESCALATE (32768/GPU) only after one clean iteration.
+export GB_N_SUBBANDS=16384  # (was 8192) PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @3mo, ~8 MB @23mo) x 2 move caches -- job-183 sizing   # PER GPU (LAT >= this commit): total = x n_gpus
 # RJ pick thinning. UNSET as of 2026-08-28 -- the value now lives in code
 # (_SEARCH_RJ_FLIP_DEFAULT / _PE_RJ_FLIP_DEFAULT in recipe.py, both 0.2),
 # so behavior is UNCHANGED from the 0.2 this line used to export.
@@ -884,7 +894,29 @@ export GB_SIGHET_TRUST_PHASE_C=49
 # delta-vs-delta p50 0.054, cold max 5.48, well inside tolerance over the
 # whole run). ~18 s/iter. Re-arm (=1) if a sig-het accuracy question reopens.
 export GB_SIGHET_ANCHOR_CHECK=0
-export GB_SIGHET_DRIFT_CHECK=0
+# RE-ARMED 2026-09-09 -- the accuracy question the line above anticipated has
+# reopened. [GB_CELL_LL] breaches on 100% of RJ band units (1,378/1,378) and
+# never on a VGB unit (0/5,877); mean |sampled-actual| is 9.85 here vs
+# 2.35e-06 on VGB. The correlate is sig-het: inmodel_sighet_refresh runs in
+# both RJ moves and is ABSENT from vgb_pe. The 1-yr twin, which kept this
+# audit ON, shows why -- end-of-block carrier-phase drift median 0.87 rad,
+# MAX 5.7 rad (~2*pi), 238/256 sources over threshold, accumulated in the
+# 25 repeats since the last refresh. The heterodyne expansion is a
+# LINEARIZATION; ~0.9 rad is far outside its validity, and that is exactly
+# the sampled-vs-realized gap GB_CELL_LL reports.
+#
+# WHAT THIS RUN MUST ANSWER: drift = 2*pi*|df0|*Tobs + pi*|dfdot|*Tobs^2, so
+# the SAME parameter step buys 4x the phase at 1 yr (16x through fdot).
+# PREDICTION: 3-mo drift should come in ~4x SMALLER than the 1-yr median,
+# i.e. ~0.2 rad. Confirming that pins the Tobs scaling and says
+# GB_SIGHET_REFRESH_EVERY (25 here AND at 1 yr) must scale as 1/Tobs
+# rather than being held fixed across observation times.
+#
+# ⚠ TAKES EFFECT ONLY ON A FRESH LAUNCH OR RESTART -- the env is read at
+# startup, so the in-flight job does NOT pick this up.
+# Logs one INFO line per in-model block ("sig-het end-of-block drift"); the
+# 1-yr run emitted 3,425 such lines over 16 iterations, so expect volume.
+export GB_SIGHET_DRIFT_CHECK=1
 # TIER SCAN RETIRED FOR THE CLEAN RESTART (2026-08-19). It has NO iteration
 # cap (the "first-few-iterations" note above it was wrong): it ran 13 extra
 # scoring passes -- half of them chunked-exact -- on EVERY in-model block,
@@ -1106,9 +1138,64 @@ export VGB_BAND_LAYERS=8
 # and RE-ENABLE both mempool frees (reclaim accumulated buffers). Slower
 # (more launch trains + free/realloc cycles) but memory-safe. Raise batch
 # back toward 2048 only if the relaunch telemetry shows real margin.
-export GB_INMODEL_SETUP_BATCH=1024
-export GB_INFOMAT_MEMPOOL_FREE=1
-export GB_INMODEL_BATCH_MEMPOOL_FREE=1
+# ######################################################################### #
+# ##  RESUME RELAUNCH 2026-09-09: WINDOWED SIG-HET STASH + UNCAPPED IN-MODEL ##
+# ##  ⚠ GATE: DO NOT RESUBMIT until the cluster has PULLED AND REBUILT GBGPU ##
+# ##  with the windowed-stash port (CUDA kernel + binding changed -> a       ##
+# ##  `pip install -e .` in GBGPU is REQUIRED; LAT is a pull only). On the  ##
+# ##  OLD wheel these settings recreate the pre-port one-batch stash + OOM.  ##
+# ##  CONFIRM on the first propose: the log must carry                       ##
+# ##    "sig-het in-model stash: COMPACT per-reference windows [v5=1, ...]"  ##
+# ##  If it says "full band (Nf_active=...)" the port is NOT live: scancel.  ##
+# ##  All knobs below are runtime env, not stored -> a RESUME applies them   ##
+# ##  (resume guard checks band_edges/cap_edges/nleaves_max/ndim only).      ##
+# ##  Batched vs unbatched in-model is statistically identical, NOT          ##
+# ##  bit-identical -- fine for a resume, not a bit-match test.              ##
+# ######################################################################### #
+# Force the compact stash and FAIL LOUDLY if the scorer cannot take it
+# (unset = windowed iff v5, which this run is; "0" = rollback to the
+# full-band expansion, the control arm).
+export GB_SIGHET_INMODEL_WINDOWED=1
+# 1024 -> 0 (OFF = the original unbatched path: whole picked pool in ONE
+# setup_in_model, one removal, one write-back, no pool sweeps between). At
+# 3 mo the windowed stash is ~0.21 MB/source, so even the full 16384-slot
+# capacity as one batch is ~3.4 GB. The reference BUILD stays chunked by
+# GB_SIGHET_FOLD_MAX_BYTES (1 GiB), bounding the transient at any pool size.
+export GB_INMODEL_SETUP_BATCH=0
+# RJ-path in-model chunk width (2026-09-09). Sits UPSTREAM of the staging cap:
+# `_im_w = min(n_slots, GB_RJ_INMODEL_CHUNK)` (gbspecialstretch, job-194
+# forensics), then GB_INMODEL_SETUP_BATCH re-caps residency at EVERY call
+# site downstream. The 4096 code default was sized when a source's sig-het
+# reference cost ~11 MB (a 7,532-source block pushed a 96 GB device to 84%).
+# The windowed stash (Nf_sub=5 x N_sparse_t, not Nf_active=179) brings that
+# to ~0.2 MB/source here (~0.83 MB at 1 yr), so 7,532 sources = ~1.5 GB and
+# the 4096 cap would only SILENTLY under-cap the residency the user wants
+# (~10K sources in-model at once, refill batched separately by the fold
+# byte budget GB_SIGHET_FOLD_MAX_BYTES). 32768 = this run's buffer capacity
+# (16384 x 2 GPUs after the 2026-09-09 raise), so the min() collapses to
+# capacity and this knob stops being a limiter: residency is then governed
+# ONLY by GB_INMODEL_SETUP_BATCH and the buffer capacity -- the two dials
+# the user ruled must be separately adjustable.
+# LIVE as of the 2026-09-09 resume relaunch (SETUP_BATCH=0 above no longer
+# binds), which is the intent: the whole picked pool goes into one stash.
+# KEEP THIS >= GB_N_SUBBANDS x n_gpus whenever that knob is raised, or it
+# silently re-caps the pool. Depends on the windowed-stash port being
+# deployed on the cluster (see the gate block above).
+export GB_RJ_INMODEL_CHUNK=32768
+# 1 -> 0, BOTH (2026-09-09). The memory-safe-mode pair this script
+# re-enabled ("slower ... but memory-safe") to reclaim the PRE-PORT stash
+# churn: the staging-cap sweep (_free_inmodel_batch_pools, gated by
+# GB_INMODEL_BATCH_MEMPOOL_FREE) drained the pool before and between every
+# sub-block because setup_in_model allocated through raw cudaMalloc that
+# could not reuse CuPy's cached blocks. With the compact stash (~0.21
+# MB/source here) and SETUP_BATCH=0 there is ONE setup per block, so the
+# sweeps only add cudaFree/cudaMalloc cycles. GB_INFOMAT_MEMPOOL_FREE is the
+# documented pairing (speed mode = both off, memory-safe = both on).
+# WATCH after relaunch: "GPU pool used X / total Y GB" -- `total` should
+# PLATEAU within an iteration; a monotonic climb across iterations is a
+# leak signature -> set both back to 1 and report it.
+export GB_INFOMAT_MEMPOOL_FREE=0
+export GB_INMODEL_BATCH_MEMPOOL_FREE=0
 # ######################################################################### #
 # ## SEAM-STRADDLING CAP CELLS (divisor 2 + stagger, 2026-08-29).        ## #
 # ## ⚠ DO NOT "FIX" THE CAP GRID BACK INTO ALIGNMENT WITH THE SUB-BANDS. ## #

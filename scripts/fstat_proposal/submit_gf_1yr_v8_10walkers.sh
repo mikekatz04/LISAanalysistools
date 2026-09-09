@@ -518,7 +518,25 @@ export GB_NLEAVES_MAX=25000
 # 2.4s host round-trips. ~4.2 GB buffer; post-fix profile at 4096 was
 # flat 42-45/31 GB on 96 GB cards. If the unit-open lines stay flat,
 # full residency (50000 -> 44,352 slots, ~11.3 GB) is the next step.
-export GB_N_SUBBANDS=1024  # PER GPU; per-slot cost ~4 MB @1yr (Tobs-linear) x 2 move caches -- HALVED TWICE from the 3-mo 8192 so the byte budget matches (8192@3mo->4096@6mo->2048@1yr). This is the #1 GPU-MEMORY WATCH: the old 1yr_v5 dropped to 1024 under a v5-era memory ceiling; v8 retired the F-stat centers so 2048 was tried first, but jobs 443/446 OOM'd on the FIRST rj_fstat_search of gb_search -- dev0 hit 88.72/99.9 GB (89%) loading the complete F-stat grid + move caches, then a 2.08 GB SubBandBuffer alloc tipped it over (batch 512 made NO difference: identical 88.72 GB -- this OOM is the F-stat-search path, not the in-model stash). Halved to 1024 (2026-09-06) per this line's own ceiling rule; frees ~8 GB/GPU. If it still OOMs, either halve again to 512 or add GPUs (--gres=gpu:4 + GPUS=0,1,2,3 ~halves per-GPU load; dev0/dev1 are imbalanced ~2:1).   # PER GPU: total = x n_gpus
+# 1024 -> 2048 (2026-09-09, RESUME RELAUNCH -- read the gate block by
+# GB_INMODEL_SETUP_BATCH before resubmitting). WHY NOW: this knob is not
+# only a memory dial, it caps the search -- the picked pool per in-model
+# block hit the 2048-slot capacity in >10% of blocks (p90 = MAX = 2048,
+# mean 1,171 on job 466). 2048 is exactly the value that OOM'd jobs 443/446,
+# but that was the EPOCH-0 F-stat-grid load at 88.7 GB BEFORE the stacked
+# grid was cut 9 -> 2.3 GB, and before the windowed sig-het stash removed
+# ~8 GB of resident references plus up to ~29 GB of cached-free pool churn
+# (measured: dev0 max 90.8 GB, cached-free max 29.4 GB, outside-pool 8.8 GB
+# constant). Cost of this doubling: +2048 slots x 4.09 MB = +8.4 GB (RJ
+# buffer 8.4 -> 16.8 GB); the 2400-slot template twin (12.3 GB) is fixed by
+# GB_TEMPER_PRELOAD_CELLS and does not move. WATCH: the first
+# rj_fstat_search after resume (the F-stat grid load is the phase that set
+# the old ceiling) and the "GPU pool used X / total Y" plateau. FALLBACK:
+# 1536. ESCALATE to 4096 only after one clean iteration -- the ~35 GB of
+# in-pool memory the logs do not itemize is the remaining uncertainty; the
+# post-port envelope is ~4,000/GPU before the slab (4.09 MB/slot, 75% invC)
+# becomes the binding term.
+export GB_N_SUBBANDS=2048  # (was 1024) PER GPU; per-slot cost ~4 MB @1yr (Tobs-linear) x 2 move caches -- HALVED TWICE from the 3-mo 8192 so the byte budget matches (8192@3mo->4096@6mo->2048@1yr). This is the #1 GPU-MEMORY WATCH: the old 1yr_v5 dropped to 1024 under a v5-era memory ceiling; v8 retired the F-stat centers so 2048 was tried first, but jobs 443/446 OOM'd on the FIRST rj_fstat_search of gb_search -- dev0 hit 88.72/99.9 GB (89%) loading the complete F-stat grid + move caches, then a 2.08 GB SubBandBuffer alloc tipped it over (batch 512 made NO difference: identical 88.72 GB -- this OOM is the F-stat-search path, not the in-model stash). Halved to 1024 (2026-09-06) per this line's own ceiling rule; frees ~8 GB/GPU. If it still OOMs, either halve again to 512 or add GPUs (--gres=gpu:4 + GPUS=0,1,2,3 ~halves per-GPU load; dev0/dev1 are imbalanced ~2:1).   # PER GPU: total = x n_gpus
 # RJ pick thinning. UNSET as of 2026-08-28 -- the value now lives in code
 # (_SEARCH_RJ_FLIP_DEFAULT / _PE_RJ_FLIP_DEFAULT in recipe.py, both 0.2),
 # so behavior is UNCHANGED from the 0.2 this line used to export.
@@ -1100,9 +1118,77 @@ export VGB_BAND_LAYERS=8
 # 1.54 GB at n=512, on top of the ~89 GB dev0 baseline). Dropped 512->256
 # (env-read at runtime -> a RESUME applies it, no fresh store needed). ~89 GB
 # baseline is the real ceiling (dev0/dev1 imbalance) -- go to 128 if 256 OOMs.
-export GB_INMODEL_SETUP_BATCH=256
-export GB_INFOMAT_MEMPOOL_FREE=1
-export GB_INMODEL_BATCH_MEMPOOL_FREE=1
+# ######################################################################### #
+# ##  RESUME RELAUNCH 2026-09-09: WINDOWED SIG-HET STASH + UNCAPPED IN-MODEL ##
+# ##  ⚠ GATE: DO NOT RESUBMIT until the cluster has PULLED AND REBUILT GBGPU ##
+# ##  with the windowed-stash port (CUDA kernel + binding changed -> a       ##
+# ##  `pip install -e .` in GBGPU is REQUIRED; LAT is a pull only). On the  ##
+# ##  OLD wheel these settings recreate the ~35 GB one-batch stash and OOM.  ##
+# ##  CONFIRM on the first propose: the log must carry                       ##
+# ##    "sig-het in-model stash: COMPACT per-reference windows [v5=1, ...]"  ##
+# ##  If it says "full band (Nf_active=...)" the port is NOT live: scancel.  ##
+# ##  All four knobs below are runtime env, not stored -> a RESUME applies  ##
+# ##  them (verified: the resume guard checks band_edges/cap_edges/         ##
+# ##  nleaves_max/ndim only). Batched vs unbatched in-model is statistically ##
+# ##  identical, NOT bit-identical (accept-draw stream reshapes) -- fine for ##
+# ##  a resume, not a bit-match test.                                        ##
+# ######################################################################### #
+# Force the compact stash and FAIL LOUDLY if the scorer cannot take it
+# (unset = windowed iff v5, which this run is; "0" = rollback to the
+# full-band expansion, the control arm). Explicit 1 so a silent fallback to
+# the ~35x larger layout is impossible.
+export GB_SIGHET_INMODEL_WINDOWED=1
+# 256 -> 0 (OFF = the original unbatched path: the whole picked pool in ONE
+# setup_in_model, one removal, one write-back, no pool sweeps between).
+# The cap existed because the stash was ~30 MB/source, so this run's pool
+# (mean 1,171, p90 = MAX = 2048 = the buffer capacity) cost ~35 GB in one
+# batch. Windowed it is 0.83 MB/source: 2048 x 0.83 = 1.7 GB. Measured cost
+# of keeping the cap: 5.0 sub-blocks/block -> 3,780 sig-het setups + 3,776
+# pool sweeps over 16 iterations (236/iteration), the pool swinging 20<->69
+# GB and up to 29.4 GB sitting cached-free at peak. The reference BUILD is
+# still chunked internally by GB_SIGHET_FOLD_MAX_BYTES (1 GiB, ~75 src),
+# so the build transient is bounded regardless of pool size.
+export GB_INMODEL_SETUP_BATCH=0
+# RJ-path in-model chunk width (2026-09-09). Sits UPSTREAM of the staging cap:
+# `_im_w = min(n_slots, GB_RJ_INMODEL_CHUNK)` (gbspecialstretch, job-194
+# forensics), then GB_INMODEL_SETUP_BATCH re-caps residency at EVERY call
+# site downstream. The 4096 code default was sized when a source's sig-het
+# reference cost ~11 MB (a 7,532-source block pushed a 96 GB device to 84%).
+# The _expand_B array named in the OOM note above -- xp.zeros((n,3,3,
+# Nf_active,N_sparse_t)), 1.54 GB at n=512 -- is exactly what the windowed
+# stash removes: coefficients stored on (Nf_sub=5, N_sparse_t) instead of
+# Nf_active=179, ~0.83 MB/source here, so 7,532 sources = ~6 GB and the 4096
+# cap would only SILENTLY under-cap the residency the user wants (~10K
+# sources in-model at once, refill batched separately by the fold byte
+# budget GB_SIGHET_FOLD_MAX_BYTES). 16384 is above every planned buffer
+# capacity, so the min() collapses to capacity and this knob stops being a
+# limiter: residency is then governed ONLY by GB_INMODEL_SETUP_BATCH and
+# the buffer capacity -- the two dials the user ruled must be separately
+# adjustable.
+# LIVE as of the 2026-09-09 resume relaunch: capacity is now 4096
+# (2048 x 2 GPUs) and SETUP_BATCH=0 above no longer binds, so
+# min(n_slots=4096, 16384) collapses to capacity -- the whole picked pool
+# goes into one stash, which is the intent. KEEP THIS >= GB_N_SUBBANDS x
+# n_gpus whenever that knob is raised (16384 covers up to 8192/GPU), or it
+# silently re-caps the pool. Depends on the windowed-stash port being
+# deployed on the cluster (see the gate block above).
+export GB_RJ_INMODEL_CHUNK=16384
+# 1 -> 0, BOTH (2026-09-09). These are the memory-safe-mode pair this script
+# re-enabled ("slower ... but memory-safe") to reclaim the PRE-PORT stash
+# churn: the staging-cap sweep (_free_inmodel_batch_pools, gated by
+# GB_INMODEL_BATCH_MEMPOOL_FREE) drained the pool before and between every
+# sub-block because setup_in_model allocated through raw cudaMalloc that
+# could not reuse CuPy's cached blocks. Measured on job 466: 3,983 pool
+# frees over 16 iterations, ~1:1 with the 3,776 sub-block sweeps. With the
+# compact stash and SETUP_BATCH=0 there is ONE setup per block (~1.7 GB at
+# full capacity), so the sweeps only add cudaFree/cudaMalloc cycles and
+# keep the pool swinging 20<->69 GB. GB_INFOMAT_MEMPOOL_FREE is the
+# documented pairing (speed mode = both off, memory-safe = both on).
+# WATCH after relaunch: the "GPU pool used X / total Y GB" lines. `total`
+# should PLATEAU within an iteration; a monotonic climb across iterations
+# is a leak signature -> set both back to 1 and report it.
+export GB_INFOMAT_MEMPOOL_FREE=0
+export GB_INMODEL_BATCH_MEMPOOL_FREE=0
 # ######################################################################### #
 # ## SEAM-STRADDLING CAP CELLS (divisor 2 + stagger, 2026-08-29).        ## #
 # ## ⚠ DO NOT "FIX" THE CAP GRID BACK INTO ALIGNMENT WITH THE SUB-BANDS. ## #
