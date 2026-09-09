@@ -1127,6 +1127,14 @@ export VGB_BAND_LAYERS=8
 # ##  CONFIRM on the first propose: the log must carry                       ##
 # ##    "sig-het in-model stash: COMPACT per-reference windows [v5=1, ...]"  ##
 # ##  If it says "full band (Nf_active=...)" the port is NOT live: scancel.  ##
+# ##  ALSO CONFIRM the raised capacity took: the first RJ buffer build     ##
+# ##  line must read "buffer build (4096-slot alloc, ..." (2048/GPU x 2).  ##
+# ##  If it still says 2048-slot, the knob did not apply. The NWALKERS     ##
+# ##  line's old "resume trap" note is NOT a store-side refusal (the only  ##
+# ##  resume check is the noise-model identity; n_subbands is never        ##
+# ##  persisted): it is that a REQUEUED job re-runs the SPOOLED copy of    ##
+# ##  this script. So relaunch with scancel + a NEW sbatch of this file -- ##
+# ##  never scontrol requeue -- and the edited env is what runs.           ##
 # ##  All four knobs below are runtime env, not stored -> a RESUME applies  ##
 # ##  them (verified: the resume guard checks band_edges/cap_edges/         ##
 # ##  nleaves_max/ndim only). Batched vs unbatched in-model is statistically ##

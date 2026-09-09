@@ -1147,6 +1147,13 @@ export VGB_BAND_LAYERS=8
 # ##  CONFIRM on the first propose: the log must carry                       ##
 # ##    "sig-het in-model stash: COMPACT per-reference windows [v5=1, ...]"  ##
 # ##  If it says "full band (Nf_active=...)" the port is NOT live: scancel.  ##
+# ##  ALSO CONFIRM the raised capacity took: the first RJ buffer build     ##
+# ##  line must read "buffer build (32768-slot alloc, ..." (16384/GPU x 2).##
+# ##  If it still says 16384-slot, the knob did not apply. n_subbands is   ##
+# ##  never persisted and the only resume check is the noise-model         ##
+# ##  identity, so the way a raised value fails to apply is a REQUEUED job ##
+# ##  re-running the SPOOLED copy of this script. Relaunch with scancel +  ##
+# ##  a NEW sbatch of this file -- never scontrol requeue.                 ##
 # ##  All knobs below are runtime env, not stored -> a RESUME applies them   ##
 # ##  (resume guard checks band_edges/cap_edges/nleaves_max/ndim only).      ##
 # ##  Batched vs unbatched in-model is statistically identical, NOT          ##
