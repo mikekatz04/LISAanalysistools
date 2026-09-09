@@ -6991,18 +6991,44 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         :meth:`_update_band_shutoff` for the occupancy rules. Bands with
         LOWER edge above ``GB_RJ_BAND_SHUTOFF_FMIN_MHZ`` (default 10 mHz
         — no confusion noise up there, so a real source shows full SNR
-        from the first iteration) are eligible. RJ BIRTHS ONLY are shut
-        off: deaths and in-model repeats continue for any resident
-        source. ``GB_RJ_BAND_SHUTOFF_SCOPE``: "search" (default) = only
+        from the first iteration) are eligible. A shut-off band is FROZEN
+        FOR RJ AT EVERY TEMPERATURE — no births AND no deaths, alive rows
+        and dead rows alike (user ruling 2026-08-28, reversing the
+        earlier births-only rule; the enforcement block in
+        ``run_proposal`` is the authority). In-model repeats are not
+        gated, but a qualifying band is empty by construction, so there
+        is nothing resident to repeat on. Tempering swaps continue unless
+        ``GB_TEMPER_SKIP_SHUTOFF_BANDS=1``.
+        ``GB_RJ_BAND_SHUTOFF_SCOPE``: "search" (default) = only
         moves with "search" in their name; "all" = every fstat birth
         move; "off" = disabled. Exactly ONE enabled move should exist
         per stage (the fstat birth move) — a second would double-count
         iterations. 6-mo TODO: reassess search+pe vs search-only.
-        Counters are in-memory per move instance — a restart resets
-        them and bands re-earn their shutoff (errs conservative).
+        Counters persist through restarts via the stored band record
+        (see :meth:`_update_band_shutoff`); only an unstored process
+        re-earns from scratch.
         """
+        # DESIGNATION: ``leaf_cap_update`` marks the single per-iteration
+        # designated GB move (it is True in exactly one place, the base
+        # ``gb_move_kwargs`` in recipe.py, and every other move overrides
+        # it to False), which is precisely the "exactly ONE enabled move
+        # per stage" this valve requires.
+        #
+        # ⚠ DO NOT gate this on ``rj_fstat_dist_birth`` again. It was the
+        # discriminator until 2026-09-08 and it silently disabled the
+        # whole valve: that flag follows ``GB_RJ_FSTAT_DIST_BIRTH``, a
+        # knob about how amplitude/distance are drawn AT BIRTH, and every
+        # v8 production script exports it as 0. With it falsy this method
+        # returned False on every move, so ``_update_band_shutoff`` was
+        # never ticked, the streaks never accumulated, and NOTHING was
+        # logged — the tick's guard only logs when the tick RAISES, and
+        # it never got that far. Measured on job 465 at iteration 80,
+        # 646 of 688 eligible bands were empty in every walker with
+        # all-walker-zero streaks >= 20 against a threshold of 5: the
+        # criterion was amply satisfied the entire time. Two unrelated
+        # features must not share one gate.
         if (not self.is_rj_prop or self.rj_removal_only or self.rj_replace
-                or not getattr(self, "rj_fstat_dist_birth", False)):
+                or not getattr(self, "leaf_cap_update", False)):
             return False
         scope = os.environ.get("GB_RJ_BAND_SHUTOFF_SCOPE", "search")
         if scope == "off":
