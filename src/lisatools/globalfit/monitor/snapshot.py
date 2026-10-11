@@ -231,7 +231,8 @@ def _short_members(run_dir: str, store: str, young_bytes: int):
                 keep.append(p)
             elif fn.endswith("_residual_snapshot.npz"):
                 # the run's own residual for the data/template/residual
-                # panels (GF_RESIDUAL_SNAPSHOT_EVERY, ~20 MB)
+                # panels (GF_RESIDUAL_SNAPSHOT_EVERY; every cold walker
+                # since 2026-10-11, ~80 MB on the 9mo grid at 4 walkers)
                 keep.append(p)
             elif fn == "DONE.json" and "gb_fstat_fit" in rel:
                 keep.append(p)

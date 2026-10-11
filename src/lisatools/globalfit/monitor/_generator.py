@@ -2129,6 +2129,42 @@ criterion &mdash; when the red pending line reaches zero the stage has converged
 which bands are holding it open.</div></div>"""
         del _sw, _occ
 
+
+def gb_gate_valve_settings(log_text, environ):
+    """``(tol, conv_iter, tol_from_log, ci_from_log)`` for the valve panel.
+
+    The run's own values come from the NEWEST ``[GB_GATE <move>] occupied
+    ...`` summary line, which prints ``streak ... of <conv_iter>`` and
+    ``(tol <tol>)``. Without one, the env on the machine building the page
+    (``GB_SEARCH_BAND_SHUTOFF_LL_TOL`` default 4.0,
+    ``GB_SEARCH_BAND_SHUTOFF_CONV_ITER`` default 3) -- which need not be
+    what the run used (the 9mo run gated at tol 20 while the laptop default
+    read 4).
+    """
+    import re as _re
+
+    tol = ci = None
+    lines = _re.findall(r"\[GB_GATE [^\]\n]+\] occupied \d+[^\n]*",
+                        log_text or "")
+    if lines:
+        last = lines[-1]
+        m = _re.search(r"\(tol ([-+0-9.eEinfa]+)\)", last)
+        if m:
+            try:
+                tol = float(m.group(1))
+            except ValueError:
+                tol = None
+        m = _re.search(r"streak p50 \S+ p90 \S+ of (\d+);", last)
+        if m:
+            ci = float(m.group(1))
+    tol_log, ci_log = tol is not None, ci is not None
+    if tol is None:
+        tol = float(environ.get("GB_SEARCH_BAND_SHUTOFF_LL_TOL", "4.0"))
+    if ci is None:
+        ci = float(environ.get("GB_SEARCH_BAND_SHUTOFF_CONV_ITER", "3"))
+    return tol, ci, tol_log, ci_log
+
+
 # ---- 5b-2b. WHY the valve has or has not latched (2026-09-27) ------------
 # The shutoff share above says WHETHER pairs are shutting. These three say
 # WHY the rest are not, which is the question the 6mo run spent a day
@@ -2155,8 +2191,16 @@ if (_cmax is not None and _cnow is not None and _strk is not None
         _oc = np.asarray(_occ_wb[:_n2]) > 0
         _last = _n2 - 1
         _act = _oc[_last] & ~_sh[_last]                  # occupied, not shut
-        _tol = float(os.environ.get("GB_SEARCH_BAND_SHUTOFF_LL_TOL", "4.0"))
-        _ci = float(os.environ.get("GB_SEARCH_BAND_SHUTOFF_CONV_ITER", "3"))
+        # The RUN's tolerance and clock length, from its newest [GB_GATE]
+        # summary line; the env here is the page builder's, not the run's
+        # (the 9mo run gated at tol 20 while this read the laptop's 4).
+        _tol, _ci, _tol_log, _ci_log = gb_gate_valve_settings(log_text, os.environ)
+        _tol_src = ("from the run's [GB_GATE] log line" if _tol_log else
+                    "GB_SEARCH_BAND_SHUTOFF_LL_TOL on the page-building machine, "
+                    "NOT read from the run (no [GB_GATE] summary line in its logs)")
+        _ci_src = ("from the run's [GB_GATE] log line" if _ci_log else
+                   "GB_SEARCH_BAND_SHUTOFF_CONV_ITER on the page-building machine, "
+                   "NOT read from the run")
         if not _act.any():
             raise ValueError("no active occupied pairs in the last row")
 
@@ -2173,7 +2217,8 @@ if (_cmax is not None and _cnow is not None and _strk is not None
             ax[0].hist(np.clip(_gap, -2.0 * _tol, 6.0 * _tol), bins=50,
                        color=AMBER, alpha=0.9)
             ax[0].axvline(_tol, color=RED, ls="--", lw=1.4)
-            ax[0].text(_tol, ax[0].get_ylim()[1], f" tol {_tol:g} ",
+            ax[0].text(_tol, ax[0].get_ylim()[1],
+                       f" tol {_tol:g} ({'run log' if _tol_log else 'local env, not the run'}) ",
                        color=RED, fontsize=8, va="top")
             ax[0].axvline(0.0, color=FG, ls=":", lw=1.0)
         ax[0].set_xlabel("all-time max  -  this iteration  [lnL]")
@@ -2186,7 +2231,8 @@ if (_cmax is not None and _cnow is not None and _strk is not None
         ax[1].hist(_skv, bins=np.arange(0, max(_skv.max(), _ci) + 2) - 0.5,
                    color=CYAN, alpha=0.9)
         ax[1].axvline(_ci, color=GREEN, ls="--", lw=1.4)
-        ax[1].text(_ci, ax[1].get_ylim()[1], f" shuts at {_ci:g} ",
+        ax[1].text(_ci, ax[1].get_ylim()[1],
+                   f" shuts at {_ci:g} ({'run log' if _ci_log else 'local env'}) ",
                    color=GREEN, fontsize=8, va="top", ha="right")
         ax[1].set_xlabel("consecutive non-improving iterations")
         ax[1].set_ylabel("active pairs")
@@ -2227,7 +2273,8 @@ cannot separate: a <em>chronic resetter</em> keeps beating its record, one that 
 <em>still young</em> simply has not had enough consecutive quiet iterations yet,
 and a <em>newly occupied</em> pair started its clock this iteration. A run that is
 converging shows the red band shrinking; a run whose gate is mis-specified shows
-it flat.</div></div>"""
+it flat. The tolerance ({_tol:g} lnL) is {_tol_src}; the clock length ({_ci:g}
+iterations) is {_ci_src}.</div></div>"""
     except Exception as _e:   # noqa: BLE001
         MISSING.append(f"gate-diagnosis panel unavailable: {_e!r}")
 elif _shut_w is not None:
@@ -2744,8 +2791,118 @@ except Exception as e:
 # brick at complex overlap 0.9999 per channel (residual power 1.8e-4 of the
 # brick); without the factor the same comparison reads 0.77 with a ~90 deg
 # phase.
+
+
+def snapshot_wdm_to_fd(arr, wdm, full, fds, channels=None):
+    """One residual-snapshot array ``(3, Nf_active, Nt_active)`` -> FD.
+
+    Zero-pads the active band and span into the full ``full`` WDM grid and
+    inverts with ``WDMSignal.wdm_to_fd`` onto ``fds``: band-limited to the
+    analysed band and the edge-cropped span, which is all the likelihood
+    sees. ``channels`` (a slice) converts only those channels -- the
+    X-only call (``slice(0, 1)``) builds a third of the transform's
+    full-length temporaries. Returns ``(nchannels, fds.N)`` complex.
+    """
+    from lisatools.domains import WDMSignal
+
+    a = np.asarray(arr)
+    if channels is not None:
+        a = a[channels]
+    pad = np.zeros((a.shape[0], int(full.Nf), int(full.Nt)))
+    pad[:, wdm.active_slice_f, wdm.active_slice_t] = a
+    return np.asarray(WDMSignal(pad, full).wdm_to_fd(settings=fds).arr)
+
+
+def load_residual_snapshot(path, keep_walkers=None):
+    """The page's view of a ``*_residual_snapshot.npz`` sidecar.
+
+    Always: ``data``, ``residual`` (the snapshot's max-lnL walker),
+    ``iteration``, ``walker`` and ``row`` (the STORE row; ``None`` for
+    sidecars before 2026-10-08, which carry only the job's own iteration
+    count, restarting on every resume). Sidecars from 2026-10-11 on also
+    carry every cold walker: ``residuals`` + ``walkers`` are then set, cut
+    to ``keep_walkers`` (cold walker indices; ``None`` keeps all) so the
+    page holds only the rows it draws. An older sidecar simply lacks them.
+    """
+    with np.load(path) as z:
+        snap = {k: z[k] for k in ("data", "residual", "iteration", "walker")}
+        snap["row"] = int(z["store_row"]) if "store_row" in z.files else None
+        if "residuals" in z.files and "walkers" in z.files:
+            ws_all = [int(v) for v in np.asarray(z["walkers"]).ravel()]
+            want = (set(ws_all) if keep_walkers is None
+                    else {int(v) for v in keep_walkers})
+            ix = [i for i, v in enumerate(ws_all) if v in want]
+            rs_all = z["residuals"]
+            snap["residuals"] = rs_all[ix]          # fancy index: a copy
+            snap["walkers"] = [ws_all[i] for i in ix]
+            del rs_all
+    return snap
+
+
+#: the three ways the page can build a walker's residual, best first (see
+#: :func:`walker_residual_x`); these short tags go in figure legends, the
+#: full label on the figure's title lines
+RESID_KIND_SHORT = {
+    "run": "run's residual",
+    "swap": "GB+VGB swapped in",
+    "gbvgb": "GB+VGB only",
+}
+
+
+def walker_residual_x(w, wbest, snap, page_resid_x, tmpl_x, snap_fd_x, data_x):
+    """The X-channel FD residual that stands for cold walker ``w`` on the
+    "whitened residual per GB band" panels, and how it was built.
+
+    Returns ``(r_x, kind, label)``, ``kind`` one of (best first):
+
+    ``"run"``    the run's own residual for ``w``: the snapshot's
+                 ``residuals`` row for ``w`` (sidecars written from
+                 2026-10-11 on), or its ``residual`` when ``w`` IS the
+                 snapshot's walker;
+    ``"swap"``   an OLD single-walker snapshot of walker ``s != w``:
+                 ``r_s + T(s) - T(w)``, i.e. ``s``'s residual with ``w``'s GB
+                 + VGB templates swapped in for ``s``'s. Every other class
+                 (MBH, EMRI, SOBBH) is still ``s``'s fit, not ``w``'s;
+    ``"gbvgb"``  no snapshot: the data minus ``w``'s GB + VGB templates only,
+                 so every MBH / EMRI / SOBBH in the data is still in it.
+
+    Before 2026-10-11 every walker but the snapshot's own got "data minus
+    its GB + VGB" even WITH a snapshot, so the min-lnL curve carried every
+    MBH / EMRI / SOBBH (a 5-7x "excess" below 1.5 mHz on the 9mo page).
+
+    ``snap`` is ``None`` or the page's snapshot dict (``walker``; optionally
+    ``residuals`` + ``walkers``). ``page_resid_x`` is the page's own residual
+    ``resid_fd[0]``: the snapshot walker's when ``snap`` is set, else
+    ``data_x - tmpl_x(wbest)``. ``tmpl_x(v)`` returns a NEW array, cold walker
+    ``v``'s X-channel GB + VGB template sum at the last stored row;
+    ``snap_fd_x(a)`` turns one ``(3, Nf, Nt)`` snapshot array into its
+    X-channel FD series. Each is called only when its construction needs it,
+    and besides the result at most one extra full-length series is alive
+    here at a time.
+    """
+    w = int(w)
+    if snap is None:
+        r = page_resid_x if w == int(wbest) else data_x - tmpl_x(w)
+        return r, "gbvgb", ("GB+VGB subtraction only (MBH / EMRI / SOBBH not "
+                            "subtracted)")
+    s = int(snap["walker"])
+    if w == s:
+        return page_resid_x, "run", "run's own residual"
+    ws, rs = snap.get("walkers"), snap.get("residuals")
+    if ws is not None and rs is not None:
+        ws = [int(v) for v in np.asarray(ws).ravel()]
+        if w in ws:
+            return snap_fd_x(rs[ws.index(w)]), "run", "run's own residual"
+    r = page_resid_x + tmpl_x(s)
+    r -= tmpl_x(w)
+    return r, "swap", (f"snapshot residual of walker {s} with this walker's "
+                       f"GB+VGB templates swapped in (other classes from "
+                       f"walker {s})")
+
+
 DTR = {}
 FGW = {}        # whitened-residual-per-band readout (filled inside the block below)
+FG_RESID_SRC = ""   # one sentence: how the whitened panels' residuals were built
 try:
     import glob as _glob
     from lisatools.globalfit.recipe import MOJITO_REFERENCE_TIME
@@ -2995,24 +3152,23 @@ try:
                     key=os.path.getmtime, reverse=True)
     if _snaps:
         try:
-            with np.load(_snaps[0]) as _z:
-                SNAP = {k: _z[k] for k in ("data", "residual", "iteration",
-                                           "walker")}
-                # the STORE row (snapshots before 2026-10-08 carry only the
-                # job's own iteration count, which restarts on every resume)
-                SNAP["row"] = (int(_z["store_row"]) if "store_row" in _z.files
-                               else None)
+            # only the two walkers the whitened panels show are kept: the
+            # max- and the min-lnL of the last stored row
+            SNAP = load_residual_snapshot(
+                _snaps[0], keep_walkers=(WBEST, int(np.argmin(ll[-1]))))
             _want = (3, int(_wdm.Nf_active), int(_wdm.Nt_active))
             if tuple(SNAP["data"].shape) != _want:
                 raise ValueError(f"snapshot shape {SNAP['data'].shape} != the "
                                  f"store's WDM grid {_want}")
+            if ("residuals" in SNAP
+                    and tuple(SNAP["residuals"].shape[1:]) != _want):
+                raise ValueError(f"snapshot residuals {SNAP['residuals'].shape} "
+                                 f"!= the store's WDM grid {_want}")
             _full = WDMSettings(W_NF, W_NT, W_DT, oversample=int(_k["oversample"]),
                                 force_backend="cpu")
 
             def _snap_fd(arr):
-                pad = np.zeros((3, W_NF, W_NT))
-                pad[:, _wdm.active_slice_f, _wdm.active_slice_t] = arr
-                return np.asarray(WDMSignal(pad, _full).wdm_to_fd(settings=FDS).arr)
+                return snapshot_wdm_to_fd(arr, _wdm, _full, FDS)
 
             data_fd = _snap_fd(SNAP["data"].astype(float))
             resid_fd = _snap_fd(SNAP["residual"].astype(float))
@@ -3501,12 +3657,14 @@ try:
             mc = np.convolve(m, w, mode="same")
             return np.where(mc > 0, yc / np.maximum(mc, 1e-30), np.nan)
 
-        def _walker_resid_X(w):
-            """X-channel residual of cold walker w at the last stored row."""
-            if w == WBEST:
-                return resid_fd[0]
-            _g9 = gb_chain_cold[w][gb_alive_last[w]]
-            _v5w = vgb_c[-1, w]
+        def _gbvgb_X(v):
+            """NEW X-channel FD GB + VGB template sum of cold walker v at the
+            last stored row, advanced onto the data grid (``_shift``). One
+            3-channel generation buffer is alive at a time."""
+            if v == WBEST:            # built above for the DTR panels
+                return _tmpl["gb"][0] + _tmpl["vgb"][0]     # a new array
+            _g9 = gb_chain_cold[v][gb_alive_last[v]]
+            _v5w = vgb_c[-1, v]
             if VGB_SAMPLED_CHIRP:
                 _vg9 = np.column_stack([_v5w[:, 0], _r9[:, 1], _v5w[:, 4],
                                         _v5w[:, 1], _v5w[:, 2], _v5w[:, 3],
@@ -3515,14 +3673,20 @@ try:
                 _vg9 = np.column_stack([_v5w[:, 0], _r9[:, 1], _r9[:, 2],
                                         _v5w[:, 1], _v5w[:, 2], _v5w[:, 3],
                                         _r9[:, 6], _r9[:, 7], _v5w[:, 4]])
-            _t = np.zeros((1, 3, FDS.N), dtype=np.complex128)
+            _tX = np.zeros(FDS.N, dtype=np.complex128)
             for _rows in (_g9, _vg9):
                 _a = np.zeros((1, 3, FDS.N), dtype=np.complex128)
                 _comp.fill_global(_tf.both_transforms(_rows.copy()), _a,
                                   convert_to_ra_dec=False)
-                _t += _a
+                _tX += _a[0, 0]
                 del _a
-            return data_fd[0] - _t[0, 0] * _shift[0]
+            _tX *= _shift[0]
+            return _tX
+
+        def _snap_fd_x(arr):
+            """X channel only of one snapshot WDM array -> FD."""
+            return snapshot_wdm_to_fd(arr, _wdm, _full, FDS,
+                                      channels=slice(0, 1))[0]
 
         # TWO WALKERS, NOT THE MEAN OF ALL OF THEM (user request 2026-10-02):
         # the max- and min-lnL cold walkers of the last stored row, each
@@ -3530,8 +3694,17 @@ try:
         # into a curve no walker holds; the best and the worst walker bracket
         # what the cold chain actually carries. Index 0 = max lnL, 1 = min lnL
         # in every array below.
+        #
+        # WHICH RESIDUAL each one is (2026-10-11): walker_residual_x picks the
+        # run's own residual when the snapshot carries that walker, else the
+        # snapshot walker's residual with this walker's GB + VGB swapped in,
+        # else (no snapshot) data minus GB + VGB only. Until 2026-10-11 the
+        # min-lnL walker always got "data minus its GB + VGB", i.e. every
+        # MBH / EMRI / SOBBH left in, while the max-lnL walker had the run's
+        # full residual -- the 9mo page's 5-7x amber "excess" below 1.5 mHz.
         WWORST = int(np.argmin(ll[-1]))
         _WSHOW = ((WBEST, CYAN, "max lnL"), (WWORST, AMBER, "min lnL"))
+        _wkind, _wlab = [], []
         _gal_inj_curve = np.maximum(_Ssum_inj - _Sinst_inj, 0.0)
         _rat_tot, _rat_inst, _rat_est, _mm, _tail, _share = [], [], [], [], [], []
         _psd_b, _Stot_b, _Sinst_b = [], [], []
@@ -3545,7 +3718,9 @@ try:
             _St_w = np.asarray(get_sensitivity(_fpos, sens_fn=X2TDISens, model=_lmw,
                                                stochastic_params=tuple(_gmw),
                                                stochastic_function=_HTGF), float)
-            _rX = _walker_resid_X(_w)
+            _rX, _kd, _lb = walker_residual_x(
+                _w, WBEST, SNAP, resid_fd[0], _gbvgb_X, _snap_fd_x, data_fd[0])
+            _wkind.append(_kd); _wlab.append(_lb)
             _p = np.abs(_rX) ** 2 / _norm_w / 2.0
             _u = _p / np.maximum(_St_w, 1e-60)
             _rat_tot.append(_bmean_band(_u))
@@ -3576,6 +3751,21 @@ try:
             _S0_b = None
         _wtitle = (f"cold walkers {WBEST} (max lnL, cyan) and {WWORST} (min lnL, amber) "
                    f"of stored row {NIT - 1}")
+        # HOW each curve's residual was built, said on every figure and in
+        # the prose -- the two curves need not be the same construction.
+        _snap_at = ""
+        if SNAP is not None:
+            _snap_at = (f"snapshot at store row {SNAP['row']}" if SNAP["row"] is not None
+                        else f"snapshot at job iteration {int(SNAP['iteration'])}")
+        _wsrc_l = [f"{('cyan', 'amber')[_k]} walker {_w}: {_wlab[_k]}"
+                   for _k, (_w, _wc, _wl) in enumerate(_WSHOW)]
+        if _snap_at:
+            _wsrc_l[-1] += f" ({_snap_at})"
+        _wsrc = "; ".join(_wsrc_l)               # one line, for the captions
+        _wsrc_t = "\n".join(_wsrc_l)             # one line per walker, for titles
+        _wleg = [f"walker {_w} ({_wl}; {RESID_KIND_SHORT[_wkind[_k]]})"
+                 for _k, (_w, _wc, _wl) in enumerate(_WSHOW)]
+        FG_RESID_SRC = f" Residuals: {_wsrc}."
 
         fig, ax = plt.subplots(4, 1, figsize=(11.6, 10.4), sharex=True,
                                gridspec_kw=dict(height_ratios=[2.4, 1.2, 1.2, 0.9],
@@ -3586,7 +3776,7 @@ try:
         for _k, (_w, _wc, _wl) in enumerate(_WSHOW):
             ax[0].scatter(_bfc, _rat_tot[_k], s=5, color=_wc, alpha=0.3, lw=0)
             ax[0].plot(_bfc, _run_mean(_rat_tot[_k]), color=_wc, lw=1.8,
-                       label=f"walker {_w} ({_wl}) against its own noise: per band (points), "
+                       label=f"{_wleg[_k]} against its own noise: per band (points), "
                              "running mean over 15 bands")
             ax[0].plot(_bfc, _run_mean(_rat_inst[_k]), color=_wc, lw=1.0, ls="--",
                        label=("dashed: same residual / instrument-only (what the foreground "
@@ -3618,8 +3808,9 @@ try:
         ax[3].set_xlim(max(_bfc[0], 0.5), _bfc[-1])
         fig.suptitle(
             f"whitened residual per GB band, {_wtitle}, TDI X -- 1 means the residual "
-            "carries exactly the power the fitted noise says", fontsize=10, color=FG)
-        fig.tight_layout(rect=[0, 0, 1, 0.97])
+            f"carries exactly the power the fitted noise says\nresiduals -- {_wsrc_t}",
+            fontsize=9, color=FG)
+        fig.tight_layout(rect=[0, 0, 1, 0.945])
         fig_b64(fig, "fg_whitened_bands")
 
         # ---- ZOOM 2.5-5.5 mHz, linear frequency (user request 2026-10-02) ----
@@ -3629,7 +3820,7 @@ try:
         for _k, (_w, _wc, _wl) in enumerate(_WSHOW):
             ax[0].scatter(_bfc[_zm], _rat_tot[_k][_zm], s=6, color=_wc, alpha=0.3, lw=0)
             ax[0].plot(_bfc[_zm], _run_mean(_rat_tot[_k], half=2)[_zm], color=_wc, lw=2.0,
-                       label=f"walker {_w} ({_wl}) against its own noise: per band (points), "
+                       label=f"{_wleg[_k]} against its own noise: per band (points), "
                              "running mean over 5 bands")
             ax[0].plot(_bfc[_zm], _run_mean(_rat_inst[_k], half=2)[_zm], color=_wc, lw=1.0,
                        ls="--", label="dashed: same residual / instrument-only"
@@ -3655,8 +3846,9 @@ try:
         ax[2].legend(fontsize=7.5, loc="upper right")
         ax[2].set_xlabel("frequency [mHz]"); ax[2].set_xlim(2.5, 5.5)
         fig.suptitle(f"ZOOM 2.5-5.5 mHz: whitened residual per GB band, {_wtitle}, each "
-                     "against its own fitted noise (linear frequency)", fontsize=10, color=FG)
-        fig.tight_layout(rect=[0, 0, 1, 0.97])
+                     f"against its own fitted noise (linear frequency)\nresiduals -- {_wsrc_t}",
+                     fontsize=9, color=FG)
+        fig.tight_layout(rect=[0, 0, 1, 0.93])
         fig_b64(fig, "fg_whitened_zoom")
 
         # ---- ZOOM 2.5-5.5 mHz: the UNWHITENED residual against the curves ----
@@ -3665,7 +3857,7 @@ try:
         fig, ax = plt.subplots(1, 1, figsize=(11.6, 5.4))
         for _k, (_w, _wc, _wl) in enumerate(_WSHOW):
             ax.plot(_bfc[_zm], _psd_b[_k][_zm], color=_wc, lw=1.5,
-                    label=f"walker {_w} ({_wl}): residual PSD per GB band, TDI X")
+                    label=f"{_wleg[_k]}: residual PSD per GB band")
             ax.plot(_bfc[_zm], _Stot_b[_k][_zm], color=_wc, lw=1.3, ls="--",
                     label=f"walker {_w}: its fitted noise, instrument + galfor")
             ax.plot(_bfc[_zm], _Sinst_b[_k][_zm], color=_wc, lw=0.9, ls=":",
@@ -3684,9 +3876,9 @@ try:
         if _zz.size and _zi.size:
             ax.set_ylim(0.5 * float(np.min(_zi)), 3.0 * float(np.max(_zz)))
         ax.legend(fontsize=7.5, loc="upper right", ncols=2)
-        fig.suptitle("ZOOM 2.5-5.5 mHz: residual spectrum against the noise curves (unwhitened)",
-                     fontsize=10, color=FG)
-        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        fig.suptitle("ZOOM 2.5-5.5 mHz: residual spectrum against the noise curves (unwhitened)"
+                     f"\nresiduals -- {_wsrc_t}", fontsize=9, color=FG)
+        fig.tight_layout(rect=[0, 0, 1, 0.885])
         fig_b64(fig, "fg_resid_psd_zoom")
 
         def _at(arr, f_mhz):
@@ -3698,7 +3890,33 @@ try:
         _m12 = (_bfc >= 1.0) & (_bfc <= 2.0)
         _m610 = (_bfc >= 6.0) & (_bfc <= 10.0)
         # readouts per shown walker: bare keys = max lnL, "_min" = min lnL
-        FGW.update(walker=WBEST, walker_min=WWORST, bands_35=int(_m35.sum()))
+        FGW.update(walker=WBEST, walker_min=WWORST, bands_35=int(_m35.sum()),
+                   kind=_wkind[0], kind_min=_wkind[1],
+                   src=_wlab[0], src_min=_wlab[1], snap_at=_snap_at)
+        # the prose for the caption's caveat (1): what each curve's residual is
+        _snap_w = int(SNAP["walker"]) if SNAP is not None else None
+        _why = {
+            "run": ("the run's own residual: the data it loaded minus every fitted "
+                    "signal class (GB, VGB, MBH, EMRI, SOBBH), band-limited to the "
+                    "analysed band"),
+            "swap": (f"walker {_snap_w}'s own residual from the run with that walker's "
+                     f"GB + VGB templates swapped in for walker {_snap_w}'s, so its "
+                     f"MBH / EMRI / SOBBH subtraction is walker {_snap_w}'s fit, not "
+                     "its own (the snapshot predates per-walker residuals, "
+                     "2026-10-11); a GB + VGB difference between the two walkers "
+                     "shows, a difference in the other classes does not"),
+            "gbvgb": ("the data minus that walker's GB + VGB templates only (the run "
+                      "wrote no residual snapshot; GF_RESIDUAL_SNAPSHOT_EVERY), so "
+                      "every MBH / EMRI / SOBBH in its data ("
+                      + (" + ".join(sorted(globals().get("_files", {}))) or "?")
+                      + ") is still in it"),
+        }
+        if _wkind[0] == _wkind[1]:
+            _src_txt = f"Both curves are {_why[_wkind[0]]}"
+        else:
+            _src_txt = (f"The cyan curve (walker {WBEST}) is {_why[_wkind[0]]}; the "
+                        f"amber curve (walker {WWORST}) is {_why[_wkind[1]]}")
+        FGW["src_txt"] = _src_txt + (f" ({_snap_at})" if _snap_at else "") + ". "
         for _k, _sfx in ((0, ""), (1, "_min")):
             _rm = _run_mean(_rat_tot[_k])
             FGW.update({
@@ -4042,15 +4260,7 @@ if FGW:
         "loud bins (unresolved or missed lines) rather than a Gaussian floor; a smooth drift of "
         "the mean away from 1 that follows frequency is the rigid tanh x power-law failing to "
         "follow the residual's shape. Bottom: the share of the model noise that is foreground. "
-        "<em>Caveats.</em> (1) " + (
-            f"This page's residual is the run's own (snapshot at "
-            f"{DTR.get('snap_it')}, walker {DTR.get('snap_walker')}): the data the run "
-            f"loaded minus every fitted signal class, band-limited to the analysed band. "
-            if DTR.get("snap") else
-            "This page's residual removes the GB and VGB templates only (the run wrote no "
-            "residual snapshot; GF_RESIDUAL_SNAPSHOT_EVERY), so every MBH / EMRI / SOBBH in "
-            "its data (" + (" + ".join(sorted(globals().get("_files", {}))) or "?") +
-            ") is still in it. ") +
+        "<em>Caveats.</em> (1) " + _F["src_txt"] +
         "(2) The noise curves here are the "
         "static equal-arm model on each walker's parameters; the run multiplies the foreground "
         "by a tabulated time modulation (GalForTimeModulation) that these curves do not carry, "
@@ -8000,7 +8210,7 @@ the residual by construction.</div>
 <div class="caption">Zoom of the panel above on 2.5&ndash;5.5 mHz with a linear frequency
 axis. Points are every GB band for the max-lnL (cyan) and min-lnL (amber) cold walkers
 of the last stored row, each against its own fitted noise; the running mean spans 5 bands
-(~85 &micro;Hz) instead of 15.</div></div>
+(~85 &micro;Hz) instead of 15.{FG_RESID_SRC}</div></div>
 <div class="panel">{img("fg_resid_psd_zoom", "zoom 2.5-5.5 mHz: residual spectrum against the noise curves")}
 <div class="caption">The same residual unwhitened, for the max-lnL (cyan) and min-lnL
 (amber) cold walkers of the last stored row: each walker&rsquo;s residual PSD per GB band
@@ -8009,7 +8219,7 @@ instrument alone (dotted), with the injected instrument + FittedHT estimate and 
 0&rsquo;s noise (violet) &mdash; under a pinned launch that is the start vector the search
 ran against until the first release.
 Where the residual sits above the fitted curve the model is under-estimating the power
-there; where the fitted curve sits above row 0 the release raised the foreground.</div></div>
+there; where the fitted curve sits above row 0 the release raised the foreground.{FG_RESID_SRC}</div></div>
 <div class="panel">{img("fg_leaf_delta", "where the leaves went across the ratchet")}
 <div class="caption">{cap_fgC}</div></div>
 <div class="panel">{img("fg_leaf_delta_zoom", "zoom 2.5-5.5 mHz: where the leaves went")}

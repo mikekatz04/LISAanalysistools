@@ -2758,7 +2758,7 @@ class GlobalFit:
         self.recipe.fanout = self.fanout
         # GF_RESIDUAL_SNAPSHOT_EVERY (head only; the recipe's per-iteration
         # hook is the head's): what lisatools.globalfit.residual_snapshot
-        # needs to write the max-lnL walker's residual beside the store.
+        # needs to write every cold walker's residual beside the store.
         self.recipe.snapshot_context = dict(
             acs=acs,
             data_holder=getattr(self.curr.general_info,
@@ -3319,8 +3319,8 @@ class GlobalFit:
                 RESIDUAL_HASH_OP: lambda payload, clock, model: residual_hash(
                     model.analysis_container_arr
                 ),
-                # answers residual_snapshot.take_snapshot: the owning rank
-                # returns one walker's residual (GF_RESIDUAL_SNAPSHOT_EVERY)
+                # answers residual_snapshot.take_snapshot: a block's lead
+                # returns its walkers' residuals (GF_RESIDUAL_SNAPSHOT_EVERY)
                 RESIDUAL_SNAPSHOT_OP: lambda payload, clock, model: walker_residual(
                     model, payload
                 ),

@@ -717,7 +717,7 @@ class Recipe:
                     logger.warning("[FANOUT_DIGEST] residual hash gather failed: %r", exc)
                     hashes = None
             logger.info(fanout_digest_line(iteration, last_sample, residual_hashes=hashes))
-        # GF_RESIDUAL_SNAPSHOT_EVERY: the max-lnL walker's residual + the data
+        # GF_RESIDUAL_SNAPSHOT_EVERY: every cold walker's residual + the data
         # beside the store for the monitor page (never raises; see the module).
         _snap = getattr(self, "snapshot_context", None)
         if _snap is not None:

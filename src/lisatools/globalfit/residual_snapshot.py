@@ -11,23 +11,43 @@ analysis domain (active band and time span only):
 * ``residual`` -- the max-lnL cold walker's residual, i.e. that data minus
   EVERY fitted signal (GB, VGB, MBH, EMRI, SOBBH): the array its likelihood
   is computed from;
+* ``residuals`` -- EVERY cold walker's residual, shape
+  ``(nwalkers, 3, Nf_active, Nt_active)``, in the order of ``walkers``
+  (``walkers[k]`` is the cold walker index of ``residuals[k]``; today
+  ``arange(nwalkers)``). ``residual`` is ``residuals[walkers.index(walker)]``,
+  kept as its own key so a reader written before 2026-10-11 still works;
 * ``f_edges`` / ``t_edges`` (Hz / s, active band), ``store_row`` (the
   store row this state was saved as: the resume point plus this job's
   iteration), ``iteration`` (this JOB's iteration count, which restarts at 0
   on every resume), ``walker``, ``lnl`` (every cold walker), ``nf`` / ``nt``
   / ``dt``.
 
+A sidecar written before 2026-10-11 has no ``residuals`` / ``walkers``: it
+holds the max-lnL walker alone, and a reader must not treat ``residual`` as
+any other walker's.
+
 Why the run writes it rather than the monitor rebuilding it (Mike
 2026-10-07): the monitor's data / template / residual panel used to subtract
 only GB + VGB from per-type bricks it picked itself, so every MBH merger
 in the window showed up as a "residual" (an MBH at 111 d on the 6mo page).
 Regenerating every source class outside the run would need the run's exact
-generators and settings; the run already holds the exact answer.
+generators and settings; the run already holds the exact answer. Why every
+walker (2026-10-11): the page's "whitened residual per GB band" panels
+compare the max- and the min-lnL walker, and with only the max-lnL one on
+disk the min-lnL curve was rebuilt as data minus its GB + VGB alone -- every
+MBH / EMRI / SOBBH left in -- which read as a 5-7x excess below 1.5 mHz on
+the 9mo page for a walker only ~800 nats behind.
 
 Arrays are stored as float32 (complex64 for a complex WDM basis): this is a
-plotting product, not an analysis input. Multi-rank: the residual comes from
-the walker's owning rank through the ``residual_snapshot`` fan-out builtin
-(see :data:`RESIDUAL_SNAPSHOT_OP`); the data from the head's own copy.
+plotting product, not an analysis input. Each walker costs
+``3 * Nf_active * Nt_active * 4`` bytes (13.7 MB on the 9mo grid, so four
+walkers add ~55 MB to a ~27 MB file; ``residual`` duplicates one of them).
+The stack is filled walker by walker, so at most one walker's host copy in
+the run's own dtype is alive at a time. Multi-rank: every walker block's
+LEAD rank returns its block's residuals through the ``residual_snapshot``
+fan-out builtin (see :data:`RESIDUAL_SNAPSHOT_OP`) and the head places each
+block at its ``[w0, w1)`` rows; replicas of a block (``R > 1``) are not
+asked. The data comes from the head's own copy.
 
 Nothing here may break the run: :func:`maybe_snapshot` logs and carries on.
 """
@@ -46,9 +66,11 @@ SNAPSHOT_SUFFIX = "_residual_snapshot.npz"
 #: Cadence knob, in iterations; 0 = off.
 SNAPSHOT_EVERY_ENV = "GF_RESIDUAL_SNAPSHOT_EVERY"
 #: Default cadence: every 3rd iteration (~15 min on the 6mo run; one ~1 s
-#: fan-out + a ~20 MB file, overwritten in place).
+#: fan-out + a file of (2 + nwalkers) float32 grids, ~80 MB on the 9mo run
+#: with 4 walkers, overwritten in place).
 SNAPSHOT_EVERY_DEFAULT = 3
-#: Fan-out builtin: the owning rank returns one walker's residual array.
+#: Fan-out builtin: a walker block's lead returns its block's residuals,
+#: ``(rows, 3, Nf_active, Nt_active)`` in the plotting dtype.
 RESIDUAL_SNAPSHOT_OP = "residual_snapshot"
 
 
@@ -76,18 +98,84 @@ def _plot_array(arr) -> np.ndarray:
     return a.astype(np.complex64 if np.iscomplexobj(a) else np.float32)
 
 
+def _stack_residuals(acs, rows):
+    """``(len(rows), *shape)`` plotting-dtype stack of ``acs[i].data.arr``.
+
+    Filled walker by walker: one walker's host copy in the run's own dtype
+    (float64 on the cluster) is alive at a time and is cast straight into
+    its float32 row, so no second full-size copy of the block exists.
+    """
+    rows = [int(i) for i in rows]
+    out = None
+    for k, i in enumerate(rows):
+        a = acs[i].data.arr
+        a = a.get() if hasattr(a, "get") else np.asarray(a)
+        if out is None:
+            out = np.empty((len(rows),) + a.shape,
+                           np.complex64 if np.iscomplexobj(a) else np.float32)
+        out[k] = a
+        del a
+    return out
+
+
 def walker_residual(model, payload):
-    """Fan-out builtin body: this rank's walker ``payload["local"]``'s
-    residual, or ``None`` on a rank that was not asked."""
+    """Fan-out builtin body: this rank's walkers ``payload["rows"]`` (local
+    ACA rows) stacked, or ``None`` on a rank that was not asked (a replica
+    that is not its block's lead)."""
     if payload is None:
         return None
-    ac = model.analysis_container_arr[int(payload["local"])]
-    return _plot_array(ac.data.arr)
+    return _stack_residuals(model.analysis_container_arr, payload["rows"])
+
+
+def _block_leads(layout):
+    """One rank per walker block (its lead), as ``concat_blocks`` picks them."""
+    leads = getattr(layout, "block_leads", None)
+    if leads is None:  # stub layouts without the block API
+        leads = ((layout.head_rank,) if getattr(layout, "replica_mode", False)
+                 else layout.compute_ranks)
+    return tuple(int(r) for r in leads)
+
+
+def _gather_residuals(acs, fanout, nwalkers):
+    """Every cold walker's residual, ``(nwalkers, ...)`` in global walker order."""
+    if fanout is None:
+        return _stack_residuals(acs, range(int(nwalkers)))
+    layout = fanout.layout
+    leads = _block_leads(layout)
+
+    def _payload(rank, w0, w1):
+        return ({"rows": list(range(int(w1) - int(w0)))}
+                if int(rank) in leads else None)
+
+    def _local(payload, model):
+        return None if payload is None else _stack_residuals(acs, payload["rows"])
+
+    def _merge(results):
+        # Placed by each block's own [w0, w1), not by arrival or dict order:
+        # the rows are then right even if the lead order ever stops being
+        # the walker order.
+        out = None
+        for r in leads:
+            part = results.get(r)
+            w0, w1 = (int(v) for v in layout.block_of(r))
+            if part is None or part.shape[0] != w1 - w0:
+                raise RuntimeError(
+                    f"residual snapshot: block lead rank {r} (walkers "
+                    f"{w0}:{w1}) returned "
+                    f"{None if part is None else part.shape}")
+            if out is None:
+                out = np.empty((int(nwalkers),) + part.shape[1:], part.dtype)
+            out[w0:w1] = part
+        return out
+
+    return fanout.run(RESIDUAL_SNAPSHOT_OP, move=None,
+                      per_rank_payload=_payload, local_body=_local,
+                      merge=_merge)
 
 
 def take_snapshot(*, acs, data_holder, store_path, iteration, fanout=None,
                   store_iteration0=0):
-    """Write the sidecar for the max-lnL cold walker; returns its path.
+    """Write the sidecar (every cold walker's residual); returns its path.
 
     ``acs`` is the head's AnalysisContainerArray (its own block under the
     walker-block layout), ``data_holder`` the run's
@@ -101,30 +189,14 @@ def take_snapshot(*, acs, data_holder, store_path, iteration, fanout=None,
         lls = np.asarray(fanout.gather_likelihood(acs), float)
     finite = np.where(np.isfinite(lls), lls, -np.inf)
     w = int(np.argmax(finite))
+    nw = int(lls.size)
 
-    if fanout is None:
-        residual = _plot_array(acs[w].data.arr)
-    else:
-        owner, local = fanout.layout.owner_of(w)
-
-        def _payload(rank, w0, w1):
-            return {"local": int(local)} if int(rank) == int(owner) else None
-
-        def _local(payload, model):
-            return None if payload is None else _plot_array(
-                acs[int(payload["local"])].data.arr)
-
-        def _merge(results):
-            got = [v for v in results.values() if v is not None]
-            if len(got) != 1:
-                raise RuntimeError(
-                    f"residual snapshot: expected one rank to answer for "
-                    f"walker {w}, got {len(got)}")
-            return got[0]
-
-        residual = fanout.run(RESIDUAL_SNAPSHOT_OP, move=None,
-                              per_rank_payload=_payload, local_body=_local,
-                              merge=_merge)
+    residuals = _gather_residuals(acs, fanout, nw)
+    if residuals is None or residuals.shape[0] != nw:
+        raise RuntimeError(
+            f"residual snapshot: {nw} walker likelihoods but residuals "
+            f"{None if residuals is None else residuals.shape}")
+    residual = residuals[w]
 
     data = _plot_array(data_holder.data_res_arr.arr)
     if data.shape != residual.shape:
@@ -135,6 +207,7 @@ def take_snapshot(*, acs, data_holder, store_path, iteration, fanout=None,
     tmp = path + ".tmp.npz"
     np.savez(
         tmp, data=data, residual=residual,
+        residuals=residuals, walkers=np.arange(nw),
         f_edges=np.asarray(_plot_array(s.f_arr_edges), float),
         t_edges=np.asarray(_plot_array(s.t_arr_edges), float),
         iteration=int(iteration), store_row=int(store_iteration0) + int(iteration),
