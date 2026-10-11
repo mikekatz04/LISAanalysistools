@@ -538,6 +538,9 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
     # illegal-memory-access race). The multi-shard branches of _kernel_ll
     # and _apply_cold_chain_sources already entered each view's device;
     # these hooks give the single-shard branches and the Gram the same rule.
+    # Not enough on its own (9mo job 754): the lookup comp's PN step runs
+    # through JAX, which left GPU 0 current INSIDE these contexts; the comp
+    # now pins JAX to the cupy device (wdm_direct.SOBBHBatchedTOF.build).
     # ------------------------------------------------------------------
 
     def _split_rows(self, idx):

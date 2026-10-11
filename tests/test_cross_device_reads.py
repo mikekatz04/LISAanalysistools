@@ -574,5 +574,254 @@ class SOBBHSingleShardDeviceTest(unittest.TestCase):
         self.assertEqual(xp.current, 0)
 
 
+# ---------------------------------------------------------------------------
+# 9mo job 754: the SOBBH lookup comp's PN step runs through JAX
+# ---------------------------------------------------------------------------
+
+
+class _StrictTwoGPUSync(_StrictTwoGPU):
+    """``_StrictTwoGPU`` + ``deviceSynchronize`` + JAX's default device
+    (``jax_default``: GPU 0 unless a ``jax_device_context`` moved it)."""
+
+    def __init__(self):
+        super().__init__()
+        self.cuda.runtime.deviceSynchronize = lambda: None
+        self.jax_default = 0
+
+
+def _tof_class():
+    from lisatools.sources.sobbh import wdm_direct as wd
+
+    class _TOF(wd.SOBBHBatchedTOF):
+        """The real response build on the fake two-device ``xp``."""
+
+        fake_xp = None
+
+        @property
+        def xp(self):
+            return self.fake_xp
+
+    return _TOF
+
+
+class SOBBHLookupJaxDeviceTest(unittest.TestCase):
+    """The lookup comp's PN step leaves the walker's device current (9mo job
+    754, 2026-10-11).
+
+    ``sobbh_amp_phase_batch`` evaluates the PN series through ``jnp``
+    (sources/sobbh/waveform.py). On a GPU JAX those ops run on JAX's DEFAULT
+    device, and XLA leaves that device's CUDA context current on the calling
+    thread when it returns (its outermost ``ScopedActivateContext`` does not
+    restore). On a rank whose walker lives on GPU 1 the caller's cupy
+    ``Device(1)`` context was therefore GPU 0 from the PN step on: the
+    response, the lookup kernel (against the GPU-1 residual / table) and,
+    after the fill returned, the Gram's half-differences
+    (addremovemove.py:746) and inner products (diagnostic.py:288) ran on GPU
+    0, and the Gram's second pass built a second lookup comp there.
+
+    The fake ``xp`` plays XLA: ``sobbh_amp_phase_batch`` (patched) makes
+    ``jax_default`` current, and a patched ``jax_device_context`` moves
+    ``jax_default`` the way ``jax.default_device`` does. Everything else --
+    the move's ``_gram_info`` / ``_gram_templates`` / ``_gram_context``, the
+    router, the comp's ``fill_global_wdm``, ``SOBBHDirectWDM.response`` and
+    ``SOBBHBatchedTOF.build`` -- is the production code; strict arrays refuse
+    any operand off the current device, as a GPU without peer access would.
+    """
+
+    ND = 11                      # the SOBBH sampling basis
+    NCH, NFA, NTA = 2, 3, 4      # active-band slab
+
+    def setUp(self):
+        from lisatools.sources.sobbh import wdm_direct as wd
+
+        self.wd = wd
+        self.xp = xp = _StrictTwoGPUSync()
+        self.built, self.launches, self.gens, self.pn_jax = [], [], [], []
+        test = self
+
+        def fake_pn(p, node_t, reference_time):
+            # XLA: the jnp ops run on JAX's default device, which stays current
+            test.pn_jax.append(xp.jax_default)
+            xp.current = xp.jax_default
+            n = p.shape[0]
+            amp = np.repeat((1.0 + p @ np.arange(1.0, p.shape[1] + 1.0))[:, None],
+                            node_t.size, axis=1)
+            return amp, np.zeros_like(amp), np.full(n, np.inf)
+
+        class FakeGen:
+            def __init__(self, t, amp, phase, *args, t_input=None, **kwargs):
+                test.gens.append((xp.current, {a._dev for a in (t, amp, phase, t_input)}))
+                self.amp = amp
+
+            def __call__(self, *angles, return_spline=False):
+                return SimpleNamespace(coef=self.amp)
+
+        def kernel_fill(out, flat, di, fac):
+            # the fused kernel writes through a raw pointer: record WHERE it
+            # launched, then accumulate fac * h into each row's slab
+            test.launches.append((xp.current, flat._dev))
+            coef = out.coef.view(np.ndarray)[:, 0]
+            slabs = flat.view(np.ndarray).reshape(-1, self.NCH, self.NFA, self.NTA)
+            pattern = np.arange(1.0, self.NCH * self.NFA * self.NTA + 1.0).reshape(
+                self.NCH, self.NFA, self.NTA)
+            for k, slot in enumerate(np.asarray(di)):
+                slabs[slot] += fac[k] * (coef[k] * pattern + coef[k] ** 2 * pattern[::-1])
+            return {"dropped_pixels": 0}
+
+        def build(dev):
+            test.built.append(dev)
+            tof = _tof_class()(None, None, 0.0, n_grid=16, buffer_time=600.0,
+                               eval_dt=1.0e4, force_backend="cpu")
+            tof.fake_xp = xp
+            tof._orbit_span_cache = (-1.0e12, 1.0e12)
+            direct = object.__new__(wd.SOBBHDirectWDM)
+            direct.ev = SimpleNamespace(xp=xp)
+            direct.tof = tof
+            direct.t_pixels = np.array([0.0, 1.0e5])
+            direct.num_m_layers = 2
+            direct.last_spans = {}
+            direct.kernel_fill = kernel_fill
+            comp = object.__new__(wd.SOBBHLookupComputations)
+            comp.direct = direct
+            comp._build_device = dev
+            comp._band_noted = False
+            comp.wdm_settings = SimpleNamespace(Nf_active=self.NFA, Nt_active=self.NTA)
+            comp.nchannels = self.NCH
+            comp.uses_kernel = True
+            comp.row_batch = 32
+            comp.last_call_spans = None
+            return comp
+
+        for p in (
+            mock.patch.object(wd, "sobbh_amp_phase_batch", side_effect=fake_pn),
+            mock.patch("lisatools.response.tdionfly.TDTDIonTheFly", FakeGen),
+            mock.patch.object(wd.SOBBHLookupRouter, "xp", new=property(lambda s: xp)),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        # the router is built after the run pinned the walker's device
+        with xp.cuda.Device(1):
+            self.router = wd.SOBBHLookupRouter(build, "cpu")
+        self.assertEqual(self.built, [1])
+
+    def _jax_follows_cupy(self):
+        """``jax_device_context`` as JAX does it: the default device moves."""
+        xp = self.xp
+
+        @contextmanager
+        def ctx(device):
+            prev = xp.jax_default
+            if device is not None:
+                xp.jax_default = int(device)
+            try:
+                yield
+            finally:
+                xp.jax_default = prev
+
+        return mock.patch.object(self.wd, "jax_device_context", side_effect=ctx,
+                                 create=True)
+
+    def _jax_cannot_see_the_device(self):
+        """``jax_device_context`` is a null context (JAX on CPU, or fewer JAX
+        devices than cupy sees): the PN step still runs on JAX's GPU 0."""
+        from contextlib import nullcontext
+
+        return mock.patch.object(self.wd, "jax_device_context",
+                                 side_effect=lambda device: nullcontext(), create=True)
+
+    def _move(self):
+        from eryn.priors import ProbDistContainer, UniformDistribution
+
+        from lisatools.globalfit.moves.sobbhspecialmove import SOBBHChunkedLikeMove
+
+        xp, nd = self.xp, self.ND
+        move = object.__new__(SOBBHChunkedLikeMove)
+        move.branch_name = "sobbh"
+        move.priors = {"sobbh": ProbDistContainer(
+            {i: UniformDistribution(0.0, 1.0) for i in range(nd)})}
+        move.eigen_gram_target = 1e-3          # the production two-pass default
+        move.eigen_gram_eps_rel = 1e-3
+        move.waveform_like_kwargs = {}
+        move._to_phys = lambda X: X
+        move.comp = self.router
+        move.m_band_half_width = 3
+        move._f_band_lo, move._f_band_hi = 0.0, 1.0
+        # the walker's PSD, on its shard GPU
+        psd = object.__new__(SensitivityMatrixBase)
+        psd._sens_mat = xp.wrap(np.full((2, 2, 5), 2.0), 1)
+        psd._invC = xp.wrap(np.full((2, 2, 5), 0.5), 1)
+        psd._detC = xp.wrap(np.full(5, 4.0), 1)
+        psd.do_inv_det, psd._inv_det_dirty = True, False
+        self.psd = psd
+        data = SimpleNamespace(
+            arr=xp.wrap(np.zeros((self.NCH, self.NFA, self.NTA)), 1), settings="box")
+        ac = SimpleNamespace(data=data, _slice_to_template=lambda h: (None, None, psd))
+        # production holder: one walker, one shard, gpus=[1], data on GPU 1
+        move.acs = SimpleNamespace(
+            acs=np.array([ac], dtype=object), xp=xp, gpus=[1],
+            linear_data_arr=[xp.wrap(np.zeros(self.NCH * self.NFA * self.NTA), 1)])
+        return move
+
+    def _run_gram(self):
+        import lisatools.diagnostic as diag
+        from lisatools.globalfit.moves import addremovemove as arm
+
+        xp, move, seen = self.xp, self._move(), []
+
+        def ip(a, b, psd=None, **kw):
+            seen.append((xp.current, a.arr._dev, b.arr._dev, psd.invC._dev))
+            _check_current(xp, a.arr, b.arr, psd.invC)
+            return float(np.sum(a.arr.view(np.ndarray) * b.arr.view(np.ndarray)))
+
+        with mock.patch.object(arm, "get_array_module",
+                               side_effect=lambda a: xp if isinstance(a, _Arr) else np), \
+                mock.patch.object(arm, "WDMSignal",
+                                  side_effect=lambda arr, box: SimpleNamespace(
+                                      arr=arr, settings=box)), \
+                mock.patch.object(diag, "inner_product", side_effect=ip):
+            info = move._gram_info(np.full(self.ND, 0.5), 0, np.ones(self.ND))
+        return info, seen
+
+    def _assert_all_on_the_walker_device(self, info, seen):
+        self.assertEqual(info.shape, (self.ND, self.ND))
+        self.assertTrue(np.all(np.isfinite(info)))
+        self.assertEqual(self.built, [1])                    # no second comp
+        self.assertEqual(len(self.launches), 2)              # two template passes
+        self.assertEqual(set(self.launches), {(1, 1)})       # fill on the buffer's GPU
+        self.assertEqual({g[0] for g in self.gens}, {1})     # response built on GPU 1
+        self.assertEqual(set().union(*(g[1] for g in self.gens)), {1})
+        self.assertEqual({s[0] for s in seen}, {1})          # inner products on GPU 1
+        self.assertEqual(set().union(*(set(s[1:]) for s in seen)), {1})
+        self.assertEqual(self.xp.current, 0)                 # context released
+
+    def test_gram_runs_on_the_walker_device(self):
+        with self._jax_follows_cupy():
+            info, seen = self._run_gram()
+        self._assert_all_on_the_walker_device(info, seen)
+        self.assertEqual(set(self.pn_jax), {1})              # JAX pinned with cupy
+
+    def test_gram_survives_a_jax_that_cannot_follow(self):
+        with self._jax_cannot_see_the_device():
+            info, seen = self._run_gram()
+        self._assert_all_on_the_walker_device(info, seen)
+        self.assertEqual(set(self.pn_jax), {0})              # XLA left GPU 0 current ...
+        self.assertEqual(self.xp.jax_default, 0)             # ... and the build re-entered 1
+
+    def test_in_model_fill_launches_on_the_walker_device(self):
+        # the expose / fold-back ran the same response inside the shard
+        # context: on GPU-1 ranks the kernel launched on GPU 0 against the
+        # GPU-1 residual (silent: raw pointers, no cupy warning)
+        move = self._move()
+        coords = np.full((1, self.ND), 0.5)
+        with self._jax_follows_cupy(), \
+                mock.patch.dict(os.environ, {"SOBBH_CHUNKED_FILL": "1"}):
+            move._apply_cold_chain_sources(coords, +1)
+            move._apply_cold_chain_sources(coords, -1)
+        self.assertEqual(self.launches, [(1, 1), (1, 1)])
+        self.assertEqual({g[0] for g in self.gens}, {1})
+        self.assertEqual(self.built, [1])
+        self.assertEqual(self.xp.current, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

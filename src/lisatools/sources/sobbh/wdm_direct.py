@@ -34,7 +34,7 @@ import time
 
 import numpy as np
 
-from ...utils.device import current_device, synchronize
+from ...utils.device import current_device, device_context, jax_device_context, synchronize
 from ...utils.utility import asnumpy, get_array_module
 
 logger = logging.getLogger(__name__)
@@ -270,7 +270,17 @@ class SOBBHBatchedTOF:
         lo, hi = float(eval_t[0]), float(eval_t[-1])
         node_t = np.linspace(lo - self.buffer_time, hi + self.buffer_time, self.n_grid)
         t_pn = time.perf_counter()
-        amp, gw_phase, tc = sobbh_amp_phase_batch(p, node_t, self.reference_time)
+        # The PN series (waveform.py) is written in jnp: on a GPU JAX it runs on JAX's DEFAULT
+        # device, and XLA leaves that device's context current on this thread when it returns
+        # (its outermost ScopedActivateContext does not restore). Inside a caller's cupy
+        # context for GPU 1 everything below -- uploads, response, the lookup kernel against
+        # GPU-1 buffers -- and the caller after the return then ran on GPU 0 (9mo job 754: the
+        # SOBBH Gram at addremovemove.py:746, a second lookup comp on GPU 0). Pin JAX to the
+        # current cupy device, as the MBH paths do, and re-enter that device on the way out in
+        # case JAX cannot follow it.
+        dev = current_device(self.xp)
+        with device_context(self.xp, dev), jax_device_context(dev):
+            amp, gw_phase, tc = sobbh_amp_phase_batch(p, node_t, self.reference_time)
         t_gen = time.perf_counter()
         xp = self.xp
         gen = TDTDIonTheFly(
