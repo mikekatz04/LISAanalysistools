@@ -38,7 +38,8 @@ CONTENT, in this order
    node is not sampled), cold lnL max / mean / min at the last row and the
    change against the row before, cold leaf counts per branch, the VGBs
    above SNR 7, the overlap headline and the instrument-noise bias.
-2. Cold log-likelihood against stored row: min / mean / max over walkers, the
+2. Cold log-likelihood against stored row: every cold walker in its own colour
+   and the walker mean (user request 2026-10-12, was min / mean / max), the
    whole run and the recent window, with the recipe stage boundaries.
 3. GB leaf count against stored row, same layout, against the detectable
    target when a truth set is present.
@@ -130,9 +131,10 @@ GEN_HELPERS = ("mark_stages", "_zoom_its", "_last_written", "_backup_group",
                "_row", "_match_pairs", "_survival",
                "_parse_src_ids_from_settings", "_src_cat_to_sampling_mbh",
                "_src_cat_to_sampling_emri", "_src_cat_to_sampling_sobbh",
-               "_src_cat_row", "_src_load_catalogue", "_src_pool_window")
+               "_src_cat_row", "_src_load_catalogue", "_src_pool_window",
+               "walker_color", "plot_walker_lines")
 #: ... and its top-level plain-data constants (literals, ``dict(...)`` of literals).
-GEN_CONSTS = ("_SRC_BRANCH_SPECS",)
+GEN_CONSTS = ("_SRC_BRANCH_SPECS", "WALKER_COLORS", "WALKER_OTHER_COLOR", "WALKER_MEAN_COLOR")
 #: The fixed-dimension source branches the "Other Sources" table covers.
 SRC_BRANCHES = ("mbh", "emri", "sobbh")
 #: A cold walker whose matched SNR sits this far off the walker median -- by this
@@ -1054,20 +1056,13 @@ def _png(fig, dpi=None) -> str:
     return base64.b64encode(shrink_png(buf.getvalue())).decode()
 
 
-def _band_panel(ax, x, y, color, ylabel):
-    ax.fill_between(x, y.min(axis=1), y.max(axis=1), color=color, alpha=0.22, lw=0,
-                    label="min-max over walkers")
-    ax.plot(x, y.max(axis=1), color=color, lw=1.0)
-    ax.plot(x, y.min(axis=1), color=color, lw=1.0)
-    ax.plot(x, y.mean(axis=1), color=FG, lw=1.5, label="mean")
-    ax.set_xlabel("stored row")
-    ax.set_ylabel(ylabel)
-
-
-def fig_history(ns, y, color, ylabel, title, target=None):
-    """Whole run (left) and the recent window (right): min / mean / max over
-    walkers, stage boundaries via the generator's ``mark_stages``; ``target``
-    = ``(value, label)`` draws a dotted reference on the whole-run panel."""
+def fig_history(ns, y, ylabel, title, target=None):
+    """Whole run (left) and the recent window (right): every cold walker of
+    ``y`` (rows, walkers) as its own line and the walker mean as a thick one,
+    drawn by the generator's ``plot_walker_lines`` so a walker has the full
+    page's colour (user request 2026-10-12, was a min-max band + mean); stage
+    boundaries via the generator's ``mark_stages``; ``target`` = ``(value,
+    label)`` draws a dotted reference on the whole-run panel."""
     from matplotlib.figure import Figure
 
     nit = y.shape[0]
@@ -1078,7 +1073,10 @@ def fig_history(ns, y, color, ylabel, title, target=None):
     every = ns["STAGE_BOUNDS"]
     for a, sl, ttl in ((ax[0], slice(0, nit), f"{title}, all {nit} rows"),
                        (ax[1], slice(nit - nz, nit), f"last {nz} rows")):
-        _band_panel(a, x[sl], y[sl], color, ylabel)
+        # the legend names each walker once: the whole-run panel carries it
+        ns["plot_walker_lines"](a, x[sl], y[sl], label=a is ax[0])
+        a.set_xlabel("stored row")
+        a.set_ylabel(ylabel)
         lo, hi = int(x[sl][0]), int(x[sl][-1])
         # mark_stages has a max_it but no min_it, and its labels use a blended
         # (data, axes) transform that is NOT clipped -- a boundary left of the
@@ -1644,13 +1642,13 @@ def build_glance(run_dir: str, *, mojito: Optional[str] = None) -> dict:
     psd_bias = {}
     imgs = {}
     with matplotlib.rc_context(STYLE):
-        imgs["lnl"] = fig_history(ns, S["ll"] - S["ll"][nit - 1].max(), CYAN,
+        imgs["lnl"] = fig_history(ns, S["ll"] - S["ll"][nit - 1].max(),
                                   f"cold lnL - {S['ll'][nit - 1].max():,.1f}",
                                   "cold log-likelihood")
         if gb_leaves is not None:
             tgt = ((ov["ndet"], f"{ov['ndet']} detectable (SNR > 7)")
                    if ov is not None else None)
-            imgs["leaves"] = fig_history(ns, gb_leaves, GREEN, "cold GB leaves",
+            imgs["leaves"] = fig_history(ns, gb_leaves, "cold GB leaves",
                                          "GB leaf count", target=tgt)
         if ov is not None and ov.get("mm") is not None and ov["mm"].size:
             imgs["overlap"] = fig_overlap(ns, ov)
@@ -1704,15 +1702,16 @@ def build_glance(run_dir: str, *, mojito: Optional[str] = None) -> dict:
 <section id="lnl"><h2>Log-likelihood</h2>
 <div class="panel">{_img(imgs.get("lnl"), "cold log-likelihood")}
 <div class="caption">Cold-chain total log-likelihood per stored row, relative to the best
-walker at the last row: the band spans min to max over the {nw} walkers, the white line is
-the mean. Left the whole run, right the recent window. Grey dashed verticals are recipe stage
-boundaries (completed and start iterations from the store's recipe group).</div></div>
+walker at the last row: each of the {nw} cold walkers is its own thin line, in the same colour
+on every per-walker panel of both pages, and the thick light line is their mean. Left the whole
+run, right the recent window. Grey dashed verticals are recipe stage boundaries (completed and
+start iterations from the store's recipe group).</div></div>
 </section>
 
 <section id="leaves"><h2>GB Leaf Count</h2>
 <div class="panel">{_img(imgs.get("leaves"), "GB leaf count")}
-<div class="caption">Galactic-binary leaves per cold walker per stored row, min / mean /
-max over walkers, same layout and marks{", against the detectable target (dotted red)" if ov else ""}.
+<div class="caption">Galactic-binary leaves per cold walker per stored row, each walker its
+own line and the thick line their mean, same layout, colours and marks{", against the detectable target (dotted red)" if ov else ""}.
 The fixed-size branches are listed in the topline.</div></div>
 </section>
 

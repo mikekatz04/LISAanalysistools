@@ -33,6 +33,9 @@ different things):
   violet recovered with NO matching injection
   red    detectable but NOT recovered  (and nothing else)
   white  reference lines: noise model, y = x, sensitivity
+Per-walker traces (lnL, GB leaf count, both pages) are the one exception:
+there a hue names a cold walker index (WALKER_COLORS, never red) and the
+thick light-grey line is the walker mean.
 """
 import base64, glob, io, json, os, re, sys
 from datetime import datetime
@@ -171,6 +174,69 @@ plt.rcParams.update({
     "legend.frameon": False, "figure.dpi": 110,
     "text.usetex": _USETEX,
 })
+
+# ---- one colour per cold walker (user request 2026-10-12) ------------------
+# "Adjust the logL and leaf plots over iteration from min-max-mean to all 4
+# walkers + mean". Every each-walker-against-iteration trace -- this page's
+# total log-likelihood and GB leaf count, and the at-a-glance block's two
+# history figures (_short.fig_history, which compiles these three constants
+# and the two functions below by name) -- draws cold walker k in
+# WALKER_COLORS[k] and the walker mean as one thick WALKER_MEAN_COLOR line,
+# so a walker keeps its colour on every panel, inset and page.
+# The hues are the data-viz reference palette's dark steps (green, magenta,
+# blue, yellow, violet), in an order validated on this panel colour
+# (#10161F): adjacent pairs clear CVD dE 13.0 and normal-vision dE 26.5; the
+# first four -- today's four walkers -- clear normal-vision dE 19.3 for EVERY
+# pair (CVD 6.9 at worst, yellow / green, where the legend label carries it);
+# all five clear 3:1 contrast. Its orange and red are left out (normal-vision
+# dE < 6 from RED, this page's detectable-target colour); its aqua too, at
+# dE 11.9 from green. Magenta is kept although it sits at dE 7.3 from RED: on
+# these figures red is only the dotted, labelled target line, and telling the
+# walkers apart is the point. A walker past the fifth folds into one muted
+# line labelled once, never a cycled hue, which would hand it an earlier
+# walker's identity.
+WALKER_COLORS = ("#008300", "#d55181", "#3987e5", "#c98500", "#9085e9")
+WALKER_OTHER_COLOR = "#67788A"
+WALKER_MEAN_COLOR = "#B8C6D4"
+
+
+def walker_color(w):
+    """Line colour of cold walker ``w`` on every per-walker trace."""
+    return WALKER_COLORS[w] if 0 <= w < len(WALKER_COLORS) else WALKER_OTHER_COLOR
+
+
+def plot_walker_lines(ax, x, y, *, label=True, lw=1.0, mean_lw=2.4, mean_label="mean"):
+    """Each cold walker of ``y`` (rows, walkers) as its own thin line in
+    :func:`walker_color`, and the mean over walkers as one thick line on top.
+
+    The walker count is ``y.shape[1]``, never assumed. A NaN row (not written
+    yet, or unreadable) is a gap in every line, the mean's included: the mean
+    is the plain one, as the min / max it replaces were, so a row missing a
+    walker is not averaged over whichever walkers happen to be there.
+    ``label=False`` (the zoom panel, an inset) adds no legend entries, so a
+    figure's legend names each walker once. Returns the mean.
+    """
+    import matplotlib.patheffects as _pe
+
+    y = np.asarray(y, dtype=float)
+    if y.ndim != 2:
+        raise ValueError(f"y must be (rows, walkers), got shape {y.shape}")
+    nw, nc = y.shape[1], len(WALKER_COLORS)
+    for w in range(nw):
+        lab = None
+        if label and w < nc:
+            lab = f"walker {w}"
+        elif label and w == nc:
+            lab = f"walker {w}" if nw == nc + 1 else f"walkers {nc}-{nw - 1}"
+        ax.plot(x, y[:, w], color=walker_color(w), lw=lw, alpha=0.9, label=lab, zorder=2)
+    mean = y.mean(axis=1)
+    # a ring in the panel colour keeps the mean legible where it crosses walkers
+    ax.plot(x, mean, color=WALKER_MEAN_COLOR, lw=mean_lw, zorder=3,
+            label=mean_label if label else None,
+            path_effects=[_pe.Stroke(linewidth=mean_lw + 1.2, foreground=ax.get_facecolor()),
+                          _pe.Normal()])
+    return mean
+
 
 IMGS, MISSING = {}, []
 
@@ -971,12 +1037,12 @@ T_REF_SCI = float(_m0.group(1)) if _m0 else 97729089.327664
 
 # ============================ PLOTS =========================================
 # ---- 1. likelihood ----
+# Each cold walker in its own colour plus the walker mean (user request
+# 2026-10-12; was every walker in one cyan + max + median).
 fig, ax = plt.subplots(1, 2, figsize=(11, 3.4))
-for w in range(nwalk):
-    ax[0].plot(it, ll[:, w], color=CYAN, alpha=0.25, lw=0.8)
-ax[0].plot(it, ll.max(axis=1), color=AMBER, lw=1.8, label="max")
-ax[0].plot(it, np.median(ll, axis=1), color=FG, lw=1.2, ls="--", label="median")
-ax[0].set_xlabel("iteration"); ax[0].set_ylabel("cold-chain lnL"); ax[0].legend()
+plot_walker_lines(ax[0], it, ll)
+ax[0].set_xlabel("iteration"); ax[0].set_ylabel("cold-chain lnL")
+ax[0].legend(fontsize=8, loc="upper left")
 ax[0].set_title(f"total log-likelihood ({nwalk} walkers)")
 ax[1].plot(it, ll.max(axis=1) - ll.min(axis=1), color=VIOLET, lw=1.5)
 ax[1].set_xlabel("iteration"); ax[1].set_title("walker lnL spread (max - min)")
@@ -992,10 +1058,7 @@ if _n_zoom >= 3:
     # Left panel zoom: last 50 iterations of all traces
     axins0 = inset_axes(ax[0], width="35%", height="30%", loc="lower right",
                         borderpad=1.2)
-    for w in range(nwalk):
-        axins0.plot(_it_zoom, _ll_zoom[:, w], color=CYAN, alpha=0.3, lw=0.7)
-    axins0.plot(_it_zoom, _ll_zoom.max(axis=1), color=AMBER, lw=1.4)
-    axins0.plot(_it_zoom, np.median(_ll_zoom, axis=1), color=FG, lw=0.9, ls="--")
+    plot_walker_lines(axins0, _it_zoom, _ll_zoom, label=False, lw=0.8, mean_lw=1.6)
     axins0.tick_params(labelsize=7)
     axins0.set_title(f"last {_n_zoom} iter", fontsize=7.5, pad=2)
     axins0.grid(True, alpha=0.25, lw=0.5)
@@ -1493,9 +1556,13 @@ if DET_F0 is None:
             "target line.")
 
 fig, ax = plt.subplots(1, 2, figsize=(11, 3.4))
-for w in range(nwalk):
-    ax[0].plot(it, gb_counts[:, w], color=GREEN, alpha=0.35, lw=0.9)
-ax[0].plot(it, gb_counts.max(axis=1), color=GREEN, lw=1.8, label="all f")
+# Each cold walker in its own colour plus the walker mean (user request
+# 2026-10-12; was every walker in one green + the max over walkers for each
+# frequency selection). Two selections per walker would be eight thin lines
+# in two near-parallel bundles, so when the analysed band is known the walkers
+# are drawn over THAT band (the one the detectable target counts) and the
+# all-frequency count is its walker mean alone, dashed; the legend says so.
+# _gb_walk is the per-walker selection, reused by the zoom inset below.
 # TRUTH TARGET. The raw leaf count has no scale -- 577 leaves is only
 # meaningful against how many sources are actually THERE. Overlay the
 # detectable (SNR>7) catalogue count over the range where SNRs exist, and
@@ -1510,14 +1577,22 @@ if DET_F0 is not None:
             _f0_i = _f0_i * 1e-3
             _cnt[_i] = ((_f0_i >= DET_LO) & (_f0_i <= DET_HI)
                         & gb_inds[_i]).sum(axis=1)
-    ax[0].plot(it, _cnt.max(axis=1), color=CYAN, lw=1.6,
-               label=f"{_mhz(DET_LO)}-{_mhz(DET_HI)} mHz")
+    _gb_walk = _cnt
+    plot_walker_lines(ax[0], it, _cnt)
+    ax[0].plot(it, gb_counts.mean(axis=1), color=WALKER_MEAN_COLOR, lw=1.6,
+               ls=(0, (5, 2)), zorder=3, label="all f, mean only")
     ax[0].axhline(DET_F0.size, color=RED, ls=":", lw=1.5)
     ax[0].text(NIT * 0.98, DET_F0.size,
                f"{DET_F0.size} detectable (SNR>7), "
                f"{_mhz(DET_LO)}-{_mhz(DET_HI)} mHz ", color=RED,
                fontsize=8, va="bottom", ha="right")
-    ax[0].legend(fontsize=8, loc="lower right")
+    _gb_sel = f"{_mhz(DET_LO)}-{_mhz(DET_HI)} mHz"
+else:
+    _gb_walk = gb_counts
+    plot_walker_lines(ax[0], it, gb_counts)
+    _gb_sel = "all f"
+ax[0].legend(fontsize=7.5, loc="lower right", ncol=3, handlelength=1.4, columnspacing=1.0,
+             title=f"{_gb_sel}: walkers + mean", title_fontsize=7.5)
 ax[0].set_title("GB leaf count (cold walkers)"); ax[0].set_xlabel("iteration")
 ax[0].set_ylim(bottom=-0.5)
 if caps is not None and caps.size:
@@ -1556,13 +1631,13 @@ if shutoff_bands:
         f"leaf cap per {_lab} ({len(shutoff_bands)} bands birth-OFF, red)")
 
 # In-pane zoom for GB leaf count: last 50 iterations (user request 2026-09-20).
-_gb_zoom = gb_counts[-_n_zoom:]
+# The per-walker selection of the main panel and its mean; the all-f mean is
+# left out here, where its offset would squash the walkers into a flat band.
+_gb_zoom = _gb_walk[-_n_zoom:]
 if _n_zoom >= 3:
     axins_gb = inset_axes(ax[0], width="35%", height="30%", loc="center",
                           borderpad=1.2)
-    for w in range(nwalk):
-        axins_gb.plot(_it_zoom, _gb_zoom[:, w], color=GREEN, alpha=0.35, lw=0.7)
-    axins_gb.plot(_it_zoom, _gb_zoom.max(axis=1), color=GREEN, lw=1.4)
+    plot_walker_lines(axins_gb, _it_zoom, _gb_zoom, label=False, lw=0.8, mean_lw=1.6)
     axins_gb.tick_params(labelsize=7)
     axins_gb.set_title(f"last {_n_zoom} iter", fontsize=7.5, pad=2)
     axins_gb.grid(True, alpha=0.25, lw=0.5)
@@ -8732,11 +8807,14 @@ there; where the fitted curve sits above row 0 the release raised the foreground
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
 <div class="panel">{img("gb_leaves")}
 <div class="caption">Left: galactic-binary leaf count per cold walker across the stored
-iterations, against the detectable-injection target. Right: the enforced per-cell leaf
+iterations, each walker its own colour (the same on every per-walker panel) and the thick
+light line their mean, against the detectable-injection target; with a truth set the walkers
+count the analysed band and the dashed line is the all-frequency mean. Right: the enforced per-cell leaf
 cap over time. Rows marked in red have had their births shut off by the barren-band rule
 &mdash; deaths and in-model moves continue there.</div></div>
 <div class="panel">{img("ll")}
-<div class="caption">Cold-chain total log-likelihood across the {nwalk} walkers, and
+<div class="caption">Cold-chain total log-likelihood of each of the {nwalk} walkers in
+its own colour (the same as on the leaf count) with their mean as the thick light line, and
 the max-minus-min spread. At equilibrium the spread sits at a few units.</div></div>
 </div>
 <div class="panel">{img("gb_band_ll", "GB log-likelihood per sub-band")}
