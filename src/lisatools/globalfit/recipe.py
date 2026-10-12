@@ -5210,15 +5210,18 @@ def build_gb_moves(
     _fit_in_move = bool(getattr(gb_info, "fstat_fit_in_move", False))
     _RJBirth = GBSpecialRJFStatGridMove if _fit_in_move else GBSpecialRJPriorMove
     _fit_kwargs = {}
-    # PE-STAGE REFIT CADENCE (user ruling 2026-09-24): 250 ELAPSED
-    # iterations in PE, against the search stages' own value. Separate
+    # PE-STAGE REFIT CADENCE: ELAPSED iterations in PE, against the search
+    # stages' own value. 250 by user ruling 2026-09-24 (and again
+    # 2026-10-07); 150 by user ruling 2026-10-12 ("PE fstat fit should be
+    # based on a randomly chosen walker residual. And we should do a refit
+    # on that every 150 iterations" -- the walker rule is
+    # GB_FSTAT_PE_REF=random, the PE default since 2026-10-06). Separate
     # because full_pe is a random_choice stage -- the GB move is drawn
     # roughly one iteration in N, so a search-tuned cadence there would
     # refit far more often in wall-clock terms than the number suggests
     # (and, before the clock was changed to count elapsed iterations,
-    # far LESS often than it said). Unset -> the shared value -> today's
-    # behaviour.
-    _refit_pe = int(os.environ.get("GB_FSTAT_REFIT_EVERY_PE", "250"))
+    # far LESS often than it said). The launchers export the same value.
+    _refit_pe = int(os.environ.get("GB_FSTAT_REFIT_EVERY_PE", "150"))
     if _fit_in_move:
         _fit_dir = getattr(gb_info, "fstat_fit_dir", "") or os.path.join(
             os.path.dirname(str(general_info.main_file_path)), "gb_fstat_fit")

@@ -3608,8 +3608,10 @@ export GB_FSTAT_REFIT_EVERY=2      # SEARCH stages: every 2nd iteration
 # not "iterations this branch was proposed in". In a sequential stage
 # (gb_search) the two coincide exactly, so 40 above is unchanged in meaning;
 # in full_pe the old clock ticked ~1/N as fast and the knob silently meant N
-# times more iterations than it said.
-export GB_FSTAT_REFIT_EVERY_PE=250
+# times more iterations than it said. 150 since 2026-10-12 (Mike: "PE fstat
+# fit should be based on a randomly chosen walker residual. And we should do a
+# refit on that every 150 iterations"), as in the 6mo / 9mo / 1yr scripts.
+export GB_FSTAT_REFIT_EVERY_PE=150
 export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
 # STAGE-B STACK CHUNKING -- fixes the 2026-09-21 epoch-9 OOM.
 # StackedFStatProposal4D.__init__ corner-averages the ENTIRE K-box 4-D grid
