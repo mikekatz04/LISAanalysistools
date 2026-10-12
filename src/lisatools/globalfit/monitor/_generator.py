@@ -2796,6 +2796,228 @@ except Exception as e:
 # phase.
 
 
+# ---- TIME-FREQUENCY IMAGES: POOL TO THE PIXEL GRID (2026-10-11) -----------
+# An MBHB merger is ONE WDM time column (3600 s). The 9mo panel used to
+# max-pool 5 columns per drawn column (6361 -> 1272) and hand that to a
+# ~347 px wide axes, so matplotlib's own resampling kept one column in ~3.7
+# and dropped the rest -- a different subset in every panel. The 102 d
+# merger (SNR ~1010) was bright in the data panel and faint in the
+# fitted-signals panel, while 109 d and 171 d showed the other way round:
+# "spikes in the wrong panels", raster aliasing rather than data. The fix is
+# to pool to AT MOST ONE COLUMN PER SCREEN PIXEL with MAX, so every drawn
+# column is drawn and a one-column transient survives in every panel. These
+# helpers are display only; nothing here touches a likelihood.
+
+
+def tf_pool_block(n, target):
+    """Contiguous block length that pools ``n`` samples to at most ``target``.
+
+    ``ceil(n / target)``, and 1 (no pooling) when ``target >= n``.
+    """
+    n, target = int(n), int(target)
+    if target < 1:
+        raise ValueError(f"pooling target must be >= 1, got {target}")
+    return max(1, -(-n // target))
+
+
+def pool_tf_for_display(abs_w, n_cols, n_rows=None, how="max"):
+    """Pool a ``(..., layers, time)`` ``|w|`` array down to a display size.
+
+    The time axis (last) is cut into contiguous blocks of
+    ``tf_pool_block(Nt, n_cols)`` columns, so the result has at most
+    ``n_cols`` columns; likewise the layer axis (second to last) when
+    ``n_rows`` is given. Each block is reduced with ``how``: ``"max"``
+    (default) keeps a one-column transient -- an MBHB merger -- at full
+    height in whichever block holds it; ``"mean"`` dilutes it by the block
+    length. The last block may be RAGGED (shorter): it is reduced over the
+    samples it has. NaNs are ignored; an all-NaN block gives NaN. A target
+    at least as large as the axis leaves that axis untouched. Leading axes
+    (channels) pass through.
+    """
+    if how not in ("max", "mean"):
+        raise ValueError(f"how must be 'max' or 'mean', got {how!r}")
+    a = np.asarray(abs_w)
+    if a.ndim < 2:
+        raise ValueError(f"need a (..., layers, time) array, got shape {a.shape}")
+    if not np.issubdtype(a.dtype, np.floating):
+        a = a.astype(float)
+
+    def _pool_last(x, target):
+        n = x.shape[-1]
+        b = tf_pool_block(n, target)
+        if b == 1:
+            return x
+        nout = -(-n // b)
+        pad = nout * b - n
+        if pad:     # ragged last block: NaN padding, ignored by the reductions
+            x = np.concatenate(
+                [x, np.full(x.shape[:-1] + (pad,), np.nan, dtype=x.dtype)], axis=-1)
+        x = x.reshape(x.shape[:-1] + (nout, b))
+        if how == "max":
+            return np.fmax.reduce(x, axis=-1)       # NaN-ignoring, no warning
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.nansum(x, axis=-1) / np.sum(~np.isnan(x), axis=-1)
+
+    out = _pool_last(a, n_cols)
+    if n_rows is not None:
+        out = np.swapaxes(_pool_last(np.swapaxes(out, -1, -2), n_rows), -1, -2)
+    return out
+
+
+def tf_display_grid(axes, dpi):
+    """``(n_cols, n_rows)``: the largest image that maps <= 1 column (row) per
+    screen pixel in EVERY one of ``axes`` when the figure is saved at ``dpi``.
+
+    Read from the axes positions, so call it after the layout is final
+    (``tight_layout``, colorbars). One pixel is kept in hand for Agg's
+    snapping of the image box to whole pixels. ``bbox_inches="tight"`` only
+    crops the canvas; it never rescales it, so the positions hold.
+    """
+    axes = list(axes)
+    fw, fh = axes[0].figure.get_size_inches()
+    w = min(a.get_position().width for a in axes) * fw * float(dpi)
+    h = min(a.get_position().height for a in axes) * fh * float(dpi)
+    return max(int(np.floor(w)) - 1, 1), max(int(np.floor(h)) - 1, 1)
+
+
+#: sampling-basis column of ``t_plunge`` in ``chain/mbh``
+#: (``stock.erebor.transforms.make_mbh_transform_container``: the last of 11)
+MBH_T_PLUNGE_COL = 10
+
+
+def mbh_merger_plot_days(chain_row, inds_row, t_offset, col=MBH_T_PLUNGE_COL):
+    """Merger times of the MBH leaves on a time axis, in days, sorted.
+
+    ``chain_row`` is ONE stored row of the MBH cold chain,
+    ``(nwalkers, nleaves, ndim)``; ``inds_row`` its ``(nwalkers, nleaves)``
+    mask (``None`` = all live). Per leaf, the median ``t_plunge`` over its
+    live walkers (the walker spread is seconds; a drawn column is hours),
+    minus ``t_offset`` seconds -- the axis origin in the ``t_plunge`` frame.
+    Leaves with no live walker are skipped.
+    """
+    c = np.asarray(chain_row, dtype=float)
+    if c.ndim != 3 or c.shape[1] == 0 or c.shape[2] <= col:
+        return []
+    t = c[..., col]
+    live = (np.ones(t.shape, bool) if inds_row is None
+            else np.asarray(inds_row, dtype=bool))
+    out = []
+    for j in range(t.shape[1]):
+        v = t[:, j][live[:, j] & np.isfinite(t[:, j])]
+        if v.size:
+            out.append((float(np.median(v)) - float(t_offset)) / 86400.0)
+    return sorted(out)
+
+
+def draw_wdm_tf_panels(sources, *, layer_dt, layer_df, t_edge0, f_edge0, nt, nf,
+                       col_titles, row_names=("X", "Y", "Z"), suptitle="",
+                       mergers_d=(), merger_src="", dpi=88, figsize=(13.5, 8.6)):
+    """The data | fitted signals | residual time-frequency figure.
+
+    ``sources`` is three ``(key, thunk)`` pairs in column order; each thunk
+    returns that column's full-resolution ``|w|``, ``(channels, nf, nt)``.
+    The axes are laid out FIRST, so the pixel grid is known before any
+    array is built; each array is then max-pooled to that grid
+    (:func:`pool_tf_for_display`, the SAME target for all three columns) the
+    moment it exists, and the full-resolution map is dropped. Drawn with
+    ``interpolation="nearest"`` on at most one pooled column per pixel, so
+    no column is skipped and a one-column merger shows in every panel.
+
+    Colour: ONE linear scale per channel row, the 99.5th percentile of that
+    row's POOLED data panel, shared across the row. Max pooling lifts the
+    apparent noise floor a little against an unpooled view; the subtitle
+    says so. The time axis is days from ``t_edge0`` (seconds, the first
+    active edge); ``mergers_d`` (days, same origin) are drawn as short white
+    ticks on the top and bottom edge of every panel, off the image's middle
+    so they never cover the feature they mark.
+
+    ``figsize`` height 8.6 in (8.0 before 2026-10-11) gives each row ~185 px
+    at 88 dpi, so the 179-layer grid is drawn at one layer per pixel or
+    better (``bf == 1``) instead of being pooled 2x in frequency.
+
+    Returns ``(fig, info)``; ``info`` holds the pooled grid and blocks.
+    """
+    import matplotlib.patheffects as _pe
+
+    fig, ax = plt.subplots(len(row_names), len(sources), figsize=figsize,
+                           sharex=True, sharey=True, squeeze=False)
+    ims, cbs = {}, {}
+    nr, nc = ax.shape
+    for r in range(nr):
+        for c in range(nc):
+            a_ = ax[r][c]
+            # placeholder: the real (pooled) image needs the final layout
+            ims[r, c] = a_.imshow(np.zeros((1, 1)), aspect="auto", origin="lower",
+                                  extent=[0.0, 1.0, 0.0, 1.0], vmin=0.0, vmax=1.0,
+                                  cmap="viridis", interpolation="nearest")
+            a_.grid(False)
+            if r == 0:
+                a_.set_title(col_titles[c], fontsize=10)
+            if c == 0:
+                a_.set_ylabel(f"{row_names[r]}\nfrequency [mHz]", fontsize=9)
+            if r == nr - 1:
+                # the axis starts at the first ACTIVE edge, not at the data
+                # start: the edge crop (min_time) sits in between
+                a_.set_xlabel(f"time [d], 0 = data start + {t_edge0 / 86400.0:.3g} d "
+                              f"(edge crop)", fontsize=9)
+            if c == nc - 1:
+                cbs[r] = fig.colorbar(ims[r, c], ax=a_, fraction=0.046, pad=0.02)
+                cbs[r].ax.tick_params(labelsize=7)
+                cbs[r].set_label(f"|w| / {1.0:.2e}", fontsize=7, color=DIM)
+    fig.suptitle(suptitle, fontsize=10, color=FG, y=0.997)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+
+    n_cols, n_rows = tf_display_grid(ax.ravel(), dpi)
+    bt, bf = tf_pool_block(nt, n_cols), tf_pool_block(nf, n_rows)
+    pooled = {}
+    for key, thunk in sources:
+        m = thunk()
+        if tuple(m.shape[-2:]) != (int(nf), int(nt)):
+            raise ValueError(f"{key}: |w| shape {m.shape} != (.., {nf}, {nt})")
+        pooled[key] = pool_tf_for_display(m, n_cols, n_rows, how="max")
+        del m
+    keys = [k for k, _ in sources]
+    pshape = pooled[keys[0]].shape
+    # EXACT cell edges: every drawn cell spans bt pixels (bf layers), the
+    # ragged last one included, so a merger tick lands on its own cell. The
+    # axis may run up to one cell past the analysed span; nothing is cut.
+    ext = [0.0, pshape[-1] * bt * layer_dt / 86400.0,
+           f_edge0 * 1e3, (f_edge0 + pshape[-2] * bf * layer_df) * 1e3]
+    vmaxes = []
+    for r in range(nr):
+        vmax = float(np.nanpercentile(pooled[keys[0]][r], 99.5))
+        if not np.isfinite(vmax) or vmax <= 0.0:
+            vmax = 1.0
+        vmaxes.append(vmax)
+        for c, key in enumerate(keys):
+            ims[r, c].set_data(pooled[key][r] / vmax)
+            ims[r, c].set_extent(ext)
+        cbs[r].set_label(f"|w| / {vmax:.2e}", fontsize=7, color=DIM)
+    ax[0][0].set_xlim(ext[0], ext[1])
+    ax[0][0].set_ylim(ext[2], ext[3])
+
+    drawn = [float(t) for t in mergers_d if ext[0] <= float(t) <= ext[1]]
+    _halo = [_pe.Stroke(linewidth=2.8, foreground="#0A0E14"), _pe.Normal()]
+    for a_ in ax.ravel():
+        _tx = a_.get_xaxis_transform()
+        for t in drawn:
+            for y0, y1 in ((0.0, 0.07), (0.93, 1.0)):
+                a_.plot([t, t], [y0, y1], transform=_tx, color="white", lw=1.3,
+                        solid_capstyle="butt", path_effects=_halo, zorder=5)
+    sub = (f"max-pooled to the pixel grid: one drawn column = {bt} x "
+           f"{layer_dt:.0f} s" + (f", one drawn row = {bf} layers" if bf > 1 else "")
+           + " (MAX keeps one-pixel transients in every panel; the noise floor "
+           "reads slightly higher)")
+    if drawn:
+        sub += (f"\nwhite edge ticks = the {len(drawn)} MBHB merger times"
+                + (f" ({merger_src})" if merger_src else ""))
+    fig.text(0.5, 0.973, sub, ha="center", va="top", fontsize=8, color=DIM)
+    info = dict(n_cols=int(n_cols), n_rows=int(n_rows), bt=int(bt), bf=int(bf),
+                pooled_shape=tuple(int(s) for s in pshape), vmax=vmaxes,
+                mergers_d=drawn, extent=ext)
+    return fig, info
+
+
 def snapshot_wdm_to_fd(arr, wdm, full, fds, channels=None):
     """One residual-snapshot array ``(3, Nf_active, Nt_active)`` -> FD.
 
@@ -3305,29 +3527,26 @@ try:
 
     # ===================== WDM figure =====================================
     # (``_wdm`` is built above, beside the residual-snapshot read.)
-    DEC = 5                       # WDM time pixels pooled per plotted column
-    _wp = {}
+    # POOLED TO THE PIXEL GRID (2026-10-11), see draw_wdm_tf_panels: the old
+    # fixed 5x pool left ~3.7 columns per screen pixel and matplotlib's
+    # resampling dropped single-column MBHB mergers at random per panel.
+    # Each thunk builds ONE full-resolution |w| map; the figure pools it the
+    # moment it exists, so no full-resolution map outlives its own pooling.
     if SNAP is not None:
         # the run's own arrays, on its own grid: no transform at all
-        _wdm_src = (("data", SNAP["data"]), ("tmpl", SNAP["data"] - SNAP["residual"]),
-                    ("res", SNAP["residual"]))
+        _wdm_src = (
+            ("data", lambda: np.abs(np.asarray(SNAP["data"], dtype=float))),
+            ("tmpl", lambda: np.abs(np.asarray(SNAP["data"], dtype=float)
+                                    - SNAP["residual"])),
+            ("res", lambda: np.abs(np.asarray(SNAP["residual"], dtype=float))))
     else:
-        _wdm_src = (("data", data_fd), ("tmpl", _tmpl["gb"] + _tmpl["vgb"]),
-                    ("res", resid_fd))
-    for _nm, _arr in _wdm_src:
-        _m = (np.abs(np.asarray(_arr, dtype=float)) if SNAP is not None else
-              np.abs(np.asarray(FDSignal(_arr.copy(), FDS).transform(_wdm).arr)))
-        _n = (_m.shape[-1] // DEC) * DEC
-        # MAX-pool the time axis down to plot resolution immediately; the
-        # full-resolution map is never carried past this line.
-        _wp[_nm] = _m[..., :_n].reshape(_m.shape[0], _m.shape[1], -1,
-                                        DEC).max(axis=-1)
-        del _m
+        def _wdm_abs(arr):
+            return lambda: np.abs(np.asarray(
+                FDSignal(arr.copy(), FDS).transform(_wdm).arr))
+        _wdm_src = (("data", _wdm_abs(data_fd)),
+                    ("tmpl", _wdm_abs(_tmpl["gb"] + _tmpl["vgb"])),
+                    ("res", _wdm_abs(resid_fd)))
     _te = np.asarray(_wdm.t_arr_edges); _fe = np.asarray(_wdm.f_arr_edges)
-    _ext = [0.0, (_te[-1] - _te[0]) / 86400.0, _fe[0] * 1e3, _fe[-1] * 1e3]
-    DTR.update(wdm_shape=tuple(int(s) for s in _wp["data"].shape), wdm_dec=DEC,
-               layer_df=float(_wdm.layer_df), layer_dt=float(_wdm.layer_dt))
-    fig, ax = plt.subplots(3, 3, figsize=(13.5, 8.0), sharex=True, sharey=True)
     _tt = (["data (as the run loaded it)",
             "all fitted signals (data - residual)",
             f"residual (the run's own, walker {int(SNAP['walker'])}, "
@@ -3335,36 +3554,22 @@ try:
                f"job iteration {int(SNAP['iteration'])})")]
            if SNAP is not None else
            ["data", "template sum (GB + VGB)", "residual = data - templates"])
-    for r in range(3):
-        # ONE linear scale per channel row, keyed to that row's DATA panel
-        # (the addremove debug convention: norm from the total-data column,
-        # one per channel, shared across every frame) -- so the residual
-        # panel darkens as sources leave instead of re-autoscaling.
-        vmax = float(np.percentile(_wp["data"][r], 99.5))
-        for c, kk in enumerate(("data", "tmpl", "res")):
-            a_ = ax[r][c]
-            # plotted as a FRACTION of the row scale: 0-1 ticks keep the
-            # colorbar free of a floating 1e-20 offset label, and the shared
-            # per-row normalization becomes explicit rather than implied.
-            im = a_.imshow(_wp[kk][r] / vmax, aspect="auto", origin="lower",
-                           extent=_ext, vmin=0.0, vmax=1.0, cmap="viridis",
-                           interpolation="nearest")
-            a_.grid(False)
-            if r == 0:
-                a_.set_title(_tt[c], fontsize=10)
-            if c == 0:
-                a_.set_ylabel(f"{CHN[r]}\nfrequency [mHz]", fontsize=9)
-            if r == 2:
-                a_.set_xlabel("time [days from data start]", fontsize=9)
-            if c == 2:
-                cb = fig.colorbar(im, ax=a_, fraction=0.046, pad=0.02)
-                cb.ax.tick_params(labelsize=7)
-                cb.set_label(f"|w| / {vmax:.2e}", fontsize=7, color=DIM)
-    fig.suptitle(
-        f"WDM domain - |w_mn| on the run's own grid "
-        f"({_wdm.Nf_active} layers x {_wdm.layer_df * 1e3:.4f} mHz, "
-        f"{int(_wdm.layer_dt)} s pixels) - shared linear scale per channel row",
-        fontsize=10, color=FG)
+    # MBHB MERGER TICKS. ``t_plunge`` is referenced to the MBH waveform epoch
+    # (stock ``mbh_waveform_t0`` = MOJITO_REFERENCE_TIME on mojito data); WDM
+    # layer 0 is the data start ``_t0_data`` (850.5 s later), and this axis
+    # starts at the first ACTIVE edge ``_te[0]`` (the edge crop, 2.5 d on the
+    # 6mo/9mo/1yr grids). So axis time = t_plunge - (data_t0 - epoch) - _te[0].
+    _merge_d, _merge_src = [], ""
+    try:
+        _mbh_c = _row("chain/mbh", (NIT - 1, 0, 0))
+        _mbh_i = _row("inds/mbh", (NIT - 1, 0, 0))
+        if _mbh_c is not None:
+            _merge_d = mbh_merger_plot_days(
+                _mbh_c, _mbh_i,
+                t_offset=(_t0_data - MOJITO_REFERENCE_TIME) + float(_te[0]))
+            _merge_src = f"MBH cold chain, store row {NIT - 1}"
+    except (KeyError, ValueError, IndexError):
+        pass        # no MBH branch in this store: no ticks, nothing to say
     plt.rcParams.update({
     "figure.facecolor": PANEL, "axes.facecolor": PANEL, "savefig.facecolor": PANEL,
     "axes.edgecolor": LINE, "axes.labelcolor": FG, "text.color": FG,
@@ -3374,10 +3579,26 @@ try:
     "legend.frameon": False, "figure.dpi": 110,
     "text.usetex": _USETEX,
 })
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-    # 9 dense speckle images are the single most expensive PNG on the page;
-    # 88 dpi still oversamples the pooled (layer x pooled-time) grid.
-    fig_b64(fig, "dtr_wdm", dpi=88)
+    # ONE linear scale per channel row, keyed to that row's DATA panel (the
+    # addremove debug convention), plotted as a FRACTION of the row scale --
+    # so the residual panel darkens as sources leave instead of
+    # re-autoscaling; see draw_wdm_tf_panels.
+    _WDM_DPI = 88   # 9 dense images: the single most expensive PNG on the page
+    fig, _tfi = draw_wdm_tf_panels(
+        _wdm_src, layer_dt=float(_wdm.layer_dt), layer_df=float(_wdm.layer_df),
+        t_edge0=float(_te[0]), f_edge0=float(_fe[0]),
+        nt=int(_wdm.Nt_active), nf=int(_wdm.Nf_active),
+        col_titles=_tt, row_names=CHN,
+        suptitle=(f"WDM domain - |w_mn| on the run's own grid "
+                  f"({_wdm.Nf_active} layers x {_wdm.layer_df * 1e3:.4f} mHz, "
+                  f"{int(_wdm.layer_dt)} s pixels) - shared linear scale per "
+                  f"channel row"),
+        mergers_d=_merge_d, merger_src=_merge_src, dpi=_WDM_DPI)
+    DTR.update(wdm_shape=(3, int(_wdm.Nf_active), int(_wdm.Nt_active)),
+               wdm_pooled=_tfi["pooled_shape"], wdm_bt=_tfi["bt"], wdm_bf=_tfi["bf"],
+               wdm_mergers=len(_tfi["mergers_d"]),
+               layer_df=float(_wdm.layer_df), layer_dt=float(_wdm.layer_dt))
+    fig_b64(fig, "dtr_wdm", dpi=_WDM_DPI)
 
     # ================= F1: the residual spectrum ==========================
     # The field's canonical "is the fit subtracting anything" figure (Katz+
@@ -7866,8 +8087,18 @@ if DTR and "nbins" in DTR:
     dtr_wdm_cap = (
         f"The same three states on the run's own time-frequency grid: "
         f"{_d['wdm_shape'][1]} layers of {_d['layer_df'] * 1e3:.4f} mHz by "
-        f"{int(_d['layer_dt'])} s, max-pooled {_d['wdm_dec']}&times; in time. "
-        f"One shared linear scale per channel row, keyed to that row's data "
+        f"{int(_d['layer_dt'])} s, max-pooled to the image's pixel grid "
+        f"({_d['wdm_bt']} time pixels"
+        + (f" &times; {_d['wdm_bf']} layers" if _d.get("wdm_bf", 1) > 1 else "")
+        + f" per drawn cell, the same in all three columns). Taking the "
+        f"MAXIMUM, not a sample, keeps a one-pixel transient &mdash; an MBHB "
+        f"merger is a single {int(_d['layer_dt'])} s column &mdash; visible in "
+        f"every panel; it "
+        f"also lifts the noise floor slightly against an unpooled view. "
+        + (f"White ticks on the top and bottom edges mark the "
+           f"{_d['wdm_mergers']} MBHB merger times from the MBH cold chain. "
+           if _d.get("wdm_mergers") else "")
+        + f"One shared linear scale per channel row, keyed to that row's data "
         f"panel, so a shrinking residual renders darker instead of "
         f"rescaling itself back to full brightness. The horizontal tracks with "
         f"annual brightness modulation are the recovered sources.")
