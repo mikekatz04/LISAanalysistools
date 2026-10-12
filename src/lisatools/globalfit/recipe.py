@@ -6206,6 +6206,25 @@ def build_gb_moves(
     # candidate for a replacement swap in the same iteration. The stage's
     # recipe move list is what actually orders the GFCombineMove cycle;
     # this order is the registration order the filter preserves.
+    # F-STAT NODE GRIDS ON THE DEVICE (user ruling 2026-10-12, step 1 of the
+    # grid memory plan in StackedFStatProposal4D): after construction the
+    # node stack is read only by the trilinear in-cell mode, which only the
+    # replace moves use. With no replace move composed, every F-stat grid
+    # container built in this process (the in-move fit, every epoch load on
+    # every rank) drops its node grids: 24.2 GB of the 9mo PE galaxy grid's
+    # ~43 GB per card, with bit-identical draws and densities.
+    # GB_FSTAT_KEEP_NODES=1 / 0 overrides either way.
+    from ..sampling.fstat_proposal import set_stacked_keep_nodes
+
+    _keep_nodes = (gb_replace_move is not None) or (gb_pe_replace_move is not None)
+    set_stacked_keep_nodes(_keep_nodes)
+    logger.info(
+        "[FSTAT_GRID] node grids %s on the device after construction "
+        "(replace moves composed: search=%s pe=%s; env GB_FSTAT_KEEP_NODES=%r).",
+        "KEPT" if _keep_nodes else "DROPPED",
+        gb_replace_move is not None, gb_pe_replace_move is not None,
+        os.environ.get("GB_FSTAT_KEEP_NODES", ""))
+
     gb_pe_moves = [gb_pe_prior_move, gb_pe_residual_move]
     if gb_warm_pe_move is not None:
         gb_pe_moves.append(gb_warm_pe_move)

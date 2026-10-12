@@ -96,6 +96,8 @@ __all__ = [
     "set_peak_min_F_override",
     "peak_min_F_override",
     "peak_min_snr_scope",
+    "set_stacked_keep_nodes",
+    "stacked_keep_nodes",
     "fstat_peak_min_F_stages",
     "fstat_band_min_F",
     "fstat_n_f0",
@@ -219,6 +221,47 @@ def set_peak_min_F_override(value) -> Optional[float]:
 def peak_min_F_override() -> Optional[float]:
     """The live override in F units, or ``None`` when unset."""
     return _PEAK_MIN_F_OVERRIDE
+
+
+#: Whether a :class:`StackedFStatProposal4D` built with ``keep_nodes=None``
+#: (every production path: the in-move fit, ``from_cache``,
+#: ``stacked_from_cache``) RETAINS its node grids after construction.
+#:
+#: The node grids are read after construction by ONE thing: the "trilinear"
+#: in-cell mode, which only the F-stat REPLACE moves (``rj_replace`` /
+#: ``rj_replace_pe``, ``_replace_incell_mode``) switch on. The RJ birth
+#: machinery draws and scores in the uniform mode from the cell log-weights
+#: alone. So a run without a replace move carries the node stack on every
+#: card for nothing: on the 9mo PE galaxy grid that is 24.2 GB of the ~43 GB
+#: resident (the cell weights are the other ~20 GB; the CDF is on the host).
+#: The recipe sets this to ``False`` when it composes no replace move
+#: (:func:`set_stacked_keep_nodes`, user ruling 2026-10-12: "Make the
+#: necessary changes including 1)"); ``GB_FSTAT_KEEP_NODES=1`` / ``0`` on the
+#: environment overrides either way (``1`` restores the pre-2026-10-12
+#: footprint; ``0`` forces the drop and makes a trilinear request raise).
+#: ``True`` by default so standalone scripts and tests keep today's
+#: behaviour.
+_STACKED_KEEP_NODES: bool = True
+
+
+def set_stacked_keep_nodes(flag) -> bool:
+    """Install the process-wide default for ``keep_nodes=None`` containers;
+    returns the previous value. The recipe calls this once per process with
+    "a replace move is composed" (see :data:`_STACKED_KEEP_NODES`)."""
+    global _STACKED_KEEP_NODES
+    prev = bool(_STACKED_KEEP_NODES)
+    _STACKED_KEEP_NODES = bool(flag)
+    return prev
+
+
+def stacked_keep_nodes() -> bool:
+    """The resolved default: ``GB_FSTAT_KEEP_NODES`` (``1`` / ``0``) when set,
+    else the recipe's :func:`set_stacked_keep_nodes` value (``True`` until
+    the recipe says otherwise)."""
+    env = os.environ.get("GB_FSTAT_KEEP_NODES", "").strip()
+    if env in ("0", "1"):
+        return env == "1"
+    return bool(_STACKED_KEEP_NODES)
 
 
 @contextlib.contextmanager
@@ -1350,6 +1393,27 @@ class StackedFStatProposal4D:
     a third of the resident grid (6mo job 738 OOM in the device cumsum,
     2026-10-06). Same values, same draws.
 
+    THE F-STAT GRID MEMORY PLAN (user ruling 2026-10-12, after the 9mo PE
+    galaxy grid came to ~43 GB resident per card: node grids 24.2 GB + cell
+    log-weights ~20 GB, both float64):
+
+    1. DONE: ``keep_nodes=None`` resolves through
+       :func:`stacked_keep_nodes`; the recipe drops the node grids when no
+       replace move is composed (the only reader of ``log_node`` after
+       construction is the trilinear in-cell mode). Bit-identical draws and
+       densities in the uniform mode.
+    2. TODO: store ``log_wcell`` (and ``log_node`` when kept) as float32 --
+       another ~10 GB back on the 9mo. The proposal density then carries a
+       ~1e-7 relative rounding; re-run the rvs/logpdf mutual-exactness tests
+       at float32 and keep the CDF (host) and ``_log_norm`` in float64.
+    3. TODO: host-resident grids with per-band upload. The RJ births are
+       scheduled per band unit, so a propose only needs the boxes of the
+       bands in the current unit (~1/9 of the grid per pass); keep the cell
+       weights in pinned host memory, upload the needed boxes per pass
+       through a small cache, and gather ``logpdf`` cells from the host.
+       Device footprint ~1-2 GB; a rewrite of the chunk routing in
+       :meth:`rvs` / :meth:`logpdf`; GPU-only validation.
+
     Args:
         logp_grids: ``(K, n0, n1, n2, n3)`` node grids of ``beta * F``
             (numpy or cupy; computation stays on the input's module, except
@@ -1391,9 +1455,13 @@ class StackedFStatProposal4D:
     def __init__(self, logp_grids, f0_los, f0_dxs, mc_ax, alpha_ax,
                  sin_delta_ax, weights=None, seed: Optional[int] = None,
                  mem_budget_mb: Optional[float] = None,
-                 keep_nodes: bool = True):
+                 keep_nodes: Optional[bool] = None):
         from ..utils.utility import get_array_module
 
+        # ``None`` -> the process default (the recipe's "a replace move is
+        # composed", env GB_FSTAT_KEEP_NODES on top); see stacked_keep_nodes.
+        keep_nodes = stacked_keep_nodes() if keep_nodes is None else bool(keep_nodes)
+        self.keep_nodes = keep_nodes
         xp = get_array_module(logp_grids)
         K = int(logp_grids.shape[0])
         node_shape = tuple(int(n) for n in logp_grids.shape[1:])
@@ -1535,7 +1603,8 @@ class StackedFStatProposal4D:
     @classmethod
     def from_cache(cls, d, weights=None, seed: Optional[int] = None,
                    mem_budget_mb: Optional[float] = None,
-                   use_cupy: bool = False, device: Optional[int] = None):
+                   use_cupy: bool = False, device: Optional[int] = None,
+                   keep_nodes: Optional[bool] = None):
         """Rebuild from a stacked-cache mapping (the ``*_peaks_stacked.npz``
         contents): keys ``logp_grids``, ``f0_los``, ``f0_dxs``, ``mc_ax``,
         ``alpha_ax``, ``sin_delta_ax``. ``use_cupy`` moves the stack to the
@@ -1568,6 +1637,7 @@ class StackedFStatProposal4D:
             np.asarray(d["alpha_ax"], dtype=float),
             np.asarray(d["sin_delta_ax"], dtype=float),
             weights=weights, seed=seed, mem_budget_mb=mem_budget_mb,
+            keep_nodes=keep_nodes,
         )
 
     # ------------------------------------------------------------------
@@ -1605,7 +1675,9 @@ class StackedFStatProposal4D:
         if g is None:
             raise RuntimeError(
                 "StackedFStatProposal4D: trilinear in-cell mode requires "
-                "keep_nodes=True (node grids were dropped at construction)."
+                "keep_nodes=True (node grids were dropped at construction). "
+                "The recipe keeps them only when a replace move is composed "
+                "(set_stacked_keep_nodes); GB_FSTAT_KEEP_NODES=1 forces it."
             )
         di = xp.arange(2)
         m0 = int(k_local.shape[0])
@@ -1920,7 +1992,8 @@ class GroupedStackedFStatProposal:
 
 def stacked_from_cache(d, weights=None, seed: Optional[int] = None,
                        mem_budget_mb: Optional[float] = None,
-                       use_cupy: bool = False, device: Optional[int] = None):
+                       use_cupy: bool = False, device: Optional[int] = None,
+                       keep_nodes: Optional[bool] = None):
     """Rebuild the stage-B peak proposal from a ``*_peaks_stacked.npz``.
 
     Dispatches on the cache format: the legacy single-stack keys
@@ -1952,7 +2025,7 @@ def stacked_from_cache(d, weights=None, seed: Optional[int] = None,
     if "logp_grids" in keys:
         return StackedFStatProposal4D.from_cache(
             d, weights=weights, seed=seed, mem_budget_mb=mem_budget_mb,
-            use_cupy=use_cupy, device=device)
+            use_cupy=use_cupy, device=device, keep_nodes=keep_nodes)
     sizes = np.asarray(d["group_sizes"], dtype=int)
     bounds = np.concatenate([[0], np.cumsum(sizes)])
     K = int(sizes.sum())
@@ -1987,7 +2060,7 @@ def stacked_from_cache(d, weights=None, seed: Optional[int] = None,
                                if f"sin_delta_ax_g{gi}" in _keys
                                else d["sin_delta_ax"])),
             weights=sub_w, seed=seed, mem_budget_mb=mem_budget_mb,
-            use_cupy=use_cupy, device=device))
+            use_cupy=use_cupy, device=device, keep_nodes=keep_nodes))
     return GroupedStackedFStatProposal(comps, box_weights=w, seed=seed)
 
 
