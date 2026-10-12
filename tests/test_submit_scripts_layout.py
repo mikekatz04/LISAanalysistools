@@ -822,6 +822,11 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             "EMRI_DIRECT_RESPONSE", "EMRI_TRAJ_WORKERS", "EMRI_DIRECT_LOOKUP",
         }
         drift = {
+            # 2026-10-12: the LISA-frame sky-mode hops back in the MBH inner-move
+            # stack (SkyMove in the ICRS basis; 0.02 both / 0.04 lat / 0.02 long
+            # of the per-leaf draws, user ruling). New knobs, same code defaults.
+            "MBH_SKY_MOVE_BOTH_WEIGHT", "MBH_SKY_MOVE_LAT_WEIGHT",
+            "MBH_SKY_MOVE_LONG_WEIGHT",
             k: (self.v8.get(k), self.v9.get(k))
             for k in set(self.v8) | set(self.v9)
             if self.v8.get(k) != self.v9.get(k)
@@ -1777,6 +1782,11 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             "EMRI_LIKELIHOOD", "EMRI_BATCH_MAX_SIZE", "EMRI_DIRECT_TABLE",
             "EMRI_DIRECT_RESPONSE", "EMRI_TRAJ_WORKERS", "EMRI_DIRECT_LOOKUP",
             # V9-30 (2026-10-07): Mike's 6mo production line became the
+            # 2026-10-12: the LISA-frame sky-mode hops back in the MBH inner-move
+            # stack (SkyMove in the ICRS basis; 0.02 both / 0.04 lat / 0.02 long
+            # of the per-leaf draws, user ruling). New knobs, same code defaults.
+            "MBH_SKY_MOVE_BOTH_WEIGHT", "MBH_SKY_MOVE_LAT_WEIGHT",
+            "MBH_SKY_MOVE_LONG_WEIGHT",
             # 6mo / 1yr / 9mo launcher DEFAULT (MIDIT_CHECKPOINT 0, 8-rung
             # MBH / EMRI ladders, gram / fisher eigen tables, source
             # cross-checks off). The 3mo v9 twin was not on that line and

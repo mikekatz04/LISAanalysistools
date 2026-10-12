@@ -5058,6 +5058,24 @@ export EMRI_EIGEN_REFRESH=${EMRI_EIGEN_REFRESH:-10}
 #   the direct template; MBH: the batched windowed template) at the max-lnL
 #   cold walker, through that walker's PSD -- the expected information, no
 #   residual noise, positive semi-definite. ONE shared table per leaf (the
+# ---- MBH SKY-MODE HOPS (2026-10-12) ----------------------------------------
+# The MBH inner-move stack mixes the LISA-frame sky-mode hops back in. The
+# production basis is ICRS (alpha / sin_delta / psi), so the SkyMove converts
+# each row ICRS -> ecliptic -> constellation frame at the row's OWN orbital
+# phase (read off the run's orbits; t_plunge is referenced to
+# mbh_waveform_t0), hops there (the 8 modes: plane reflection x 90-degree
+# in-plane rotations; the merger keeps its DETECTOR arrival time, so t_plunge
+# moves by up to ~2 R/c), converts back, and carries the frame Jacobian in
+# the Metropolis factor (exact detailed balance). Verified 2026-10-12 on the
+# LAT time-domain response (equal-arm + ESA orbits): every hopped mode
+# overlaps the original A/E at > 0.99 with no residual time shift at 3 mHz.
+# Draw fractions of the per-leaf inner-move draws (Mike 2026-10-12): 0.02
+# the full 8-mode hop, 0.04 the plane reflection only, 0.02 the in-plane
+# rotation only; the remaining 0.92 is the eigen move above. 0 disables a
+# kind. Code defaults are the same values (this block pins them).
+export MBH_SKY_MOVE_BOTH_WEIGHT=${MBH_SKY_MOVE_BOTH_WEIGHT:-0.02}
+export MBH_SKY_MOVE_LAT_WEIGHT=${MBH_SKY_MOVE_LAT_WEIGHT:-0.04}
+export MBH_SKY_MOVE_LONG_WEIGHT=${MBH_SKY_MOVE_LONG_WEIGHT:-0.02}
 #   {BRANCH}_EIGEN_SCOPE knob does not apply). Any failure WARNS
 #   ("[eigen_refresh] ... Gram build failed") and builds the ll table.
 #   Why: on the SOBBH toy the ll route's 1e-4-of-box step gives an f_low

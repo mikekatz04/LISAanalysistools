@@ -1198,12 +1198,103 @@ def prepare_mbh_branch(mbh, general_setup: GeneralSetup, gs):
     if mbh.waveform_kwargs is None:
         mbh.waveform_kwargs = dict()
     if mbh.inner_moves is None:
-        # TODO(post-merge): re-enable SkyMove hops once the move supports
-        # the ICRS sampling basis.
-        resolve_inner_moves(mbh)
+        mbh.inner_moves = make_mbh_inner_moves(mbh, general_setup, gs)
     mbh.nleaves_max = n
     mbh.nleaves_min = n
     return mbh
+
+
+#: Column indices of the sky / orientation / time parameters in the stock MBH
+#: sampling basis (``make_mbh_transform_container().input_basis``:
+#: ``cos_iota=6, psi=7, alpha=8, sin_delta=9, t_plunge=10``), in the
+#: :class:`~lisatools.sampling.moves.skymodehop.SkyMove` key names.
+MBH_SKY_MOVE_IND_MAP = dict(cosinc=6, psi=7, lam=8, sinbeta=9, t_ref=10)
+
+
+def make_mbh_inner_moves(mbh, general_setup, gs) -> list:
+    """The MBH add/remove move's inner-move stack: the ``inner_move_kind``
+    proposal plus the LISA-frame sky-mode hops.
+
+    The hops are :class:`~lisatools.sampling.moves.skymodehop.SkyMove`
+    instances with ``coord_frame="icrs"`` (the stock basis samples
+    ``alpha / sin_delta / psi`` in ICRS against ICRS orbits) whose
+    constellation phase is read off the run's orbits
+    (:class:`~lisatools.sampling.moves.skymodehop.ConstellationPhase`,
+    ``t_offset = mbh_waveform_t0``: the sampled ``t_plunge`` is referenced
+    to that epoch while the orbit file carries absolute times). Draw
+    fractions come from ``mbh.sky_move_{both,lat,long}_weight``; the
+    ``inner_move_kind`` stack takes the remainder. Every weight at 0 gives
+    the bare stack.
+    """
+    from lisatools.sampling.moves.skymodehop import ConstellationPhase, SkyMove
+
+    from .common import make_default_inner_moves
+
+    weights = {
+        "both": float(getattr(mbh, "sky_move_both_weight", 0.0)),
+        "lat": float(getattr(mbh, "sky_move_lat_weight", 0.0)),
+        "long": float(getattr(mbh, "sky_move_long_weight", 0.0)),
+    }
+    for kind, w in weights.items():
+        if not (0.0 <= w <= 1.0):
+            raise ValueError(f"mbh.sky_move_{kind}_weight must be in [0, 1], got {w}.")
+    total = sum(weights.values())
+    if total >= 1.0:
+        raise ValueError(
+            "the MBH sky-move weights must leave room for the in-model stack "
+            f"(sum {total} >= 1)."
+        )
+    base = make_default_inner_moves(getattr(mbh, "inner_move_kind", "eigen"))
+    base_total = float(sum(w for _, w in base))
+    moves = [(move, (1.0 - total) * w / base_total) for move, w in base]
+    if total == 0.0:
+        return moves
+
+    transform = getattr(mbh, "transform", None)
+    basis = list(getattr(transform, "input_basis", []) or [])
+    if basis:
+        expect = {"cosinc": "cos_iota", "psi": "psi", "lam": "alpha", "sinbeta": "sin_delta", "t_ref": "t_plunge"}
+        got = {k: basis[i] if i < len(basis) else None for k, i in MBH_SKY_MOVE_IND_MAP.items()}
+        if got != expect:
+            raise ValueError(
+                "the MBH sky-mode hops assume the stock ICRS sampling basis "
+                f"{expect} at columns {MBH_SKY_MOVE_IND_MAP}; this transform has {got}."
+            )
+
+    orbits = getattr(general_setup, "orbits", None)
+    t_offset = float(getattr(gs, "mbh_waveform_t0", 0.0))
+    if orbits is not None:
+        phase = ConstellationPhase.from_orbits(orbits, t_offset=t_offset)
+        logger.info(
+            "MBH sky-mode hops: constellation phase table from %s (%s frame) over "
+            "[%.6e, %.6e] s, t_offset = %.6e s; weights both %.3f / lat %.3f / long %.3f, "
+            "%s stack %.3f.",
+            type(orbits).__name__, getattr(orbits, "frame", "?"), phase.t_grid[0],
+            phase.t_grid[-1], t_offset, weights["both"], weights["lat"], weights["long"],
+            getattr(mbh, "inner_move_kind", "eigen"), 1.0 - total,
+        )
+    else:
+        phase = None
+        logger.warning(
+            "MBH sky-mode hops: the general setup carries no orbits; falling back to "
+            "the analytic constellation phase alpha = Omega * t (the data-start phase "
+            "is NOT known, so the hops land off the symmetric modes by the orbit's "
+            "phase at the epoch)."
+        )
+    for which in ("both", "lat", "long"):
+        if weights[which] > 0.0:
+            moves.append(
+                (
+                    SkyMove(
+                        ind_map=dict(MBH_SKY_MOVE_IND_MAP),
+                        which=which,
+                        coord_frame="icrs",
+                        constellation_phase=phase,
+                    ),
+                    weights[which],
+                )
+            )
+    return moves
 
 
 def make_mbh_initialize_kwargs(mbh, general_setup: GeneralSetup, gs) -> dict:

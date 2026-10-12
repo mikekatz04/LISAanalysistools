@@ -34,6 +34,24 @@ class MBHSettings(Settings):
     inner_move_kind: str = dataclasses.field(
         default_factory=env_default("MBH_INNER_MOVE_KIND", "eigen", str)
     )
+    # LISA-frame sky-mode hops mixed into the inner-move stack (the
+    # ``SkyMove`` with ``coord_frame="icrs"`` -- the stock basis samples
+    # alpha / sin_delta / psi in ICRS, so each row is converted to the
+    # constellation frame at its own orbital phase, hopped, and converted
+    # back; see ``source_runtime.make_mbh_inner_moves``). Fractions of the
+    # per-leaf inner-move draws: the full 8-mode hop ("both"), the
+    # reflection through the constellation plane ("lat") and the 90-degree
+    # in-plane rotation ("long"); the remainder is the ``inner_move_kind``
+    # stack. 0.02 / 0.04 / 0.02 (user 2026-10-12); 0 disables a kind.
+    sky_move_both_weight: float = dataclasses.field(
+        default_factory=env_default("MBH_SKY_MOVE_BOTH_WEIGHT", 0.02, float)
+    )
+    sky_move_lat_weight: float = dataclasses.field(
+        default_factory=env_default("MBH_SKY_MOVE_LAT_WEIGHT", 0.04, float)
+    )
+    sky_move_long_weight: float = dataclasses.field(
+        default_factory=env_default("MBH_SKY_MOVE_LONG_WEIGHT", 0.02, float)
+    )
     # leaf-visit cadence for the eigen inner-move table refresh — SPARSE:
     # MBH likelihood rows are per-row dense (~1.4 s), so a table build is
     # minutes; it happens on the first visit and then every N-th
@@ -189,15 +207,11 @@ class MBHSetup(Setup):
         if self.inner_moves is None:
             from .common import resolve_inner_moves
 
-            # TODO(post-merge): re-enable SkyMove hops once the move
-            # supports the ICRS sampling basis — the stock MBH basis is
-            # now direct ICRS (alpha, sin_delta, psi ICRS) while the
-            # existing SkyMove geometry assumes SSB ecliptic. The index
-            # map is unchanged (cos_iota=6, psi=7, alpha=8, sin_delta=9):
-            #
-            #   from lisatools.sampling.moves.skymodehop import SkyMove
-            #   angles_map = dict(cosinc=6, psi=7, lam=8, sinbeta=9)
-            #   ... (SkyMove(ind_map=angles_map, which=...), w) ...
+            # Bare ``inner_move_kind`` stack. The stock build path
+            # (``source_runtime.prepare_mbh_branch``) fills ``inner_moves``
+            # BEFORE this Setup is constructed, with the LISA-frame sky-mode
+            # hops mixed in at ``sky_move_*_weight`` (they need the run's
+            # orbits for the constellation phase, which only the build has).
             resolve_inner_moves(self)
 
     def init_setup(self):
