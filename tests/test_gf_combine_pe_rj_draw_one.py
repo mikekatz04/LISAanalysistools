@@ -213,6 +213,118 @@ class PeRjDrawOneTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 comb.propose(_StubModel(), _StubState())
 
+    # ---- two F-stat moves (user ruling 2026-10-12: "two fstat moves that will
+    # split their share of the total moves") ------------------------------------
+
+    FOUR = ("rj_warm_pe", "rj_fstat_pe", "rj_fstat_pe_residual", "rj_prior_pe",
+            "gb_ridge_gibbs")
+    RJ4 = ("rj_warm_pe", "rj_fstat_pe", "rj_fstat_pe_residual", "rj_prior_pe")
+
+    def _picks(self, names, n, seed, **env):
+        log = []
+        _, comb = _make(names, log, weighted_cycle=True)
+        picks = []
+        with _env(GB_PE_RJ_DRAW_ONE=1, **env):
+            model = _StubModel(seed=seed)
+            for _ in range(n):
+                log.clear()
+                comb.propose(model, _StubState())
+                rj = [x for x in log if x in self.RJ4]
+                self.assertEqual(len(rj), 1, log)                 # exactly ONE RJ move
+                self.assertEqual(log, [rj[0], "gb_ridge_gibbs"])  # in the first member's slot
+                picks.append(rj[0])
+        return picks
+
+    def test_config_splits_the_fstat_share_and_sums_to_one(self):
+        with _env(GB_PE_RJ_DRAW_ONE=1, GB_PE_RJ_FSTAT_FRACTION=0.45,
+                  GB_PE_RJ_WARM_FRACTION=0.1, GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=0.5):
+            on, p = GFCombineMove._pe_rj_draw_one_config()
+        self.assertTrue(on)
+        self.assertAlmostEqual(p["rj_fstat_pe"], 0.225)
+        self.assertAlmostEqual(p["rj_fstat_pe_residual"], 0.225)
+        self.assertAlmostEqual(p["rj_prior_pe"], 0.45)
+        self.assertAlmostEqual(p["rj_warm_pe"], 0.1)
+        self.assertAlmostEqual(sum(p.values()), 1.0)
+        # the split is honoured, the total F-stat share and prior / warm are not
+        # touched by it
+        with _env(GB_PE_RJ_DRAW_ONE=1, GB_PE_RJ_FSTAT_FRACTION=0.45,
+                  GB_PE_RJ_WARM_FRACTION=0.1, GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=0.2):
+            _, q = GFCombineMove._pe_rj_draw_one_config()
+        self.assertAlmostEqual(q["rj_fstat_pe"], 0.36)
+        self.assertAlmostEqual(q["rj_fstat_pe_residual"], 0.09)
+        self.assertAlmostEqual(q["rj_prior_pe"], 0.45)
+        self.assertAlmostEqual(q["rj_warm_pe"], 0.1)
+        self.assertAlmostEqual(sum(q.values()), 1.0)
+
+    def test_the_default_split_is_one_half(self):
+        with _env(GB_PE_RJ_DRAW_ONE=1, GB_PE_RJ_FSTAT_FRACTION=0.4):
+            os.environ.pop("GB_PE_RJ_FSTAT_RESIDUAL_SPLIT", None)
+            _, p = GFCombineMove._pe_rj_draw_one_config()
+        self.assertAlmostEqual(p["rj_fstat_pe"], 0.2)
+        self.assertAlmostEqual(p["rj_fstat_pe_residual"], 0.2)
+
+    def test_both_fstat_moves_drawn_at_the_split(self):
+        picks = self._picks(self.FOUR, 6000, 31, GB_PE_RJ_FSTAT_FRACTION=0.45,
+                            GB_PE_RJ_WARM_FRACTION=0.1,
+                            GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=0.5)
+        fr = {n: np.mean([p == n for p in picks]) for n in self.RJ4}
+        # 6000 draws: sigma ~0.0054 at 0.225, ~0.0064 at 0.45, ~0.0039 at 0.1
+        self.assertTrue(0.198 < fr["rj_fstat_pe"] < 0.252, fr)
+        self.assertTrue(0.198 < fr["rj_fstat_pe_residual"] < 0.252, fr)
+        self.assertTrue(0.418 < fr["rj_prior_pe"] < 0.482, fr)
+        self.assertTrue(0.08 < fr["rj_warm_pe"] < 0.12, fr)
+
+    def test_split_endpoints_degrade_to_one_fstat_move(self):
+        """0 / 1: the zero-share move is never drawn and so NEVER RUNS (it must
+        not fall back to running every iteration the way a zero-mass warm move
+        does), and the other takes the whole F-stat share."""
+        for split, gone, kept in ((0.0, "rj_fstat_pe_residual", "rj_fstat_pe"),
+                                  (1.0, "rj_fstat_pe", "rj_fstat_pe_residual")):
+            picks = self._picks(self.FOUR, 3000, 7, GB_PE_RJ_FSTAT_FRACTION=0.45,
+                                GB_PE_RJ_WARM_FRACTION=0.1,
+                                GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=split)
+            self.assertNotIn(gone, picks, split)
+            f = np.mean([p == kept for p in picks])
+            self.assertTrue(0.42 < f < 0.48, (split, f))
+
+    def test_a_stage_with_only_the_galaxy_move_draws_as_before(self):
+        """A pre-2026-10-12 composition (no residual move): rj_fstat_pe takes the
+        WHOLE F-stat share -- the draws are the old three-member draws exactly,
+        whatever the split says."""
+        names = ("rj_warm_pe", "rj_fstat_pe", "rj_prior_pe", "gb_ridge_gibbs")
+        picks = self._picks(names, 2000, 21, GB_PE_RJ_FSTAT_FRACTION=0.45,
+                            GB_PE_RJ_WARM_FRACTION=0.1,
+                            GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=0.5)
+        # the old algorithm, by hand: members (fstat, prior, warm) at
+        # (0.45, 0.45, 0.1), one uniform per iteration from the same RNG
+        mirror = np.random.RandomState(21)
+        cdf = np.cumsum([0.45, 0.45, 0.1])
+        old = [("rj_fstat_pe", "rj_prior_pe", "rj_warm_pe")[
+            min(int(np.searchsorted(cdf, mirror.uniform(), side="right")), 2)]
+            for _ in range(2000)]
+        # not assertEqual on the lists: unittest's diff of two long differing
+        # lists runs for many minutes; name the first mismatch instead
+        bad = next((i for i, (a, b) in enumerate(zip(picks, old)) if a != b), None)
+        self.assertIsNone(bad, None if bad is None else
+                          f"draw {bad}: {picks[bad]} != the old draw {old[bad]}")
+        self.assertEqual(len(picks), len(old))
+
+    def test_a_stage_with_only_the_residual_move_still_draws(self):
+        names = ("rj_fstat_pe_residual", "rj_prior_pe", "gb_ridge_gibbs")
+        picks = self._picks(names, 3000, 5, GB_PE_RJ_FSTAT_FRACTION=0.45,
+                            GB_PE_RJ_WARM_FRACTION=0.0,
+                            GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=0.5)
+        f = np.mean([p == "rj_fstat_pe_residual" for p in picks])
+        self.assertTrue(0.42 < f < 0.48, f)          # the whole 0.45, not 0.225
+
+    def test_bad_split_raises(self):
+        log = []
+        _, comb = _make(self.FOUR, log, weighted_cycle=True)
+        for bad in ("1.5", "-0.1", "nan"):
+            with _env(GB_PE_RJ_DRAW_ONE=1, GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=bad):
+                with self.assertRaises(ValueError, msg=bad):
+                    comb.propose(_StubModel(), _StubState())
+
     def test_pe_stage_without_the_pair_falls_through(self):
         log = []
         names = ("rj_warm_pe", "rj_fstat_pe", "gb_ridge_gibbs")

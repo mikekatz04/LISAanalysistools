@@ -95,6 +95,7 @@ __all__ = [
     "fstat_peak_min_F",
     "set_peak_min_F_override",
     "peak_min_F_override",
+    "peak_min_snr_scope",
     "fstat_peak_min_F_stages",
     "fstat_band_min_F",
     "fstat_n_f0",
@@ -218,6 +219,35 @@ def set_peak_min_F_override(value) -> Optional[float]:
 def peak_min_F_override() -> Optional[float]:
     """The live override in F units, or ``None`` when unset."""
     return _PEAK_MIN_F_OVERRIDE
+
+
+@contextlib.contextmanager
+def peak_min_snr_scope(snr):
+    """A MOVE's own peak floor for the duration of the block, then the
+    previous override back, exactly (the raw F value, no SNR round trip).
+
+    ``snr=None`` changes nothing: the block runs at whatever floor is in
+    force (the stage's declared override, else ``FSTAT_PEAK_MIN_SNR``).
+
+    Why a scope and not a second global (user ruling 2026-10-12): ``full_pe``
+    carries TWO F-stat birth moves with different floors -- the GB-free
+    galaxy fit at SNR 6.5 (``rj_fstat_pe``) and the live-residual fit at the
+    stage's 6.25 (``rj_fstat_pe_residual``). The floor is read while a grid
+    is FITTED (peak selection, the stage-B ``peak_min_F`` stamp, the forced-
+    refit decline), all of it on the head inside one move's ``setup()``, so
+    scoping the process-global override around that call gives each move its
+    own floor while every other reader keeps seeing the stage's.
+    """
+    global _PEAK_MIN_F_OVERRIDE
+    if snr is None:
+        yield
+        return
+    prev = _PEAK_MIN_F_OVERRIDE
+    _PEAK_MIN_F_OVERRIDE = 0.5 * float(snr) ** 2
+    try:
+        yield
+    finally:
+        _PEAK_MIN_F_OVERRIDE = prev
 
 
 def fstat_peak_min_F() -> float:

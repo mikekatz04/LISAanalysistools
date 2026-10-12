@@ -3611,7 +3611,19 @@ export GB_FSTAT_REFIT_EVERY=2      # SEARCH stages: every 2nd iteration
 # times more iterations than it said. 150 since 2026-10-12 (Mike: "PE fstat
 # fit should be based on a randomly chosen walker residual. And we should do a
 # refit on that every 150 iterations"), as in the 6mo / 9mo / 1yr scripts.
+# Since 2026-10-12 it is the cadence of rj_fstat_pe_residual (the LIVE-residual
+# PE move); rj_fstat_pe (the GB-free galaxy grid) fits once -- see below.
 export GB_FSTAT_REFIT_EVERY_PE=150
+# TWO PE F-STAT MOVES (user ruling 2026-10-12), as in the 6mo / 9mo / 1yr
+# scripts (the full block and Mike's words are in submit_gf_6mo_v9_4gpu.sh):
+# "two fstat moves that will split their share of the total moves" --
+# rj_fstat_pe fits the GB-free residual ("the whole galaxy down to SNR 6.5")
+# ONCE and never refits during full_pe ("The residual fstat will take care of
+# low snr adjustments"); rj_fstat_pe_residual fits the live residual of one
+# randomly drawn cold walker every GB_FSTAT_REFIT_EVERY_PE overall iterations.
+export GB_FSTAT_REFIT_EVERY_PE_GB_FREE=0
+export GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE=6.5
+export GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=${GB_PE_RJ_FSTAT_RESIDUAL_SPLIT:-0.5}
 export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
 # STAGE-B STACK CHUNKING -- fixes the 2026-09-21 epoch-9 OOM.
 # StackedFStatProposal4D.__init__ corner-averages the ENTIRE K-box 4-D grid

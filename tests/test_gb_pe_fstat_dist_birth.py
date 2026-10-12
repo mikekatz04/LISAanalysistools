@@ -138,10 +138,15 @@ class RecipeStampSiteTest(unittest.TestCase):
         )
 
     def test_every_stamp_goes_through_the_shared_resolver(self):
-        # search replace + PE replace + PE fstat birth == 3, and none of
-        # them re-rolls the env parsing inline.
+        # search replace + PE replace + PE fstat birth + the PE live-residual
+        # fstat birth (rj_fstat_pe_residual, 2026-10-12: rj_fstat_pe's twin in
+        # every proposal setting) == 4, and none of them re-rolls the env
+        # parsing inline.
         src = self._src()
-        self.assertEqual(src.count("_fstat_dist_birth_stamp()"), 3)
+        self.assertEqual(src.count("_fstat_dist_birth_stamp()"), 4)
+        self.assertIn(
+            "gb_pe_residual_move.rj_fstat_dist_birth = _fstat_dist_birth_stamp()",
+            src)
         self.assertNotIn('os.environ.get("GB_RJ_FSTAT_DIST_BIRTH")', src)
 
     def test_moves_deliberately_left_alone(self):
@@ -163,6 +168,10 @@ class RecipeStampSiteTest(unittest.TestCase):
         i = src.index("gb_pe_prior_move.rj_fstat_dist_birth")
         head = src[:i]
         self.assertIn("not _gb_mode_search or _pe_strict", head)
+        # the residual twin under the SAME guard, on the line right above it
+        j = src.index("gb_pe_residual_move.rj_fstat_dist_birth")
+        guard = src[:j].rstrip().splitlines()[-1].strip()
+        self.assertEqual(guard, "if not _gb_mode_search or _pe_strict:")
 
 
 class StampedPEMoveModeSetTest(unittest.TestCase):

@@ -471,6 +471,30 @@ def substate_check_enabled() -> bool:
     return os.environ.get("GF_SUBSTATE_CHECK", "1") != "0"
 
 
+def pe_rj_fstat_residual_split() -> float:
+    """``GB_PE_RJ_FSTAT_RESIDUAL_SPLIT``: the share of the PE draw's F-stat
+    fraction that goes to ``rj_fstat_pe_residual``; ``rj_fstat_pe`` (the
+    GB-free galaxy grid) takes the rest. Default ``0.5`` (user ruling
+    2026-10-12: "two fstat moves that will split their share of the total
+    moves"). In [0, 1]; read at call time.
+
+    The ONE resolver for both consumers: the PE draw
+    (:meth:`GFCombineMove._pe_rj_draw_one_config`) and the driver's stage
+    composition (``run_combined_staged.py``), which leaves a move with no
+    share (a split of exactly 0 or 1) out of the PE stage altogether -- so
+    the draw and the composition can never disagree about which F-stat moves
+    a PE stage carries.
+    """
+    raw = os.environ.get("GB_PE_RJ_FSTAT_RESIDUAL_SPLIT", "").strip() or "0.5"
+    s = float(raw)
+    if not np.isfinite(s) or not (0.0 <= s <= 1.0):
+        raise ValueError(
+            f"GB_PE_RJ_FSTAT_RESIDUAL_SPLIT={raw!r} must lie in [0, 1] (the "
+            "share of GB_PE_RJ_FSTAT_FRACTION that rj_fstat_pe_residual gets; "
+            "rj_fstat_pe takes the rest).")
+    return s
+
+
 class GFCombineMove(CombineMove, GlobalFitMove):
     """An ``eryn`` :class:`CombineMove` that participates in global-fit bookkeeping.
 
@@ -729,18 +753,33 @@ class GFCombineMove(CombineMove, GlobalFitMove):
     #: 2026-10-02 (user ruling: "put the warm proposal in with the other two
     #: rj moves. Draw them at 0.45 prior, 0.45 fstat, 0.1 warm start"); a
     #: stage without it draws between the first two as before.
-    _PE_RJ_DRAW_ONE_MEMBERS = ("rj_fstat_pe", "rj_prior_pe", "rj_warm_pe")
+    #: ``rj_fstat_pe_residual`` joined on 2026-10-12 (user ruling: "two fstat
+    #: moves that will split their share of the total moves"): the F-stat
+    #: share ``GB_PE_RJ_FSTAT_FRACTION`` is split between the GB-free galaxy
+    #: move and the live-residual move by ``GB_PE_RJ_FSTAT_RESIDUAL_SPLIT``.
+    #: Listed right after ``rj_fstat_pe`` so a stage WITHOUT it keeps the
+    #: pre-2026-10-12 member order, weights and therefore draws bit-for-bit.
+    _PE_RJ_DRAW_ONE_MEMBERS = ("rj_fstat_pe", "rj_fstat_pe_residual",
+                               "rj_prior_pe", "rj_warm_pe")
+    #: the F-stat members of the draw: a stage carrying only one of them
+    #: hands it the whole F-stat share (the total stays the launcher's)
+    _PE_RJ_FSTAT_MEMBERS = ("rj_fstat_pe", "rj_fstat_pe_residual")
 
     @staticmethod
     def _pe_rj_draw_one_config():
         """``(enabled, {member: P})`` from the env, read at CALL time.
 
         ``GB_PE_RJ_DRAW_ONE`` (default ``0``) switches the mode on;
-        ``GB_PE_RJ_FSTAT_FRACTION`` (default ``0.8``) is P(rj_fstat_pe) and
-        ``GB_PE_RJ_WARM_FRACTION`` (default ``0``) P(rj_warm_pe) per
-        iteration; ``rj_prior_pe`` takes the remainder. Both in [0, 1] and
-        summing to at most 1. Read per call like ``GF_MOVE_TIMING`` so a
-        resumed run takes the runbook's value with no code change.
+        ``GB_PE_RJ_FSTAT_FRACTION`` (default ``0.8``) is the TOTAL F-stat
+        probability per iteration, split between ``rj_fstat_pe`` (the
+        GB-free galaxy grid) and ``rj_fstat_pe_residual`` (the live-residual
+        grid) by ``GB_PE_RJ_FSTAT_RESIDUAL_SPLIT`` (the residual move's
+        share, default ``0.5``; see :func:`pe_rj_fstat_residual_split`);
+        ``GB_PE_RJ_WARM_FRACTION`` (default ``0``) is P(rj_warm_pe) and
+        ``rj_prior_pe`` takes the remainder. Fractions in [0, 1], the two
+        absolute ones summing to at most 1. Read per call like
+        ``GF_MOVE_TIMING`` so a resumed run takes the runbook's value with no
+        code change.
         """
         if os.environ.get("GB_PE_RJ_DRAW_ONE", "0") != "1":
             return False, None
@@ -757,7 +796,10 @@ class GFCombineMove(CombineMove, GlobalFitMove):
             raise ValueError(
                 f"GB_PE_RJ_FSTAT_FRACTION={raw_f!r} + GB_PE_RJ_WARM_FRACTION="
                 f"{raw_w!r} exceed 1; rj_prior_pe takes the remainder.")
-        return True, {"rj_fstat_pe": p_f, "rj_prior_pe": 1.0 - p_f - p_w,
+        s = pe_rj_fstat_residual_split()
+        return True, {"rj_fstat_pe": p_f * (1.0 - s),
+                      "rj_fstat_pe_residual": p_f * s,
+                      "rj_prior_pe": 1.0 - p_f - p_w,
                       "rj_warm_pe": p_w}
 
     def _pe_rj_draw_one_plan(self, model):
@@ -776,6 +818,13 @@ class GFCombineMove(CombineMove, GlobalFitMove):
         pair -- both fall through to the stage's configured mode
         (``weighted_cycle`` / ``random_choice`` / sequential).
 
+        TWO F-STAT MOVES (user ruling 2026-10-12): ``rj_fstat_pe_residual``
+        is a member beside ``rj_fstat_pe`` and either one stands in for the
+        F-stat half of the required pair. With both in the stage they split
+        ``GB_PE_RJ_FSTAT_FRACTION`` by ``GB_PE_RJ_FSTAT_RESIDUAL_SPLIT``; with
+        one, it takes the whole F-stat fraction. The drawn move still takes
+        the slot of the first member in the stage's order.
+
         Why: with the PE cycle drawn as ``len(moves)`` weighted draws, both
         RJ moves ran ~once per iteration (3-month job 469: 27 + 27 firings
         over 27 PE iterations, ~280 s each = the whole ~9.4 min iteration).
@@ -788,14 +837,25 @@ class GFCombineMove(CombineMove, GlobalFitMove):
             return None
         moves = [m[0] if isinstance(m, tuple) else m for m in self.moves]
         names = [getattr(m, "gf_move_name", type(m).__name__) for m in moves]
-        # the fstat/prior pair is required (as before). rj_warm_pe joins the
-        # draw only when it is given probability mass (GB_PE_RJ_WARM_FRACTION
-        # > 0) AND the stage carries it; at 0 it stays outside the draw and
-        # runs every iteration in its fixed slot exactly as before. A warm
-        # fraction set on a stage without rj_warm_pe is redistributed over
-        # the pair in their configured proportion.
-        if not all(n in names for n in self._PE_RJ_DRAW_ONE_MEMBERS[:2]):
+        # an F-stat move + rj_prior_pe is required (as before, with either
+        # F-stat move -- or both -- counting since 2026-10-12). rj_warm_pe
+        # joins the draw only when it is given probability mass
+        # (GB_PE_RJ_WARM_FRACTION > 0) AND the stage carries it; at 0 it stays
+        # outside the draw and runs every iteration in its fixed slot exactly
+        # as before. A warm fraction set on a stage without rj_warm_pe is
+        # redistributed over the others in their configured proportion.
+        fstat_here = [n for n in self._PE_RJ_FSTAT_MEMBERS if n in names]
+        if "rj_prior_pe" not in names or not fstat_here:
             return None
+        # ONE F-stat move in the stage takes the WHOLE F-stat share, so the
+        # total stays GB_PE_RJ_FSTAT_FRACTION and prior / warm keep theirs (a
+        # pre-2026-10-12 composition draws exactly as it did). With both, an
+        # F-stat move at zero mass (a split of 0 or 1) stays a member, is
+        # never drawn and so never runs: it does NOT fall back to running every
+        # iteration the way a zero-mass warm move does.
+        if len(fstat_here) == 1:
+            probs = dict(probs)
+            probs[fstat_here[0]] = sum(probs[n] for n in self._PE_RJ_FSTAT_MEMBERS)
         members = tuple(
             n for n in self._PE_RJ_DRAW_ONE_MEMBERS
             if n in names and (n != "rj_warm_pe" or probs.get(n, 0.0) > 0.0))

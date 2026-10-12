@@ -3894,16 +3894,62 @@ export GB_FSTAT_REFIT_EVERY=2      # SEARCH stages: every 2nd iteration
 # in full_pe the old clock ticked ~1/N as fast and the knob silently meant N
 # times more iterations than it said.
 # refit the F-stat birth grid every 150 PE ITERATIONS (the clock counts
-# iterations; the decision runs when rj_fstat_pe proposes, so the actual
-# spacing is the first rj_fstat_pe draw at or after 150) -- user ruling
+# iterations; the decision runs when the move proposes, so the actual
+# spacing is its first draw at or after 150) -- user ruling
 # 2026-10-02: "during PE fstat should refit every 50 iterations" (was 250);
 # back to 250 on 2026-10-07 (Mike: "make it default during pe to updating
 # fstat every 250 iterations"); 150 on 2026-10-12 (Mike: "PE fstat fit
 # should be based on a randomly chosen walker residual. And we should do a
 # refit on that every 150 iterations" -- the walker rule is the
-# GB_FSTAT_PE_REF=random code default below, unchanged). On the 9mo each PE
-# refit is a 3.5-h epoch (32,715 peaks at F >= 19.5 over all 1232 bands).
+# GB_FSTAT_PE_REF=random code default below, unchanged).
+# ⚠ SINCE 2026-10-12 (the TWO PE F-STAT MOVES below) THIS CADENCE BELONGS TO
+# rj_fstat_pe_residual, the LIVE-residual move; rj_fstat_pe (the GB-free
+# galaxy grid, a 3.5-h epoch on the 9mo: 32,715 peaks at F >= 19.5 over all
+# 1232 bands) fits once and never again (GB_FSTAT_REFIT_EVERY_PE_GB_FREE).
 export GB_FSTAT_REFIT_EVERY_PE=150
+# ---------------------------------------------------------------------------
+# TWO PE F-STAT MOVES (user ruling 2026-10-12)
+# ---------------------------------------------------------------------------
+# Mike: "I would like to do two fstat moves that will split their share of
+# the total moves. One fstat move fits the GB-free residual so the whole
+# galaxy down to SNR 6.5. [...] The second fstat move will fit the
+# gb-inclusive residual every 150 iterations. These iteration counts are the
+# overall iterations, so the first time after the overall iterations pass a
+# number, it should refit the first time that proposal is chosen. This is not
+# a 'number of visits', so within the proposal it should check if it has
+# passed the overall iteration cadence and refit." Then: "set the gb-free
+# residual refit (with the full galaxy found) to not refitting during full
+# pe. It should just fit once the first time it is visiting in full pe. The
+# residual fstat will take care of low snr adjustments." And: "this should
+# not be specific to each walker, just specific to the one walker that was
+# randomly drawn."
+#   rj_fstat_pe           GB-FREE residual (the reference walker's cold GBs
+#                         restored for the sweep) = the whole galaxy. Same
+#                         name, fit dir (gb_fstat_fit/shared) and fingerprint
+#                         as before, so a resumed store LOADS the PE epoch it
+#                         already holds as its one fit. One random cold walker
+#                         (GB_FSTAT_PE_REF, unchanged).
+#   rj_fstat_pe_residual  LIVE residual (GB templates subtracted, what the PE
+#                         model has not absorbed), ONE random cold walker per
+#                         epoch (not the search's min-lnL walker, not a fit per
+#                         walker), its own root gb_fstat_fit/shared_pe_residual,
+#                         refit every GB_FSTAT_REFIT_EVERY_PE (above) elapsed
+#                         iterations, peak floor = full_pe's declared 6.25.
+# The galaxy move's cadence: 0 = fit ONCE (its first PE visit fits, or loads
+# the epoch already on disk), never refit.
+export GB_FSTAT_REFIT_EVERY_PE_GB_FREE=0
+# The galaxy move's OWN F-stat peak floor, SNR (F = SNR^2/2 = 21.125). NOT part
+# of the epoch fingerprint: a FIT selects its peaks at it; a LOAD of an epoch
+# selected at a lower floor (the 9mo's PE epoch_0000, F >= 19.53) keeps only
+# its cached peak boxes with F >= 21.125 -- exactly the catalog re-selecting
+# the cached comb at 6.5 gives (candidates are floor-independent, the per-band
+# cap keeps the top F), with no refit. 'none' = full_pe's declared floor.
+export GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE=6.5
+# The residual move's share of GB_PE_RJ_FSTAT_FRACTION (0.45 -> 0.225 each);
+# prior 0.45 and warm 0.1 unchanged. 0 or 1 composes ONE F-stat move.
+export GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=${GB_PE_RJ_FSTAT_RESIDUAL_SPLIT:-0.5}
+# GB_FSTAT_FORCE_REFIT=1 on a launch line now refits BOTH PE grids (one new
+# epoch per root, the 3.5-h galaxy included) -- leave it off a PE resume.
 # WHICH WALKER A PE REFIT FITS (code default, NOT exported; user ruling
 # 2026-10-06): GB_FSTAT_PE_REF=random (default) fits each PE epoch to a
 # uniformly RANDOM cold walker with a finite lnL instead of the min-lnL one --
@@ -5012,6 +5058,24 @@ export SOBBH_CHECK_LL=${SOBBH_CHECK_LL:-0}
 export SOBBH_INNER_MOVE_KIND=${SOBBH_INNER_MOVE_KIND:-eigen}
 export MBH_INNER_MOVE_KIND=eigen
 export EMRI_INNER_MOVE_KIND=eigen
+# ---- MBH SKY-MODE HOPS (2026-10-12) ----------------------------------------
+# The MBH inner-move stack mixes the LISA-frame sky-mode hops back in. The
+# production basis is ICRS (alpha / sin_delta / psi), so the SkyMove converts
+# each row ICRS -> ecliptic -> constellation frame at the row's OWN orbital
+# phase (read off the run's orbits; t_plunge is referenced to
+# mbh_waveform_t0), hops there (the 8 modes: plane reflection x 90-degree
+# in-plane rotations; the merger keeps its DETECTOR arrival time, so t_plunge
+# moves by up to ~2 R/c), converts back, and carries the frame Jacobian in
+# the Metropolis factor (exact detailed balance). Verified 2026-10-12 on the
+# LAT time-domain response (equal-arm + ESA orbits): every hopped mode
+# overlaps the original A/E at > 0.99 with no residual time shift at 3 mHz.
+# Draw fractions of the per-leaf inner-move draws (Mike 2026-10-12): 0.02
+# the full 8-mode hop, 0.04 the plane reflection only, 0.02 the in-plane
+# rotation only; the remaining 0.92 is the eigen move above. 0 disables a
+# kind. Code defaults are the same values (this block pins them).
+export MBH_SKY_MOVE_BOTH_WEIGHT=${MBH_SKY_MOVE_BOTH_WEIGHT:-0.02}
+export MBH_SKY_MOVE_LAT_WEIGHT=${MBH_SKY_MOVE_LAT_WEIGHT:-0.04}
+export MBH_SKY_MOVE_LONG_WEIGHT=${MBH_SKY_MOVE_LONG_WEIGHT:-0.02}
 # TABLE SCOPE. SOBBH is set ABOVE (SOBBH_EIGEN_SCOPE, walker_max per the
 # 2026-09-16 ruling; the 2026-09-08 per-walker ruling it superseded cost
 # 12 rungs x 10 walkers = 120 points x ~245 rows ~ 29k batched likelihood
@@ -5058,24 +5122,6 @@ export EMRI_EIGEN_REFRESH=${EMRI_EIGEN_REFRESH:-10}
 #   the direct template; MBH: the batched windowed template) at the max-lnL
 #   cold walker, through that walker's PSD -- the expected information, no
 #   residual noise, positive semi-definite. ONE shared table per leaf (the
-# ---- MBH SKY-MODE HOPS (2026-10-12) ----------------------------------------
-# The MBH inner-move stack mixes the LISA-frame sky-mode hops back in. The
-# production basis is ICRS (alpha / sin_delta / psi), so the SkyMove converts
-# each row ICRS -> ecliptic -> constellation frame at the row's OWN orbital
-# phase (read off the run's orbits; t_plunge is referenced to
-# mbh_waveform_t0), hops there (the 8 modes: plane reflection x 90-degree
-# in-plane rotations; the merger keeps its DETECTOR arrival time, so t_plunge
-# moves by up to ~2 R/c), converts back, and carries the frame Jacobian in
-# the Metropolis factor (exact detailed balance). Verified 2026-10-12 on the
-# LAT time-domain response (equal-arm + ESA orbits): every hopped mode
-# overlaps the original A/E at > 0.99 with no residual time shift at 3 mHz.
-# Draw fractions of the per-leaf inner-move draws (Mike 2026-10-12): 0.02
-# the full 8-mode hop, 0.04 the plane reflection only, 0.02 the in-plane
-# rotation only; the remaining 0.92 is the eigen move above. 0 disables a
-# kind. Code defaults are the same values (this block pins them).
-export MBH_SKY_MOVE_BOTH_WEIGHT=${MBH_SKY_MOVE_BOTH_WEIGHT:-0.02}
-export MBH_SKY_MOVE_LAT_WEIGHT=${MBH_SKY_MOVE_LAT_WEIGHT:-0.04}
-export MBH_SKY_MOVE_LONG_WEIGHT=${MBH_SKY_MOVE_LONG_WEIGHT:-0.02}
 #   {BRANCH}_EIGEN_SCOPE knob does not apply). Any failure WARNS
 #   ("[eigen_refresh] ... Gram build failed") and builds the ll table.
 #   Why: on the SOBBH toy the ll route's 1e-4-of-box step gives an f_low

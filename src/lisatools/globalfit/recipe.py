@@ -216,6 +216,111 @@ def pe_phase_maximize_on(gb_mode_search: bool, pe_strict: bool) -> bool:
     return bool(gb_mode_search) and not bool(pe_strict)
 
 
+# ---- the two PE F-stat moves (user ruling 2026-10-12) ----------------------
+# Mike, 2026-10-12: "I would like to do two fstat moves that will split their
+# share of the total moves. One fstat move fits the GB-free residual so the
+# whole galaxy down to SNR 6.5. [...] The second fstat move will fit the
+# gb-inclusive residual every 150 iterations. These iteration counts are the
+# overall iterations, so the first time after the overall iterations pass a
+# number, it should refit the first time that proposal is chosen." -- then:
+# "set the gb-free residual refit (with the full galaxy found) to not
+# refitting during full pe. It should just fit once the first time it is
+# visiting in full pe. The residual fstat will take care of low snr
+# adjustments." -- and: "this should not be specific to each walker, just
+# specific to the one walker that was randomly drawn."
+#
+#   rj_fstat_pe            the GB-FREE residual (the reference walker's cold GBs
+#                          restored for the sweep): the whole galaxy. Root
+#                          ``shared`` (unchanged, so a resumed store loads the
+#                          PE epochs it already fitted). Fit ONCE:
+#                          GB_FSTAT_REFIT_EVERY_PE_GB_FREE (default 0). Floor
+#                          GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE (default SNR 6.5).
+#   rj_fstat_pe_residual   the LIVE residual (GBs subtracted), one random cold
+#                          walker per epoch (GB_FSTAT_PE_REF). Root
+#                          ``shared_pe_residual``. Refit every
+#                          GB_FSTAT_REFIT_EVERY_PE (150) elapsed iterations,
+#                          decided inside its propose. Floor: the stage's.
+#
+# The PE draw splits GB_PE_RJ_FSTAT_FRACTION between them by
+# GB_PE_RJ_FSTAT_RESIDUAL_SPLIT (globalfitmove.pe_rj_fstat_residual_split).
+
+#: the PE live-residual F-stat move's name
+PE_FSTAT_RESIDUAL_MOVE = "rj_fstat_pe_residual"
+#: the default GB-free galaxy floor (SNR), ruling 2026-10-12
+PE_FSTAT_GB_FREE_PEAK_MIN_SNR_DEFAULT = 6.5
+
+
+def _env_nonneg_int(knob: str, default: int) -> int:
+    raw = os.environ.get(knob, "").strip()
+    try:
+        val = int(raw) if raw else int(default)
+    except ValueError:
+        raise ValueError(f"{knob}={raw!r} must be an integer (iterations; "
+                         "0 = fit once and never refit).") from None
+    if val < 0:
+        raise ValueError(f"{knob}={raw!r} must be >= 0 (0 = fit once and "
+                         "never refit).")
+    return val
+
+
+def pe_fstat_refit_every() -> int:
+    """``GB_FSTAT_REFIT_EVERY_PE`` (default 150): the PE refit cadence, in
+    ELAPSED iterations on the F-stat refit clock, of the LIVE-residual move
+    ``rj_fstat_pe_residual`` (since 2026-10-12; it was ``rj_fstat_pe``'s until
+    the galaxy move became fit-once). The decision runs inside the move's
+    propose, so the refit lands on its first draw at or after the cadence."""
+    return _env_nonneg_int("GB_FSTAT_REFIT_EVERY_PE", 150)
+
+
+def pe_fstat_gb_free_refit_every() -> int:
+    """``GB_FSTAT_REFIT_EVERY_PE_GB_FREE`` (default 0): the GB-free galaxy
+    move ``rj_fstat_pe``'s cadence. 0 = fit exactly ONCE (at its first visit
+    in PE, or load the epoch a resumed store already holds) and never refit
+    (user ruling 2026-10-12)."""
+    return _env_nonneg_int("GB_FSTAT_REFIT_EVERY_PE_GB_FREE", 0)
+
+
+def pe_fstat_gb_free_peak_min_snr():
+    """``GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE`` (default 6.5): the GB-free galaxy
+    move's OWN F-stat peak floor, as an SNR (F = SNR^2 / 2). ``none`` / ``stage``
+    hands it back to the stage's declared floor (full_pe: 6.25). A fit selects
+    at it; a LOAD of an epoch selected lower keeps only the boxes at or above
+    it (no refit -- see ``fstat_gridfit.stacked_cache_at_floor``)."""
+    raw = os.environ.get("GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE", "").strip()
+    if raw.lower() in ("none", "stage"):
+        return None
+    try:
+        val = float(raw) if raw else PE_FSTAT_GB_FREE_PEAK_MIN_SNR_DEFAULT
+    except ValueError:
+        raise ValueError(
+            f"GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE={raw!r} must be an SNR (or "
+            "'none' for the stage's floor).") from None
+    if not (np.isfinite(val) and val > 0.0):
+        raise ValueError(
+            f"GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE={raw!r} must be a positive SNR.")
+    return val
+
+
+def pe_fstat_move_config(name: str) -> dict:
+    """The per-move F-stat configuration :func:`build_gb_moves` gives a PE
+    F-stat grid move, by name: ``{fstat_refit_every, fstat_peak_min_snr,
+    fstat_pe_residual}``.
+
+    ``rj_replace_pe`` (not in the v9 recipe) shares ``rj_fstat_pe``'s root and
+    therefore its configuration: on the old shared cadence it would have
+    re-opened the galaxy's epochs every 150 iterations.
+    """
+    if name in ("rj_fstat_pe", "rj_replace_pe"):
+        return dict(fstat_refit_every=pe_fstat_gb_free_refit_every(),
+                    fstat_peak_min_snr=pe_fstat_gb_free_peak_min_snr(),
+                    fstat_pe_residual=False)
+    if name == PE_FSTAT_RESIDUAL_MOVE:
+        return dict(fstat_refit_every=pe_fstat_refit_every(),
+                    fstat_peak_min_snr=None,
+                    fstat_pe_residual=True)
+    raise KeyError(f"{name!r} is not a PE F-stat grid move.")
+
+
 def _stage_kind_of(step):
     """The stage kind (``"search"``/``"rj"``/``"pe"``) stamped on a materialized step.
 
@@ -5221,7 +5326,11 @@ def build_gb_moves(
     # refit far more often in wall-clock terms than the number suggests
     # (and, before the clock was changed to count elapsed iterations,
     # far LESS often than it said). The launchers export the same value.
-    _refit_pe = int(os.environ.get("GB_FSTAT_REFIT_EVERY_PE", "150"))
+    # SINCE 2026-10-12 this cadence belongs to the LIVE-residual PE move
+    # (rj_fstat_pe_residual); the GB-free galaxy move rj_fstat_pe fits once
+    # (GB_FSTAT_REFIT_EVERY_PE_GB_FREE=0) -- see pe_fstat_move_config.
+    _pe_fstat_gb_free = pe_fstat_move_config("rj_fstat_pe")
+    _pe_fstat_residual = pe_fstat_move_config(PE_FSTAT_RESIDUAL_MOVE)
     if _fit_in_move:
         _fit_dir = getattr(gb_info, "fstat_fit_dir", "") or os.path.join(
             os.path.dirname(str(general_info.main_file_path)), "gb_fstat_fit")
@@ -5790,11 +5899,27 @@ def build_gb_moves(
     # phase_maximize, so search campaigns keep the pin convention.
     _pe_extr_draw = bool(getattr(gb_info, "pe_extrinsic_draw", True))
 
+    def _pe_fit_kwargs(cfg):
+        # the PE F-stat grid moves' fit kwargs from pe_fstat_move_config: the
+        # cadence (passed as before, fit-in-move or not) and, on the grid
+        # class only, the move's own peak floor
+        out = {**_fit_kwargs, "fstat_refit_every": cfg["fstat_refit_every"]}
+        if _fit_in_move:
+            out["fstat_peak_min_snr"] = cfg["fstat_peak_min_snr"]
+        return out
+
+    # THE GB-FREE GALAXY GRID (ruling 2026-10-12): name, fit dir and mode
+    # (fstat_search_residual / fstat_pe_residual both False -> root "shared",
+    # GB-free window open, fingerprint unchanged) are EXACTLY today's, so a
+    # resumed store picks up the PE epoch it already fitted. Fit once
+    # (GB_FSTAT_REFIT_EVERY_PE_GB_FREE=0) at its own floor
+    # (GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE=6.5, applied to a loaded epoch as a
+    # cut on its cached peaks -- never a refit).
     gb_pe_prior_move = _RJBirth(
         *gb_move_args,
         rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
         **({"is_rj_prop": True} if _fit_in_move else {}),
-        **{**_fit_kwargs, "fstat_refit_every": _refit_pe},
+        **_pe_fit_kwargs(_pe_fstat_gb_free),
         name="rj_fstat_pe",
         use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
         # NEVER in full_pe unless GB_PE_PHASE_MAXIMIZE=1 asks for it by name
@@ -5816,7 +5941,9 @@ def build_gb_moves(
     )
     # PE stays on the GB-FREE grid (``fstat_search_residual`` left False):
     # see the TODO beside rj_fstat_search. Spelled out here because the
-    # default is silent and this is the move the decision is about.
+    # default is silent and this is the move the decision is about. Since
+    # 2026-10-12 the LIVE residual has its own PE move, rj_fstat_pe_residual
+    # (below), and this one is the galaxy grid, fitted once.
     gb_pe_prior_move.accepted = np.zeros((ntemps, nwalkers_local))
     gb_pe_prior_move.install_walker_fanout(curr)
 
@@ -5843,6 +5970,52 @@ def build_gb_moves(
     # reverse-density convention, per its docstring).
     if not _gb_mode_search or _pe_strict:
         gb_pe_prior_move.rj_fstat_dist_birth = _fstat_dist_birth_stamp()
+
+    #* =============== PE LIVE-RESIDUAL F-STAT (rj_fstat_pe_residual) ===============
+    # USER RULING 2026-10-12: "The second fstat move will fit the gb-inclusive
+    # residual every 150 iterations [...] The residual fstat will take care of
+    # low snr adjustments" -- "this should not be specific to each walker, just
+    # specific to the one walker that was randomly drawn". rj_fstat_pe's twin in
+    # every proposal setting (same class, kwargs, PE tempering budget, flavor
+    # stamps), differing ONLY in what its grid is fitted to:
+    #   * fstat_pe_residual: the LIVE residual (GBs subtracted, the GB-free
+    #     window closed), ONE random cold walker per epoch on the PE rule
+    #     (GB_FSTAT_PE_REF; NOT the search moves' min-lnL walker, NOT a fit per
+    #     walker), epochs under their OWN root shared_pe_residual;
+    #   * cadence GB_FSTAT_REFIT_EVERY_PE (150 elapsed iterations; the decision
+    #     runs in its own propose, so the refit is its first draw at or after);
+    #   * the stage's declared peak floor (no floor of its own).
+    # Built unconditionally (a cheap object until its first propose fits); the
+    # recipe's pe_move_names filter and GB_PE_RJ_FSTAT_RESIDUAL_SPLIT (the
+    # driver composes it only with a positive share) decide whether it runs.
+    # Never a cap updater (rj_fstat_pe keeps that role, as before).
+    gb_pe_residual_move = _RJBirth(
+        *gb_move_args,
+        rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
+        **({"is_rj_prop": True} if _fit_in_move else {}),
+        **_pe_fit_kwargs(_pe_fstat_residual),
+        name=PE_FSTAT_RESIDUAL_MOVE,
+        use_prior_removal=False,
+        phase_maximize=(
+            _rj_phase_max
+            if pe_phase_maximize_on(_gb_mode_search, _pe_strict)
+            else False
+        ),
+        pe_extrinsic_draw=(
+            _pe_extr_draw and not (_gb_mode_search and not _pe_strict)
+        ),
+        run_swaps=True,
+        temper_every_proposes=_pe_temper_every,
+        gpus=[],
+        **{**gb_move_kwargs, "leaf_cap_update": False,
+           "rj_flip_fraction_default": _rj_flip_default,
+           **_imr_defaults, **_pe_cap_off}
+    )
+    gb_pe_residual_move.fstat_pe_residual = _pe_fstat_residual["fstat_pe_residual"]
+    gb_pe_residual_move.accepted = np.zeros((ntemps, nwalkers_local))
+    gb_pe_residual_move.install_walker_fanout(curr)
+    if not _gb_mode_search or _pe_strict:
+        gb_pe_residual_move.rj_fstat_dist_birth = _fstat_dist_birth_stamp()
 
     #* ===================== WARM-START PE TWIN (rj_warm_pe) =====================
     # USER RULING 2026-09-07: "rj_warm_search should also have a pe twin,
@@ -5945,7 +6118,10 @@ def build_gb_moves(
             *gb_move_args,
             rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
             **({"is_rj_prop": True} if _fit_in_move else {}),
-            **{**_fit_kwargs, "fstat_refit_every": _refit_pe},
+            # rj_fstat_pe's ROOT, so rj_fstat_pe's cadence and floor (fit once,
+            # SNR 6.5): on the residual move's 150 it would re-open the galaxy
+            # epochs (2026-10-12)
+            **_pe_fit_kwargs(pe_fstat_move_config("rj_replace_pe")),
             name="rj_replace_pe",
             rj_replace=True,
             # NEVER phase-maximize the RJ birth machinery here (the
@@ -6030,7 +6206,7 @@ def build_gb_moves(
     # candidate for a replacement swap in the same iteration. The stage's
     # recipe move list is what actually orders the GFCombineMove cycle;
     # this order is the registration order the filter preserves.
-    gb_pe_moves = [gb_pe_prior_move]
+    gb_pe_moves = [gb_pe_prior_move, gb_pe_residual_move]
     if gb_warm_pe_move is not None:
         gb_pe_moves.append(gb_warm_pe_move)
     if gb_pe_replace_move is not None:

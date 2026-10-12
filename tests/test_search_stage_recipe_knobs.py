@@ -91,7 +91,7 @@ _KNOBS = {k: None for k in (
     "STAGE_REPLICA_PE", "GB_SEARCH_SOURCE_EVERY", "GB_SEARCH_SEED_ITERS",
     "NOISE_SEARCH_CHECKS", "GB_SEARCH_LEGS",
     "SOURCE_SEARCH_CHECKS", "SOURCE_SEARCH_TOL", "SOURCE_SEARCH_MAX_ROUNDS",
-    "SOURCE_SEARCH_POSITION",
+    "SOURCE_SEARCH_POSITION", "GB_PE_RJ_FSTAT_RESIDUAL_SPLIT",
     *(f"GB_SEARCH_{n}_{s}" for n in (1, 2, 3)
       for s in ("SOURCE_EVERY", "NOISE_MODE", "NOISE_MAX_ROUNDS", "RESET_VALVES")))}
 
@@ -842,6 +842,30 @@ class LauncherRecipeTest(unittest.TestCase):
             self.assertEqual(new.step_kwargs[k], old.step_kwargs[k], k)
         self.assertEqual(new.combine_kwargs, old.combine_kwargs)
 
+    def test_full_pe_carries_the_two_fstat_moves(self):
+        """User ruling 2026-10-12: "two fstat moves that will split their share
+        of the total moves" -- the GB-free galaxy grid (fit once, SNR 6.5) and
+        the live-residual grid (every 150 iterations), side by side in the RJ
+        slot, under every v9 launcher's exports."""
+        for tag in ("9mo", "1yr", "6mo"):
+            names = _names(_stage(self.fits[tag], "full_pe"))
+            i = names.index("rj_fstat_pe")
+            self.assertEqual(names[i - 1:i + 3],
+                             ["rj_warm_pe", "rj_fstat_pe", "rj_fstat_pe_residual",
+                              "rj_prior_pe"], tag)
+        # the printout resolves both moves' modes, cadences, floors and draw shares
+        with mock.patch.dict(os.environ, self.exports["9mo"]):
+            text = _R().describe_recipe(self.fits["9mo"])
+        block = text.split("full_pe  kind=pe")[1]
+        line = next(ln for ln in block.splitlines() if ln.startswith("  F-stat:"))
+        for want in ("rj_fstat_pe = GB-FREE residual", "fit ONCE", "SNR 6.5 (its own)",
+                     "rj_fstat_pe_residual = LIVE residual",
+                     "refit every 150 elapsed iterations",
+                     "the stage's declared floor", "P(draw)=0.225",
+                     "GB_PE_RJ_FSTAT_FRACTION=0.45", "GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=0.5"):
+            self.assertIn(want, line)
+        self.assertEqual(line.count("P(draw)=0.225"), 2)
+
     def test_the_6mo_recipe_is_untouched(self):
         fit = self.fits["6mo"]
         self.assertEqual([s.name for s in fit.recipe.stages],
@@ -854,6 +878,42 @@ class LauncherRecipeTest(unittest.TestCase):
         for n in ("gb_search_1", "gb_search_2", "gb_search_3"):
             self.assertEqual({m.name: m.every for m in _stage(fit, n).moves if m.name in SRC},
                              dict.fromkeys(SRC, 5), n)
+
+
+class PeFstatSplitCompositionTest(unittest.TestCase):
+    """GB_PE_RJ_FSTAT_RESIDUAL_SPLIT composes the PE stages' F-stat moves: both
+    in (0, 1), only the galaxy at 0, only the residual at 1 -- in every PE
+    stage of both assemblies, so "full_pe" means one thing."""
+
+    FSTAT = ("rj_fstat_pe", "rj_fstat_pe_residual")
+
+    def tearDown(self):
+        _clear_peak_floor()
+
+    def _pe_fstat(self, base, **over):
+        fit = _build(base, **over)
+        return {s.name: [n for n in _names(s) if n in self.FSTAT]
+                for s in fit.recipe.stages if s.kind in ("pe", "replica_pe")}
+
+    def test_default_and_endpoints(self):
+        for base, over in ((_FULL, {}), (_FULL, _RECIPE_9MO), (_GB_ONLY, {})):
+            for split, want in ((None, list(self.FSTAT)), ("0.3", list(self.FSTAT)),
+                                ("0", ["rj_fstat_pe"]), ("1", ["rj_fstat_pe_residual"])):
+                got = self._pe_fstat(base, **over, GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=split)
+                self.assertTrue(got, (base.get("GB_ONLY"), over))
+                for stage, names in got.items():
+                    self.assertEqual(names, want, (stage, split, base.get("GB_ONLY")))
+
+    def test_bad_split_is_refused_at_composition(self):
+        with self.assertRaises(ValueError):
+            _build(_FULL, GB_PE_RJ_FSTAT_RESIDUAL_SPLIT="2")
+
+    def test_search_stages_are_untouched(self):
+        fit = _build(_FULL, **_RECIPE_9MO)
+        for s in fit.recipe.stages:
+            if s.kind in ("pe", "replica_pe"):
+                continue
+            self.assertFalse(set(_names(s)) & set(self.FSTAT), s.name)
 
 
 class DefaultsAreTodayTest(unittest.TestCase):

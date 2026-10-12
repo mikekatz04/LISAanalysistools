@@ -72,6 +72,7 @@ __all__ = [
     "comb_cache_usable",
     "stacked_grid_path",
     "stage_b_complete",
+    "stacked_cache_at_floor",
     "build_gb_birth_distribution",
     "sighet_fstat_ref_margin_hz",
     "build_sighet_call_fstat",
@@ -2481,6 +2482,155 @@ def stage_b_complete(cache_dir: str) -> bool:
     return os.path.exists(stacked_grid_path(cache_dir))
 
 
+#: The stage-B cache keys that are PER-BOX parallel arrays (one entry per
+#: selected peak, in the cache's box order). Everything else is either a
+#: group-level array (``logp_grids_g{i}`` / ``mc_ax_g{i}`` / the per-group sky
+#: axes / ``group_sizes``) or run-level metadata copied through unchanged.
+_STACKED_PER_BOX_KEYS = ("f0_los", "f0_dxs", "peak_f0_mHz", "peak_F",
+                         "band_idx", "band_f0_lo", "band_f0_hi")
+
+
+def stacked_cache_at_floor(d, min_F: float):
+    """A stage-B cache restricted to the boxes whose peak F is >= ``min_F``.
+
+    Returns ``(cache, n_kept, n_total)``. ``cache`` is ``d`` ITSELF when no
+    box falls below the floor (nothing copied), ``None`` when every box does,
+    and otherwise a lazy read-through view (:class:`_FloorCutStackedCache`)
+    with the same key layout :func:`write_stacked_npz` produces (legacy single
+    stack or grouped), which
+    :func:`~lisatools.sampling.fstat_proposal.stacked_from_cache` and
+    :func:`build_gb_birth_distribution` read exactly like the npz -- each box
+    grid cut only when it is read, one group at a time.
+
+    WHY THIS IS THE SAME CATALOG A RE-SELECTION AT ``min_F`` WOULD GIVE
+    (user ruling 2026-10-12: the GB-free galaxy grid at SNR 6.5, while the
+    running 9mo store holds a PE epoch selected at 6.25). Peak selection
+    (:func:`select_comb_peaks`) takes a floor-INDEPENDENT candidate set
+    (window champions | strict local maxima, interior bands), keeps those
+    with ``F >= floor`` and caps each band at its ``FSTAT_PEAKS_PER_BAND``
+    highest-F candidates. Raising the floor therefore keeps exactly the old
+    selection's boxes with ``peak_F >= min_F``: in a band where the cap bound
+    at the old floor the kept set is a top-F prefix either way, and where it
+    did not, every candidate above the new floor was already selected. Each
+    box's grid is scored independently of the others (stage B sweeps boxes,
+    and box is the slowest axis), so the kept boxes' grids are exactly what
+    they were. What does NOT re-derive: a group's SHARED axes (the Mc axis
+    sized by the group's widest box, the sky axes after the per-group byte
+    budget step-down) keep the values the larger group was fitted on -- a
+    valid proposal, the same draw-and-logpdf object on both sides of every
+    RJ factor, just not byte-identical to a fresh fit at the higher floor.
+
+    Raising the floor only: a cache selected at a STRICTER floor than
+    ``min_F`` cannot gain the peaks between the two, and is returned as is
+    (the caller says so).
+    """
+    keys = list(getattr(d, "files", None) or list(d))
+    if "peak_F" not in keys:
+        # an unverifiable legacy cache: nothing to select on
+        return d, None, None
+    peak_F = np.asarray(d["peak_F"], dtype=float).reshape(-1)
+    n_total = int(peak_F.size)
+    keep = peak_F >= float(min_F)
+    n_kept = int(keep.sum())
+    if n_kept == n_total:
+        return d, n_kept, n_total
+    if n_kept == 0:
+        return None, 0, n_total
+    return _FloorCutStackedCache(d, keys, keep, float(min_F)), n_kept, n_total
+
+
+class _FloorCutStackedCache:
+    """Read-through view of a stage-B cache with the boxes below a floor cut
+    (what :func:`stacked_cache_at_floor` returns when it drops something).
+
+    LAZY ON PURPOSE: a box GRID is cut only when its key is read, one group
+    at a time, exactly as the unmodified loader pulls one group at a time out
+    of the npz. Materializing every cut group up front would hold the whole
+    cut galaxy grid in each rank's host memory for the length of the device
+    build (the 9mo PE epoch: 32,715 boxes, ~43 GB resident per card once on
+    device). The small per-box arrays, the renumbered group table and the
+    raised stamp are computed once here. Reads like the npz: ``files``,
+    ``in``, iteration, ``[key]``.
+    """
+
+    _GROUP_PREFIXES = ("logp_grids_g", "mc_ax_g", "alpha_ax_g", "sin_delta_ax_g")
+
+    def __init__(self, d, keys, keep, min_F):
+        self._d = d
+        self._keep = keep
+        self._small = {}          # computed arrays, by NEW key
+        self._alias = {}          # NEW key -> (source key, box mask or None)
+        grouped = "group_sizes" in keys
+        out_keys = []
+        for k in keys:
+            if k in _STACKED_PER_BOX_KEYS:
+                self._small[k] = np.asarray(d[k])[keep]
+            elif k == "logp_grids":
+                self._alias[k] = (k, keep)
+            elif grouped and (k == "group_sizes" or k.startswith(self._GROUP_PREFIXES)):
+                continue          # renumbered below
+            else:
+                self._alias[k] = (k, None)
+            out_keys.append(k)
+        if grouped:
+            sizes = np.asarray(d["group_sizes"], dtype=int).reshape(-1)
+            bounds = np.concatenate([[0], np.cumsum(sizes)])
+            if int(bounds[-1]) != int(keep.size):
+                raise ValueError(
+                    f"stage-B cache: group_sizes sum to {int(bounds[-1])} boxes "
+                    f"but peak_F has {int(keep.size)}; refusing to subset a "
+                    f"cache whose box axis disagrees with its groups.")
+            new_sizes = []
+            for gi, (a, b) in enumerate(zip(bounds[:-1], bounds[1:])):
+                m = keep[int(a):int(b)]
+                if not m.any():
+                    continue      # a group that lost every box
+                gj = len(new_sizes)
+                self._alias[f"logp_grids_g{gj}"] = (f"logp_grids_g{gi}", m)
+                self._alias[f"mc_ax_g{gj}"] = (f"mc_ax_g{gi}", None)
+                for ax in ("alpha_ax_g", "sin_delta_ax_g"):
+                    if f"{ax}{gi}" in keys:
+                        self._alias[f"{ax}{gj}"] = (f"{ax}{gi}", None)
+                new_sizes.append(int(m.sum()))
+            self._small["group_sizes"] = np.asarray(new_sizes, dtype=int)
+            out_keys.append("group_sizes")
+            out_keys += [k for k in self._alias if k.startswith(self._GROUP_PREFIXES)]
+            # the flat sky keys describe GROUP 0 when the groups differ
+            # (write_stacked_npz); keep that true when group 0 was dropped
+            if "alpha_ax_g0" in self._alias:
+                self._alias["alpha_ax"] = self._alias["alpha_ax_g0"]
+                self._alias["sin_delta_ax"] = self._alias["sin_delta_ax_g0"]
+        # the stamp now says what the cache holds: the higher floor
+        have = float(d["peak_min_F"]) if "peak_min_F" in keys else -np.inf
+        self._small["peak_min_F"] = np.float64(max(have, float(min_F)))
+        if "peak_min_F" not in out_keys:
+            out_keys.append("peak_min_F")
+        for k in self._small:
+            self._alias.pop(k, None)
+        self._keys = list(dict.fromkeys(out_keys))
+
+    @property
+    def files(self):
+        return list(self._keys)
+
+    def __contains__(self, key):
+        return key in self._small or key in self._alias
+
+    def __iter__(self):
+        return iter(self._keys)
+
+    def __len__(self):
+        return len(self._keys)
+
+    def __getitem__(self, key):
+        if key in self._small:
+            return self._small[key]
+        src, mask = self._alias[key]
+        if mask is None:
+            return self._d[src]
+        return np.asarray(self._d[src])[mask]
+
+
 def run_fstat_grid_fit(call_fstat: Callable, *, xp, Tobs: float,
                        band_edges_hz, f0_lims_hz, mc_lims, cache_dir: str,
                        fingerprint_extra: str = "", epoch=None,
@@ -2929,8 +3079,18 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
                                 stacked_live=None,
                                 expected_band_edges=None, epoch=None,
                                 ratio_tight=None, tobs=None,
-                                seed: Optional[int] = None):
+                                seed: Optional[int] = None,
+                                peak_min_F: Optional[float] = None):
     """Stacked grids (+ optional comb) -> floor -> RJ birth container.
+
+    ``peak_min_F`` (optional, F units): the LOADING move's own peak floor.
+    A cache selected at a LOWER floor is restricted to the boxes at or above
+    it (:func:`stacked_cache_at_floor` -- the same catalog a re-selection
+    from the comb at that floor gives, with no refit); a cache selected at a
+    STRICTER floor is kept as is, loudly. ``None`` (the default, every move
+    without a floor of its own) loads the cache unchanged. Never applied to
+    ``stacked_live``: a grid fitted in this process was selected at the
+    floor in force.
 
     ``stacked_live`` short-circuits the npz reload when the caller just built
     the grids in-process (the in-move fit). ``comb_weight > 0`` adds a
@@ -2984,6 +3144,38 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
     cache = None
     if os.path.exists(stacked_cache):
         cache = np.load(stacked_cache, allow_pickle=False)
+    if peak_min_F is not None and stacked_live is None and cache is not None:
+        _have = (float(cache["peak_min_F"]) if "peak_min_F" in cache
+                 else None)
+        cache, _n_kept, _n_all = stacked_cache_at_floor(cache, peak_min_F)
+        _snr = float(np.sqrt(2.0 * float(peak_min_F)))
+        if _n_all is None:
+            logger.warning(
+                "[birth] %s carries no peak_F; cannot apply this move's "
+                "peak floor F >= %.4f (SNR %.3f) to it -- loaded unchanged.",
+                stacked_cache, float(peak_min_F), _snr)
+        elif _n_kept < _n_all:
+            logger.info(
+                "[birth] %s: selected at F >= %s; this move's floor is "
+                "F >= %.4f (SNR %.3f) -> keeping %d of %d peak boxes (the "
+                "catalog a re-selection from the comb at that floor gives; "
+                "no refit).", stacked_cache,
+                "unknown" if _have is None else
+                f"{_have:.4f} (SNR {np.sqrt(2.0 * _have):.3f})",
+                float(peak_min_F), _snr, _n_kept, _n_all)
+        elif _have is not None and _have > float(peak_min_F) * (1 + 1e-9):
+            logger.warning(
+                "[birth] %s was selected at a STRICTER floor F >= %.4f (SNR "
+                "%.3f) than this move's F >= %.4f (SNR %.3f): the peaks "
+                "between the two are not in it and cannot be added without a "
+                "refit (GB_FSTAT_FORCE_REFIT=1 on the launch line opens a new "
+                "epoch). Loaded unchanged.", stacked_cache, _have,
+                np.sqrt(2.0 * _have), float(peak_min_F), _snr)
+        if cache is None:
+            logger.warning(
+                "[birth] %s: none of its %d peak boxes reaches this move's "
+                "floor F >= %.4f (SNR %.3f); no peak component.",
+                stacked_cache, _n_all, float(peak_min_F), _snr)
     if stacked_live is None and cache is None:
         return None
 
@@ -3108,9 +3300,12 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
     # which reads as a floor bug rather than an axis mix-up. Read the range
     # off the fitted axis itself, so it cannot drift from what stage B built.
     _ax1_lo, _ax1_hi = float(mc_lims[0]), float(mc_lims[-1])
-    if cache is not None and "grid_basis" in cache.files and \
+    # ``in cache``, not ``in cache.files``: ``cache`` is the NpzFile or, cut to
+    # a loading move's floor, the view stacked_cache_at_floor returns (which
+    # has ``files`` too; a hand-built dict does not)
+    if cache is not None and "grid_basis" in cache and \
             str(np.asarray(cache["grid_basis"]).item()) == "fdot":
-        _axes = ([cache["mc_ax"]] if "mc_ax" in cache.files
+        _axes = ([cache["mc_ax"]] if "mc_ax" in cache
                  else [cache[f"mc_ax_g{i}"]
                        for i in range(len(np.asarray(cache["group_sizes"])))])
         _ax1_lo = float(min(float(np.min(a)) for a in _axes))

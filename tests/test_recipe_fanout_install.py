@@ -20,17 +20,20 @@ class FanoutInstallTest(unittest.TestCase):
     def test_builders_call_install(self):
         # the builders are exercised end to end by the gated smokes; here we pin
         # the call sites so a refactor cannot silently drop them.
-        # 3 (pre-Plan-4) + 14 (Plan 4, Task 5, after the ridge fix) = 17:
+        # 3 (pre-Plan-4) + 14 (Plan 4, Task 5, after the ridge fix) = 17,
+        # + 1 for rj_fstat_pe_residual (the second PE F-stat move, user
+        # ruling 2026-10-12) = 18:
         #   - addremove (SingleSourcePEBuilder.build, one call site shared by
         #     MBH/EMRI/SOBBH): 1
         #   - noise (build_psd_moves: search_move, pe_move): 2
-        #   - GB (build_gb_moves: 13 GBSpecial* moves): 13
+        #   - GB (build_gb_moves: 14 GBSpecial* moves): 14
         #   - VGB (build_vgb_moves: the vgb move): 1
         src = open(recipe_mod.__file__).read()
         # both ridge-gibbs moves (gb_ridge_gibbs and its vgb twin) are plain
         # eryn GFRidgeGibbsMove objects -- head-only, so neither gets an
-        # install_walker_fanout and the count stays 17.
-        self.assertEqual(src.count("install_walker_fanout(curr)"), 17)
+        # install_walker_fanout and the count stays 18.
+        self.assertEqual(src.count("install_walker_fanout(curr)"), 18)
+        self.assertIn("gb_pe_residual_move.install_walker_fanout(curr)", src)
 
 
 class TemperSeedBaseStampTest(unittest.TestCase):

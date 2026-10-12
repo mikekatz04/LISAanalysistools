@@ -7210,23 +7210,62 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def fstat_search_residual(self, value) -> None:
         self._fstat_search_residual = bool(value)
 
+    @property
+    def fstat_pe_residual(self) -> bool:
+        """PE LIVE-RESIDUAL F-stat: ``rj_fstat_pe_residual`` (ruling 2026-10-12).
+
+        Mike, 2026-10-12: "The second fstat move will fit the gb-inclusive
+        residual every 150 iterations" -- the residual as it stands, GB
+        templates SUBTRACTED, so its peaks are what the assembled PE model
+        has not absorbed (the low-SNR adjustments); "this should not be
+        specific to each walker, just specific to the one walker that was
+        randomly drawn". So the move sweeps exactly what a search move sweeps
+        (the GB-free window stays CLOSED, :meth:`_fstat_gb_free_on`) but is a
+        PE move everywhere else:
+
+        * the reference walker follows the PE rule (``GB_FSTAT_PE_REF``,
+          default ``random``: ONE uniformly random cold walker per epoch), NOT
+          the search moves' min-lnL walker (:meth:`_fstat_fit_ref_rule`), on
+          its own seeded stream (:meth:`_fstat_fit_ref_from`);
+        * its epochs live under their OWN root, ``shared_pe_residual``
+          (:meth:`GBSpecialRJFStatGridMove._fstat_root`): never the galaxy
+          move's ``shared`` (a GB-free grid) and never the search stages'
+          ``shared_search`` (a min-lnL search grid).
+
+        Implies the live residual on its own -- :attr:`fstat_search_residual`
+        stays False on this move, so nothing that keys "search" off that flag
+        can mistake it for a search move. Set per instance by
+        :func:`lisatools.globalfit.recipe.build_gb_moves`; ``False`` default,
+        like :attr:`fstat_search_residual`.
+        """
+        return bool(getattr(self, "_fstat_pe_residual", False))
+
+    @fstat_pe_residual.setter
+    def fstat_pe_residual(self, value) -> None:
+        self._fstat_pe_residual = bool(value)
+
     def _fstat_gb_free_on(self) -> bool:
         """Should the F-stat sweep run against a GB-FREE residual?
 
-        ``GB_FSTAT_GB_FREE`` (default on) AND not
-        :attr:`fstat_search_residual`. The mode flag WINS over the env var:
-        "search fits the live residual" is the definition of the mode, so a
-        stray ``GB_FSTAT_GB_FREE=1`` in a submit script must not silently
-        turn the GB restore back on for the search moves.
+        ``GB_FSTAT_GB_FREE`` (default on) AND neither
+        :attr:`fstat_search_residual` nor :attr:`fstat_pe_residual`. The mode
+        flags WIN over the env var: "fits the live residual" is the definition
+        of both modes, so a stray ``GB_FSTAT_GB_FREE=1`` in a submit script
+        must not silently turn the GB restore back on for them.
 
         Single source of truth for all three readers -- the window itself
         (:meth:`_gb_free_residual`), the fan-out payload's ``gb_free``
         request, and the epoch FINGERPRINT -- which must agree or a cache
         key stops describing the residual that was actually swept.
         """
-        if self.fstat_search_residual:
+        if self.fstat_search_residual or getattr(self, "fstat_pe_residual", False):
             return False
         return os.environ.get("GB_FSTAT_GB_FREE", "1") == "1"
+
+    #: Domain tag of the PE live-residual move's reference-walker stream (see
+    #: :meth:`_fstat_fit_ref_from`), so its epoch-k walker is drawn
+    #: independently of the GB-free galaxy move's epoch-k walker.
+    _FSTAT_PE_RESIDUAL_REF_TAG = 0x5245
 
     def _fstat_fit_ref_rule(self) -> str:
         """How this move picks the walker an F-stat EPOCH is fitted to.
@@ -7235,7 +7274,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         (user ruling 2026-10-06): a PE refit fits a UNIFORMLY RANDOM cold
         walker instead of the min-lnL one. ``GB_FSTAT_PE_REF=min`` restores
         the min-lnL rule in PE; it has no effect on search moves
-        (:attr:`fstat_search_residual`).
+        (:attr:`fstat_search_residual`). The PE live-residual move
+        (:attr:`fstat_pe_residual`) is a PE move here: it follows
+        ``GB_FSTAT_PE_REF`` like the galaxy move (ruling 2026-10-12).
 
         Why random in PE: in PE every walker is a posterior sample, and the
         min-lnL walker is a systematically atypical one, so fitting it every
@@ -7247,7 +7288,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``GB_FSTAT_FORCE_REFIT=1`` to refit the PE grid on a walker other
         than the min-lnL one the earlier epochs used).
         """
-        if self.fstat_search_residual:
+        if self.fstat_search_residual and not getattr(self, "fstat_pe_residual", False):
             return "min"
         rule = os.environ.get("GB_FSTAT_PE_REF", "random").strip().lower()
         if rule not in ("random", "min", "max"):
@@ -7300,6 +7341,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         set once per propose) also routes here through
         :meth:`_fstat_reference_walker`, but without an epoch, so it keeps
         the argmin.
+
+        **Two PE F-stat moves, two streams (2026-10-12).** The GB-free galaxy
+        move (``rj_fstat_pe``) keeps the ``(seed, epoch)`` stream bit-for-bit
+        (a resumed store re-derives the walker its epochs were fitted to);
+        the live-residual move (:attr:`fstat_pe_residual`) draws from
+        ``(seed, epoch, _FSTAT_PE_RESIDUAL_REF_TAG)``, so its epoch-k walker
+        is independent of the galaxy's epoch-k walker instead of equal to it.
         """
         lls = np.asarray(lls, dtype=float).reshape(-1)
         rule = self._fstat_fit_ref_rule() if epoch is not None else "min"
@@ -7311,7 +7359,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if pool.size == 0:
                 pool = np.arange(lls.size)
             seed = int(os.environ.get("GB_FSTAT_PE_REF_SEED", "0"))
-            rng = np.random.default_rng([seed, int(epoch)])
+            key = [seed, int(epoch)]
+            if getattr(self, "fstat_pe_residual", False):
+                key.append(int(GBSpecialBase._FSTAT_PE_RESIDUAL_REF_TAG))
+            rng = np.random.default_rng(key)
             return int(pool[rng.integers(pool.size)])
         return int(np.argmin(lls))
 
@@ -30828,6 +30879,29 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
     checkpoints are salted with the epoch, so a mid-fit death resumes
     exactly where it stopped and a later epoch can never resume an earlier
     epoch's rows. A prebuilt offline grid drops in as ``epoch_0000/``.
+
+    TWO INSTANCES IN ``full_pe`` (user ruling 2026-10-12), splitting the PE
+    draw's F-stat share (``GB_PE_RJ_FSTAT_FRACTION`` x
+    ``GB_PE_RJ_FSTAT_RESIDUAL_SPLIT``, see ``GFCombineMove``):
+
+    * ``rj_fstat_pe`` -- the GB-FREE residual ("the whole galaxy"), root
+      ``shared``, ``fstat_refit_every`` from ``GB_FSTAT_REFIT_EVERY_PE_GB_FREE``
+      (default 0 = fit ONCE, at its first visit, never again: "The residual
+      fstat will take care of low snr adjustments"), its own peak floor
+      ``fstat_peak_min_snr`` from ``GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE`` (6.5).
+    * ``rj_fstat_pe_residual`` -- the LIVE residual, GBs subtracted
+      (:attr:`fstat_pe_residual`), root ``shared_pe_residual``, refit every
+      ``GB_FSTAT_REFIT_EVERY_PE`` (150) ELAPSED iterations on this refit
+      clock, at the stage's declared floor (``fstat_peak_min_snr`` None).
+
+    ``fstat_peak_min_snr`` (``None`` = the floor in force: the stage's
+    declared override, else ``FSTAT_PEAK_MIN_SNR``) is applied twice: around
+    ``setup()`` (:func:`~lisatools.sampling.fstat_proposal.peak_min_snr_scope`
+    -- what a FIT selects and stamps), and on LOAD in :meth:`_install`, where
+    an epoch selected at a lower floor is cut to this one
+    (:func:`~lisatools.sampling.fstat_gridfit.stacked_cache_at_floor`, no
+    refit). The load path consults no floor otherwise, so without the second
+    half a resumed store keeps whatever floor its epoch was fitted at.
     """
 
     #: When True the CADENCE refit is suspended: an installed grid is kept
@@ -30842,7 +30916,8 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
 
     def __init__(self, *args, fstat_fit_dir: str = "",
                  fstat_refit_every: int = 0,
-                 fstat_fit_kwargs: Optional[dict] = None, **kwargs):
+                 fstat_fit_kwargs: Optional[dict] = None,
+                 fstat_peak_min_snr: Optional[float] = None, **kwargs):
         super().__init__(*args, **kwargs)
         if not fstat_fit_dir:
             raise ValueError(
@@ -30852,6 +30927,10 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         self.fstat_fit_dir = str(fstat_fit_dir)
         self.fstat_refit_every = int(fstat_refit_every)
         self.fstat_fit_kwargs = dict(fstat_fit_kwargs or {})
+        # this move's OWN F-stat peak floor (SNR), or None for the floor in
+        # force; see the class docstring (two PE instances, 2026-10-12)
+        self.fstat_peak_min_snr = (None if fstat_peak_min_snr is None
+                                   else float(fstat_peak_min_snr))
         self._fstat_epoch = None
         self._fstat_last_fit_hit = -1
         # The ZERO-PEAK epoch this move is skipping on (user ruling
@@ -31050,9 +31129,22 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         residual", this collapses back to one root outright; if PE keeps the
         GB-free grid, decide whether a forced refit at the stage handoff is
         a cheaper guarantee than carrying two roots forever.
+
+        THE PE LIVE-RESIDUAL MOVE HAS A THIRD ROOT, ``shared_pe_residual``
+        (2026-10-12; :attr:`fstat_pe_residual`). It must read neither of the
+        others: ``shared`` holds the GB-free galaxy grid the ``rj_fstat_pe``
+        move fits once and keeps (~43 GB resident per card on the 9mo), and
+        ``_latest_epoch`` takes the highest number it finds -- landing there,
+        the residual move would load the galaxy epoch as its own and, at its
+        first cadence refit, open ``epoch k+1`` in the galaxy's directory and
+        evict the galaxy's registry entry. ``shared_search`` holds the search
+        stages' min-lnL grids. Its own root also gives it its own epoch
+        numbering, clock journal and registry keys.
         """
         if os.environ.get("GB_FSTAT_FIT_PER_MOVE", "0") == "1":
             return os.path.join(self.fstat_fit_dir, self.name)
+        if getattr(self, "fstat_pe_residual", False):
+            return os.path.join(self.fstat_fit_dir, "shared_pe_residual")
         if self.fstat_search_residual:
             return os.path.join(self.fstat_fit_dir, "shared_search")
         return os.path.join(self.fstat_fit_dir, "shared")
@@ -31452,6 +31544,29 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             logger.debug("epoch %s: peak_min_F unreadable (%r)", d, exc)
             return None
 
+    def _epoch_peaks_at_floor(self, k: int, min_F: float):
+        """How many of epoch ``k``'s peak boxes reach ``min_F`` (F units), or
+        ``None`` when that cannot be read (no stage-B npz, no ``peak_F``).
+
+        The count a LOAD under this move's own floor installs (see
+        :meth:`_install`); ``0`` is what arms the zero-peak skip there, the
+        same as a fit that selected nothing. ``None`` is "cannot tell", never
+        "zero" (the manifest's count is then used, as before)."""
+        from lisatools.sampling.fstat_gridfit import stacked_grid_path
+
+        try:
+            path = stacked_grid_path(self._epoch_dir(k))
+            if not os.path.exists(path):
+                return None
+            with np.load(path, allow_pickle=False) as z:
+                if "peak_F" not in z:
+                    return None
+                return int((np.asarray(z["peak_F"], dtype=float)
+                            >= float(min_F)).sum())
+        except Exception as exc:  # noqa: BLE001 -- a probe, never a failure
+            logger.debug("epoch %d: peak_F unreadable (%r)", int(k), exc)
+            return None
+
     def _epoch_band_grid_stale(self, d: str) -> bool:
         """True when epoch dir ``d`` holds grids fitted on DIFFERENT band edges.
 
@@ -31518,6 +31633,24 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             return "fit", k_latest + 1
         if self._epoch_complete(self._epoch_dir(k_latest)):
             return "load", k_latest
+        if self.fstat_refit_every <= 0:
+            # FIT-ONCE move (the PE galaxy grid, ruling 2026-10-12): an
+            # INCOMPLETE latest epoch was opened by an earlier launch that
+            # still had a cadence (the 9mo ran cadence 150 between 811cf945
+            # and this change). "Fit once, ever" means the complete epoch
+            # already on disk IS the one fit: load the newest complete one
+            # and leave the half-fitted directory alone, rather than spend
+            # hours finishing a sweep this move would never refit.
+            for k in range(k_latest - 1, -1, -1):
+                d = self._epoch_dir(k)
+                if (os.path.isdir(d) and self._epoch_complete(d)
+                        and not self._epoch_band_grid_stale(d)):
+                    logger.info(
+                        "%s: epoch %d is incomplete but this move fits once "
+                        "(fstat_refit_every=0); loading the newest complete "
+                        "epoch %d instead of resuming the sweep.",
+                        self.name, int(k_latest), int(k))
+                    return "load", k
         # Mid-fit death: resume the SAME epoch (its checkpoints are live).
         return "fit", k_latest
 
@@ -32308,6 +32441,18 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         # New epoch container -> re-discover the census surface.
         self._stacked_census_obj = "unset"
 
+        # THIS MOVE'S OWN FLOOR ON A LOAD (2026-10-12): an epoch selected at a
+        # lower floor is cut to it -- the 9mo's PE epoch_0000 was selected at
+        # SNR 6.25 and the galaxy move now runs at 6.5 with no refit, ever.
+        # Not for a grid this process just fitted (``stacked``): that one was
+        # selected inside ``setup()``'s floor scope already. Head and ranks
+        # (``_setup_from_directive``) build the identical move from the same
+        # env, so every process cuts the same boxes.
+        _own_snr = getattr(self, "fstat_peak_min_snr", None)
+        _own_F = None if _own_snr is None else 0.5 * float(_own_snr) ** 2
+        if stacked is None and _own_F is not None and n_peaks is None:
+            n_peaks = self._epoch_peaks_at_floor(k, _own_F)
+
         kw = self.fstat_fit_kwargs
         container = build_gb_birth_distribution(
             cache_dir=self._epoch_dir(k),
@@ -32351,6 +32496,8 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             epoch=k,
             # Per-rank, per-epoch RJ birth stream (None -> entropy, as before).
             seed=self._birth_seed(k),
+            # this move's own floor on a load; None = the cache as fitted
+            peak_min_F=(None if stacked is not None else _own_F),
         )
         # Zero peaks (or a stage that produced nothing): the epoch stays
         # COMPLETE so this does not turn into a refit loop, and
@@ -32386,6 +32533,22 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         )
 
     def setup(self, model, branches):
+        """Fit / load / keep this move's F-stat epoch, at this move's floor.
+
+        The whole decision runs inside
+        :func:`~lisatools.sampling.fstat_proposal.peak_min_snr_scope` with
+        :attr:`fstat_peak_min_snr`: everything below that reads the floor
+        (the forced-refit decline, peak selection, the stage-B stamp) sees
+        THIS move's, and the stage's override is back the moment it returns.
+        ``None`` -- every move but the PE galaxy one -- is a no-op scope.
+        """
+        from lisatools.sampling.fstat_proposal import peak_min_snr_scope
+
+        with peak_min_snr_scope(getattr(self, "fstat_peak_min_snr", None)):
+            self._setup_at_floor(model, branches)
+
+    def _setup_at_floor(self, model, branches):
+        """``setup()``'s body, inside the move's peak-floor scope."""
         action, k = self._fstat_fit_decision()
         # A forced refit OVERRIDES every branch of the decision above,
         # including "skip": the whole point is that the cadence has not

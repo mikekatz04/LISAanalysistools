@@ -334,6 +334,33 @@ def _pe_combine_kwargs() -> dict:
     )
 
 
+def pe_fstat_moves() -> list:
+    """The PE stages' F-stat birth moves, in cycle order (user ruling 2026-10-12).
+
+    "I would like to do two fstat moves that will split their share of the
+    total moves": ``rj_fstat_pe`` (the GB-FREE residual, the whole galaxy, fit
+    once) and ``rj_fstat_pe_residual`` (the LIVE residual, refit every
+    ``GB_FSTAT_REFIT_EVERY_PE`` iterations). ``GB_PE_RJ_FSTAT_RESIDUAL_SPLIT``
+    is the residual move's share of ``GB_PE_RJ_FSTAT_FRACTION``; a move with
+    NO share (split exactly 0 or 1) is left out of the stage, so the PE stage
+    degrades to the one F-stat move it draws (and, with the draw off, the
+    weighted cycle cannot run a move the split gave nothing). The same
+    resolver feeds the draw (``GFCombineMove._pe_rj_draw_one_config``).
+    Used by EVERY PE composition in this file (full_pe and replica_pe, both
+    assemblies), so "full_pe" means one thing.
+    """
+    from lisatools.globalfit.moves.globalfitmove import pe_rj_fstat_residual_split
+    from lisatools.globalfit.recipe import PE_FSTAT_RESIDUAL_MOVE, Move
+
+    split = pe_rj_fstat_residual_split()
+    out = []
+    if split < 1.0:
+        out.append(Move("rj_fstat_pe", branch="gb"))
+    if split > 0.0:
+        out.append(Move(PE_FSTAT_RESIDUAL_MOVE, branch="gb"))
+    return out
+
+
 def _apply_smoke_defaults() -> None:
     """Shrink every cost axis and arm the debug verifications.
 
@@ -611,6 +638,10 @@ def _source_ids_from_env() -> dict:
 #: silently. 6.25 is what the design wants here (an assembled model's faint
 #: tail must stay reachable) -- this makes choosing it explicit. ``None``
 #: would clear the override and hand the stage back to FSTAT_PEAK_MIN_SNR.
+#: Since 2026-10-12 it is the floor of the LIVE-residual move
+#: (``rj_fstat_pe_residual``); the GB-free galaxy move ``rj_fstat_pe`` carries
+#: its OWN floor, GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE (6.5), scoped around its
+#: fit and applied to a loaded epoch as a cut on the cached peaks.
 _PE_PEAK_MIN_SNR = 6.25
 
 
@@ -1395,8 +1426,7 @@ def build_fit():
             # runbook drive, so a divergence here would mean the probes stop
             # testing the production cycle.
             def _gb_only_pe_moves():
-                return warm_pe() + [
-                    Move("rj_fstat_pe", branch="gb"),
+                return warm_pe() + pe_fstat_moves() + [
                     Move("rj_prior_pe", branch="gb"),
                 ] + ridge()
 
@@ -1510,8 +1540,7 @@ def build_fit():
                 name="full_pe", kind="pe",
                 # rj_warm_pe (when armed) runs IMMEDIATELY BEFORE
                 # rj_fstat_pe -- the PE mirror of the search-stage order.
-                moves=warm_pe() + [
-                    Move("rj_fstat_pe", branch="gb"),
+                moves=warm_pe() + pe_fstat_moves() + [
                     Move("rj_prior_pe", branch="gb"),
                 ] + ridge(),
                 combine_kwargs=_pe_combine_kwargs(),
@@ -2444,8 +2473,10 @@ def build_fit():
             # stages want the loose 6.25 (an assembled model's faint tail must
             # stay reachable) -- but getting it by accident from gb_search_3 is
             # not the same as choosing it.
-            return (noise_pe + source_pe(gb_search_cadence=source_cadence) + warm_pe() + [
-                Move("rj_fstat_pe", branch="gb"),
+            # rj_fstat_pe + rj_fstat_pe_residual (ruling 2026-10-12): the two
+            # F-stat moves split the draw's F-stat share (pe_fstat_moves)
+            return (noise_pe + source_pe(gb_search_cadence=source_cadence) + warm_pe()
+                    + pe_fstat_moves() + [
                 Move("rj_prior_pe", branch="gb"),
             ] + ([Move("gb_ridge_gibbs", branch="gb")]
                  if os.environ.get("GB_RIDGE_GIBBS", "1") == "1" else [])
@@ -2563,8 +2594,7 @@ def build_fit():
             # noise, then sobbh -> mbh -> emri, then gb).
             # rj_warm_pe (when armed) runs IMMEDIATELY BEFORE rj_fstat_pe
             # -- the PE mirror of the search-stage order.
-            moves=noise_pe + source_pe() + warm_pe() + [
-                Move("rj_fstat_pe", branch="gb"),
+            moves=noise_pe + source_pe() + warm_pe() + pe_fstat_moves() + [
                 Move("rj_prior_pe", branch="gb"),
             ] + ([Move("gb_ridge_gibbs", branch="gb")]
                  if os.environ.get("GB_RIDGE_GIBBS", "1") == "1" else [])
@@ -2691,6 +2721,44 @@ def _describe_source_search_stop(st) -> str:
             f"(MAXLOGL_ITERS_PER_STEP), the count carried across rows")
 
 
+def _describe_pe_fstat(st) -> str:
+    """A PE stage's F-stat birth moves: what each fits, its cadence and floor,
+    and its share of the PE RJ draw (ruling 2026-10-12), resolved."""
+    from lisatools.globalfit.moves.globalfitmove import pe_rj_fstat_residual_split
+    from lisatools.globalfit.recipe import PE_FSTAT_RESIDUAL_MOVE, pe_fstat_move_config
+
+    names = [m.name for m in st.moves]
+    f_tot = float(os.environ.get("GB_PE_RJ_FSTAT_FRACTION", "0.8"))
+    split = pe_rj_fstat_residual_split()
+    both = "rj_fstat_pe" in names and PE_FSTAT_RESIDUAL_MOVE in names
+    draw_one = os.environ.get("GB_PE_RJ_DRAW_ONE", "0") == "1"
+    parts = []
+    for name, what in (("rj_fstat_pe", "GB-FREE residual (the whole galaxy), root shared"),
+                       (PE_FSTAT_RESIDUAL_MOVE,
+                        "LIVE residual (GBs subtracted), root shared_pe_residual")):
+        if name not in names:
+            continue
+        cfg = pe_fstat_move_config(name)
+        ev = cfg["fstat_refit_every"]
+        floor = cfg["fstat_peak_min_snr"]
+        p = (f_tot * (split if name == PE_FSTAT_RESIDUAL_MOVE else 1.0 - split)
+             if both else f_tot)
+        parts.append(
+            f"{name} = {what}, one random cold walker per epoch "
+            f"({_envv('GB_FSTAT_PE_REF', 'random')}); "
+            + ("fit ONCE (first visit / the stored epoch), never refit"
+               if ev == 0 else f"refit every {ev} elapsed iterations")
+            + "; peak floor "
+            + (f"SNR {floor:g} (its own)" if floor is not None
+               else "the stage's declared floor")
+            + (f"; P(draw)={p:.3f}" if draw_one else ""))
+    if not parts:
+        return "none"
+    return (" | ".join(parts)
+            + f"  [GB_PE_RJ_FSTAT_FRACTION={f_tot:g} split "
+              f"GB_PE_RJ_FSTAT_RESIDUAL_SPLIT={split:g}]")
+
+
 def _describe_stop(st) -> str:
     kw = st.step_kwargs or {}
     fn = kw.get("convergence_fn")
@@ -2781,6 +2849,7 @@ def describe_recipe(fit) -> str:
                 f"  declares: peak_min_snr={kw.get('peak_min_snr')} "
                 f"pe_repeats={kw.get('pe_repeats')} "
                 f"pe_rj_flip_fraction={kw.get('pe_rj_flip_fraction')}")
+            lines.append(f"  F-stat:   {_describe_pe_fstat(st)}")
         ck = st.combine_kwargs or {}
         lines.append(
             "  combine:  " + (" ".join(f"{k}={ck[k]}" for k in sorted(ck))

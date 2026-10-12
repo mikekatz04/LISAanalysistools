@@ -696,6 +696,12 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             "PE_INMODEL_REPEATS", "PE_INMODEL_REPEATS_BRANCHES",
             "GB_PE_RJ_FSTAT_FRACTION", "GB_PE_RJ_WARM_FRACTION",
             "GB_PE_RJ_FLIP_FRACTION",
+            # the two PE F-stat moves (user ruling 2026-10-12): the GB-free
+            # galaxy grid fitted once at SNR 6.5, the live-residual grid every
+            # GB_FSTAT_REFIT_EVERY_PE, splitting the F-stat draw share. v8
+            # predates all three; PeTwoFstatMovesLauncherTest pins them.
+            "GB_FSTAT_REFIT_EVERY_PE_GB_FREE", "GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE",
+            "GB_PE_RJ_FSTAT_RESIDUAL_SPLIT",
             # match-criterion panels back on for the v9 pages (2026-09-30)
             "GF_MONITOR_MATCH_STATS",
             # search legs: one row per in-model leg (2026-09-30)
@@ -816,17 +822,17 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             # V9-28 (2026-10-02, MBH session): the batched window generated at
             # q*dt; default 1 = what job 695 ran. The MBH suites pin the block.
             "MBH_WINDOW_DECIMATE",
+            # 2026-10-12: the LISA-frame sky-mode hops back in the MBH inner-move
+            # stack (SkyMove in the ICRS basis; 0.02 both / 0.04 lat / 0.02 long
+            # of the per-leaf draws, user ruling). New knobs, same code defaults.
+            "MBH_SKY_MOVE_BOTH_WEIGHT", "MBH_SKY_MOVE_LAT_WEIGHT",
+            "MBH_SKY_MOVE_LONG_WEIGHT",
             # V9-26 (2026-10-02): the EMRI direct-to-WDM scoring path's knobs
             # (default full = the v8 path); SixMonthEMRIDirectTest pins the block.
             "EMRI_LIKELIHOOD", "EMRI_BATCH_MAX_SIZE", "EMRI_DIRECT_TABLE",
             "EMRI_DIRECT_RESPONSE", "EMRI_TRAJ_WORKERS", "EMRI_DIRECT_LOOKUP",
         }
         drift = {
-            # 2026-10-12: the LISA-frame sky-mode hops back in the MBH inner-move
-            # stack (SkyMove in the ICRS basis; 0.02 both / 0.04 lat / 0.02 long
-            # of the per-leaf draws, user ruling). New knobs, same code defaults.
-            "MBH_SKY_MOVE_BOTH_WEIGHT", "MBH_SKY_MOVE_LAT_WEIGHT",
-            "MBH_SKY_MOVE_LONG_WEIGHT",
             k: (self.v8.get(k), self.v9.get(k))
             for k in set(self.v8) | set(self.v9)
             if self.v8.get(k) != self.v9.get(k)
@@ -1776,17 +1782,17 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             # V9-28 (2026-10-02, MBH session): the batched window generated at
             # q*dt; default 1 = what job 695 ran. The MBH suites pin the block.
             "MBH_WINDOW_DECIMATE",
+            # 2026-10-12: the LISA-frame sky-mode hops back in the MBH inner-move
+            # stack (SkyMove in the ICRS basis; 0.02 both / 0.04 lat / 0.02 long
+            # of the per-leaf draws, user ruling). New knobs, same code defaults.
+            "MBH_SKY_MOVE_BOTH_WEIGHT", "MBH_SKY_MOVE_LAT_WEIGHT",
+            "MBH_SKY_MOVE_LONG_WEIGHT",
             # 3MO-8 (2026-10-02): nor is the 6mo EMRI direct-to-WDM block: no
             # EMRI branch is armed here, and its lookup table is built for the
             # 6-month grid's Nf and dt only.
             "EMRI_LIKELIHOOD", "EMRI_BATCH_MAX_SIZE", "EMRI_DIRECT_TABLE",
             "EMRI_DIRECT_RESPONSE", "EMRI_TRAJ_WORKERS", "EMRI_DIRECT_LOOKUP",
             # V9-30 (2026-10-07): Mike's 6mo production line became the
-            # 2026-10-12: the LISA-frame sky-mode hops back in the MBH inner-move
-            # stack (SkyMove in the ICRS basis; 0.02 both / 0.04 lat / 0.02 long
-            # of the per-leaf draws, user ruling). New knobs, same code defaults.
-            "MBH_SKY_MOVE_BOTH_WEIGHT", "MBH_SKY_MOVE_LAT_WEIGHT",
-            "MBH_SKY_MOVE_LONG_WEIGHT",
             # 6mo / 1yr / 9mo launcher DEFAULT (MIDIT_CHECKPOINT 0, 8-rung
             # MBH / EMRI ladders, gram / fisher eigen tables, source
             # cross-checks off). The 3mo v9 twin was not on that line and
@@ -2839,6 +2845,58 @@ class NineMonthV9TwinTest(unittest.TestCase):
         self.assertIn("#SBATCH --job-name=gf9mo_v9", self.nine_text)
         self.assertIn("/shared/data/global_fit_output/gf9mo_v9_%j.log", self.nine_text)
         self.assertNotIn("gf9mo_v9_4gpu", self.nine_text)
+
+
+class PeTwoFstatMovesLauncherTest(unittest.TestCase):
+    """The two PE F-stat moves (user ruling 2026-10-12) on every v9 launcher.
+
+    "I would like to do two fstat moves that will split their share of the
+    total moves. One fstat move fits the GB-free residual so the whole galaxy
+    down to SNR 6.5. [...] The second fstat move will fit the gb-inclusive
+    residual every 150 iterations." -- "set the gb-free residual refit (with
+    the full galaxy found) to not refitting during full pe. It should just fit
+    once the first time it is visiting in full pe."
+
+    Exported explicitly in the 6mo derivation source, carried verbatim into
+    the 1yr / 9mo (derive_*), mirrored in the 3mo twin.
+    """
+
+    WANT = {
+        "GB_FSTAT_REFIT_EVERY_PE": "150",          # now the RESIDUAL move's
+        "GB_FSTAT_REFIT_EVERY_PE_GB_FREE": "0",    # the galaxy: fit once
+        "GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE": "6.5",
+        "GB_PE_RJ_FSTAT_RESIDUAL_SPLIT": "0.5",
+        # the totals the split divides are unchanged
+        "GB_PE_RJ_FSTAT_FRACTION": "0.45",
+        "GB_PE_RJ_WARM_FRACTION": "0.1",
+    }
+
+    def test_every_v9_launcher_exports_the_ruling(self):
+        for path in (SIX_MO_V9, ONE_YR_V9, NINE_MO_V9, THREE_MO_V9):
+            exports = _exports(path)
+            for knob, want in self.WANT.items():
+                if path == THREE_MO_V9 and knob in ("GB_PE_RJ_FSTAT_FRACTION",
+                                                    "GB_PE_RJ_WARM_FRACTION"):
+                    continue    # the 3mo twin's pre-existing PE draw (its drift list)
+                with self.subTest(script=os.path.basename(path), knob=knob):
+                    self.assertEqual(exports.get(knob), want)
+
+    def test_the_ruling_is_quoted_in_the_derivation_source(self):
+        src = open(SIX_MO_V9).read()
+        for words in ("two fstat moves that will split their share",
+                      "fit once the first time it is visiting in full pe",
+                      "just specific to the one walker that was",
+                      "rj_fstat_pe_residual"):
+            self.assertIn(words, src)
+
+    def test_the_split_yields_to_the_launch_line_and_the_galaxy_knobs_do_not(self):
+        # the split is the GB_PE_RJ_FSTAT_FRACTION sibling (${K:-v}); the
+        # galaxy cadence / floor are hard, like GB_FSTAT_REFIT_EVERY_PE
+        src = open(NINE_MO_V9).read()
+        self.assertRegex(src, r"(?m)^export GB_PE_RJ_FSTAT_RESIDUAL_SPLIT="
+                              r"\$\{GB_PE_RJ_FSTAT_RESIDUAL_SPLIT:-0\.5\}$")
+        self.assertRegex(src, r"(?m)^export GB_FSTAT_REFIT_EVERY_PE_GB_FREE=0$")
+        self.assertRegex(src, r"(?m)^export GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE=6\.5$")
 
 
 class V930ProductionDefaultsTest(unittest.TestCase):
