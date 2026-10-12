@@ -1,52 +1,67 @@
 """A one-screen dashboard of where a global-fit run is RIGHT NOW: last saved row,
-stage, the live pace (log age, time since the last save, row cadence), the
-ratchet's latest gate action and verdict, head-node GPU utilization and
-memory, cold-chain lnL and leaf counts, the last rows, and the stage's
-proposal cycle with the last saved leg marked and the next proposal named.
+stage, the live pace (log age, last save, the leg in flight against its last
+wall time), the stage-end clock (the per-(walker, band) RJ valve's active
+pairs and their trend), the empty-band valve, the F-stat epochs, head-node
+GPU utilization and memory, cold-chain lnL and leaf counts, the last rows, and
+the stage's proposal cycle grouped by leg with each move's last wall time, the
+last saved leg marked and the next proposal named.
 
-    python scripts/diagnostics/gf_last_iteration.py /shared/data/global_fit_output/gf_prod_6mo_v9_4gpu
+    python scripts/diagnostics/gf_last_iteration.py /shared/data/global_fit_output/gf_prod_9mo_v9
 
     ================================================================================================
-     gf_prod_6mo_testing.h5                 /shared/data/global_fit_output/gf_prod_6mo_v9_4gpu
+     gf_prod_9mo_testing.h5                  /shared/data/global_fit_output/gf_prod_9mo_v9
     ------------------------------------------------------------------------------------------------
-     last saved row   85             saved after   in_model_removal
-     stage            gb_search_3    step 4 of 6 . started row 47 . 38 rows in
-     done             gb_search_seed, gb_search_1, gb_search_2
-     galfor ratchet   running (no stop stamp)
+     last saved row   90              saved after   in_model
+     stage            gb_search_2     step 4 of 5 . started row 56, 21.8 h ago . 34 rows in
+     done             gb_search_seed, source_search, gb_search_1
     ------------------------------------------------------------------------------------------------
-     live        log age 2 min . last save 17 min ago . row cadence: last 29 min, median of 5 = 31 min
-     ratchet     iteration 1: NUDGE (cycle 1 of 20)     after RELEASE 0: reference recorded
-     gpu (head)  GPU0 util 28% (60 s 41%)  mem 29.6/95.8 GB  99 W 50C  .  GPU1 ...   sample 1 min ago
+     live        log written 4 s ago . last save 17 min ago . last full cycle 102.7 min (cycle 10)
+     next row    leg 2/3 (rj_fstat_search .. in_model_fstat): 16.9 min in, 50.2 min last time
+     rj valve    124 active of 1999 occupied pairs (93.8% shut; stage end at 0) . judged 1.3 h ago
+                 streak p50 0 p90 2 of 3, tol 20 nats
+                 active, last 8 judges: 377 > 313 > 286 > 232 > 195 > 183 > 136 > 124
+     empty bands 647 of 688 eligible bands off (f > 10 mHz) . next revive check in 9 iteration(s)
+     fstat       epoch 28, 14 min ago: 242 peaks . fit 3.2 min (stage A 2.4, 1085/1232 bands skipped)
+                 peaks, last 8 epochs: 463 > 410 > 382 > 342 > 287 > 263 > 377 > 242
+     gpu (head)  GPU0 util 84% (60 s 61%) . 41.3/93.6 GiB, job peak 49.7
+                 GPU1 util 80% (60 s 65%) . 42.8/93.6 GiB, job peak 48.0   sample 4 s ago
     ------------------------------------------------------------------------------------------------
-     cold lnL   row 85   max 104,343,050.4   mean 104,342,594.2   min 104,342,228.4   spread 822.0
-                vs 84    max -815.2   mean -842.6   min -360.6
-     cold leaves        gb  min 2371  mean 2411.5  max 2491    emri 8 . mbh 4 . sobbh 6 . vgb 55
+     cold lnL   row 90    max 158,033,409.7   mean 158,032,894.8   min 158,032,544.7   spread 865.0
+                vs 89     max +57.3   mean +8.4   min -61.1
+     cold leaves          gb  min 2656  mean 2674.0  max 2684    emri 8 . mbh 6 . sobbh 6 . vgb 55
     ------------------------------------------------------------------------------------------------
      last rows   row  saved after            lnL max          lnL min        gb leaves
-                  81  noise_ratchet_search   104,332,775.9    104,330,927.8  2355-2485
+                  86  in_model_removal       158,033,360.5    158,032,508.0  2646-2680
                   ...
     ------------------------------------------------------------------------------------------------
-     stage cycle (gb_search_3.move_order)   * = a row lands after this leg   <<< last saved   <-- next
-       1  * noise_ratchet_search
+     stage cycle (gb_search_2.move_order)   * = a row lands after this leg          last wall
+       leg 1/3                                                                       18.4 min
+          1    vgb_pe                         10 s
+          2    rj_warm_search                9.2 min
+          3  * in_model                      9.1 min  <<< LAST SAVED (row 90)
+       leg 2/3                                                                       50.2 min
+          4    rj_fstat_search              41.0 min  <-- NEXT
        ...
-       8  * in_model_removal        <<< LAST SAVED (row 85)
-       9    gb_ridge_gibbs          <-- NEXT
     ================================================================================================
 
-``--line`` prints the old one-line form (``85  stage=gb_search_3 (step 4 of 6;
-...)  saved_after=in_model_removal  store=...``); ``-v`` is accepted and means
-the dashboard. ``--rows N`` sets the recent-rows table length (default 5);
+``--line`` prints the old one-line form (``90  stage=gb_search_2 (step 4 of 5;
+...)  saved_after=in_model  store=...``); ``-v`` is accepted and means the
+dashboard. ``--rows N`` sets the recent-rows table length (default 5);
 ``--no-color`` / ``--color`` override the tty detection.
 
 Sources, all read-only and lock-free (safe while the saver writes): the live
 store (newest ``*.h5`` in the folder that is not a running backup, a
 pre-migration copy or a quarantined file; an ``.h5`` path works too); the
 head's run log ``<run_dir>/*_artifacts/globalfit_run.log`` (or the tar's
-``globalfit_run_tail.log``), last 4 MB; the launcher's nvidia-smi sampler
-``<run_dir>/gpu_util_<job>.csv`` (newest; the HEAD node's GPUs only -- a
-2-node layout's second node is not sampled). A dataset read that races the
-saver is reported as unreadable on its own line, never as a crash; a missing
-log or CSV prints n/a.
+``globalfit_run_tail.log``, else the newest job stdout), read from the end in
+growing windows (32 MB, doubled up to 256 MB) until the window holds a full
+timed cycle, 8 valve judges and 8 F-stat epochs or reaches the previous
+stage's end; the launcher's nvidia-smi sampler ``<run_dir>/gpu_util_<job>.csv``
+(newest; the HEAD node's GPUs only -- a 2-node layout's second node is not
+sampled). Ages are anchored on the files' mtimes and the log's own clock, so a
+tar read on a laptop in another time zone reads right (its "log written" age
+is the snapshot's age). A dataset read that races the saver is reported as
+unreadable on its own line, never as a crash; a missing log or CSV prints n/a.
 """
 
 import glob
@@ -54,14 +69,36 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 SKIP = ("backup", "CORRUPT", "pre_rerung", "pre_repair", "midit", ".stale")
 WIDTH = 96
-TAIL_BYTES = 48 * 1024 * 1024      # ~half a day of the head's log: enough saves for a cadence
+TAIL_BYTES = 32 * 1024 * 1024      # the first log window; doubled until the dashboard has its lines
+TAIL_BYTES_MAX = 256 * 1024 * 1024
+TREND = 8                          # valve judges / F-stat epochs in the trend lines
 _TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+# the head-log lines the dashboard reads, found with bytes.find (memchr speed,
+# ~10x a per-line Python scan of the same window)
+_TAGS = (b"[SAVE] save_step", b"[LEG ", b"[GB_GATE ", b"[GB_BAND_SHUTOFF status ",
+         b"[FANOUT] op=", b"[stageA] ", b"[sweep:", b"] STAGE COMPLETE", b"] stored row",
+         b"F-stat grid fit epoch ")
+_RE_LEG = re.compile(r"\[LEG (\S+)\] cycle (\d+) leg (\d+)/(\d+): ran \[(.*?)\] -> "
+                     r"row saved after '([^']*)'")
+_RE_RESUME = re.compile(r"\[LEG (\S+)\] resume:")
+_RE_FANOUT = re.compile(r"\[FANOUT\] op=(\S+) move=(\S+)")
+_RE_GATE = re.compile(r"occupied (\d+) \| shut (\d+) \(([\d.]+)%\) \| active (\d+)"
+                      r"(?: -- streak p50 (\d+) p90 (\d+) of (\d+))?")
+_RE_TOL = re.compile(r"\(tol ([\d.]+)\)")
+_RE_EMPTY = re.compile(r"floor ([\d.]+) mHz: (\d+)/(\d+) bands eligible.*?; (\d+) off \(.*?\); "
+                       r"(\d+)/(\d+) iters since revive")
+_RE_EPOCH = re.compile(r"F-stat grid fit epoch (\d+) (?:done in ([\d.]+)s \((\d+) peaks\)|starting)")
+_RE_STAGEA = re.compile(r"\[stageA\] comb \+ peak selection: (\d+) peaks in ([\d.]+)m .*?; "
+                        r"(\d+) of (\d+) bands skipped")
+_RE_SWEEP = re.compile(r"\[sweep:(\S+)\] \d+/\d+ evals \(([\d.]+)%\).*?ETA (\S+)")
+_RE_DONE = re.compile(r"\[V9-STAGE (\S+)\] (STAGE COMPLETE.*)")
 
 
 # --------------------------------------------------------------------------
@@ -93,7 +130,7 @@ def _str(raw):
 
 def current_stage(g):
     """The recipe step a resume would run: ``dict(name, order, total, start, done,
-    ratchet_done, move_order)``.
+    move_order)``.
 
     ``None`` when the store carries no recipe group. ``name`` is None when
     every step is complete (the recipe has finished).
@@ -110,17 +147,13 @@ def current_stage(g):
             mo = None
         steps.append(dict(name=name, order=int(_attr(a, "order num", 0) or 0),
                           status=bool(_attr(a, "status", False)),
-                          start=_attr(a, "start_iteration"),
-                          completed=_attr(a, "completed_iteration"),
-                          ratchet_done=_attr(a, "galfor_ratchet_done"),
-                          move_order=mo))
+                          start=_attr(a, "start_iteration"), move_order=mo))
     steps.sort(key=lambda s: s["order"])
     done = [s["name"] for s in steps if s["status"]]
     cur = next((s for s in steps if not s["status"]), None)
     return dict(name=None if cur is None else cur["name"],
                 order=None if cur is None else cur["order"], total=len(steps),
                 start=None if cur is None else cur["start"],
-                ratchet_done=None if cur is None else cur["ratchet_done"],
                 move_order=None if cur is None else cur["move_order"], done=done)
 
 
@@ -181,7 +214,7 @@ def read_rows(path, it, n_rows, group="global_fit"):
 # --------------------------------------------------------------------------
 # live sidecars: the head's run log and the nvidia-smi CSV
 # --------------------------------------------------------------------------
-def _tail_lines(path, nbytes=TAIL_BYTES):
+def _tail_lines(path, nbytes):
     size = os.path.getsize(path)
     with open(path, "rb") as fh:
         if size > nbytes:
@@ -219,57 +252,226 @@ def _mins(a, b):
     return (b - a).total_seconds() / 60.0
 
 
-def read_live(run_dir, now=None):
-    """What the head's run log says about the pace and the gate:
-    ``dict(log, log_age_min, last_save_age_min, saves (times), cadence (mins),
-    gate, verdict, replica, stage_line)``, or None without a log."""
-    path = find_run_log(run_dir)
-    if path is None:
-        return None
-    now = now or datetime.now()
-    lines = _tail_lines(path)
-    out = dict(log=path, log_age_min=None, last_save_age_min=None, saves=[], cadence=[],
-               gate=None, verdict=None, replica=None, stage_line=None)
-    last_ts = None
-    for line in lines:
+def _scan(path, lo, hi):
+    """The tagged lines of ``path[lo:hi]`` in file order, and the offset of the
+    chunk's first whole line (the torn first line is dropped unless ``lo`` is 0)."""
+    with open(path, "rb") as fh:
+        fh.seek(lo)
+        data = fh.read(hi - lo)
+    start = data.find(b"\n") + 1 if lo > 0 else 0
+    starts = set()
+    for tag in _TAGS:
+        i = data.find(tag, start)
+        while i >= 0:
+            starts.add(data.rfind(b"\n", 0, i) + 1)
+            e = data.find(b"\n", i)
+            if e < 0:
+                break
+            i = data.find(tag, e)
+    lines = []
+    for s in sorted(starts):
+        e = data.find(b"\n", s)
+        lines.append(data[s:e if e >= 0 else len(data)].decode("utf-8", "replace"))
+    return lines, lo + start
+
+
+def _last_ts(path):
+    """The newest timestamp in the log (its own clock)."""
+    for line in reversed(_tail_lines(path, 256 * 1024)):
         t = _ts(line)
         if t is not None:
-            last_ts = t
-        if "[SAVE] save_step" in line and t is not None:
+            return t
+    return None
+
+
+def _follows(prev, rec):
+    """``rec`` is the leg right after ``prev`` in the same stage's cycle."""
+    if prev["stage"] != rec["stage"]:
+        return False
+    if rec["cycle"] == prev["cycle"]:
+        return rec["leg"] == prev["leg"] + 1
+    return prev["leg"] == prev["nlegs"] and rec["leg"] == 1 and rec["cycle"] == prev["cycle"] + 1
+
+
+def _move_walls(fan, ran, t0):
+    """Each move's wall seconds inside one leg, from the leg's ``[FANOUT]`` lines
+    (logged when an op ENDS): a move runs from the previous move's last line
+    (the leg start ``t0`` for the first) to its own last line. A FANOUT name
+    the leg did not run is an inner move of a composite (the noise block's
+    psd_pe / galfor_pe) and belongs to the next leg move that logs no FANOUT
+    line of its own; a move with none at all (a skipped Gibbs) has no wall."""
+    direct = {m for _, m in fan if m in ran}
+    end, cur = {}, None
+    for t, m in fan:
+        if m in ran:
+            cur = m
+        else:
+            i0 = ran.index(cur) + 1 if cur in ran else 0
+            cur = next((r for r in ran[i0:] if r not in direct), cur)
+        if cur is not None:
+            end[cur] = t
+    walls, t_prev = {}, t0
+    for m in ran:
+        if m in end:
+            walls[m] = (end[m] - t_prev).total_seconds()
+            t_prev = end[m]
+    return walls
+
+
+def _parse_log(lines):
+    """The dashboard's reading of the tagged head-log lines (in file order).
+
+    Valve judges, empty-band status and F-stat epochs restart at a ``STAGE
+    COMPLETE`` line (they belong to the stage that ended). A leg's wall is the
+    time from the previous ``[LEG]`` line of the same stage's cycle; a resume
+    line breaks the chain (the gap holds a restart)."""
+    out = dict(saves=[], legs=[], gates=[], empty=None, epochs=[], epoch_open=None, sweep=None,
+               stage_done=None, replica=None)
+    prev, fan, stage_a, seg = None, [], None, 0
+    for line in lines:
+        t = _ts(line)
+        if t is None:
+            continue
+        if "[FANOUT] op=" in line:
+            m = _RE_FANOUT.search(line)
+            if m and m.group(2) != "None":
+                fan.append((t, m.group(2)))
+        elif "[SAVE] save_step" in line:
             out["saves"].append(t)
-        elif "[GALFOR_RATCHET" in line:
-            body = line.split("] ", 1)[-1] if "] " in line else line
-            if re.search(r"\] iteration \d+: (NUDGE|RELEASE|HOLD)", line):
-                out["gate"] = body.split(" -- ")[0].strip()
-            elif "] after RELEASE" in line:
-                out["verdict"] = body
-            elif "RATCHET DONE" in line or "already FINISHED" in line:
-                out["verdict"] = body
-        elif "[REPLICA_PE" in line and "stored row" in line:
+        elif "[LEG " in line:
+            m = _RE_LEG.search(line)
+            if m:
+                rec = dict(t=t, seg=seg, stage=m.group(1), cycle=int(m.group(2)),
+                           leg=int(m.group(3)), nlegs=int(m.group(4)),
+                           ran=re.findall(r"'([^']*)'", m.group(5)), after=m.group(6),
+                           wall=None, moves={})
+                if prev is not None and _follows(prev, rec):
+                    rec["wall"] = (t - prev["t"]).total_seconds()
+                    rec["moves"] = _move_walls(fan, rec["ran"], prev["t"])
+                out["legs"].append(rec)
+                prev, fan = rec, []
+            elif _RE_RESUME.search(line):
+                prev, fan, seg = None, [], seg + 1
+        elif "[GB_GATE " in line:
+            m = _RE_GATE.search(line)
+            if m:
+                tol = _RE_TOL.search(line)
+                out["gates"].append(dict(
+                    t=t, occupied=int(m.group(1)), shut=int(m.group(2)),
+                    shut_pct=float(m.group(3)), active=int(m.group(4)),
+                    streak=None if m.group(5) is None else tuple(int(m.group(i)) for i in (5, 6, 7)),
+                    tol=float(tol.group(1)) if tol else None))
+        elif "[GB_BAND_SHUTOFF status" in line:
+            m = _RE_EMPTY.search(line)
+            if m:
+                out["empty"] = dict(t=t, floor_mhz=float(m.group(1)), eligible=int(m.group(2)),
+                                    nbands=int(m.group(3)), off=int(m.group(4)),
+                                    since=int(m.group(5)), every=int(m.group(6)))
+        elif "[stageA] " in line:
+            m = _RE_STAGEA.search(line)
+            if m:
+                stage_a = dict(minutes=float(m.group(2)), skipped=int(m.group(3)),
+                               nbands=int(m.group(4)))
+        elif "F-stat grid fit epoch " in line:
+            m = _RE_EPOCH.search(line)
+            if m and m.group(2) is not None:
+                out["epochs"].append(dict(t=t, epoch=int(m.group(1)), wall_s=float(m.group(2)),
+                                          peaks=int(m.group(3)), stage_a=stage_a))
+                out["epoch_open"], out["sweep"], stage_a = None, None, None
+            elif m:
+                out["epoch_open"], out["sweep"] = dict(t=t, epoch=int(m.group(1))), None
+        elif "[sweep:" in line:
+            m = _RE_SWEEP.search(line)
+            if m and out["epoch_open"] is not None:
+                out["sweep"] = dict(t=t, name=m.group(1), pct=float(m.group(2)), eta=m.group(3))
+        elif "] STAGE COMPLETE" in line:
+            m = _RE_DONE.search(line)
+            if m:
+                out["stage_done"] = dict(t=t, stage=m.group(1), text=m.group(2))
+                out["gates"], out["empty"], out["epochs"] = [], None, []
+        elif "[REPLICA_PE" in line and "] stored row" in line:
             out["replica"] = line.split("] ", 1)[-1]
-        elif "[V9-STAGE" in line and ("entering" in line or "STAGE COMPLETE" in line):
-            out["stage_line"] = line.split(" - INFO - ", 1)[-1]
-    if last_ts is not None:
-        out["log_age_min"] = _mins(last_ts, now)
-    if out["saves"]:
-        out["last_save_age_min"] = _mins(out["saves"][-1], now)
-        s = out["saves"][-7:]
-        out["cadence"] = [_mins(a, b) for a, b in zip(s[:-1], s[1:])]
     return out
 
 
-def read_gpu(run_dir, now=None, window_s=60.0):
+def last_cycle(legs, stage):
+    """``(cycle, total_s, walls)`` of the newest cycle of ``stage`` whose every leg
+    carries a wall, from one job (no resume inside it); None when there is none."""
+    by = {}
+    for r in legs:
+        if r["stage"] == stage:
+            by.setdefault((r["seg"], r["cycle"]), {})[r["leg"]] = r
+    for key in sorted(by, key=lambda k: max(r["t"] for r in by[k].values()), reverse=True):
+        d = by[key]
+        n = next(iter(d.values()))["nlegs"]
+        if all(i in d and d[i]["wall"] is not None for i in range(1, n + 1)):
+            walls = [d[i]["wall"] for i in range(1, n + 1)]
+            return key[1], sum(walls), walls
+    return None
+
+
+def _enough(out):
+    """The window holds what the dashboard shows, or it reached the previous stage."""
+    if out["stage_done"] is not None:
+        return True
+    if len(out["saves"]) < 7:
+        return False
+    if out["legs"] and last_cycle(out["legs"], out["legs"][-1]["stage"]) is None:
+        return False
+    if out["gates"] and len(out["gates"]) < TREND:
+        return False
+    if out["epochs"] and len(out["epochs"]) < TREND:
+        return False
+    return True
+
+
+def read_live(run_dir):
+    """What the head's run log says about the pace, the gates and the F-stat fit:
+    :func:`_parse_log`'s dict plus ``log``, ``log_age_min`` (now minus the log's
+    mtime), ``t_end`` (the log's newest timestamp, its own clock) and
+    ``scanned_mb``; None without a log."""
+    path = find_run_log(run_dir)
+    if path is None:
+        return None
+    size = os.path.getsize(path)
+    lines, lo, nbytes = [], size, TAIL_BYTES
+    while True:
+        new_lo = max(0, size - nbytes)
+        chunk, lo = _scan(path, new_lo, lo)
+        lines = chunk + lines
+        out = _parse_log(lines)
+        if new_lo == 0 or nbytes >= TAIL_BYTES_MAX or _enough(out):
+            break
+        nbytes *= 2
+    out.update(log=path, log_age_min=(time.time() - os.path.getmtime(path)) / 60.0,
+               t_end=_last_ts(path), scanned_mb=(size - lo) / 2.0 ** 20)
+    return out
+
+
+def read_gpu(run_dir, window_s=60.0):
     """The newest ``gpu_util_<job>.csv``: per GPU index the last sample
-    ``dict(util, mem_used_gb, mem_total_gb, power_w, temp_c, util_avg)`` with
-    ``util_avg`` over the trailing ``window_s`` seconds; plus ``age_min`` and
-    the CSV's name. None without a CSV."""
+    ``dict(util, mem_used_gb, mem_total_gb, power_w, temp_c, util_avg, mem_peak_gb)``
+    with ``util_avg`` over the trailing ``window_s`` seconds and ``mem_peak_gb``
+    over the whole job; plus ``age_min`` (now minus the CSV's mtime) and the
+    CSV's name. None without a CSV."""
     cands = glob.glob(os.path.join(run_dir, "gpu_util_*.csv"))
     if not cands:
         return None
     path = max(cands, key=os.path.getmtime)
-    now = now or datetime.now()
+    with open(path, "rb") as fh:
+        text = fh.read().decode("utf-8", "replace").splitlines()
+    peak = {}
+    for line in text:                                   # whole job: memory only, no time parse
+        parts = line.split(",")
+        if len(parts) < 9:
+            continue
+        try:
+            idx, used = int(parts[1]), float(parts[5]) / 1024.0
+        except ValueError:
+            continue
+        peak[idx] = max(peak.get(idx, 0.0), used)
     rows = []
-    for line in _tail_lines(path, 256 * 1024)[-400:]:
+    for line in text[-400:]:
         parts = [p.strip() for p in line.split(",")]
         if len(parts) < 9:
             continue
@@ -283,18 +485,18 @@ def read_gpu(run_dir, now=None, window_s=60.0):
     if not rows:
         return None
     t_last = max(r["t"] for r in rows)
-    out = dict(csv=path, age_min=_mins(t_last, now), gpus={})
+    recent = {}
     for r in rows:
         if (t_last - r["t"]).total_seconds() <= window_s:
-            out["gpus"].setdefault(r["idx"], []).append(r)
+            recent.setdefault(r["idx"], []).append(r)
     gpus = {}
-    for idx, rs in out["gpus"].items():
+    for idx, rs in recent.items():
         last = max(rs, key=lambda r: r["t"])
         gpus[idx] = dict(util=last["util"], util_avg=sum(r["util"] for r in rs) / len(rs),
                          mem_used_gb=last["used"], mem_total_gb=last["total"],
-                         power_w=last["power"], temp_c=last["temp"])
-    out["gpus"] = gpus
-    return out
+                         power_w=last["power"], temp_c=last["temp"],
+                         mem_peak_gb=peak.get(idx, last["used"]))
+    return dict(csv=path, age_min=(time.time() - os.path.getmtime(path)) / 60.0, gpus=gpus)
 
 
 # --------------------------------------------------------------------------
@@ -331,8 +533,8 @@ def _age(m):
     if m is None:
         return "n/a"
     if m < -1.0:
-        # the log's clock is AHEAD of this host's (a laptop reading a tar from
-        # the cluster): the age is meaningless, say so instead of a negative
+        # the file's mtime is AHEAD of this host's clock (NFS skew): the age is
+        # meaningless, say so instead of a negative
         return f"{-m:.0f} min in the future (clock skew)"
     if m < 1.0:
         return f"{max(m, 0.0) * 60:.0f} s ago"
@@ -341,8 +543,22 @@ def _age(m):
     return f"{m / 60:.1f} h ago"
 
 
+def _dur(s):
+    if s is None:
+        return "-"
+    if s < 100:
+        return f"{s:.0f} s"
+    if s < 7200:
+        return f"{s / 60:.1f} min"
+    return f"{s / 3600:.1f} h"
+
+
 def _rule(ch="-"):
     return ch * WIDTH
+
+
+def _trend(vals):
+    return " > ".join(str(v) for v in vals[-TREND:])
 
 
 def describe_stage(it, stage, verbose):
@@ -356,93 +572,162 @@ def describe_stage(it, stage, verbose):
     bits = [f"step {stage['order']} of {stage['total']}"]
     if stage["start"] is not None:
         bits.append(f"started at row {int(stage['start'])}, {it - int(stage['start'])} rows in")
-    if stage["ratchet_done"]:
-        bits.append("galfor ratchet DONE (stamped)")
     if stage["done"]:
         bits.append("done: " + ", ".join(stage["done"]))
     return s + " (" + "; ".join(bits) + ")"
 
 
-def _short_verdict(v):
-    """One phrase from a ratchet verdict line."""
-    if not v:
-        return None
-    head = v.split(":", 1)[0].strip()                     # "after RELEASE 4"
-    if "RATCHET DONE" in v or "already FINISHED" in v:
-        return head + ": RATCHET DONE"
-    if "recorded as the reference" in v or "baseline" in v:
-        return head + ": reference recorded"
-    m = re.search(r"drop ([+-][\d.]+%) \(threshold ([\d.]+%)", v)
-    if m:
-        tail = "continues" if "continues" in v else ("STOP" if "stop" in v.lower() else "")
-        return f"{head}: foreground drop {m.group(1)} vs {m.group(2)} -> {tail}".rstrip(" ->")
-    m = re.search(r"([+-][\d.,]+) over the previous release \(threshold (\d+)\)", v)
-    if m:
-        tail = "continues" if "continues" in v else ""
-        return f"{head}: lnL gain {m.group(1)} vs {m.group(2)} {tail}".strip()
-    return (head + ": " + v.split(":", 1)[-1].strip())[:70]
+def _leg_view(live, stage_name):
+    """The current stage's legs: the newest record per leg index (with a wall
+    when one exists), the leg each move belongs to, and the newest record."""
+    recs = [r for r in (live or {}).get("legs", []) if r["stage"] == stage_name]
+    newest, timed = {}, {}
+    for r in recs:
+        newest[r["leg"]] = r
+        if r["wall"] is not None:
+            timed[r["leg"]] = r
+    leg_of = {m: k for k, r in sorted(newest.items()) for m in r["ran"]}
+    return dict(timed=timed, leg_of=leg_of, last=recs[-1] if recs else None,
+                nlegs=recs[-1]["nlegs"] if recs else None)
+
+
+def _render_live(L, live, gpu, stage, legs, st):
+    """The live block: pace, the leg in flight, the gates, the F-stat fit, gpu."""
+    lab = lambda s: f" {s:<11} "        # noqa: E731
+    pad = " " * 13
+    if live is None:
+        L.append(lab("live") + st.dim("n/a (no run log in the run dir)"))
+    else:
+        t_end, log_age = live["t_end"], live["log_age_min"]
+
+        def ago(t):                      # an event on the log's clock -> minutes before now
+            return None if t is None or t_end is None else log_age + _mins(t, t_end)
+
+        bits = [f"log written {_age(log_age)}"]
+        if live["saves"]:
+            bits.append(f"last save {_age(ago(live['saves'][-1]))}")
+        cyc = last_cycle(live["legs"], stage["name"]) if stage and stage["name"] else None
+        if cyc is not None:
+            bits.append(f"last full cycle {_dur(cyc[1])} (cycle {cyc[0]})")
+        elif len(live["saves"]) > 1:
+            s = live["saves"][-7:]
+            c = [_mins(a, b) for a, b in zip(s[:-1], s[1:])]
+            bits.append(f"row cadence: last {c[-1]:.0f} min, median of {len(c)} = "
+                        f"{sorted(c)[len(c) // 2]:.0f} min")
+        line = lab("live") + " . ".join(bits)
+        L.append(st.warn(line) if log_age > 30 else line)
+        if log_age > 30:
+            L.append(pad + st.dim("quiet log: a snapshot or a stopped job"
+                                  + ("; the leg time below is at its last line"
+                                     if legs["last"] is not None else "")))
+        # ---- the leg in flight against its last wall time ----------------
+        last = legs["last"]
+        if last is not None and t_end is not None:
+            k = last["leg"] % last["nlegs"] + 1
+            nxt = legs["timed"].get(k)
+            ran = nxt["ran"] if nxt else [m for m, j in legs["leg_of"].items() if j == k]
+            names = f" ({ran[0]} .. {ran[-1]})" if len(ran) > 1 else (f" ({ran[0]})" if ran else "")
+            run_s = (t_end - last["t"]).total_seconds()
+            s = f"leg {k}/{last['nlegs']}{names}: {_dur(run_s)} in"
+            if nxt is not None:
+                s += f", {_dur(nxt['wall'])} last time"
+                if run_s > 1.3 * nxt["wall"] + 300:
+                    s = st.warn(s + f" -- {_dur(run_s - nxt['wall'])} OVER")
+            L.append(lab("next row") + s)
+        # ---- the stage-end clock: the per-(walker, band) RJ valve --------
+        if live["gates"]:
+            g = live["gates"][-1]
+            L.append(lab("rj valve") + f"{g['active']} active of {g['occupied']} occupied pairs "
+                     f"({g['shut_pct']:.1f}% shut; stage end at 0) . judged {_age(ago(g['t']))}")
+            bits = []
+            if g["streak"]:
+                bits.append(f"streak p50 {g['streak'][0]} p90 {g['streak'][1]} of {g['streak'][2]}")
+            if g["tol"] is not None:
+                bits.append(f"tol {g['tol']:g} nats")
+            if bits:
+                L.append(pad + ", ".join(bits))
+            if len(live["gates"]) > 1:
+                L.append(pad + f"active, last {min(TREND, len(live['gates']))} judges: "
+                         + _trend([x["active"] for x in live["gates"]]))
+        if live["empty"]:
+            e = live["empty"]
+            L.append(lab("empty bands") + f"{e['off']} of {e['eligible']} eligible bands off "
+                     f"(f > {e['floor_mhz']:g} mHz) . next revive check in "
+                     f"{max(e['every'] - e['since'], 0)} iteration(s)")
+        # ---- F-stat epochs ------------------------------------------------
+        if live["epochs"] or live["epoch_open"]:
+            if live["epoch_open"] is not None:
+                o = live["epoch_open"]
+                s = f"epoch {o['epoch']} FITTING for {_dur((t_end - o['t']).total_seconds())}"
+                if live["sweep"]:
+                    w = live["sweep"]
+                    s += f" . {w['name']} {w['pct']:.0f}% ETA {w['eta']}"
+                L.append(lab("fstat") + s)
+            if live["epochs"]:
+                ep = live["epochs"][-1]
+                s = (f"epoch {ep['epoch']}, {_age(ago(ep['t']))}: {ep['peaks']} peaks . "
+                     f"fit {_dur(ep['wall_s'])}")
+                if ep["stage_a"]:
+                    a = ep["stage_a"]
+                    s += f" (stage A {a['minutes']:.1f}, {a['skipped']}/{a['nbands']} bands skipped)"
+                L.append((pad if live["epoch_open"] else lab("fstat")) + s)
+                if len(live["epochs"]) > 1:
+                    L.append(pad + f"peaks, last {min(TREND, len(live['epochs']))} epochs: "
+                             + _trend([x["peaks"] for x in live["epochs"]]))
+        if live["replica"]:
+            L.append(lab("replica pe") + live["replica"][:WIDTH - 14])
+    # ---- head-node GPUs -------------------------------------------------
+    if gpu is None:
+        L.append(lab("gpu (head)") + st.dim("n/a (no gpu_util_*.csv in the run dir)"))
+        return
+    stale = gpu["age_min"] is not None and gpu["age_min"] > 5
+    tag = f"sample {_age(gpu['age_min'])}"
+    for j, idx in enumerate(sorted(gpu["gpus"])):
+        d = gpu["gpus"][idx]
+        s = (f"GPU{idx} util {d['util']:.0f}% (60 s {d['util_avg']:.0f}%) . "
+             f"{d['mem_used_gb']:.1f}/{d['mem_total_gb']:.1f} GiB, job peak {d['mem_peak_gb']:.1f}")
+        if j == len(gpu["gpus"]) - 1:
+            s += "   " + (st.warn(tag + " -- STALE") if stale else st.dim(tag))
+        L.append((lab("gpu (head)") if j == 0 else pad) + s)
 
 
 def render(it, store, after, stage, rows, live, gpu, st):
     L = []
     run_dir = os.path.dirname(os.path.abspath(store))
+    name = os.path.basename(store)
     L.append(_rule("="))
-    L.append(f" {st.bold(os.path.basename(store))}".ljust(40) + f"  {run_dir}")
+    L.append(f" {st.bold(name)}" + " " * max(1, 39 - len(name)) + f"  {run_dir}")
     L.append(_rule())
+    legs = _leg_view(live, stage["name"] if stage else None)
     # ---- where ----------------------------------------------------------
-    L.append(f" {'last saved row':<16} {st.bold(str(it)):<14}  saved after   "
-             f"{st.hi(after) if after else st.dim('(none recorded)')}")
+    L.append(f" {'last saved row':<16} {st.bold(str(it))}{' ' * max(1, 14 - len(str(it)))}  "
+             f"saved after   {st.hi(after) if after else st.dim('(none recorded)')}")
     if stage is None:
         L.append(f" {'stage':<16} none (no recipe group)")
     elif stage["name"] is None:
         L.append(f" {'stage':<16} {st.bold('FINISHED')}  all {stage['total']} steps complete")
     else:
         bits = [f"step {stage['order']} of {stage['total']}"]
+        sd = live["stage_done"] if live else None
         if stage["start"] is not None:
             s0 = int(stage["start"])
-            bits.append(f"started row {s0}")
+            when = ""
+            # the logged end of the step right before this one is this one's start
+            # (a source_search in between logs no STAGE COMPLETE of its own)
+            if (sd is not None and stage["done"] and sd["stage"] == stage["done"][-1]
+                    and live["t_end"] is not None):
+                when = f", {_age(live['log_age_min'] + _mins(sd['t'], live['t_end']))}"
+            bits.append(f"started row {s0}{when}")
             bits.append(f"{it - s0} rows in")
-        L.append(f" {'stage':<16} {st.bold(stage['name']):<14} " + " . ".join(bits))
+        L.append(f" {'stage':<16} {st.bold(stage['name'])}"
+                 f"{' ' * max(1, 15 - len(stage['name']))} " + " . ".join(bits))
         if stage["done"]:
             L.append(f" {'done':<16} {', '.join(stage['done'])}")
-        if stage["name"].startswith("gb_search"):
-            L.append(f" {'galfor ratchet':<16} "
-                     + (st.bold("DONE (stop stamped in the store)") if stage["ratchet_done"]
-                        else "running (no stop stamp)"))
+        if sd is not None and sd["stage"] == stage["name"]:
+            L.append(f" {'':<16} " + st.warn("the log says STAGE COMPLETE; the store's stamp "
+                                             "is still pending"))
     L.append(_rule())
-    # ---- live: pace, gate, gpu -----------------------------------------
-    if live is None:
-        L.append(f" {'live':<11} " + st.dim("n/a (no *_artifacts/globalfit_run.log in the run dir)"))
-    else:
-        bits = [f"log age {_age(live['log_age_min'])}"]
-        if live["last_save_age_min"] is not None:
-            bits.append(f"last save {_age(live['last_save_age_min'])}")
-        if live["cadence"]:
-            c = live["cadence"]
-            med = sorted(c)[len(c) // 2]
-            bits.append(f"row cadence: last {c[-1]:.0f} min, median of {len(c)} = {med:.0f} min")
-        L.append(f" {'live':<11} " + " . ".join(bits))
-        if live["gate"] or live["verdict"]:
-            g = live["gate"] or ""
-            v = _short_verdict(live["verdict"])
-            L.append(f" {'ratchet':<11} {st.bold(g):<44} {v or ''}")
-        if live["replica"]:
-            L.append(f" {'replica pe':<11} {live['replica'][:WIDTH - 14]}")
-        if live["stage_line"]:
-            L.append(f" {'stage log':<11} {live['stage_line'][:WIDTH - 14]}")
-    if gpu is None:
-        L.append(f" {'gpu':<11} " + st.dim("n/a (no gpu_util_*.csv in the run dir)"))
-    else:
-        parts = []
-        for idx in sorted(gpu["gpus"]):
-            d = gpu["gpus"][idx]
-            parts.append(f"GPU{idx} util {d['util']:3.0f}% (60 s {d['util_avg']:3.0f}%)  "
-                         f"mem {d['mem_used_gb']:4.1f}/{d['mem_total_gb']:.1f} GiB  "
-                         f"{d['power_w']:3.0f} W {d['temp_c']:.0f}C")
-        stale = gpu["age_min"] is not None and gpu["age_min"] > 5
-        tag = f"sample {_age(gpu['age_min'])}"
-        L.append(f" {'gpu (head)':<11} " + "  .  ".join(parts) + "   "
-                 + (st.warn(tag + " -- STALE") if stale else st.dim(tag)))
+    _render_live(L, live, gpu, stage, legs, st)
     L.append(_rule())
     # ---- cold chain -----------------------------------------------------
     last = rows[-1] if rows else None
@@ -490,22 +775,33 @@ def render(it, store, after, stage, rows, live, gpu, st):
                     f"{_fmt(rec['ll'].max()):>16} {_fmt(rec['ll'].min()):>16}  {gbs:<11}")
             L.append(st.bold(line) if rec is last else line)
         L.append(_rule())
-    # ---- the stage's proposal cycle -------------------------------------
+    # ---- the stage's proposal cycle, grouped by leg ----------------------
     if stage is not None and stage["name"] is not None:
         mo = stage["move_order"]
         if not mo:
             L.append(f" {'stage cycle':<10} " + st.dim("(no move_order recorded for this stage)"))
         else:
-            legs = {rec["after"] for rec in rows if rec.get("after")}
+            marks = {rec["after"] for rec in rows if rec.get("after")}
+            marks |= {r["after"] for r in legs["timed"].values()}
             if after:
-                legs.add(after)
-            L.append(f" stage cycle ({stage['name']}.move_order)   "
-                     f"* = a row lands after this leg   <<< last saved   <-- next proposal")
+                marks.add(after)
+            head = (f" stage cycle ({stage['name']}.move_order)   "
+                    f"* = a row lands after this leg")
+            L.append(head + ("last wall".rjust(WIDTH - len(head) - 1) if legs["timed"] else ""))
             i_last = mo.index(after) if after in mo else None
             i_next = (i_last + 1) % len(mo) if i_last is not None else None
+            cur_leg = None
             for i, m in enumerate(mo):
-                mark = "*" if m in legs else " "
-                line = f"   {i + 1:>2}  {mark} {m:<24}"
+                k = legs["leg_of"].get(m)
+                if k is not None and k != cur_leg:
+                    r = legs["timed"].get(k)
+                    lh = f"   leg {k}/{legs['nlegs']}"
+                    L.append(st.dim(lh + (_dur(r["wall"]).rjust(WIDTH - len(lh) - 1) if r else "")))
+                    cur_leg = k
+                r = legs["timed"].get(k)
+                w = r["moves"].get(m) if r else None
+                line = (f"   {'  ' if k else ''}{i + 1:>2}  {'*' if m in marks else ' '} {m:<24}"
+                        f"{_dur(w) if w is not None else '':>9}")
                 if i == i_last:
                     line = st.hi(line + f"  <<< LAST SAVED (row {it})")
                 elif i == i_next:
