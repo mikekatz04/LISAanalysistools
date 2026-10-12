@@ -108,6 +108,16 @@ CIRCULAR_COLS = {3: 2.0 * np.pi, 5: np.pi, 6: 2.0 * np.pi}
 _LOGPDF_MAX_BYTES = int(
     os.environ.get("GB_WARM_START_LOGPDF_MAX_BYTES", 1 << 30))
 
+# Bytes the candidate-gather stage of the logpdf holds PER (coord, depth)
+# cell before any pair is scored: cand_pos + kk (int64), the win_lo / win_hi
+# takes and lp (float64), the exp(lp - m) temporary (float64), the bool
+# masks (~3 bytes). Seven words is a round upper bound. The same 1 GiB
+# budget above divides into rows of the coordinate block (see
+# _mixture_logpdf): the 9mo full_pe (job 757, 2026-10-12) scored 20,000
+# coordinates against a depth-29,832 candidate set and asked for
+# 4.77 GB per (n, D) array on a card already holding 92 GB.
+_LOGPDF_BYTES_PER_CANDIDATE = 56
+
 #: default logpdf candidate window, in units of df = 1/Tobs (mHz)
 DEFAULT_F0_WINDOW_DF = 10.0
 #: per-component sigma guard added to the candidate window half-width; the
@@ -732,6 +742,45 @@ class WarmStartComponents:
         xp = get_array_module(x)
         t = self._t(xp)
         x = xp.atleast_2d(xp.asarray(x, dtype=xp.float64))
+        n = x.shape[0]
+        # CHUNKED OVER ROWS (2026-10-12), on top of the pair chunking inside
+        # _mixture_logpdf_rows. The candidate gather there materialises
+        # several (n, D) arrays at once (cand_pos, kk, the win_lo / win_hi
+        # takes, lp): with the production candidate set D is tens of
+        # thousands, so n = 20,000 coordinates (every GB slot of a walker,
+        # BandSorter scores them all) is 4.77 GB PER ARRAY. 9mo job 757 died
+        # on exactly that in full_pe's first rj_warm_pe, after the PE F-stat
+        # refit had left ~70 GB resident:
+        #
+        #   rj_warm_pe -> BandSorter.__init__ -> rj_prop.logpdf
+        #     -> _mixture_logpdf -> t["win_hi"][kk]
+        #   OutOfMemoryError: allocating 4,773,120,000 bytes
+        #                     (allocated so far: 92,007,001,088)
+        #
+        # Every row's density depends on that row alone, so slicing the
+        # coordinate block is float-exact (tests/test_warmstart_logpdf_row_
+        # chunking.py checks bit identity at every chunk size).
+        rows = self._logpdf_rows_per_chunk(self._overlap_depth)
+        if n <= rows:
+            return self._mixture_logpdf_rows(x, t, xp)
+        out = xp.empty(n, dtype=xp.float64)
+        for s in range(0, n, rows):
+            e = min(s + rows, n)
+            out[s:e] = self._mixture_logpdf_rows(x[s:e], t, xp)
+        return out
+
+    @staticmethod
+    def _logpdf_rows_per_chunk(depth, budget=None):
+        """Rows of one logpdf block so its ``(rows, D)`` temporaries fit the
+        byte budget (``GB_WARM_START_LOGPDF_MAX_BYTES``); at least one row,
+        however small the budget or large the depth."""
+        budget = _LOGPDF_MAX_BYTES if budget is None else int(budget)
+        per_row = _LOGPDF_BYTES_PER_CANDIDATE * max(int(depth), 1)
+        return max(1, int(budget // max(per_row, 1)))
+
+    def _mixture_logpdf_rows(self, x, t, xp):
+        """One block of :meth:`_mixture_logpdf`: ``x`` is ``(n, ndim)`` in
+        the fitted basis on ``xp``, ``t`` the tables on that module."""
         n = x.shape[0]
         f0 = x[:, 1]
 
