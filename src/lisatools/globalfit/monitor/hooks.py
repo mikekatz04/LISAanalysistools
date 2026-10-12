@@ -34,8 +34,9 @@ worth making silently, and an operator who wants it back can restart
 with a longer ``GF_MONITOR_ITER``.
 
 ``GF_MONITOR_PAGE_SHORT=1`` (2026-10-03) builds the SHORT page
-(``_short.py``: topline, lnL and leaf count over time, phase-maximised
-overlap, current noise; under a minute) INSTEAD of the full one, at
+(``_short.py``: topline, lnL and leaf count over time, the other sources,
+phase-maximised overlap, current noise; under a minute -- the same block
+opens the full page) INSTEAD of the full one, at
 ``RUN_DIR_monitor_short.html``
 beside the run folder. The full page stays the default. ``GF_MONITOR_OUT``
 names the FULL page only; the short page always takes its default name, so

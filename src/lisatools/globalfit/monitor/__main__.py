@@ -22,8 +22,9 @@ because the page was written inside the directory being archived. It no
 longer does. Copy both if the report has to travel with the data.
 
 ``--short-page`` (2026-10-03) builds the SHORT page INSTEAD of the full
-one: the topline, likelihood and leaf count over time, the phase-maximised
-overlap and the current noise measurement, in well under a minute, written
+one: the topline, likelihood and leaf count over time, the other sources, the
+phase-maximised overlap and the current noise measurement -- the block that
+also opens the full page -- in well under a minute, written
 to ``RUN_DIR_monitor_short.html`` beside the run folder (a separate file; the
 full page's name is untouched). The user's request and the page's contents
 are in ``_short.py``. It composes with ``--snapshot`` and ``--build-truth``,

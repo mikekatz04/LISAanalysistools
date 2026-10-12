@@ -1,15 +1,23 @@
-"""The SHORT monitor page (``lisatools.globalfit.monitor._short``).
+"""The SHORT monitor page (``lisatools.globalfit.monitor._short``), which is
+also the full page's at-a-glance block.
 
 User request 2026-10-03: "let's make a short version of the html as well.
 That picks out the most important plots and topline info. phase maximized
 overlap. current psd measurements. nleaves over time, likelihood over time."
+User request 2026-10-11: the most important / succinct plots and info first
+-- the short page -- and "stack the other sources closer to the top".
 
 Pinned here:
   * it renders from a small synthetic run directory, with the topline fields
     and the section headings in order, as one self-contained, well-formed
     document;
-  * it DEGRADES rather than fails when the head log, the GPU CSV or the truth
-    set is absent;
+  * the topline reads the head log the way gf_last_iteration.py does (legs and
+    their walls, the RJ valve's active pairs, the empty-band valve, the F-stat
+    epochs), and the two parsers give one answer on one log;
+  * the other-sources table names a walker on another mode and colours a
+    parameter pulled off its catalogue truth;
+  * it DEGRADES rather than fails when the head log, the GPU CSV, the truth
+    set or a catalogue is absent;
   * the overlap section, given a truth set equal to the model, scores every
     pair at overlap 1 -- the real GBGPU path, end to end;
   * the generator's own helpers are compiled out of its syntax tree, not run,
@@ -22,6 +30,7 @@ Pinned here:
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -40,14 +49,88 @@ import lisatools.globalfit.monitor as mon
 from lisatools.globalfit.monitor import _short as sh
 
 NIT, CAP, NW, NLEAF = 12, 16, 4, 40
-GATES = {6: "nudge", 9: "moved"}       # rows saved after the gated noise step
 NOW = datetime(2026, 10, 3, 11, 12)
 GALFOR0 = np.array([-43.84, -2.6, 5.0, -2.0, -2.85])      # log10 basis, alpha linear
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DASHBOARD = os.path.join(_HERE, os.pardir, "scripts", "diagnostics", "gf_last_iteration.py")
+
+_T = "2026-10-03 {} - lisatools.globalfit.{} - INFO - {}\n"
+HEAD_LOG = [
+    ("10:00:00,100", "recipe", "[LEG stage_b] resume: rows 4..7 of this stage, last saved after "
+                               "'in_model_removal' -> next move 'vgb_pe' (leg 1/2), 0 cycle(s) completed"),
+    ("10:20:00,100", "communication.fanout", "[FANOUT] op=gb_run_proposal move=vgb_pe head_s=1.0 "
+                                             "max_rank_s=1.0 wait_s=0.000"),
+    ("10:29:59,000", "communication.fanout", "[FANOUT] op=gb_run_proposal move=in_model head_s=500.0 "
+                                             "max_rank_s=540.0 wait_s=0.030"),
+    ("10:30:00,100", "moves.globalfitmove", "[LEG stage_b] cycle 0 leg 1/2: ran ['vgb_pe', 'in_model'] "
+                                            "-> row saved after 'in_model'"),
+    ("10:30:00,200", "hdfbackend", "[SAVE] save_step 0.13 s (handoff to rank 4)"),
+    ("10:40:00,000", "moves.gbspecialstretch", "[GB_GATE rj_fstat_search] occupied 40 | shut 10 (25.0%) "
+                                               "| active 30 -- streak p50 1 p90 2 of 3; resets/pair mean "
+                                               "0.10 max 1 | max-minus-now gain p50 0.00 p90 3.00 (tol "
+                                               "20.00) | peak: 40 of 40 occupied cells"),
+    ("10:41:00,000", "moves.gbspecialstretch", "rj_fstat_search: F-stat grid fit epoch 3 starting "
+                                               "(walker_ref=0 GLOBAL on rank 0 row 0)"),
+    ("10:45:00,000", "sampling.fstat_gridfit", "[stageA] comb + peak selection: 12 peaks in 3.5m (split "
+                                               "by node range over the compute ranks); 5 of 20 bands "
+                                               "skipped (100 of 400 f0 nodes dropped from the sweep)"),
+    ("10:46:00,000", "moves.gbspecialstretch", "rj_fstat_search: F-stat grid fit epoch 3 done in 300.0s "
+                                               "(12 peaks)"),
+    ("10:47:00,000", "moves.gbspecialstretch", "[GB_BAND_SHUTOFF status rj_fstat_search] clock 2 iters, "
+                                               "floor 10.000 mHz: 12/20 bands eligible, 5 qualifying now "
+                                               "(cold occ 0), streak max 2 median 2, 5 armed (streak >= "
+                                               "clock); 5 off (+0 this tick, -0 re-homed); 3/10 iters "
+                                               "since revive; persist restored"),
+    ("11:10:00,100", "moves.globalfitmove", "[LEG stage_b] cycle 0 leg 2/2: ran ['in_model_fstat', "
+                                            "'in_model_removal'] -> row saved after 'in_model_removal'"),
+    ("11:10:00,200", "hdfbackend", "[SAVE] save_step 0.13 s (handoff to rank 4)"),
+    ("11:40:00,100", "moves.globalfitmove", "[LEG stage_b] cycle 1 leg 1/2: ran ['vgb_pe', 'in_model'] "
+                                            "-> row saved after 'in_model'"),
+    ("11:40:00,200", "hdfbackend", "[SAVE] save_step 0.13 s (handoff to rank 4)"),
+    ("11:50:00,000", "moves.gbspecialstretch", "[GB_GATE rj_fstat_search] occupied 41 | shut 20 (48.8%) "
+                                               "| active 21 -- streak p50 2 p90 3 of 3; resets/pair mean "
+                                               "0.20 max 1 | max-minus-now gain p50 0.00 p90 1.00 (tol "
+                                               "20.00) | peak: 41 of 41 occupied cells"),
+    ("12:30:00,100", "moves.globalfitmove", "[LEG stage_b] cycle 1 leg 2/2: ran ['in_model_fstat', "
+                                            "'in_model_removal'] -> row saved after 'in_model_removal'"),
+    ("12:30:00,200", "hdfbackend", "[SAVE] save_step 0.13 s (handoff to rank 4)"),
+    ("12:35:00,000", "moves.gbspecialstretch", "rj_fstat_search: F-stat grid fit epoch 4 starting "
+                                               "(walker_ref=0 GLOBAL on rank 0 row 0)"),
+    ("12:36:00,000", "sampling.fstat_gridfit", "[sweep:comb.nsky512] 50/100 evals (50.0%) | 10 evals/s "
+                                               "| ETA 5s | elapsed 5s"),
+]
+
+# the MBHB catalogue rows the fixture's two MBH leaves are injected from
+# (loader keys 1 and 0: positional rows of the ID-sorted catalogue)
+MBH_CAT = dict(
+    ID=[10, 11], PrimaryMassSSBFrame=[1.0e6, 3.0e5], SecondaryMassSSBFrame=[3.0e5, 1.0e5],
+    PrimarySpinCompZ=[0.5, 0.2], SecondarySpinCompZ=[0.3, -0.1], LuminosityDistance=[2.0e4, 1.5e4],
+    PhaseReferenceSourceFrame=[1.0, 2.0], InclinationAngle=[0.7, 1.1], RightAscension=[2.0, 4.0],
+    Declination=[0.3, -0.5], PolarisationAngle=[0.4, 1.4], TimeCoalescenceSSBFrame=[1.0e7, 2.0e7])
 
 
-def _make_run(root, name="gf_prod_test", *, log=True, csv=True):
+def _dashboard():
+    """``scripts/diagnostics/gf_last_iteration.py`` as a module (stdlib-only at import)."""
+    spec = importlib.util.spec_from_file_location("gf_last_iteration", DASHBOARD)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _mbh_truths():
+    """The two leaves' sampling-basis truths, through the generator's own map:
+    leaf i is loader key ``[1, 0][i]``, the positional row of the ID-sorted
+    catalogue (IDs 10, 11 -> keys 0, 1)."""
+    ns = sh._generator_functions({"np": np}, names=("_src_cat_to_sampling_mbh",))
+    rows = [{k: np.asarray(v)[i] for k, v in MBH_CAT.items()} for i in range(2)]
+    to = ns["_src_cat_to_sampling_mbh"]
+    return to(rows[1]), to(rows[0])
+
+
+def _make_run(root, name="gf_prod_test", *, log=True, csv=True, sources=False):
     """A run directory the short page can read: the store plus, optionally,
-    the head log and the head node's GPU CSV."""
+    the head log, the head node's GPU CSV, and an MBH branch with its
+    run_settings.log source ids."""
     run = os.path.join(root, name)
     os.makedirs(run)
     rng = np.random.default_rng(7)
@@ -73,15 +156,14 @@ def _make_run(root, name="gf_prod_test", *, log=True, csv=True):
     p_now = np.column_stack([1.5e-11 * (1 + 1e-4 * rng.standard_normal(NW)),
                              3.0e-15 * (1 + 1e-3 * rng.standard_normal(NW))])
     for r in range(NIT):
-        if r == 6:                                         # the forced step
+        if r == 6:
             g_now = g_now + np.array([-0.05, -0.1, 0.0, 0.0, -0.15])
-        elif r == 9:                                       # released and sampled
+        elif r == 9:
             g_now = g_now + 0.02 * rng.standard_normal((NW, 5))
             p_now = p_now * (1 + 1e-4 * rng.standard_normal((NW, 2)))
         gal[r, :, :, 0] = g_now
         psd[r, :, :, 0] = p_now
-    saved = [("noise_ratchet_search" if r in GATES else
-              ("in_model", "in_model_fstat", "in_model_removal")[r % 3]) for r in range(NIT)]
+    saved = [("in_model", "in_model_fstat", "in_model_removal")[r % 3] for r in range(NIT)]
     with h5py.File(os.path.join(run, f"{name}_testing.h5"), "w") as f:
         g = f.create_group("global_fit")
         g.attrs["iteration"] = NIT
@@ -90,6 +172,9 @@ def _make_run(root, name="gf_prod_test", *, log=True, csv=True):
         g.create_dataset("chain/gb", data=chain)
         for b, n in (("vgb", 3), ("psd", 1), ("galfor", 1)):
             g.create_dataset(f"inds/{b}", data=np.ones((CAP, 1, 1, NW, n), bool))
+        vhh = np.full((CAP, NW, 3), np.nan)
+        vhh[:NIT] = np.array([100.0, 81.0, 4.0])           # SNR 10, 9, 2: two above 7
+        g.create_dataset("sub_backend/vgb/h_h", data=vhh)
         g.create_dataset("saved_after", data=np.array(saved, dtype="S32"))
         g.create_dataset("sub_backend/psd/chain", data=psd)
         g.create_dataset("sub_backend/galfor/chain", data=gal)
@@ -101,21 +186,33 @@ def _make_run(root, name="gf_prod_test", *, log=True, csv=True):
         s1["order num"], s1["status"], s1["completed_iteration"] = 1, True, 4
         s2 = rec.create_group("stage_b").attrs
         s2["order num"], s2["status"], s2["start_iteration"] = 2, False, 4
-        s2["move_order"] = json.dumps(["noise_ratchet_search", "in_model",
-                                       "in_model_fstat", "in_model_removal"])
+        s2["move_order"] = json.dumps(["vgb_pe", "in_model", "in_model_fstat", "in_model_removal"])
         s3 = rec.create_group("stage_c").attrs             # stale stamp from a reset
         s3["order num"], s3["status"], s3["start_iteration"] = 3, False, 10
+        if sources:
+            truths = _mbh_truths()
+            mch = np.zeros((CAP, 1, 1, NW, 2, 11))
+            sig = np.abs(np.asarray(truths)) * 1e-3 + 1e-3
+            for leaf in range(2):
+                mch[:NIT, 0, 0, :, leaf] = (truths[leaf][None, None]
+                                            + sig[leaf] * rng.standard_normal((NIT, NW, 11)))
+            mch[:NIT, 0, 0, :, 0, 0] += 6.0 * sig[0, 0]      # leaf 0's logM pulled ~ +6 sigma
+            g.create_dataset("chain/mbh", data=mch)
+            g.create_dataset("inds/mbh", data=np.ones((CAP, 1, 1, NW, 2), bool))
+            hh = np.full((CAP, NW, 2), 400.0)               # SNR 20 for both leaves ...
+            dh = np.full((CAP, NW, 2), 400.0)
+            dh[:, 0, 1] = 100.0                             # ... but walker 0 holds leaf 1 at SNR 5
+            g.create_dataset("sub_backend/mbh/h_h", data=hh)
+            g.create_dataset("sub_backend/mbh/d_h", data=dh)
+    art = os.path.join(run, f"{name}_artifacts")
+    os.makedirs(art)
+    if sources:
+        with open(os.path.join(art, "run_settings.log"), "w") as fh:
+            fh.write("processor_init_kwargs: {'source_ids': {'MBHB': [1, 0]}}\n")
     if log:
-        art = os.path.join(run, f"{name}_artifacts")
-        os.makedirs(art)
-        t = "2026-10-03 {} - lisatools.globalfit.{} - INFO - {}\n"
         with open(os.path.join(art, "globalfit_run.log"), "w") as fh:
-            for hm in ("10:00:00,100", "10:30:00,100", "11:10:00,100"):
-                fh.write(t.format(hm, "hdfbackend", "[SAVE] save_step 0.13 s (handoff to rank 4)"))
-            fh.write(t.format("11:10:00,200", "recipe", "[GALFOR_RATCHET stage_b] iteration 3: "
-                              "NUDGE (cycle 2 of 20) -- galfor shift [-0.05 -0.1 0 0 -0.15]"))
-            fh.write(t.format("11:10:01,000", "recipe", "[GALFOR_RATCHET stage_b] after RELEASE 1: "
-                              "foreground drop -3.20% (threshold 1.00%) at 3-5 mHz; continues"))
+            for hm, mod, msg in HEAD_LOG:
+                fh.write(_T.format(hm, mod, msg))
     if csv:
         with open(os.path.join(run, "gpu_util_123.csv"), "w") as fh:
             for s in (20, 40, 60):
@@ -123,6 +220,19 @@ def _make_run(root, name="gf_prod_test", *, log=True, csv=True):
                     fh.write(f"2026/10/03 11:09:{s % 60:02d}.000, {i}, NVIDIA H100 NVL, {u}, 0, "
                              f"30000, 95830, 120.5, 45\n")
     return run
+
+
+def _make_mojito(root):
+    """A mojito tree holding the fixture's MBHB catalogue (and an empty data/)."""
+    moj = os.path.join(root, "mojito")
+    os.makedirs(os.path.join(moj, "catalogues"))
+    os.makedirs(os.path.join(moj, "data"))
+    with h5py.File(os.path.join(moj, "catalogues",
+                                "mbhb_cat_mojito_lite_processed_MT_rounding_fixed.hdf5"), "w") as f:
+        b = f.create_group("Binaries")
+        for k, v in MBH_CAT.items():
+            b.create_dataset(k, data=np.asarray(v))
+    return moj
 
 
 class _WellFormed(HTMLParser):
@@ -193,8 +303,8 @@ class ShortPageRenderTest(unittest.TestCase):
 
     def test_the_sections_are_there_in_order(self):
         heads = ["<h2>Topline</h2>", "<h2>Log-likelihood</h2>", "<h2>GB Leaf Count</h2>",
-                 "<h2>Phase-Maximised Overlap</h2>", "<h2>Noise: Current Measurement</h2>",
-                 "<h2>Ratchet Gates</h2>", "<h2>Notes</h2>"]
+                 "<h2>Other Sources</h2>", "<h2>Phase-Maximised Overlap</h2>",
+                 "<h2>Noise: Current Measurement</h2>", "<h2>Notes</h2>"]
         pos = [self.html.index(h) for h in heads]
         self.assertEqual(pos, sorted(pos))
 
@@ -203,36 +313,46 @@ class ShortPageRenderTest(unittest.TestCase):
                         self.html.index('<section id="lnl">')]
         for want in ("last saved row", f"<b>{NIT - 1}</b>", "saved after",
                      "<code>in_model_removal</code>",         # row 11: 11 % 3 = 2
-                     "next leg <code>noise_ratchet_search</code>",   # the cycle wraps
+                     "next leg <code>vgb_pe</code>",           # the cycle wraps
                      "<b>stage_b</b>", "step 2 of 3", "started row 4, 8 rows in",
-                     "galfor ratchet", "iteration 3: NUDGE (cycle 2 of 20)",
-                     "foreground drop -3.20% vs 1.00%",
-                     "row cadence: last 40 min, median of 2 = 40 min",
+                     "log written", "last save",
+                     "last full cycle 80.0 min (cycle 1: 30.0 min + 50.0 min)",
+                     "leg in flight", "leg 1/2 (vgb_pe .. in_model): 6.0 min in, 30.0 min last time",
+                     "rj valve", "<b>21</b> active of 41 occupied", "48.8% shut",
+                     "streak p50 2 p90 3 of 3", "tol 20 nats",
+                     "last 2 judges:</span> 30 &gt; 21",
+                     "empty bands", "5 of 12 eligible bands off", "next revive check in 7",
+                     "f-stat", "epoch 4 <b>FITTING</b> for 60 s", "comb.nsky512 50% ETA 5s",
+                     "<b>12</b> peaks", "fit 5.0 min", "stage A 3.5 min, 5/20 bands skipped",
                      "gpu (head node)", "GPU0 util 55%", "GPU1 util 80%",
-                     "head node only", "29.3/93.6 GiB",
+                     "head node only", "29.3/93.6 GiB", "job peak 29.3",
                      f"cold lnL, row {NIT - 1}", "change vs row", "spread",
                      "cold leaves", f"gb min <b>{5 + 2 * (NIT - 1)}</b>",
-                     "fixed-size branches", "vgb 3", "instrument noise"):
+                     "fixed-size branches", "vgb 3",
+                     "verification binaries", "<b>2</b> of 3 above SNR 7",
+                     "instrument noise"):
             self.assertIn(want, top, want)
+        for gone in ("galfor ratchet", "GALFOR_RATCHET", "verdict"):
+            self.assertNotIn(gone, top, gone)
 
     def test_the_lnl_and_leaf_panels_are_embedded_images(self):
         for alt in ("cold log-likelihood", "GB leaf count", "current sensitivity per walker",
-                    "instrument-noise posteriors", "noise parameters vs row"):
+                    "instrument-noise posteriors"):
             self.assertRegex(self.html, rf'<img src="data:image/png;base64,[A-Za-z0-9+/=]{{200,}}" '
                                         rf'alt="{alt}">', alt)
 
     def test_no_truth_set_degrades_the_overlap_section(self):
         sec = self.html[self.html.index('<section id="overlap">'):
-                        self.html.index('<section id="noise">')]
+                        self.html.index('<section id="noise-now">')]
         self.assertIn('class="missing"', sec)
         self.assertIn("No usable truth set", sec)
         self.assertIn("--build-truth", sec)
 
-    def test_the_ratchet_gates_are_read_off_the_store(self):
-        sec = self.html[self.html.index('<section id="ratchet">'):
-                        self.html.index('<section id="notes">')]
-        self.assertRegex(sec, r"<td>6</td><td class='l'[^>]*>nudge</td>")
-        self.assertRegex(sec, r"<td>9</td><td class='l'[^>]*>moved</td>")
+    def test_no_source_branch_degrades_the_sources_section(self):
+        sec = self.html[self.html.index('<section id="sources">'):
+                        self.html.index('<section id="overlap">')]
+        self.assertIn('class="missing"', sec)
+        self.assertIn("No MBHB / EMRI / SOBHB branch", sec)
 
     def test_it_is_one_well_formed_self_contained_document(self):
         self.assertTrue(self.html.startswith("<!doctype html>"))
@@ -252,6 +372,88 @@ class ShortPageRenderTest(unittest.TestCase):
 
     def test_it_is_small(self):
         self.assertLess(os.path.getsize(self.path), 3 * 1024 * 1024)
+
+
+class ShortPageSourcesTest(_Cwd, unittest.TestCase):
+    """The other-sources table against a real (tiny) MBHB catalogue."""
+
+    def test_a_walker_off_the_mode_is_named_and_a_pull_is_coloured(self):
+        run = _make_run(self.d, log=False, csv=False, sources=True)
+        moj = _make_mojito(self.d)
+        html = sh.render_short_page(run, mojito=moj, now=NOW)
+        sec = html[html.index('<section id="sources">'):html.index('<section id="overlap">')]
+        self.assertIn("<th class='l'>MBHB</th>", sec)
+        self.assertIn("<td class='l'>src 1</td><td><b>20.0</b></td>", sec)    # leaf 0 = key 1
+        self.assertIn("<td class='l'>src 0</td><td><b>20.0</b></td>", sec)
+        self.assertIn("w0 at SNR 5.0 (median 20.0)", sec)
+        rows = sec.split("<tr>")
+        leaf0 = next(r for r in rows if "src 1" in r)
+        leaf1 = next(r for r in rows if "src 0" in r)
+        # leaf 0's first key parameter (logM) is ~ +6 sigma off its truth: red
+        self.assertRegex(leaf0, r"<td class='dim'>[^<]*</td><td class='p3'>\+[5-7]\.\d</td>")
+        self.assertNotIn("p3", leaf1)
+        self.assertNotIn("w0 at SNR", leaf0)
+
+    def test_without_a_catalogue_the_table_keeps_the_snrs(self):
+        run = _make_run(self.d, log=False, csv=False, sources=True)
+        with mock.patch("lisatools.globalfit.monitor.resolve_mojito_path",
+                        return_value=(None, "test: none")):
+            html = sh.render_short_page(run, now=NOW)
+        sec = html[html.index('<section id="sources">'):html.index('<section id="overlap">')]
+        self.assertIn("<b>20.0</b>", sec)
+        self.assertIn("no catalogue truth", sec)
+        self.assertIn("SNRs only, no pulls", html)
+
+
+class HeadLogParserTest(unittest.TestCase):
+    """The topline's head-log reader IS gf_last_iteration.py's, mirrored."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.d = tempfile.mkdtemp()
+        cls.path = os.path.join(cls.d, "globalfit_run.log")
+        with open(cls.path, "w") as fh:
+            for hm, mod, msg in HEAD_LOG:
+                fh.write(_T.format(hm, mod, msg))
+        cls.lines, _ = sh._scan(cls.path, 0, os.path.getsize(cls.path))
+        cls.out = sh.parse_head_log(cls.lines)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.d, ignore_errors=True)
+
+    def test_the_two_parsers_give_one_answer(self):
+        dash = _dashboard()
+        lines_d, _ = dash._scan(self.path, 0, os.path.getsize(self.path))
+        self.assertEqual(lines_d, self.lines)
+        self.assertEqual(dash._parse_log(lines_d), self.out)
+        self.assertEqual(dash.last_cycle(self.out["legs"], "stage_b"),
+                         sh.last_cycle(self.out["legs"], "stage_b"))
+        for name in ("_TAGS", "TAIL_BYTES", "TAIL_BYTES_MAX", "TREND"):
+            self.assertEqual(getattr(dash, name), getattr(sh, name), name)
+
+    def test_a_resume_breaks_the_leg_chain(self):
+        legs = self.out["legs"]
+        self.assertIsNone(legs[0]["wall"], "the leg after a resume line has no wall")
+        self.assertEqual([r["wall"] for r in legs[1:]], [2400.0, 1800.0, 3000.0])
+        self.assertEqual(sh.last_cycle(legs, "stage_b"), (1, 4800.0, [1800.0, 3000.0]))
+
+    def test_move_walls_come_from_the_fanout_lines(self):
+        self.assertEqual(self.out["legs"][0]["moves"], {})            # untimed leg
+        dash = _dashboard()
+        fan = [(datetime(2026, 1, 1, 0, 1), "rj_prior_removal"), (datetime(2026, 1, 1, 0, 3), "sobbh_pe"),
+               (datetime(2026, 1, 1, 0, 4), "psd_pe"), (datetime(2026, 1, 1, 0, 5), "galfor_pe")]
+        ran = ["rj_prior_removal", "gb_ridge_gibbs", "sobbh_pe", "noise_cycle_end_search"]
+        want = {"rj_prior_removal": 60.0, "sobbh_pe": 120.0, "noise_cycle_end_search": 120.0}
+        for mod in (sh, dash):
+            self.assertEqual(mod._move_walls(fan, ran, datetime(2026, 1, 1)), want)
+
+    def test_a_stage_end_restarts_the_stage_lists(self):
+        extra = [_T.format("13:00:00,000", "recipe", "[V9-STAGE stage_b] STAGE COMPLETE on the "
+                                                     "SHUTOFF rule alone: every occupied pair shut").rstrip("\n")]
+        out = sh.parse_head_log(self.lines + extra)
+        self.assertEqual(out["stage_done"]["stage"], "stage_b")
+        self.assertEqual((out["gates"], out["epochs"], out["empty"]), ([], [], None))
 
 
 class ShortPageDegradesTest(_Cwd, unittest.TestCase):
@@ -304,7 +506,7 @@ class ShortPageOverlapTest(_Cwd, unittest.TestCase):
                  orbits="mojito_l1")
         with mock.patch.object(sh, "_l1_orbits_from", return_value=(None, "test: none")):
             html = sh.render_short_page(run, now=NOW)
-        sec = html[html.index('<section id="overlap">'):html.index('<section id="noise">')]
+        sec = html[html.index('<section id="overlap">'):html.index('<section id="noise-now">')]
         n = int(al.sum())
         self.assertIn(f"<b>{n:,}</b><span>matched, overlap &ge; 0.80</span>", sec)
         self.assertIn("<b>100.0%</b><span>completeness", sec)
@@ -369,7 +571,8 @@ class GeneratorAdapterTest(unittest.TestCase):
         ns = sh._generator_functions({"np": np})
         for name in sh.GEN_HELPERS:
             self.assertTrue(callable(ns.get(name)), name)
-        for script_global in ("RUN_DIR", "OUT", "IMGS", "f", "g", "html"):
+        self.assertEqual(set(ns["_SRC_BRANCH_SPECS"]), {"mbh", "emri", "sobbh"})
+        for script_global in ("RUN_DIR", "OUT", "IMGS", "f", "g", "html", "MISSING"):
             self.assertNotIn(script_global, ns)
         mi, ti, d = ns["_match_pairs"](np.array([1.0, 2.0]), np.array([2.05, 0.98]), 0.1)
         self.assertEqual(list(mi), [0, 1])
@@ -379,18 +582,16 @@ class GeneratorAdapterTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no longer defines"):
             sh._generator_functions({"np": np}, names=("no_such_helper",))
 
+    def test_a_constant_that_runs_code_is_refused(self):
+        # MATCH_MM_THRESH = float(os.environ.get(...)): a call, not plain data
+        with self.assertRaisesRegex(RuntimeError, "no longer plain data"):
+            sh._generator_functions({"np": np}, names=(), consts=("MATCH_MM_THRESH",))
+
     def test_stage_bounds_skip_stale_stamps_of_steps_not_reached(self):
         steps = [dict(name="a", order=1, status=True, start=None, completed=4),
                  dict(name="b", order=2, status=False, start=4, completed=9),
                  dict(name="c", order=3, status=False, start=10, completed=None)]
         self.assertEqual(sh.stage_bounds(steps), [(4, "a done -> b")])
-
-    def test_verdict_phrases(self):
-        self.assertEqual(sh.verdict_phrase(
-            "after iteration 2 (RELEASE): cold-mean galfor [1 2]; no pre-nudge reference "
-            "captured yet"), "after iteration 2 (RELEASE): no pre-nudge reference yet")
-        self.assertEqual(sh.verdict_phrase("after RELEASE 0: recorded as the reference"),
-                         "after RELEASE 0: reference recorded")
 
 
 class ShortPageCliTest(unittest.TestCase):

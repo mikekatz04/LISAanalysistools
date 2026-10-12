@@ -598,9 +598,11 @@ def build_monitor(run_dir: str, out_path: Optional[str] = None, *,
 
 
 # THE SHORT PAGE (user request 2026-10-03; see _short.py): the topline plus
-# the lnL, leaf-count, phase-maximised-overlap and current-noise panels, in
-# well under a minute, written to RUN_DIR + "_monitor_short.html" -- a
-# separate file, so the full page above and its default name are unchanged.
+# the lnL, leaf-count, other-sources, phase-maximised-overlap and current-noise
+# panels, in well under a minute, written to RUN_DIR + "_monitor_short.html" --
+# a separate file, so the full page above and its default name are unchanged.
+# Since 2026-10-11 the same block (_short.build_glance) also opens the full
+# page, above its collapsed detail groups.
 # Imported last: _short reaches back into this module (generator_path,
 # check_truth, resolve_mojito_path) only inside its functions.
 from ._short import build_short_monitor, default_short_out_path  # noqa: E402

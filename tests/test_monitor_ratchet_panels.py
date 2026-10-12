@@ -10,6 +10,14 @@ promises must be rendered somewhere, the section must be in the page body and
 reachable from the nav, and the whitening must be per walker against that
 walker's OWN noise (the whitening its likelihood used), never one shared
 curve.
+
+Layout since 2026-10-11 (user request: succinct first, detail grouped and
+collapsed): the foreground panels that do not need the ratchet (the whitened
+residual per band and its zooms, the unresolved-source scorecard, the truth
+decomposition) sit in the noise group right after the residual spectrum; the
+ratchet-only panels (timeline, where the leaves went) form their own group,
+rendered only when the store ran the ratchet; the RJ-traffic panel joined the
+search section.
 """
 
 import os
@@ -42,12 +50,25 @@ class RatchetPanelsLayoutTest(unittest.TestCase):
         self.assertIn('<section id="ratchet">', self.src)
         self.assertIn('<a href="#ratchet">', self.src)
 
-    def test_the_section_sits_between_residual_and_recovery(self):
-        i_res = self.src.index('<section id="resid">')
-        i_rat = self.src.index('<section id="ratchet">')
-        i_rec = self.src.index('<section id="recovery">')
-        self.assertLess(i_res, i_rat)
-        self.assertLess(i_rat, i_rec)
+    def test_the_foreground_panels_follow_the_residual_in_the_noise_group(self):
+        grp = self.src[self.src.index('<details class="group" id="grp-noise">'):]
+        grp = grp[:grp.index("</details>")]
+        i_res = grp.index('<section id="resid">')
+        i_fg = grp.index('<section id="foreground">')
+        self.assertLess(i_res, i_fg)
+        for key in ("fg_whitened_bands", "fg_whitened_zoom", "fg_resid_psd_zoom",
+                    "fg_missed_vs_row", "fg_truth_decomp"):
+            self.assertIn(f'img("{key}"', grp[i_fg:], key)
+
+    def test_the_ratchet_only_panels_are_their_own_group_when_the_ratchet_ran(self):
+        i_if = self.src.index('if "fg_ratchet_timeline" in IMGS:')
+        blk = self.src[i_if:self.src.index('html = f"""<title>')]
+        self.assertIn('<details class="group" id="grp-ratchet">', blk)
+        for key in ("fg_ratchet_timeline", "fg_leaf_delta", "fg_leaf_delta_zoom"):
+            self.assertIn(f'img("{key}"', blk, key)
+        self.assertIn("{RATCHET_GROUP}", self.src)
+        srch = self.src[self.src.index('<section id="search">'):]
+        self.assertIn('img("fg_rj_per_band"', srch[:srch.index("</section>")])
 
     def test_the_captions_render_even_when_the_panels_cannot(self):
         # defaults exist before any try block can fail, so the f-string page

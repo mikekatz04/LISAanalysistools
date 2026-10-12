@@ -284,7 +284,9 @@ def fig_b64(fig, key, dpi=None):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
     plt.close(fig)
-    IMGS[key] = base64.b64encode(buf.getvalue()).decode()
+    # 8-bit palette PNG (_png.py): about a third of the bytes for the same figure,
+    # which is what keeps the page inside the 16 MB budget with the glance block on top
+    IMGS[key] = base64.b64encode(_shrink_png(buf.getvalue())).decode()
 
 def img(key, alt=""):
     if key not in IMGS:
@@ -461,6 +463,7 @@ from lisatools.globalfit.monitor._identity import (  # noqa: E402
     arm_tag as _arm_tag,
     run_identity as _run_identity,
 )
+from lisatools.globalfit.monitor._png import shrink_png as _shrink_png  # noqa: E402
 
 _base = os.path.basename(os.path.normpath(RUN_DIR))
 RUN_LABEL, RUN_KIND = _run_identity(_base)
@@ -5027,7 +5030,8 @@ if TRU is not None:
         ax.set_ylabel(f"completeness  [% of {NDET}]")
         axr.set_ylabel("purity  [% of leaves]  (dashed)", color=DIM, fontsize=9)
         axr.tick_params(axis="y", colors=DIM, labelsize=8)
-        ax.set_ylim(0, 60); axr.set_ylim(0, 100)
+        # both axes 0-100%: a fixed 0-60 cap hid the 9mo curve (78.6%) entirely
+        ax.set_ylim(0, 100); axr.set_ylim(0, 100)
         ax.legend(fontsize=8, loc="lower right")
         fig_b64(fig, "f2_progress")
 
@@ -7516,7 +7520,7 @@ def _src_make_leaf_png(
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
-    raw = buf.getvalue()
+    raw = _shrink_png(buf.getvalue())
     if tally is not None:
         tally.append(len(raw))
     return base64.b64encode(raw).decode()
@@ -8046,6 +8050,68 @@ _col2_note = ("" if _col2 is not None else
               f"<br><em>Column 2 not computed in this snapshot "
               f"({'no TRU npz' if TRU is None else _col2_err}).</em>")
 
+# ---- AT A GLANCE (user request 2026-10-11) -------------------------------
+# "We really want the plots and info that are most important/succinct in
+# capturing information appearing first (this should be the 'short' html as
+# well). Then after grouped by type with drop down options defaulting the more
+# detailed information ... to 'collapsed'", and "stack the other sources closer
+# to the top". The block is the SHORT page's, rendered by the short page's own
+# code (_short.build_glance), so the two pages cannot disagree; everything this
+# script draws follows it in collapsed <details> groups. A failure costs the
+# block and a Notes line, never the page.
+import html as _html_mod  # noqa: E402
+
+from lisatools.globalfit.monitor._short import GLANCE_CSS, build_glance  # noqa: E402
+
+GLANCE_HTML = GLANCE_NAV = GLANCE_NOTES_HTML = ""
+try:
+    _G = build_glance(RUN_DIR, mojito=MOJITO_INFO_PATH or (
+        MOJITO_CAT_DIR if os.path.isdir(os.path.join(MOJITO_CAT_DIR, "catalogues")) else None))
+    GLANCE_HTML = _G["html"]
+    GLANCE_NAV = "".join(f'<a href="#{_i}">{_t}</a>' for _i, _t in _G["nav"])
+    GLANCE_NOTES_HTML = "".join(f"<li>at a glance: {_n}</li>" for _n in _G["notes"])
+    print(f"[glance] at-a-glance block built in {_G['elapsed']:.1f} s")
+except Exception as _e:  # noqa: BLE001
+    GLANCE_HTML = ('<div class="missing">the at-a-glance block could not be built: '
+                   f"{type(_e).__name__}: {_html_mod.escape(str(_e))} (the short page "
+                   "shares its code; the groups below are unaffected)</div>")
+    MISSING.append(f"at-a-glance block failed: {type(_e).__name__}: "
+                   f"{_html_mod.escape(str(_e))}")
+# a note can quote an exception, and exceptions quote paths like <mojito_data_path>/...:
+# escape the angle brackets (no note carries markup of its own; entities pass through)
+missing_html = "".join("<li>" + str(m).replace("<", "&lt;").replace(">", "&gt;") + "</li>"
+                       for m in MISSING)
+N_NOTES = len(MISSING) + GLANCE_NOTES_HTML.count("<li>")
+# what the closed sources group holds, so its title says whether it is worth opening
+SRC_GROUP_SUB = "per-source chain traces and posteriors: " + " &middot; ".join(
+    [f"{SRC_PANEL_META.get(_b, {}).get('n_rendered', 0)} {_c}"
+     for _b, _c in (("mbh", "MBHB"), ("emri", "EMRI"), ("sobbh", "SOBHB"))]
+    + [f"verification binaries ({VGB_N_DET} of 55 above SNR 7)"])
+
+RATCHET_GROUP = ""
+NAV_RATCHET = ""
+if "fg_ratchet_timeline" in IMGS:
+    # the galfor ratchet ran on this store (no current recipe runs it, 2026-10-03):
+    # its own panels, collapsed like every detail group
+    NAV_RATCHET = '<span class="ng"><a class="g" href="#grp-ratchet">ratchet</a>'\
+        '<a href="#ratchet">timeline</a></span>'
+    RATCHET_GROUP = f"""<details class="group" id="grp-ratchet"><summary><span class="gt">Foreground ratchet</span><span class="gs">the gated noise steps and where the leaves went across them (this store ran the galfor ratchet)</span></summary>
+<div class="gbody">
+<section id="ratchet"><h2>Foreground Ratchet Diagnosis</h2>
+<div class="panel">{img("fg_ratchet_timeline", "ratchet timeline (needs GALFOR_RATCHET + GB_SEARCH_LEGS rows)")}
+<div class="caption">{cap_fgA}</div></div>
+<div class="panel">{img("fg_leaf_delta", "where the leaves went across the ratchet")}
+<div class="caption">{cap_fgC}</div></div>
+<div class="panel">{img("fg_leaf_delta_zoom", "zoom 2.5-5.5 mHz: where the leaves went")}
+<div class="caption">Zoom on 2.5&ndash;5.5 mHz at 0.05 mHz bins (about three GB bands each):
+the grey bars are the leaves already there at the reference row, the green bars what was
+added or removed since, the amber curve the foreground ratio, and the lower panel the
+per-band cold log-likelihood change.</div></div>
+</section>
+</div>
+</details>
+"""
+
 html = f"""<title>LISA Global Fit {RUN_LABEL}</title>
 <style>
 :root {{
@@ -8127,6 +8193,26 @@ button.armed {{ border-color:var(--amber); color:var(--amber); }}
 .viewctl select:focus {{ border-color:var(--cyan); outline:none; }}
 button.armed.truth {{ border-color:var(--dim); color:var(--dim); }}
 ul {{ color:var(--dim); font-size:13px; }}
+details.group {{ margin-top:16px; border:1px solid var(--line); border-radius:4px;
+  background:color-mix(in srgb, var(--panel) 45%, var(--bg)); }}
+details.group > summary {{ cursor:pointer; list-style:none; padding:10px 14px; display:flex;
+  flex-wrap:wrap; gap:2px 14px; align-items:baseline; }}
+details.group > summary::-webkit-details-marker {{ display:none; }}
+details.group > summary::before {{ content:"\\25B8"; color:var(--cyan); width:1em; }}
+details.group[open] > summary::before {{ content:"\\25BE"; }}
+details.group > summary:hover .gt, details.group > summary:focus .gt {{ color:var(--cyan); }}
+details.group > summary .gt {{ font-size:13px; letter-spacing:.1em; text-transform:uppercase; color:var(--fg); }}
+details.group > summary .gs {{ font-size:12px; color:var(--dim); }}
+details.group > .gbody {{ padding:0 14px 14px; }}
+details.group > .gbody > section:first-child {{ margin-top:4px; }}
+#glance > h2.glance-title {{ color:var(--cyan); }}
+#glance > h2.glance-title span {{ color:var(--dim); text-transform:none; letter-spacing:0; font-weight:normal; }}
+nav .ng {{ display:inline-flex; flex-wrap:wrap; gap:4px; align-items:center; padding-right:8px;
+  border-right:1px solid var(--line); }}
+nav .ng a.g {{ color:var(--fg); }}
+nav .ng a:not(.g) {{ font-size:11px; padding:1px 6px; }}
+nav button {{ font-size:11px; padding:1px 8px; }}
+{GLANCE_CSS}
 </style>
 <header>
   <h1>LISA Global Fit &middot; {RUN_LABEL} Status</h1>
@@ -8134,112 +8220,117 @@ ul {{ color:var(--dim); font-size:13px; }}
   <span>{chips}</span>
 </header>
 <nav>
-  <a href="#status">status</a><a href="#resid">residual</a><a href="#ratchet">ratchet</a>
-  <a href="#recovery">recovery</a><a href="#population">population</a>
-  {NAV_PARAMS}<a href="#search">search &amp; cap cells</a>{NAV_GATES}
-  <a href="#fstat">f-stat</a><a href="#noise">noise</a>
-  <a href="#vgb">verification binaries</a>
-  <a href="#mbh">MBHB</a><a href="#emri">EMRI</a><a href="#sobbh">SOBHB</a>
-  <a href="#detect">detectability</a>
-  <a href="#appendix">appendix</a>
+  <span class="ng"><a class="g" href="#glance">at a glance</a>{GLANCE_NAV}</span>
+  <span class="ng"><a class="g" href="#grp-sources">other sources</a><a href="#mbh">MBHB</a><a href="#emri">EMRI</a><a href="#sobbh">SOBHB</a><a href="#vgb">VGB</a></span>
+  <span class="ng"><a class="g" href="#grp-gbrec">GB recovery</a><a href="#recovery">recovery</a><a href="#population">population</a>{NAV_PARAMS}</span>
+  <span class="ng"><a class="g" href="#grp-noise">noise &amp; residual</a><a href="#noise">noise</a><a href="#resid">residual</a><a href="#foreground">foreground</a></span>
+  <span class="ng"><a class="g" href="#grp-gbsearch">GB search</a><a href="#trackers">trackers</a><a href="#search">search &amp; cap cells</a>{NAV_GATES}<a href="#fstat">f-stat</a></span>
+  <span class="ng"><a class="g" href="#grp-method">detectability &amp; method</a><a href="#status">summary</a><a href="#detect">detectability</a></span>
+  <span class="ng"><a class="g" href="#grp-mech">run mechanics</a></span>
+  {NAV_RATCHET}
+  <span class="ng"><a class="g" href="#grp-notes">notes ({N_NOTES})</a></span>
+  <button type="button" id="grp_open">expand all</button><button type="button" id="grp_close">collapse all</button>
 </nav>
 <main>
 {COMMENTARY}
-<section id="status"><h2>Status</h2>
-<div class="kpi">
-  <div><b>{SCI.get("ngbit", 0)}</b><span>GB search iterations</span></div>
-  <div><b>{SCI.get("n_all", int(gb_counts[-1].max())):,}</b><span>model sources</span></div>
-{KPI_MATCH}
-  <div><b>{VGB_N_DET}</b><span>verification binaries above SNR 7</span></div>
+<div id="glance">
+<h2 class="glance-title">At a glance <span>&middot; the same block is the short page,
+<code>{os.path.basename(os.path.normpath(RUN_DIR))}_monitor_short.html</code>; the detail
+groups below start collapsed &mdash; click a heading to open one</span></h2>
+{GLANCE_HTML}
 </div>
-<p style="font-size:13px">{RUN_HEALTH}</p>
-<p style="font-size:13px"><strong>The denominator, stated once.</strong> Every
-recovery number on this page is against <strong>{SCI.get("ndet", 812)} galactic
-binaries</strong> &mdash; those in the injected catalogue with optimal
-signal-to-noise above 7 over {BAND_TXT}, the full band the sampler analyses,
-evaluated under this run&rsquo;s own fitted noise. A model source counts as a
-recovery when it lies within
-{TOL_BINS:.0f} frequency bins ({TOL_BINS / SCI_TOBS * 1e6:.3f} &micro;Hz) of one,
-one-to-one. Those windows cover {pct(SCI["chance"], 1) if SCI else "2.2%"} of the
-band, so that is the rate at which an arbitrary source would match by accident.
-Below roughly 3 mHz that threshold is an SNR statement and not a resolvability
-one: the sensitivity it is measured against already carries the fitted galactic
-foreground, but the catalogue puts many sources in every frequency bin down
-there, so a binary can clear signal-to-noise 7 and still be inseparable from
-its neighbours.</p>
-{ARM_TABLE}
-<!-- TRACKERS_TOP: the two headline per-iteration trackers live here, first
-     thing after the KPIs (moved from Search & Cap Cells, user request
-     2026-08-22 x2 -- they were invisible deep in a 12 MB page). -->
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
-<div class="panel">{img("gb_leaves")}
-<div class="caption">Left: galactic-binary leaf count per cold walker across the stored
-iterations, against the detectable-injection target. Right: the enforced per-cell leaf
-cap over time. Rows marked in red have had their births shut off by the barren-band rule
-&mdash; deaths and in-model moves continue there.</div></div>
-<div class="panel">{img("ll")}
-<div class="caption">Cold-chain total log-likelihood across the {nwalk} walkers, and
-the max-minus-min spread. At equilibrium the spread sits at a few units.</div></div>
+
+<details class="group" id="grp-sources"><summary><span class="gt">Other sources</span><span class="gs">{SRC_GROUP_SUB}</span></summary>
+<div class="gbody">
+<section id="mbh"><h2>Massive Black-Hole Binaries</h2>
+<div class="panel">
+<div class="btnrow viewctl">
+  <label>source <select id="mbh1_sel"></select></label>
+  <span class="caption" style="align-self:center">cold-chain trace (top) and
+  posterior over full_pe rows (bottom) per injected MBHB, one source at a
+  time; dotted red is the catalogue value</span>
 </div>
-<div class="panel">{img("gb_band_ll", "GB log-likelihood per sub-band")}
-<div class="caption">{GB_BAND_LL_CAP}</div></div>
+<img id="mbh1_img" alt="MBHB chain + posterior">
+<div class="caption" id="mbh1_cap"></div>
+<div class="caption">{MBH_PANEL_COUNT} Key parameters shown: total mass
+M<sub>tot</sub>, mass ratio Q = m<sub>1</sub>/m<sub>2</sub> &ge; 1, aligned
+spins &chi;<sub>1</sub> / &chi;<sub>2</sub>, coalescence time t<sub>c</sub>,
+distance d<sub>L</sub>, sky (&alpha;, sin&delta;). The right-hand diagnostic
+pane is the per-walker &lang;d|h&rang; / &lang;h|h&rang; from
+<code>sub_backend/mbh</code>; the summary table at the bottom quotes median,
+truth, and (median &minus; truth) / &sigma; per parameter over the
+cold-walker-pooled full_pe window.</div>
+</div>
 </section>
 
-<section id="resid"><h2>Residual Spectrum</h2>
-<div class="panel">{img("f1_resid", "residual spectrum")}
-<div class="caption">{cap_f1}<br>{cap_f1b}</div></div>
-<div class="panel">{img("dtr_fd", "data / template / residual, frequency domain")}
-<div class="caption">{dtr_fd_cap}</div></div>
-<div class="panel">{img("dtr_wdm", "data / template / residual, time-frequency")}
-<div class="caption">{dtr_wdm_cap}</div></div>
-<div class="caption">{dtr_note}</div>
-<div class="caption">Data are the mojito Level-1 products the run itself loaded,
-re-transformed with the run&rsquo;s own window; templates are the last stored
-cold-chain coordinates of the highest-likelihood walker through the run&rsquo;s own
-transform and waveform generator. The noise branches shape the sensitivity the
-likelihood weights by and are never subtracted, so the unresolved galaxy stays in
-the residual by construction.</div>
+<section id="emri"><h2>Extreme Mass-Ratio Inspirals</h2>
+<div class="panel">
+<div class="btnrow viewctl">
+  <label>source <select id="emri1_sel"></select></label>
+  <span class="caption" style="align-self:center">cold-chain trace (top) and
+  posterior over full_pe rows (bottom) per injected EMRI; dotted red is the
+  catalogue value</span>
+</div>
+<img id="emri1_img" alt="EMRI chain + posterior">
+<div class="caption" id="emri1_cap"></div>
+<div class="caption">{EMRI_PANEL_COUNT} Key parameters shown: primary mass
+log&nbsp;m<sub>1</sub>, spin a, semi-latus rectum p<sub>0</sub>, eccentricity
+e<sub>0</sub>, distance d<sub>L</sub>. The sky is kept in each sampling
+frame &mdash; the EMRI stock basis uses ecliptic colatitude q<sub>S</sub>
+and &phi;<sub>S</sub>, so the truth sky line comes from &pi;/2 &minus; Dec
+and RA.</div>
+</div>
 </section>
 
-<section id="ratchet"><h2>Foreground Ratchet Diagnosis</h2>
-<div class="panel">{img("fg_ratchet_timeline", "ratchet timeline (needs GALFOR_RATCHET + GB_SEARCH_LEGS rows)")}
-<div class="caption">{cap_fgA}</div></div>
-<div class="panel">{img("fg_whitened_bands", "whitened residual per GB band")}
-<div class="caption">{cap_fgB}</div></div>
-<div class="panel">{img("fg_whitened_zoom", "zoom 2.5-5.5 mHz: whitened residual per GB band")}
-<div class="caption">Zoom of the panel above on 2.5&ndash;5.5 mHz with a linear frequency
-axis. Points are every GB band for the max-lnL (cyan) and min-lnL (amber) cold walkers
-of the last stored row, each against its own fitted noise; the running mean spans 5 bands
-(~85 &micro;Hz) instead of 15.{FG_RESID_SRC}</div></div>
-<div class="panel">{img("fg_resid_psd_zoom", "zoom 2.5-5.5 mHz: residual spectrum against the noise curves")}
-<div class="caption">The same residual unwhitened, for the max-lnL (cyan) and min-lnL
-(amber) cold walkers of the last stored row: each walker&rsquo;s residual PSD per GB band
-(solid) against its own fitted noise (instrument + galfor, dashed) and its fitted
-instrument alone (dotted), with the injected instrument + FittedHT estimate and stored row
-0&rsquo;s noise (violet) &mdash; under a pinned launch that is the start vector the search
-ran against until the first release.
-Where the residual sits above the fitted curve the model is under-estimating the power
-there; where the fitted curve sits above row 0 the release raised the foreground.{FG_RESID_SRC}</div></div>
-<div class="panel">{img("fg_leaf_delta", "where the leaves went across the ratchet")}
-<div class="caption">{cap_fgC}</div></div>
-<div class="panel">{img("fg_leaf_delta_zoom", "zoom 2.5-5.5 mHz: where the leaves went")}
-<div class="caption">Zoom on 2.5&ndash;5.5 mHz at 0.05 mHz bins (about three GB bands each):
-the grey bars are the leaves already there at the reference row, the green bars what was
-added or removed since, the amber curve the foreground ratio, and the lower panel the
-per-band cold log-likelihood change.</div></div>
-<div class="panel">{img("fg_missed_vs_row", "ratchet scorecard: unresolved detectable catalogue sources per band vs stored row")}
-<div class="caption">{cap_fgD}</div></div>
-<div class="panel">{img("fg_truth_decomp", "what the fitted foreground is made of: unresolved catalogue power vs the fit")}
-<div class="caption">{cap_fgE}</div></div>
-<div class="panel">{img("fg_rj_per_band", "RJ traffic per leg and per 0.5 mHz")}
-<div class="caption">Accepted RJ moves on the cold rung per 0.5 mHz for each stored leg the
-counters cover, and the acceptance fraction. The in_model_fstat legs carry the F-stat
-births, the in_model_removal legs the prior removals. The counters are cumulative per band
-and are differenced between consecutive stored rows; an extract keeps them only in its keep
-window, so a short snapshot shows the last few legs. Legs covered:
-{", ".join(f"row {i} ({nm}): {int(a):,} accepted of {int(p):,}" for i, nm, p, a in RJB.get("legs", [])) or "none"}.</div></div>
+<section id="sobbh"><h2>Stellar-Origin Black-Hole Binaries</h2>
+<div class="panel">
+<div class="btnrow viewctl">
+  <label>source <select id="sobbh1_sel"></select></label>
+  <span class="caption" style="align-self:center">cold-chain trace (top) and
+  posterior over full_pe rows (bottom) per injected SOBHB; dotted red is the
+  catalogue value</span>
+</div>
+<img id="sobbh1_img" alt="SOBHB chain + posterior">
+<div class="caption" id="sobbh1_cap"></div>
+<div class="caption">{SOBBH_PANEL_COUNT} Key parameters shown: component
+log-masses log&nbsp;m<sub>1</sub>, log&nbsp;m<sub>2</sub>, starting GW
+frequency f<sub>low</sub>, distance d<sub>L</sub>, and sky (&phi;<sub>S</sub>,
+cos&nbsp;q<sub>S</sub>). SOBHB uses eight tempering rungs per leaf
+(<code>SOBBH_NTEMPS</code>); only the cold rung is shown here.</div>
+</div>
 </section>
 
+<section id="vgb"><h2>Verification Binaries</h2>
+<div class="panel">{img("f9_vgb", "detectable verification binaries")}
+<div class="caption">The {VGB_N_DET} of 55 catalogue verification binaries that clear
+SNR 7 at three months, with their distance posteriors against the catalogue value.
+The other {55 - VGB_N_DET} are prior-dominated. Full-55 SNR-vs-frequency, all-55
+distance posteriors, the SNR-per-iteration trend, and the interactive zoom cloud were
+removed for the 16 MB size budget; the median VGB SNR is {VGB_SNR_MED:.1f} and the
+{55 - VGB_N_DET} prior-dominated leaves are an absence of signal, not a fit failure.</div></div>
+<div class="panel">{img("vgb_hists")}
+<div class="caption">The four remaining sampled parameters pooled over all 55 leaves, so
+the truth is a distribution rather than a line. The frequency-derivative ratio is the
+exception: every catalogue value is identically zero.</div></div>
+<div class="panel">
+<div class="btnrow viewctl">
+  <label>source <select id="vgb1_sel"></select></label>
+  <span class="caption" style="align-self:center">full posterior, one verification
+  binary at a time &mdash; all 55, detectable first</span>
+</div>
+<img id="vgb1_img" alt="verification binary corner posterior">
+<div class="caption" id="vgb1_cap"></div>
+<div class="caption">Existence proof that the machinery produces real posteriors:
+five sampled parameters over the last {CORNER_ITS} stored iterations &times; {nwalk}
+cold walkers, with the catalogue value in cyan. Axis ranges are widened to contain
+the truth, so a truth line outside the posterior stays visible.</div>
+</div>
+</section>
+</div>
+</details>
+
+<details class="group" id="grp-gbrec"><summary><span class="gt">Galactic binaries: recovery</span><span class="gs">completeness and purity, the recovered population, the zoomable plane, parameter recovery</span></summary>
+<div class="gbody">
 <section id="recovery"><h2>Recovery</h2>
 {REC_MATCH_PANELS}
 <div class="panel">{img("f5_counts", "source counts vs frequency")}
@@ -8325,6 +8416,101 @@ rather than as credible intervals.</div>
 </section>
 
 {PARAMS_SECTION}
+</div>
+</details>
+
+<details class="group" id="grp-noise"><summary><span class="gt">Noise, foreground &amp; residual</span><span class="gs">noise posteriors and traces, the residual spectrum, data / template / residual, the whitened residual per band</span></summary>
+<div class="gbody">
+<section id="noise"><h2>Noise Model</h2>
+<div class="panel">{img("f11_psd", "instrument noise posteriors")}
+<div class="caption">The two instrument-noise parameters against their injected
+values. Medians sit {NOISE_TXT} from injection. These are the only noise parameters
+with a truth to compare against.</div></div>
+<div class="panel">{img("f11_fg", "foreground evolution")}
+<div class="caption">The fitted noise-plus-foreground curve at every stored
+iteration, light to dark with time, over the instrument-only curve. The galactic
+shoulder should walk down as resolved sources leave the residual.</div></div>
+<div class="panel">{img("psd_curves", "sensitivity curves")}
+<div class="caption">The same model as the sky-averaged sensitivity the mission documents
+quote: instrument only, instrument plus the fitted foreground, and the injected instrument
+curve. This is the only panel carrying the injected curve.</div></div>
+<div class="panel">{img("psd_evolution", "sensitivity evolution")}
+<div class="caption">The decline watch on the same axes, one curve per stored iteration,
+light to dark with time.</div></div>
+<div class="panel">{img("psd_evolution_zoom", PSD_ZOOM_ALT)}
+<div class="caption">Same as above, zoomed to the last {PSD_ZOOM_N} stored iterations.</div></div>
+<div class="panel">{img("psd_trace")}
+<div class="caption">Instrument-parameter traces per cold walker; dotted red is the
+injected value.</div></div>
+<div class="panel">{img("psd_hist")}</div>
+<div class="panel">{img("gal_trace")}
+<div class="caption">The five foreground parameters. There is no truth line: the injection
+is a source population, not a hyperbolic-tangent model, so these are checked through the
+curve above and through the residual, never against a number.</div></div>
+<div class="panel">{img("gal_hist")}</div>
+</section>
+
+<section id="resid"><h2>Residual Spectrum</h2>
+<div class="panel">{img("f1_resid", "residual spectrum")}
+<div class="caption">{cap_f1}<br>{cap_f1b}</div></div>
+<div class="panel">{img("dtr_fd", "data / template / residual, frequency domain")}
+<div class="caption">{dtr_fd_cap}</div></div>
+<div class="panel">{img("dtr_wdm", "data / template / residual, time-frequency")}
+<div class="caption">{dtr_wdm_cap}</div></div>
+<div class="caption">{dtr_note}</div>
+<div class="caption">Data are the mojito Level-1 products the run itself loaded,
+re-transformed with the run&rsquo;s own window; templates are the last stored
+cold-chain coordinates of the highest-likelihood walker through the run&rsquo;s own
+transform and waveform generator. The noise branches shape the sensitivity the
+likelihood weights by and are never subtracted, so the unresolved galaxy stays in
+the residual by construction.</div>
+</section>
+
+<section id="foreground"><h2>Foreground &amp; Whitened Residual</h2>
+<div class="panel">{img("fg_whitened_bands", "whitened residual per GB band")}
+<div class="caption">{cap_fgB}</div></div>
+<div class="panel">{img("fg_whitened_zoom", "zoom 2.5-5.5 mHz: whitened residual per GB band")}
+<div class="caption">Zoom of the panel above on 2.5&ndash;5.5 mHz with a linear frequency
+axis. Points are every GB band for the max-lnL (cyan) and min-lnL (amber) cold walkers
+of the last stored row, each against its own fitted noise; the running mean spans 5 bands
+(~85 &micro;Hz) instead of 15.{FG_RESID_SRC}</div></div>
+<div class="panel">{img("fg_resid_psd_zoom", "zoom 2.5-5.5 mHz: residual spectrum against the noise curves")}
+<div class="caption">The same residual unwhitened, for the max-lnL (cyan) and min-lnL
+(amber) cold walkers of the last stored row: each walker&rsquo;s residual PSD per GB band
+(solid) against its own fitted noise (instrument + galfor, dashed) and its fitted
+instrument alone (dotted), with the injected instrument + FittedHT estimate and stored row
+0&rsquo;s noise (violet) &mdash; under a pinned launch that is the start vector the search
+ran against until the first release.
+Where the residual sits above the fitted curve the model is under-estimating the power
+there; where the fitted curve sits above row 0 the release raised the foreground.{FG_RESID_SRC}</div></div>
+<div class="panel">{img("fg_missed_vs_row", "ratchet scorecard: unresolved detectable catalogue sources per band vs stored row")}
+<div class="caption">{cap_fgD}</div></div>
+<div class="panel">{img("fg_truth_decomp", "what the fitted foreground is made of: unresolved catalogue power vs the fit")}
+<div class="caption">{cap_fgE}</div></div>
+</section>
+
+</div>
+</details>
+
+<details class="group" id="grp-gbsearch"><summary><span class="gt">Galactic binaries: search</span><span class="gs">leaf count and lnL in detail, lnL per sub-band, birth fates, efficiency, cap cells, the search gates, the F-statistic</span></summary>
+<div class="gbody">
+<section id="trackers"><h2>Model Size &amp; Likelihood</h2>
+<!-- The detailed trackers (leaf count with the cap-cell map, lnL with the walker
+     spread, lnL per sub-band). The at-a-glance block carries the short versions
+     (user request 2026-10-11: succinct first, detail collapsed). -->
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
+<div class="panel">{img("gb_leaves")}
+<div class="caption">Left: galactic-binary leaf count per cold walker across the stored
+iterations, against the detectable-injection target. Right: the enforced per-cell leaf
+cap over time. Rows marked in red have had their births shut off by the barren-band rule
+&mdash; deaths and in-model moves continue there.</div></div>
+<div class="panel">{img("ll")}
+<div class="caption">Cold-chain total log-likelihood across the {nwalk} walkers, and
+the max-minus-min spread. At equilibrium the spread sits at a few units.</div></div>
+</div>
+<div class="panel">{img("gb_band_ll", "GB log-likelihood per sub-band")}
+<div class="caption">{GB_BAND_LL_CAP}</div></div>
+</section>
 
 <section id="search"><h2>Search &amp; Cap Cells</h2>
 <div class="panel">{img("gb_birth_fate", "birth-fate breakdown")}
@@ -8375,6 +8561,13 @@ got: summing the detectable sources a cell cannot admit gives the ceiling the sa
 never beat. A finer grid beats simply raising the cap, because a higher cap permits several
 sources inside one cell, which is the stacking the rule exists to stop.</div></div>
 {CENSUS_PANEL}
+<div class="panel">{img("fg_rj_per_band", "RJ traffic per leg and per 0.5 mHz")}
+<div class="caption">Accepted RJ moves on the cold rung per 0.5 mHz for each stored leg the
+counters cover, and the acceptance fraction. The in_model_fstat legs carry the F-stat
+births, the in_model_removal legs the prior removals. The counters are cumulative per band
+and are differenced between consecutive stored rows; an extract keeps them only in its keep
+window, so a short snapshot shows the last few legs. Legs covered:
+{", ".join(f"row {i} ({nm}): {int(a):,} accepted of {int(p):,}" for i, nm, p, a in RJB.get("legs", [])) or "none"}.</div></div>
 </section>
 
 {GATES_HTML}
@@ -8388,119 +8581,34 @@ birth proposal draws from.</div></div>
 sit in the plane; right is their density against frequency &mdash; the shape that decides
 where the search spends its proposals.</div></div>
 </section>
+</div>
+</details>
 
-<section id="noise"><h2>Noise Model</h2>
-<div class="panel">{img("f11_psd", "instrument noise posteriors")}
-<div class="caption">The two instrument-noise parameters against their injected
-values. Medians sit {NOISE_TXT} from injection. These are the only noise parameters
-with a truth to compare against.</div></div>
-<div class="panel">{img("f11_fg", "foreground evolution")}
-<div class="caption">The fitted noise-plus-foreground curve at every stored
-iteration, light to dark with time, over the instrument-only curve. The galactic
-shoulder should walk down as resolved sources leave the residual.</div></div>
-<div class="panel">{img("psd_curves", "sensitivity curves")}
-<div class="caption">The same model as the sky-averaged sensitivity the mission documents
-quote: instrument only, instrument plus the fitted foreground, and the injected instrument
-curve. This is the only panel carrying the injected curve.</div></div>
-<div class="panel">{img("psd_evolution", "sensitivity evolution")}
-<div class="caption">The decline watch on the same axes, one curve per stored iteration,
-light to dark with time.</div></div>
-<div class="panel">{img("psd_evolution_zoom", PSD_ZOOM_ALT)}
-<div class="caption">Same as above, zoomed to the last {PSD_ZOOM_N} stored iterations.</div></div>
-<div class="panel">{img("psd_trace")}
-<div class="caption">Instrument-parameter traces per cold walker; dotted red is the
-injected value.</div></div>
-<div class="panel">{img("psd_hist")}</div>
-<div class="panel">{img("gal_trace")}
-<div class="caption">The five foreground parameters. There is no truth line: the injection
-is a source population, not a hyperbolic-tangent model, so these are checked through the
-curve above and through the residual, never against a number.</div></div>
-<div class="panel">{img("gal_hist")}</div>
-</section>
-
-<section id="vgb"><h2>Verification Binaries</h2>
-<div class="panel">{img("f9_vgb", "detectable verification binaries")}
-<div class="caption">The {VGB_N_DET} of 55 catalogue verification binaries that clear
-SNR 7 at three months, with their distance posteriors against the catalogue value.
-The other {55 - VGB_N_DET} are prior-dominated. Full-55 SNR-vs-frequency, all-55
-distance posteriors, the SNR-per-iteration trend, and the interactive zoom cloud were
-removed for the 16 MB size budget; the median VGB SNR is {VGB_SNR_MED:.1f} and the
-{55 - VGB_N_DET} prior-dominated leaves are an absence of signal, not a fit failure.</div></div>
-<div class="panel">{img("vgb_hists")}
-<div class="caption">The four remaining sampled parameters pooled over all 55 leaves, so
-the truth is a distribution rather than a line. The frequency-derivative ratio is the
-exception: every catalogue value is identically zero.</div></div>
-<div class="panel">
-<div class="btnrow viewctl">
-  <label>source <select id="vgb1_sel"></select></label>
-  <span class="caption" style="align-self:center">full posterior, one verification
-  binary at a time &mdash; all 55, detectable first</span>
+<details class="group" id="grp-method"><summary><span class="gt">Detectability &amp; method</span><span class="gs">the frozen denominator, the run summary, how many sources are detectable at all, how the numbers are produced</span></summary>
+<div class="gbody">
+<section id="status"><h2>Run Summary &amp; Denominator</h2>
+<div class="kpi">
+  <div><b>{SCI.get("ngbit", 0)}</b><span>GB search iterations</span></div>
+  <div><b>{SCI.get("n_all", int(gb_counts[-1].max())):,}</b><span>model sources</span></div>
+{KPI_MATCH}
+  <div><b>{VGB_N_DET}</b><span>verification binaries above SNR 7</span></div>
 </div>
-<img id="vgb1_img" alt="verification binary corner posterior">
-<div class="caption" id="vgb1_cap"></div>
-<div class="caption">Existence proof that the machinery produces real posteriors:
-five sampled parameters over the last {CORNER_ITS} stored iterations &times; {nwalk}
-cold walkers, with the catalogue value in cyan. Axis ranges are widened to contain
-the truth, so a truth line outside the posterior stays visible.</div>
-</div>
-</section>
-
-<section id="mbh"><h2>Massive Black-Hole Binaries</h2>
-<div class="panel">
-<div class="btnrow viewctl">
-  <label>source <select id="mbh1_sel"></select></label>
-  <span class="caption" style="align-self:center">cold-chain trace (top) and
-  posterior over full_pe rows (bottom) per injected MBHB, one source at a
-  time; dotted red is the catalogue value</span>
-</div>
-<img id="mbh1_img" alt="MBHB chain + posterior">
-<div class="caption" id="mbh1_cap"></div>
-<div class="caption">{MBH_PANEL_COUNT} Key parameters shown: total mass
-M<sub>tot</sub>, mass ratio Q = m<sub>1</sub>/m<sub>2</sub> &ge; 1, aligned
-spins &chi;<sub>1</sub> / &chi;<sub>2</sub>, coalescence time t<sub>c</sub>,
-distance d<sub>L</sub>, sky (&alpha;, sin&delta;). The right-hand diagnostic
-pane is the per-walker &lang;d|h&rang; / &lang;h|h&rang; from
-<code>sub_backend/mbh</code>; the summary table at the bottom quotes median,
-truth, and (median &minus; truth) / &sigma; per parameter over the
-cold-walker-pooled full_pe window.</div>
-</div>
-</section>
-
-<section id="emri"><h2>Extreme Mass-Ratio Inspirals</h2>
-<div class="panel">
-<div class="btnrow viewctl">
-  <label>source <select id="emri1_sel"></select></label>
-  <span class="caption" style="align-self:center">cold-chain trace (top) and
-  posterior over full_pe rows (bottom) per injected EMRI; dotted red is the
-  catalogue value</span>
-</div>
-<img id="emri1_img" alt="EMRI chain + posterior">
-<div class="caption" id="emri1_cap"></div>
-<div class="caption">{EMRI_PANEL_COUNT} Key parameters shown: primary mass
-log&nbsp;m<sub>1</sub>, spin a, semi-latus rectum p<sub>0</sub>, eccentricity
-e<sub>0</sub>, distance d<sub>L</sub>. The sky is kept in each sampling
-frame &mdash; the EMRI stock basis uses ecliptic colatitude q<sub>S</sub>
-and &phi;<sub>S</sub>, so the truth sky line comes from &pi;/2 &minus; Dec
-and RA.</div>
-</div>
-</section>
-
-<section id="sobbh"><h2>Stellar-Origin Black-Hole Binaries</h2>
-<div class="panel">
-<div class="btnrow viewctl">
-  <label>source <select id="sobbh1_sel"></select></label>
-  <span class="caption" style="align-self:center">cold-chain trace (top) and
-  posterior over full_pe rows (bottom) per injected SOBHB; dotted red is the
-  catalogue value</span>
-</div>
-<img id="sobbh1_img" alt="SOBHB chain + posterior">
-<div class="caption" id="sobbh1_cap"></div>
-<div class="caption">{SOBBH_PANEL_COUNT} Key parameters shown: component
-log-masses log&nbsp;m<sub>1</sub>, log&nbsp;m<sub>2</sub>, starting GW
-frequency f<sub>low</sub>, distance d<sub>L</sub>, and sky (&phi;<sub>S</sub>,
-cos&nbsp;q<sub>S</sub>). SOBHB uses eight tempering rungs per leaf
-(<code>SOBBH_NTEMPS</code>); only the cold rung is shown here.</div>
-</div>
+<p style="font-size:13px">{RUN_HEALTH}</p>
+<p style="font-size:13px"><strong>The denominator, stated once.</strong> Every
+recovery number on this page is against <strong>{SCI.get("ndet", 812)} galactic
+binaries</strong> &mdash; those in the injected catalogue with optimal
+signal-to-noise above 7 over {BAND_TXT}, the full band the sampler analyses,
+evaluated under this run&rsquo;s own fitted noise. A model source counts as a
+recovery when it lies within
+{TOL_BINS:.0f} frequency bins ({TOL_BINS / SCI_TOBS * 1e6:.3f} &micro;Hz) of one,
+one-to-one. Those windows cover {pct(SCI["chance"], 1) if SCI else "2.2%"} of the
+band, so that is the rate at which an arbitrary source would match by accident.
+Below roughly 3 mHz that threshold is an SNR statement and not a resolvability
+one: the sensitivity it is measured against already carries the fitted galactic
+foreground, but the catalogue puts many sources in every frequency bin down
+there, so a binary can clear signal-to-noise 7 and still be inseparable from
+its neighbours.</p>
+{ARM_TABLE}
 </section>
 
 <section id="detect"><h2>How Many Are Detectable At All</h2>
@@ -8534,10 +8642,7 @@ one iteration and stated.</div>
 </div>
 </section>
 
-<section id="appendix"><h2>Appendix</h2>
-<details><summary style="cursor:pointer;color:var(--dim);font-size:13px">
-method, sampler health, interactive views and run mechanics</summary>
-
+<section id="method"><h2>Method</h2>
 <div class="caption"><strong>How the numbers are produced.</strong> Optimal SNRs and
 template overlaps use the injected catalogue&rsquo;s own parameters through the
 run&rsquo;s catalogue-to-sampling map, the same waveform generator the run samples
@@ -8550,7 +8655,14 @@ comparisons on this page are recomputed at the last stored iteration, not carrie
 from earlier snapshots.
 <br><br>
 {OPEN_ITEMS}</div>
+</section>
 
+</div>
+</details>
+
+<details class="group" id="grp-mech"><summary><span class="gt">Run mechanics</span><span class="gs">tempering swaps, the RJ move breakdown, device memory, GPU telemetry</span></summary>
+<div class="gbody">
+<section id="mechanics"><h2>Run Mechanics</h2>
 <div class="caption" style="margin-top:22px"><strong>Run mechanics.</strong> Engineering
 instrumentation &mdash; where the wall time goes, what the devices are holding, and whether
 the tempering ladder is exchanging. None of it is a science result; all of it is the first
@@ -8570,11 +8682,18 @@ restart gaps so an attempt boundary does not draw a false ramp.</div></div>
 <div class="panel">{img("gpu_util", "gpu telemetry")}
 <div class="caption">Utilisation and memory sampled by nvidia-smi; dotted traces are
 earlier jobs.</div></div>
-
-<div class="caption"><strong>Not reproduced in this snapshot:</strong></div>
-<ul>{missing_html}</ul>
-</details>
 </section>
+
+</div>
+</details>
+
+{RATCHET_GROUP}
+<details class="group" id="grp-notes"><summary><span class="gt">Notes</span>
+<span class="gs">{N_NOTES} item(s): what this snapshot could not reproduce, and why</span></summary>
+<div class="gbody">
+<ul>{missing_html}{GLANCE_NOTES_HTML}</ul>
+</div>
+</details>
 </main>
 
 <script>
@@ -8963,6 +9082,45 @@ function viewCtl(px, cv, api) {{
   }}).sync;
   new ResizeObserver(redraw).observe(cv);
   draw();
+}})();
+// ---- the collapsed detail groups (2026-10-11) ------------------------------
+// Every group starts closed. A link to anything inside one opens it (and any
+// group around it) before the browser scrolls; expand / collapse all in the nav;
+// each viewer's open groups are remembered across reloads (a refreshed snapshot
+// page reopens where the reader left it). Storage can be absent: then nothing
+// is remembered, and the page works the same.
+(() => {{
+  const groups = [...document.querySelectorAll("details.group")];
+  const KEY = "gfmon-open:";
+  const remember = (id, open) => {{
+    try {{ if (open) localStorage.setItem(KEY + id, "1"); else localStorage.removeItem(KEY + id); }}
+    catch (e) {{}}
+  }};
+  groups.forEach(d => {{
+    try {{ if (localStorage.getItem(KEY + d.id) === "1") d.open = true; }} catch (e) {{}}
+    d.addEventListener("toggle", () => remember(d.id, d.open));
+  }});
+  const openFor = id => {{
+    const el = id ? document.getElementById(id) : null;
+    if (!el) return null;
+    for (let d = el.closest("details"); d; d = d.parentElement ? d.parentElement.closest("details") : null)
+      d.open = true;
+    return el;
+  }};
+  document.querySelectorAll('a[href^="#"]').forEach(a => a.addEventListener("click", () =>
+    openFor(decodeURIComponent(a.getAttribute("href").slice(1)))));
+  window.addEventListener("hashchange", () => {{
+    const el = openFor(decodeURIComponent(location.hash.slice(1)));
+    if (el) el.scrollIntoView();
+  }});
+  if (location.hash) {{
+    const el = openFor(decodeURIComponent(location.hash.slice(1)));
+    if (el) requestAnimationFrame(() => el.scrollIntoView());
+  }}
+  const setAll = open => groups.forEach(d => {{ d.open = open; }});
+  const bo = document.getElementById("grp_open"), bc = document.getElementById("grp_close");
+  if (bo) bo.onclick = () => setAll(true);
+  if (bc) bc.onclick = () => setAll(false);
 }})();
 </script>
 """

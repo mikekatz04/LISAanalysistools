@@ -26,6 +26,7 @@ import numpy as np  # noqa: E402
 
 from lisatools.globalfit.monitor import generator_path  # noqa: E402
 from lisatools.globalfit.monitor._short import _generator_functions  # noqa: E402
+from lisatools.globalfit.monitor._png import shrink_png  # noqa: E402
 
 EDGES = np.array([1e-3, 2e-3, 4e-3, 8e-3])            # 3 bands [Hz]
 NW, NL = 2, 6
@@ -107,7 +108,8 @@ class PanelTest(unittest.TestCase):
         ns = {"np": np, "plt": plt, "os": os, "h5py": h5py, "io": io,
               "base64": base64, "g": f["global_fit"], "sub": f["global_fit/sub_backend"],
               "NIT": nit, "RUN_DIR": self.tmp, "_BACKUP_G": None, "_TORN_ROWS": [],
-              "MISSING": [], "IMGS": {}, "STAGE_BOUNDS": []}
+              "MISSING": [], "IMGS": {}, "STAGE_BOUNDS": [],
+              "_shrink_png": shrink_png}            # fig_b64's PNG shrinker (2026-10-11)
         _generator_functions(ns, names=("_row", "_backup_group", "_opt",
                                         "mark_stages", "fig_b64"))
         ns["gb_inds"] = ns["_row"]("inds/gb", (slice(0, nit), 0, 0))

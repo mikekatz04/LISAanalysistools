@@ -1,11 +1,21 @@
-"""The SHORT monitor page: the topline and the handful of panels people open
-the full page for, built in well under a minute.
+"""The SHORT monitor page, which is also the full page's "at a glance" block:
+the topline and the handful of panels that capture the run, built in well
+under a minute.
 
 USER REQUEST 2026-10-03: "let's make a short version of the html as well.
 That picks out the most important plots and topline info. phase maximized
 overlap. current psd measurements. nleaves over time, likelihood over time.
 Add what you think should be there but we want to keep it contained and easy
 to generate."
+
+USER REQUEST 2026-10-11: "We really want the plots and info that are most
+important/succinct in capturing information appearing first (this should be
+the 'short' html as well). Then after grouped by type with drop down options
+defaulting the more detailed information ... to 'collapsed'." and "stack the
+other sources closer to the top". So :func:`build_glance` renders the block
+ONCE and both pages carry it: this module wraps it in a page of its own, and
+``_generator.py`` puts the same block at the top of the full page, above its
+collapsed detail groups.
 
     python -m lisatools.globalfit.monitor --short-page RUN_DIR [OUT.html]
     python -m lisatools.globalfit.monitor.from_tar --short-page SNAP.tar.gz
@@ -18,28 +28,33 @@ writes it.
 
 CONTENT, in this order
 ----------------------
-1. TOPLINE. Store, last saved row, stage (step k of N, rows in it), the leg
-   the row was saved after and the next one, the galfor ratchet (the store's
-   stop stamp, the latest gate line and verdict from the head log), the row
-   cadence from the ``[SAVE]`` lines, head-node GPU utilisation and memory
-   from the newest ``gpu_util_JOB.csv`` (the head node only -- a second node
-   is not sampled), cold lnL max / mean / min at the last row and the change
-   against the row before, cold leaf counts per branch, the overlap headline
-   and the instrument-noise bias.
+1. TOPLINE. Store, last saved row, stage (step k of N, rows in it, how long
+   ago it started), the leg the row was saved after and the next one, the
+   pace (log age, last save, last full cycle), the leg in flight against its
+   last wall time, the stage-end clock (the per-(walker, band) RJ valve's
+   active pairs and their trend), the empty-band valve, the newest F-stat
+   epoch and the peak trend, head-node GPU utilisation and memory (job peak
+   too) from the newest ``gpu_util_JOB.csv`` (the head node only -- a second
+   node is not sampled), cold lnL max / mean / min at the last row and the
+   change against the row before, cold leaf counts per branch, the VGBs
+   above SNR 7, the overlap headline and the instrument-noise bias.
 2. Cold log-likelihood against stored row: min / mean / max over walkers, the
-   whole run and the recent window, with the recipe stage boundaries (start
-   and completed iterations) and the ratchet gate rows marked.
-3. GB leaf count against stored row, same layout. The other branches are
-   fixed-dimension and are listed in the topline.
-4. The phase-maximised, noise-weighted overlap of every proxy-matched
+   whole run and the recent window, with the recipe stage boundaries.
+3. GB leaf count against stored row, same layout, against the detectable
+   target when a truth set is present.
+4. The other sources (MBHB, EMRI, SOBHB): every source's matched SNR per cold
+   walker at the last row, a walker sitting on a different mode named, and
+   each key parameter's (median - catalogue truth) / sigma over the full
+   page's source-panel pool window.
+5. The phase-maximised, noise-weighted overlap of every proxy-matched
    (recovered, injected) pair at the last row for the max-lnL walker -- the
    full page's headline match criterion, computed the same way.
-5. The CURRENT noise measurement: every cold walker's sensitivity at the last
+6. The CURRENT noise measurement: every cold walker's sensitivity at the last
    row against the injected instrument and the injected instrument + FittedHT
    foreground (and the ratio to the latter), plus the instrument-noise
    posteriors against their injected values.
-6. Two additions: the seven noise parameters (and the foreground at 3 mHz)
-   against stored row, and the ratchet gate rows read off the store.
+(The galfor-ratchet rows and table are gone: no current recipe runs the
+ratchet, dropped 2026-10-03.)
 
 WHY IT DOES NOT CALL THE FULL PAGE'S PANELS
 -------------------------------------------
@@ -50,11 +65,13 @@ means running all of it -- every per-rank log (about 2 GB on the 6-month
 run), the mojito data bricks for the residual spectrum, the VGB catalogue.
 
 The smallest adapter that reuses its code anyway: :func:`_generator_functions`
-compiles NAMED top-level ``def`` statements out of the generator's syntax tree
-into a namespace this module supplies. The generator's own torn-read ladder
-(``_row`` / ``_backup_group``), pairing (``_match_pairs``), survival count
-(``_survival``), zoom window (``_zoom_its``), sub-backend trim
-(``_last_written``) and stage marker (``mark_stages``) run here unchanged, and
+compiles NAMED top-level ``def`` statements (and named plain-data constants) out
+of the generator's syntax tree into a namespace this module supplies. The
+generator's own torn-read ladder (``_row`` / ``_backup_group``), pairing
+(``_match_pairs``), survival count (``_survival``), zoom window
+(``_zoom_its``), sub-backend trim (``_last_written``), stage marker
+(``mark_stages``) and the source panels' catalogue reading, truth maps and
+pool window (``_SRC_BRANCH_SPECS``, ``_src_*``) run here unchanged, and
 nothing else of the script executes. The physics goes through the same
 importable routes the full page uses: ``build_truth.l1_orbits`` /
 ``build_truth.sens_grids`` (byte-for-byte the generator's ``SA_G``/``SE_G``),
@@ -66,20 +83,23 @@ the generator's own loop against it so the two cannot drift.
 WHAT IT DOES NOT READ: the per-rank logs, the mojito data bricks, the F-stat
 caches, the VGB catalogue. The head log (``*_artifacts/globalfit_run.log``,
 its ``_tail`` copy in a snapshot, else the newest ``slurm_stdout_JOB.log``)
-is read from its last 48 MB only, as ``scripts/diagnostics/gf_last_iteration.py``
-does. Its readers are mirrored here rather than imported because that script
-lives outside the package and does not ship in the wheel.
+is read from the end in growing windows, exactly as
+``scripts/diagnostics/gf_last_iteration.py`` reads it. Its readers are
+mirrored here rather than imported because that script lives outside the
+package and does not ship in the wheel; the test suite runs both parsers on
+one log and requires the same answer.
 
 EVERY SOURCE IS OPTIONAL except the store. A missing head log, GPU CSV, truth
-set, mojito tree or GBGPU costs its own row or panel and a line under "Notes",
-never the page.
+set, mojito tree, catalogue or GBGPU costs its own row or panel and a line
+under "Notes", never the page.
 
 Knobs (2026-10-03): ``GF_MONITOR_PAGE_SHORT=1`` makes the in-run hook build
 this page INSTEAD of the full one (``hooks.py``); ``GF_MONITOR_MATCH_STATS=0``
 drops the overlap section, as it does on the full page;
 ``GF_MONITOR_MATCH_MM`` sets the overlap threshold for "matched" (default
-0.8, as on the full page); ``MOJITO_INFO_PATH`` locates the L1 orbits and the
-noise brick, resolved exactly as for the full page.
+0.8, as on the full page); ``MOJITO_INFO_PATH`` locates the L1 orbits, the
+noise brick and the source catalogues, resolved exactly as for the full page;
+``GF_MONITOR_PNG_QUANTIZE=0`` keeps the figures 32-bit (``_png.py``).
 """
 
 from __future__ import annotations
@@ -98,26 +118,42 @@ from typing import Optional
 
 import numpy as np
 
+from ._png import shrink_png
+
 logger = logging.getLogger(__name__)
 
 __all__ = ["build_short_monitor", "default_short_out_path", "render_short_page",
-           "phase_max_overlaps"]
+           "build_glance", "phase_max_overlaps", "GLANCE_CSS"]
 
 #: The generator's own top-level helpers this page runs unchanged.
 GEN_HELPERS = ("mark_stages", "_zoom_its", "_last_written", "_backup_group",
-               "_row", "_match_pairs", "_survival")
+               "_row", "_match_pairs", "_survival",
+               "_parse_src_ids_from_settings", "_src_cat_to_sampling_mbh",
+               "_src_cat_to_sampling_emri", "_src_cat_to_sampling_sobbh",
+               "_src_cat_row", "_src_load_catalogue", "_src_pool_window")
+#: ... and its top-level plain-data constants (literals, ``dict(...)`` of literals).
+GEN_CONSTS = ("_SRC_BRANCH_SPECS",)
+#: The fixed-dimension source branches the "Other Sources" table covers.
+SRC_BRANCHES = ("mbh", "emri", "sobbh")
+#: A cold walker whose matched SNR sits this far off the walker median -- by this
+#: fraction AND by this many SNR units, so a quiet source's ordinary scatter is not
+#: flagged -- is named in the source table (another mode, or the source lost).
+SRC_SNR_OFF = 0.2
+SRC_SNR_OFF_ABS = 3.0
 
 #: Stores that are never the live one (same list as gf_last_iteration.py).
 SKIP = ("backup", "CORRUPT", "pre_rerung", "pre_repair", "midit", ".stale")
-#: How much of the head log is read: about half a day, enough saves for a cadence.
-TAIL_BYTES = 48 * 1024 * 1024
+#: The head log is read from its end in windows of this size, doubled until the
+#: window holds what the topline shows (gf_last_iteration.py's rule).
+TAIL_BYTES = 32 * 1024 * 1024
+TAIL_BYTES_MAX = 256 * 1024 * 1024
+#: Valve judges / F-stat epochs in the topline's trend lines.
+TREND = 8
 #: The generator's f0 pairing tolerance, in FD bins, and its overlap waveform length.
 TOL_BINS = 2.0
 NW_OVERLAP = 1024
 #: The generator's fallback GB phase epoch when run_settings.log is absent.
 T_REF_DEFAULT = 97729089.327664
-#: Rows of the ratchet gate table.
-GATE_ROWS_SHOWN = 8
 
 # The full page's palette, one meaning per hue (see _generator.py's docstring).
 BG, PANEL, LINE, FG, DIM = "#0A0E14", "#10161F", "#223041", "#B8C6D4", "#67788A"
@@ -148,31 +184,67 @@ def default_short_out_path(run_dir: str) -> str:
 # --------------------------------------------------------------------------
 # the adapter onto the generator's own helpers
 # --------------------------------------------------------------------------
-def _generator_functions(ns: dict, names=GEN_HELPERS) -> dict:
-    """Compile the named top-level ``def``s of ``_generator.py`` into ``ns``.
+def _plain_data(node) -> bool:
+    """``node`` builds plain data only: literals, containers of them, and
+    ``dict(key=...)`` calls -- nothing that can run code when executed."""
+    import ast
 
-    Only those function definitions are executed -- defining a function runs
-    none of its body -- so nothing of the script's module-level flow happens.
-    Each function resolves its globals in ``ns``: ``_row`` wants ``g``,
-    ``NIT``, ``RUN_DIR``, ``_BACKUP_G``, ``_TORN_ROWS``; ``mark_stages`` wants
-    ``STAGE_BOUNDS``; the rest want ``np`` at most. Raises if a name is no
-    longer a top-level ``def`` there, rather than silently running without it.
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return all(_plain_data(e) for e in node.elts)
+    if isinstance(node, ast.Dict):
+        return all(k is not None and _plain_data(k) for k in node.keys) and \
+            all(_plain_data(v) for v in node.values)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        return _plain_data(node.operand)
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "dict" and not node.args):
+        return all(k.arg is not None and _plain_data(k.value) for k in node.keywords)
+    return False
+
+
+def _generator_functions(ns: dict, names=GEN_HELPERS, consts=None) -> dict:
+    """Compile the named top-level ``def``s of ``_generator.py`` into ``ns``,
+    plus the named top-level constants whose value is plain data.
+
+    Only those definitions are executed -- defining a function runs none of
+    its body, and a plain-data assignment runs no code -- so nothing of the
+    script's module-level flow happens. Each function resolves its globals in
+    ``ns``: ``_row`` wants ``g``, ``NIT``, ``RUN_DIR``, ``_BACKUP_G``,
+    ``_TORN_ROWS``; ``mark_stages`` wants ``STAGE_BOUNDS``;
+    ``_src_load_catalogue`` wants ``MOJITO_CAT_DIR``, ``MISSING`` and
+    ``h5py``; the rest want ``np`` / ``re`` at most. Raises if a name is no
+    longer a top-level ``def`` (or plain-data constant) there, rather than
+    silently running without it.
     """
     import ast
 
     from . import generator_path
 
+    if consts is None:                    # a caller naming its own helpers names its constants
+        consts = GEN_CONSTS if names is GEN_HELPERS else ()
     path = generator_path()
     with open(path, encoding="utf-8") as fh:
         tree = ast.parse(fh.read(), filename=path)
     defs = [n for n in tree.body
             if isinstance(n, ast.FunctionDef) and n.name in names]
-    missing = sorted(set(names) - {n.name for n in defs})
+    lits = []
+    for n in tree.body:
+        if (isinstance(n, ast.Assign) and len(n.targets) == 1
+                and isinstance(n.targets[0], ast.Name) and n.targets[0].id in consts):
+            if not _plain_data(n.value):
+                raise RuntimeError(f"_generator.py's {n.targets[0].id} is no longer plain "
+                                   "data; the short page will not run it")
+            lits.append(n)
+    missing = sorted((set(names) - {n.name for n in defs})
+                     | (set(consts) - {n.targets[0].id for n in lits}))
     if missing:
         raise RuntimeError(
             f"_generator.py no longer defines {missing} at top level; the "
             "short page reuses them by name")
-    exec(compile(ast.Module(body=defs, type_ignores=[]), path, "exec"), ns)  # noqa: S102
+    ns.setdefault("re", re)
+    exec(compile(ast.Module(body=lits + defs, type_ignores=[]), path, "exec"), ns)  # noqa: S102
     return ns
 
 
@@ -220,8 +292,7 @@ def _recipe_steps(g) -> list:
             name=str(name), order=int(_attr(a, "order num", 0) or 0),
             status=bool(_attr(a, "status", False)),
             start=_attr(a, "start_iteration"),
-            completed=_attr(a, "completed_iteration"),
-            ratchet_done=_attr(a, "galfor_ratchet_done"), move_order=mo))
+            completed=_attr(a, "completed_iteration"), move_order=mo))
     steps.sort(key=lambda s: s["order"])
     return steps
 
@@ -253,6 +324,26 @@ def stage_bounds(steps: list) -> list:
             lab = (lab + " -> " if lab else "-> ") + " / ".join(start)
         out.append((it, lab))
     return out
+
+
+def _source_rows(g, _row, branch, nit, pool_w):
+    """One fixed-dimension branch's last ``pool_w`` rows: cold-chain coordinates
+    ``(W, nw, nleaves, ndim)``, alive mask ``(W, nw, nleaves)``, and the last
+    row's ``<d|h>`` / ``<h|h>`` ``(nw, nleaves)``; None when unreadable."""
+    lo = max(0, nit - pool_w)
+
+    def rd(name, sel):           # _row reads through a torn chunk, not a missing dataset
+        return _row(name, sel) if name in g else None
+
+    ch = rd(f"chain/{branch}", (slice(lo, nit), 0, 0))
+    ind = rd(f"inds/{branch}", (slice(lo, nit), 0, 0))
+    dh = rd(f"sub_backend/{branch}/d_h", (nit - 1,))
+    hh = rd(f"sub_backend/{branch}/h_h", (nit - 1,))
+    if ch is None or ind is None:
+        return None
+    return dict(chain=np.asarray(ch, float), inds=np.asarray(ind, bool), lo=lo,
+                dh=None if dh is None else np.asarray(dh, float),
+                hh=None if hh is None else np.asarray(hh, float))
 
 
 def read_store(store: str, run_dir: str, ns: dict, notes: list) -> dict:
@@ -361,6 +452,29 @@ def read_store(store: str, run_dir: str, ns: dict, notes: list) -> dict:
                 row = _row("chain/gb", (nit - 1, 0, 0, S["wb"]))
                 if row is not None:
                     S["rec9"] = np.asarray(row, float)[np.asarray(inds_gb[nit - 1, S["wb"]], bool)]
+
+            # the VGBs above SNR 7: the full page's rule (walker-mean <h|h>)
+            S["vgb_snr"] = None
+            if "sub_backend/vgb/h_h" in g:
+                hh = _row("sub_backend/vgb/h_h", (slice(0, nit),))
+                if hh is not None:
+                    hh = np.asarray(hh, float)
+                    k = ns["_last_written"](hh)
+                    if k:
+                        import warnings
+
+                        with warnings.catch_warnings():       # an unsampled VGB is all-NaN
+                            warnings.simplefilter("ignore", RuntimeWarning)
+                            snr = np.sqrt(np.clip(np.nanmean(hh[k - 1], axis=0), 0, None))
+                        S["vgb_snr"] = np.where(np.isfinite(snr), snr, 0.0)
+
+            # the fixed-dimension source branches, over the source panels' pool window
+            S["src"] = {}
+            pool_w = int(ns["_src_pool_window"](nit))
+            for b in SRC_BRANCHES:
+                rows = _source_rows(g, _row, b, nit, pool_w)
+                if rows is not None:
+                    S["src"][b] = rows
             S["torn_rows"] = list(ns["_TORN_ROWS"])
         finally:
             bg = ns.get("_BACKUP_G")
@@ -388,12 +502,10 @@ def current_stage(steps: list, nit: int, saved_after: list) -> Optional[dict]:
         return None
     cur = next((s for s in steps if not s["status"]), None)
     out = dict(total=len(steps), done=[s["name"] for s in steps if s["status"]],
-               name=None, order=None, start=None, rows_in=None,
-               ratchet_done=None, next_leg=None)
+               name=None, order=None, start=None, rows_in=None, next_leg=None)
     if cur is None:
         return out
-    out.update(name=cur["name"], order=cur["order"], start=cur["start"],
-               ratchet_done=cur["ratchet_done"])
+    out.update(name=cur["name"], order=cur["order"], start=cur["start"])
     if cur["start"] is not None:
         out["rows_in"] = nit - int(cur["start"])
     mo, last = cur["move_order"], (saved_after[-1] if saved_after else None)
@@ -402,34 +514,10 @@ def current_stage(steps: list, nit: int, saved_after: list) -> Optional[dict]:
     return out
 
 
-def gate_rows(saved_after: list, gal_phys, ll, leaves_gb) -> list:
-    """Rows saved after the gated noise step, classified off the galfor chain.
-
-    ``nudge``: amplitude moved with alpha and f_1 held -- the forced step (the
-    full page's rule, ``fg_ratchet_timeline``). ``moved``: the noise was
-    sampled (a release, or noise PE after one). ``held``: nothing moved. Each
-    entry also carries what the search legs did until the next gate row.
-    """
-    if gal_phys is None or not saved_after:
-        return []
-    n = min(len(saved_after), gal_phys.shape[0], ll.shape[0])
-    rows = [r for r in range(1, n) if saved_after[r] == "noise_ratchet_search"]
-    out = []
-    for j, r in enumerate(rows):
-        a, b = gal_phys[r], gal_phys[r - 1]
-        nudge = (np.allclose(a[:, 2], b[:, 2], rtol=0.0, atol=1e-9)
-                 and np.allclose(a[:, 3], b[:, 3], rtol=1e-9, atol=0.0)
-                 and not np.allclose(a[:, 0], b[:, 0], rtol=1e-9, atol=0.0))
-        kind = ("nudge" if nudge else
-                "held" if np.allclose(a, b, rtol=1e-12, atol=0.0) else "moved")
-        end = (rows[j + 1] - 1) if j + 1 < len(rows) else (ll.shape[0] - 1)
-        rec = dict(row=r, kind=kind, dll=float(ll[r].mean() - ll[r - 1].mean()),
-                   end=end, dll_after=float(ll[end].mean() - ll[r].mean()))
-        if leaves_gb is not None and leaves_gb.shape[0] > end:
-            rec.update(leaves=float(leaves_gb[r].mean()),
-                       dleaves_after=float(leaves_gb[end].mean() - leaves_gb[r].mean()))
-        out.append(rec)
-    return out
+def _artifacts_file(run_dir: str, name: str) -> Optional[str]:
+    for p in glob.glob(os.path.join(run_dir, "*_artifacts", name)):
+        return p
+    return None
 
 
 def run_settings_t0(run_dir: str) -> float:
@@ -446,9 +534,104 @@ def run_settings_t0(run_dir: str) -> float:
 
 
 # --------------------------------------------------------------------------
-# the head log and the GPU sampler (mirrors gf_last_iteration.py)
+# the other sources: SNR per walker and the pulls against the catalogue
 # --------------------------------------------------------------------------
-def _tail_lines(path, nbytes=TAIL_BYTES):
+def source_summary(S: dict, run_dir: str, ns: dict, mojito_tree, notes: list) -> dict:
+    """Per fixed-dimension branch: ``dict(params, pool, rows=[...])``, a row per
+    source with its catalogue id, the matched SNR ``<d|h>/sqrt(<h|h>)`` per cold
+    walker at the last row, the walkers more than ``SRC_SNR_OFF`` off the walker
+    median, and each key parameter's ``(median - truth) / sigma`` over the pool
+    window (the full page's source panels: the same pool, mask and truth map).
+    """
+    specs = ns["_SRC_BRANCH_SPECS"]
+    settings = ""
+    p = _artifacts_file(run_dir, "run_settings.log")
+    if p:
+        try:
+            with open(p, errors="replace") as fh:
+                settings = fh.read()
+        except OSError:
+            pass
+    ids_all = ns["_parse_src_ids_from_settings"](settings) if settings else {}
+    missing = []
+    ns.update(MOJITO_CAT_DIR=mojito_tree or "", MISSING=missing, h5py=__import__("h5py"))
+    out = {}
+    for b, rows in S.get("src", {}).items():
+        spec = specs[b]
+        chain, inds = rows["chain"], rows["inds"]           # (W, nw, nl, nd), (W, nw, nl)
+        nw, nleaves = chain.shape[1], chain.shape[2]
+        cat = ns["_src_load_catalogue"](spec["cat_files"]) if mojito_tree else None
+        ids = ids_all.get(spec["cls"], list(range(nleaves)))
+        to_samp = ns[f"_src_cat_to_sampling_{b}"]
+        key = [spec["param_defs"][k][0] for k in spec["key_idx"]]
+        recs = []
+        for leaf in range(nleaves):
+            truth = None
+            if cat is not None and leaf < len(ids):
+                r = ns["_src_cat_row"](cat, ids[leaf])
+                if r is not None:
+                    try:
+                        truth = to_samp(r)
+                    except Exception as e:  # noqa: BLE001
+                        missing.append(f"{b} leaf {leaf} truth: {type(e).__name__}: {e}")
+            snr = None
+            if rows["dh"] is not None and rows["hh"] is not None:
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    snr = rows["dh"][:, leaf] / np.sqrt(np.maximum(rows["hh"][:, leaf], 1e-30))
+            # the pool: every (row, walker) the leaf is alive in, populated rows only
+            # (an extract zero-fills rows outside its keep window)
+            m = inds[:, :, leaf] & np.any(chain[:, :, leaf, :] != 0.0, axis=-1)
+            pool = chain[:, :, leaf, :][m]
+            pulls = []
+            for k in spec["key_idx"]:
+                v = pool[:, k][np.isfinite(pool[:, k])] if pool.size else np.array([])
+                if truth is None or not v.size or not np.isfinite(truth[k]):
+                    pulls.append(None)
+                    continue
+                sd = float(np.std(v))
+                pulls.append((float(np.median(v)) - float(truth[k])) / sd if sd > 0 else None)
+            off = []
+            if snr is not None and np.all(np.isfinite(snr)):
+                med = float(np.median(snr))
+                off = [w for w in range(nw)
+                       if abs(snr[w] - med) > max(SRC_SNR_OFF * abs(med), SRC_SNR_OFF_ABS)]
+            recs.append(dict(leaf=leaf, id=ids[leaf] if leaf < len(ids) else None,
+                             snr=snr, off=off, pulls=pulls, n_pool=int(pool.shape[0]),
+                             truth=truth is not None))
+        out[b] = dict(cls=spec["cls"], params=key, rows=recs, nw=nw,
+                      pool=int(chain.shape[0]), has_cat=cat is not None)
+        if cat is None:
+            notes.append(f"{spec['cls']}: no catalogue under "
+                         f"{_html.escape(str(mojito_tree or 'no mojito tree'))}/catalogues "
+                         "-- SNRs only, no pulls.")
+    notes.extend(_html.escape(m_) for m_ in missing)
+    return out
+
+
+# --------------------------------------------------------------------------
+# the head log and the GPU sampler (mirrors gf_last_iteration.py: same tags,
+# same windows, same parse; the test suite holds the two to one answer)
+# --------------------------------------------------------------------------
+_TAGS = (b"[SAVE] save_step", b"[LEG ", b"[GB_GATE ", b"[GB_BAND_SHUTOFF status ",
+         b"[FANOUT] op=", b"[stageA] ", b"[sweep:", b"] STAGE COMPLETE", b"] stored row",
+         b"F-stat grid fit epoch ")
+_RE_LEG = re.compile(r"\[LEG (\S+)\] cycle (\d+) leg (\d+)/(\d+): ran \[(.*?)\] -> "
+                     r"row saved after '([^']*)'")
+_RE_RESUME = re.compile(r"\[LEG (\S+)\] resume:")
+_RE_FANOUT = re.compile(r"\[FANOUT\] op=(\S+) move=(\S+)")
+_RE_GATE = re.compile(r"occupied (\d+) \| shut (\d+) \(([\d.]+)%\) \| active (\d+)"
+                      r"(?: -- streak p50 (\d+) p90 (\d+) of (\d+))?")
+_RE_TOL = re.compile(r"\(tol ([\d.]+)\)")
+_RE_EMPTY = re.compile(r"floor ([\d.]+) mHz: (\d+)/(\d+) bands eligible.*?; (\d+) off \(.*?\); "
+                       r"(\d+)/(\d+) iters since revive")
+_RE_EPOCH = re.compile(r"F-stat grid fit epoch (\d+) (?:done in ([\d.]+)s \((\d+) peaks\)|starting)")
+_RE_STAGEA = re.compile(r"\[stageA\] comb \+ peak selection: (\d+) peaks in ([\d.]+)m .*?; "
+                        r"(\d+) of (\d+) bands skipped")
+_RE_SWEEP = re.compile(r"\[sweep:(\S+)\] \d+/\d+ evals \(([\d.]+)%\).*?ETA (\S+)")
+_RE_DONE = re.compile(r"\[V9-STAGE (\S+)\] (STAGE COMPLETE.*)")
+
+
+def _tail_lines(path, nbytes):
     size = os.path.getsize(path)
     with open(path, "rb") as fh:
         if size > nbytes:
@@ -484,79 +667,222 @@ def _mins(a, b):
     return (b - a).total_seconds() / 60.0
 
 
-def read_live(run_dir: str, now=None) -> Optional[dict]:
-    """Pace and gate from the head log's tail, or ``None`` without a log."""
-    path = find_head_log(run_dir)
-    if path is None:
-        return None
-    now = now or datetime.now()
-    out = dict(log=path, last_ts=None, log_age_min=None, saves=[], cadence=[],
-               gate=None, gate_ts=None, verdict=None, replica=None, stage_line=None)
-    for line in _tail_lines(path):
+def _scan(path, lo, hi):
+    """The tagged lines of ``path[lo:hi]`` in file order, and the offset of the
+    chunk's first whole line (the torn first line is dropped unless ``lo`` is 0)."""
+    with open(path, "rb") as fh:
+        fh.seek(lo)
+        data = fh.read(hi - lo)
+    start = data.find(b"\n") + 1 if lo > 0 else 0
+    starts = set()
+    for tag in _TAGS:
+        i = data.find(tag, start)
+        while i >= 0:
+            starts.add(data.rfind(b"\n", 0, i) + 1)
+            e = data.find(b"\n", i)
+            if e < 0:
+                break
+            i = data.find(tag, e)
+    lines = []
+    for s in sorted(starts):
+        e = data.find(b"\n", s)
+        lines.append(data[s:e if e >= 0 else len(data)].decode("utf-8", "replace"))
+    return lines, lo + start
+
+
+def _last_ts(path):
+    for line in reversed(_tail_lines(path, 256 * 1024)):
         t = _ts(line)
         if t is not None:
-            out["last_ts"] = t
-        if "[SAVE] save_step" in line and t is not None:
+            return t
+    return None
+
+
+def _follows(prev, rec):
+    if prev["stage"] != rec["stage"]:
+        return False
+    if rec["cycle"] == prev["cycle"]:
+        return rec["leg"] == prev["leg"] + 1
+    return prev["leg"] == prev["nlegs"] and rec["leg"] == 1 and rec["cycle"] == prev["cycle"] + 1
+
+
+def _move_walls(fan, ran, t0):
+    """Each move's wall seconds inside one leg, from its ``[FANOUT]`` lines (see
+    gf_last_iteration.py: an inner move of a composite belongs to the next leg
+    move that logs none of its own)."""
+    direct = {m for _, m in fan if m in ran}
+    end, cur = {}, None
+    for t, m in fan:
+        if m in ran:
+            cur = m
+        else:
+            i0 = ran.index(cur) + 1 if cur in ran else 0
+            cur = next((r for r in ran[i0:] if r not in direct), cur)
+        if cur is not None:
+            end[cur] = t
+    walls, t_prev = {}, t0
+    for m in ran:
+        if m in end:
+            walls[m] = (end[m] - t_prev).total_seconds()
+            t_prev = end[m]
+    return walls
+
+
+def parse_head_log(lines):
+    """The tagged head-log lines (file order) -> saves, legs (with walls), valve
+    judges, empty-band status, F-stat epochs, the open epoch and its sweep, the
+    last STAGE COMPLETE. Valve, empty-band and epoch lists restart at a STAGE
+    COMPLETE line; a ``[LEG ...] resume:`` line breaks the leg chain."""
+    out = dict(saves=[], legs=[], gates=[], empty=None, epochs=[], epoch_open=None, sweep=None,
+               stage_done=None, replica=None)
+    prev, fan, stage_a, seg = None, [], None, 0
+    for line in lines:
+        t = _ts(line)
+        if t is None:
+            continue
+        if "[FANOUT] op=" in line:
+            m = _RE_FANOUT.search(line)
+            if m and m.group(2) != "None":
+                fan.append((t, m.group(2)))
+        elif "[SAVE] save_step" in line:
             out["saves"].append(t)
-        elif "[GALFOR_RATCHET" in line:
-            body = line.split("] ", 1)[-1] if "] " in line else line
-            if re.search(r"\] iteration \d+: (NUDGE|RELEASE|HOLD)", line):
-                out["gate"], out["gate_ts"] = body.split(" -- ")[0].strip(), t
-            elif (re.search(r"\] after (RELEASE|iteration)", line)
-                  or "RATCHET DONE" in line or "already FINISHED" in line):
-                out["verdict"] = body
-        elif "[REPLICA_PE" in line and "stored row" in line:
+        elif "[LEG " in line:
+            m = _RE_LEG.search(line)
+            if m:
+                rec = dict(t=t, seg=seg, stage=m.group(1), cycle=int(m.group(2)),
+                           leg=int(m.group(3)), nlegs=int(m.group(4)),
+                           ran=re.findall(r"'([^']*)'", m.group(5)), after=m.group(6),
+                           wall=None, moves={})
+                if prev is not None and _follows(prev, rec):
+                    rec["wall"] = (t - prev["t"]).total_seconds()
+                    rec["moves"] = _move_walls(fan, rec["ran"], prev["t"])
+                out["legs"].append(rec)
+                prev, fan = rec, []
+            elif _RE_RESUME.search(line):
+                prev, fan, seg = None, [], seg + 1
+        elif "[GB_GATE " in line:
+            m = _RE_GATE.search(line)
+            if m:
+                tol = _RE_TOL.search(line)
+                out["gates"].append(dict(
+                    t=t, occupied=int(m.group(1)), shut=int(m.group(2)),
+                    shut_pct=float(m.group(3)), active=int(m.group(4)),
+                    streak=None if m.group(5) is None else tuple(int(m.group(i)) for i in (5, 6, 7)),
+                    tol=float(tol.group(1)) if tol else None))
+        elif "[GB_BAND_SHUTOFF status" in line:
+            m = _RE_EMPTY.search(line)
+            if m:
+                out["empty"] = dict(t=t, floor_mhz=float(m.group(1)), eligible=int(m.group(2)),
+                                    nbands=int(m.group(3)), off=int(m.group(4)),
+                                    since=int(m.group(5)), every=int(m.group(6)))
+        elif "[stageA] " in line:
+            m = _RE_STAGEA.search(line)
+            if m:
+                stage_a = dict(minutes=float(m.group(2)), skipped=int(m.group(3)),
+                               nbands=int(m.group(4)))
+        elif "F-stat grid fit epoch " in line:
+            m = _RE_EPOCH.search(line)
+            if m and m.group(2) is not None:
+                out["epochs"].append(dict(t=t, epoch=int(m.group(1)), wall_s=float(m.group(2)),
+                                          peaks=int(m.group(3)), stage_a=stage_a))
+                out["epoch_open"], out["sweep"], stage_a = None, None, None
+            elif m:
+                out["epoch_open"], out["sweep"] = dict(t=t, epoch=int(m.group(1))), None
+        elif "[sweep:" in line:
+            m = _RE_SWEEP.search(line)
+            if m and out["epoch_open"] is not None:
+                out["sweep"] = dict(t=t, name=m.group(1), pct=float(m.group(2)), eta=m.group(3))
+        elif "] STAGE COMPLETE" in line:
+            m = _RE_DONE.search(line)
+            if m:
+                out["stage_done"] = dict(t=t, stage=m.group(1), text=m.group(2))
+                out["gates"], out["empty"], out["epochs"] = [], None, []
+        elif "[REPLICA_PE" in line and "] stored row" in line:
             out["replica"] = line.split("] ", 1)[-1]
-        elif "[V9-STAGE" in line and ("entering" in line or "STAGE COMPLETE" in line):
-            out["stage_line"] = line.split(" - INFO - ", 1)[-1]
-    if out["last_ts"] is not None:
-        out["log_age_min"] = _mins(out["last_ts"], now)
-    s = out["saves"][-7:]
-    out["cadence"] = [_mins(a, b) for a, b in zip(s[:-1], s[1:])]
     return out
 
 
-def verdict_phrase(v: Optional[str]) -> Optional[str]:
-    """One phrase from a ratchet verdict line (gf_last_iteration's reading,
-    plus the release-before-reference case)."""
-    if not v:
+def last_cycle(legs, stage):
+    """``(cycle, total_s, walls)`` of the newest fully timed cycle of ``stage``."""
+    by = {}
+    for r in legs:
+        if r["stage"] == stage:
+            by.setdefault((r["seg"], r["cycle"]), {})[r["leg"]] = r
+    for key in sorted(by, key=lambda k: max(r["t"] for r in by[k].values()), reverse=True):
+        d = by[key]
+        n = next(iter(d.values()))["nlegs"]
+        if all(i in d and d[i]["wall"] is not None for i in range(1, n + 1)):
+            walls = [d[i]["wall"] for i in range(1, n + 1)]
+            return key[1], sum(walls), walls
+    return None
+
+
+def _enough(out):
+    if out["stage_done"] is not None:
+        return True
+    if len(out["saves"]) < 7:
+        return False
+    if out["legs"] and last_cycle(out["legs"], out["legs"][-1]["stage"]) is None:
+        return False
+    if out["gates"] and len(out["gates"]) < TREND:
+        return False
+    if out["epochs"] and len(out["epochs"]) < TREND:
+        return False
+    return True
+
+
+def read_live(run_dir: str) -> Optional[dict]:
+    """The head log's reading (:func:`parse_head_log`) plus ``log``,
+    ``log_age_min`` (now minus the log's mtime, so a tar read in another time
+    zone reads right), ``t_end`` (its newest timestamp, its own clock);
+    ``None`` without a log."""
+    path = find_head_log(run_dir)
+    if path is None:
         return None
-    head = v.split(":", 1)[0].strip()
-    if "RATCHET DONE" in v or "already FINISHED" in v:
-        return head + ": RATCHET DONE"
-    if "recorded as the reference" in v or "baseline" in v:
-        return head + ": reference recorded"
-    if "reference captured yet" in v:
-        return head + ": no pre-nudge reference yet"
-    m = re.search(r"drop ([+-][\d.]+%) \(threshold ([\d.]+%)", v)
-    if m:
-        tail = "continues" if "continues" in v else ("STOP" if "stop" in v.lower() else "")
-        return f"{head}: foreground drop {m.group(1)} vs {m.group(2)} -> {tail}".rstrip(" ->")
-    m = re.search(r"([+-][\d.,]+) over the previous release \(threshold (\d+)\)", v)
-    if m:
-        tail = "continues" if "continues" in v else ""
-        return f"{head}: lnL gain {m.group(1)} vs {m.group(2)} {tail}".strip()
-    return (head + ": " + v.split(":", 1)[-1].strip())[:90]
+    size = os.path.getsize(path)
+    lines, lo, nbytes = [], size, TAIL_BYTES
+    while True:
+        new_lo = max(0, size - nbytes)
+        chunk, lo = _scan(path, new_lo, lo)
+        lines = chunk + lines
+        out = parse_head_log(lines)
+        if new_lo == 0 or nbytes >= TAIL_BYTES_MAX or _enough(out):
+            break
+        nbytes *= 2
+    out.update(log=path, log_age_min=(time.time() - os.path.getmtime(path)) / 60.0,
+               t_end=_last_ts(path))
+    return out
 
 
-def read_gpu(run_dir: str, now=None, window_s: float = 60.0) -> Optional[dict]:
-    """The newest ``gpu_util_JOB.csv``: per GPU its last sample and the mean
-    utilisation over the trailing ``window_s``. The launcher's sampler runs on
-    the HEAD node only."""
+def read_gpu(run_dir: str, window_s: float = 60.0) -> Optional[dict]:
+    """The newest ``gpu_util_JOB.csv``: per GPU its last sample, the mean
+    utilisation over the trailing ``window_s`` and the job's peak memory. The
+    launcher's sampler runs on the HEAD node only."""
     cands = glob.glob(os.path.join(run_dir, "gpu_util_*.csv"))
     if not cands:
         return None
     path = max(cands, key=os.path.getmtime)
-    now = now or datetime.now()
+    with open(path, "rb") as fh:
+        text = fh.read().decode("utf-8", "replace").splitlines()
+    peak = {}
+    for line in text:
+        p = line.split(",")
+        if len(p) < 9:
+            continue
+        try:
+            idx, used = int(p[1]), float(p[5]) / 1024.0
+        except ValueError:
+            continue
+        peak[idx] = max(peak.get(idx, 0.0), used)
     rows = []
-    for line in _tail_lines(path, 256 * 1024)[-400:]:
+    for line in text[-400:]:
         p = [x.strip() for x in line.split(",")]
         if len(p) < 9:
             continue
         try:
             rows.append(dict(t=datetime.strptime(p[0].split(".")[0], "%Y/%m/%d %H:%M:%S"),
                              idx=int(p[1]), util=float(p[3]), used=float(p[5]) / 1024.0,
-                             total=float(p[6]) / 1024.0, power=float(p[7]), temp=float(p[8])))
+                             total=float(p[6]) / 1024.0))
         except ValueError:
             continue
     if not rows:
@@ -571,8 +897,9 @@ def read_gpu(run_dir: str, now=None, window_s: float = 60.0) -> Optional[dict]:
         last = max(rs, key=lambda r: r["t"])
         gpus[idx] = dict(util=last["util"], util_avg=sum(r["util"] for r in rs) / len(rs),
                          mem_used_gb=last["used"], mem_total_gb=last["total"],
-                         power_w=last["power"], temp_c=last["temp"])
-    return dict(csv=path, t_last=t_last, age_min=_mins(t_last, now), gpus=gpus)
+                         mem_peak_gb=peak.get(idx, last["used"]))
+    return dict(csv=path, t_last=t_last,
+                age_min=(time.time() - os.path.getmtime(path)) / 60.0, gpus=gpus)
 
 
 # --------------------------------------------------------------------------
@@ -724,14 +1051,7 @@ def compute_overlap(S: dict, truth_path: str, ns: dict, mojito_tree, t_ref: floa
 def _png(fig, dpi=None) -> str:
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
-    return base64.b64encode(buf.getvalue()).decode()
-
-
-def _gate_marks(ax, gates, lo, hi):
-    for gr in gates:
-        if lo <= gr["row"] <= hi:
-            ax.axvline(gr["row"], color=AMBER if gr["kind"] == "nudge" else GREEN,
-                       lw=0.8, ls=(0, (2, 2)), alpha=0.7, zorder=1)
+    return base64.b64encode(shrink_png(buf.getvalue())).decode()
 
 
 def _band_panel(ax, x, y, color, ylabel):
@@ -744,9 +1064,10 @@ def _band_panel(ax, x, y, color, ylabel):
     ax.set_ylabel(ylabel)
 
 
-def fig_history(ns, y, gates, color, ylabel, title):
+def fig_history(ns, y, color, ylabel, title, target=None):
     """Whole run (left) and the recent window (right): min / mean / max over
-    walkers, stage boundaries via the generator's ``mark_stages``."""
+    walkers, stage boundaries via the generator's ``mark_stages``; ``target``
+    = ``(value, label)`` draws a dotted reference on the whole-run panel."""
     from matplotlib.figure import Figure
 
     nit = y.shape[0]
@@ -768,9 +1089,12 @@ def fig_history(ns, y, gates, color, ylabel, title):
             ns["mark_stages"](a, label=True, max_it=hi)
         finally:
             ns["STAGE_BOUNDS"] = every
-        _gate_marks(a, gates, lo, hi)
         a.set_xlim(lo - 0.5, hi + 0.5)
         a.set_title(ttl)
+    if target is not None:
+        ax[0].axhline(target[0], color=RED, ls=":", lw=1.1)
+        ax[0].text(0.99, target[0], f"{target[1]} ", color=RED, fontsize=8, va="bottom",
+                   ha="right", transform=ax[0].get_yaxis_transform())
     ax[0].legend(fontsize=8, loc="lower right")
     fig.tight_layout()
     return _png(fig)
@@ -805,18 +1129,18 @@ def fig_overlap(ns, ov):
     return _png(fig)
 
 
-def noise_figures(S, soms_inj, sa_inj, gates, ns):
-    """``(psd_now, psd_params, noise_traces)`` PNGs: the current sensitivity
-    per cold walker, the instrument posteriors, and the parameter traces."""
+def noise_figures(S, soms_inj, sa_inj):
+    """``(psd_now, psd_params)`` PNGs: the current sensitivity per cold walker
+    and the instrument posteriors. (The per-parameter traces are the full
+    page's Noise group: ``psd_trace`` / ``gal_trace``.)"""
     from matplotlib.figure import Figure
 
     from lisatools import detector as lisa_models
-    from lisatools.globalfit.stock.erebor.noise import GALFOR_BASIS, GALFOR_LOG_PARAMS
     from lisatools.sensitivity import LISASens, get_sensitivity
     from lisatools.stochastic import FittedHyperbolicTangentGalacticForeground as FHT
     from lisatools.stochastic import HyperbolicTangentGalacticForeground as HTGF
 
-    psd, gph, gal = S["psd"], S["gal_phys"], S["gal"]
+    psd, gph = S["psd"], S["gal_phys"]
     nw, nsub = psd.shape[1], psd.shape[0]
     orb0 = lisa_models.DefaultOrbits()
     fr = np.logspace(np.log10(2e-4), np.log10(2.6e-2), 500)
@@ -874,42 +1198,14 @@ def noise_figures(S, soms_inj, sa_inj, gates, ns):
     fig.suptitle(f"instrument-noise posteriors, last {nsh} rows x {nw} cold walkers",
                  fontsize=10, color=FG)
     fig.tight_layout(rect=[0, 0, 1, 0.92])
-    psd_params = _png(fig)
-
-    x = np.arange(nsub)
-    names = (["Soms_d", "Sa_a"]
-             + [("log10 " + n) if (S["galfor_log"] and n in GALFOR_LOG_PARAMS) else n
-                for n in GALFOR_BASIS] + ["S_gal(3 mHz)"])
-    s3 = np.array([[float(np.asarray(HTGF.specific_Sh_function(np.array([3e-3]),
-                                                               *gph[i, w])).ravel()[0])
-                    for w in range(nw)] for i in range(nsub)])
-    series = [psd[:, :, 0], psd[:, :, 1]] + [gal[:, :, k] for k in range(5)] + [s3]
-    fig = Figure(figsize=(13.6, 5.2))
-    ax = fig.subplots(2, 4).ravel()
-    for k, (nm, ys) in enumerate(zip(names, series)):
-        col = CYAN if k < 2 else AMBER
-        for w in range(nw):
-            ax[k].plot(x, ys[:, w], color=col, lw=0.9, alpha=0.6)
-        if k == 0:
-            ax[k].axhline(soms_inj, color=RED, lw=1.1, ls=":")
-        elif k == 1:
-            ax[k].axhline(sa_inj, color=RED, lw=1.1, ls=":")
-        if k == 7:
-            ax[k].set_yscale("log")
-        ns["mark_stages"](ax[k], label=False)
-        _gate_marks(ax[k], gates, 0, nsub - 1)
-        ax[k].set_xlim(-0.5, nsub - 0.5)
-        ax[k].set_title(nm, fontsize=9)
-        ax[k].tick_params(labelsize=7)
-    fig.tight_layout()
-    traces = _png(fig)
-    return psd_now, psd_params, traces
+    return psd_now, _png(fig)
 
 
 # --------------------------------------------------------------------------
 # the page
 # --------------------------------------------------------------------------
-CSS = """
+#: The base page style (the full page carries its own copy of these rules).
+BASE_CSS = """
 :root {
   --bg:#0A0E14; --panel:#10161F; --line:#223041; --fg:#B8C6D4; --dim:#67788A;
   --cyan:#4FD8EB; --amber:#F5A623; --green:#58C48A; --red:#E5484D; --violet:#9B7BFF;
@@ -938,15 +1234,24 @@ h2 { font-size:13px; letter-spacing:.1em; text-transform:uppercase; color:var(--
 .kpi b { display:block; font-size:18px; color:var(--cyan); font-variant-numeric:tabular-nums; }
 .kpi span { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
 .missing { color:var(--amber); border:1px dashed var(--amber); border-radius:4px; padding:10px; font-size:12px; margin-top:12px; }
-table.top, table.gates { border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums; width:100%; }
-table.top td { padding:4px 10px 4px 0; vertical-align:top; border-bottom:1px solid var(--line); }
-table.top td.k { color:var(--dim); white-space:nowrap; width:1%; text-transform:uppercase; font-size:11px; letter-spacing:.05em; }
-table.gates th, table.gates td { padding:3px 14px 3px 0; text-align:right; border-bottom:1px solid var(--line); }
-table.gates th:first-child, table.gates td:first-child, table.gates td.l, table.gates th.l { text-align:left; }
-.warn { color:var(--red); }
-.dim { color:var(--dim); }
 code { color:var(--cyan); }
 ul { color:var(--dim); font-size:13px; }
+"""
+
+#: What the at-a-glance block needs beyond the base style; the full page adds it to its own.
+GLANCE_CSS = """
+table.top { border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums; width:100%; }
+table.top td { padding:4px 10px 4px 0; vertical-align:top; border-bottom:1px solid var(--line); }
+table.top td.k { color:var(--dim); white-space:nowrap; width:1%; text-transform:uppercase; font-size:11px; letter-spacing:.05em; }
+table.src { border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; margin:4px 0 14px; }
+table.src th, table.src td { padding:2px 10px 2px 0; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; }
+table.src th { color:var(--dim); font-weight:normal; }
+table.src th.l, table.src td.l { text-align:left; }
+table.src td.p2 { color:var(--amber); }
+table.src td.p3 { color:var(--red); font-weight:bold; }
+table.src td.off { color:var(--red); text-align:left; white-space:normal; }
+.warn { color:var(--red); }
+.dim { color:var(--dim); }
 """
 
 
@@ -974,10 +1279,114 @@ def _age(m) -> str:
     return f"{m / 60:.1f} h ago"
 
 
+def _dur(s) -> str:
+    if s is None:
+        return "-"
+    if s < 100:
+        return f"{s:.0f} s"
+    if s < 7200:
+        return f"{s / 60:.1f} min"
+    return f"{s / 3600:.1f} h"
+
+
+def _trend(vals) -> str:
+    return " &gt; ".join(str(v) for v in vals[-TREND:])
+
+
 def _img(b64: Optional[str], alt: str) -> str:
     if not b64:
         return f'<div class="missing">plot unavailable: {_e(alt)}</div>'
     return f'<img src="data:image/png;base64,{b64}" alt="{_e(alt)}">'
+
+
+def _live_rows(row, live, stage):
+    """The topline rows read off the head log: pace, the leg in flight, the
+    stage-end clock, the empty-band valve, the F-stat epochs."""
+    if live is None:
+        row("pace", "<span class='dim'>n/a (no head log or job stdout in the run dir)</span>")
+        return
+    t_end, log_age = live["t_end"], live["log_age_min"]
+
+    def ago(t):
+        return None if t is None or t_end is None else log_age + _mins(t, t_end)
+
+    name = stage["name"] if stage else None
+    recs = [r for r in live["legs"] if r["stage"] == name]
+    bits = [f"log written {_age(log_age)}"]
+    if live["saves"]:
+        bits.append(f"last save {_age(ago(live['saves'][-1]))}")
+    cyc = last_cycle(live["legs"], name) if name else None
+    if cyc is not None:
+        bits.append(f"last full cycle {_dur(cyc[1])} (cycle {cyc[0]}: "
+                    + " + ".join(_dur(w) for w in cyc[2]) + ")")
+    elif len(live["saves"]) > 1:
+        s = live["saves"][-7:]
+        c = [_mins(a, b) for a, b in zip(s[:-1], s[1:])]
+        bits.append(f"row cadence: last {c[-1]:.0f} min, median of {len(c)} = "
+                    f"{sorted(c)[len(c) // 2]:.0f} min")
+    quiet = log_age > 30
+    row("pace", (f"<span class='warn'>{' &middot; '.join(bits)}</span>" if quiet
+                 else " &middot; ".join(bits))
+        + (" <span class='dim'>(quiet log: a snapshot or a stopped job)</span>" if quiet else "")
+        + f" <span class='dim'>({_e(os.path.basename(live['log']))})</span>")
+    if recs and t_end is not None:
+        last = recs[-1]
+        k = last["leg"] % last["nlegs"] + 1
+        timed = [r for r in recs if r["leg"] == k and r["wall"] is not None]
+        prev = timed[-1] if timed else None
+        ran = prev["ran"] if prev else next((r["ran"] for r in reversed(recs) if r["leg"] == k), [])
+        names = f" ({_e(ran[0])} .. {_e(ran[-1])})" if len(ran) > 1 else (
+            f" ({_e(ran[0])})" if ran else "")
+        run_s = (t_end - last["t"]).total_seconds()
+        s = f"leg {k}/{last['nlegs']}{names}: {_dur(run_s)} in"
+        if prev is not None:
+            s += f", {_dur(prev['wall'])} last time"
+            if run_s > 1.3 * prev["wall"] + 300:
+                s = f"<span class='warn'>{s} -- {_dur(run_s - prev['wall'])} OVER</span>"
+        row("leg in flight", s + (" <span class='dim'>(as of the log's last line)</span>"
+                                  if quiet else ""))
+    if live["gates"]:
+        g = live["gates"][-1]
+        s = (f"<b>{g['active']:,}</b> active of {g['occupied']:,} occupied (walker, band) "
+             f"pairs ({g['shut_pct']:.1f}% shut; the stage ends at 0)")
+        if g["streak"]:
+            s += f" &middot; streak p50 {g['streak'][0]} p90 {g['streak'][1]} of {g['streak'][2]}"
+        if g["tol"] is not None:
+            s += f" &middot; tol {g['tol']:g} nats"
+        s += f" &middot; judged {_age(ago(g['t']))}"
+        if len(live["gates"]) > 1:
+            s += (f"<br><span class='dim'>active, last {min(TREND, len(live['gates']))} "
+                  f"judges:</span> {_trend([x['active'] for x in live['gates']])}")
+        row("rj valve", s)
+    if live["empty"]:
+        e = live["empty"]
+        row("empty bands", f"{e['off']} of {e['eligible']} eligible bands off "
+            f"(f &gt; {e['floor_mhz']:g} mHz, of {e['nbands']}) &middot; next revive check in "
+            f"{max(e['every'] - e['since'], 0)} iteration(s)")
+    if live["epochs"] or live["epoch_open"]:
+        parts = []
+        if live["epoch_open"] is not None:
+            o = live["epoch_open"]
+            s = f"epoch {o['epoch']} <b>FITTING</b> for {_dur((t_end - o['t']).total_seconds())}" \
+                if t_end is not None else f"epoch {o['epoch']} fitting"
+            if live["sweep"]:
+                w = live["sweep"]
+                s += f" &middot; {_e(w['name'])} {w['pct']:.0f}% ETA {_e(w['eta'])}"
+            parts.append(s)
+        if live["epochs"]:
+            ep = live["epochs"][-1]
+            s = (f"epoch {ep['epoch']}, {_age(ago(ep['t']))}: <b>{ep['peaks']}</b> peaks "
+                 f"&middot; fit {_dur(ep['wall_s'])}")
+            if ep["stage_a"]:
+                a = ep["stage_a"]
+                s += f" (stage A {a['minutes']:.1f} min, {a['skipped']}/{a['nbands']} bands skipped)"
+            parts.append(s)
+            if len(live["epochs"]) > 1:
+                parts.append(f"<span class='dim'>peaks, last {min(TREND, len(live['epochs']))} "
+                             f"epochs:</span> {_trend([x['peaks'] for x in live['epochs']])}")
+        row("f-stat", "<br>".join(parts))
+    if live.get("replica"):
+        row("replica pe", _e(live["replica"][:160]))
 
 
 def _topline(S, stage, live, gpu, ov, noise_bias, run_dir) -> str:
@@ -1004,55 +1413,29 @@ def _topline(S, stage, live, gpu, ov, noise_bias, run_dir) -> str:
     else:
         bits = [f"step {stage['order']} of {stage['total']}"]
         if stage["start"] is not None:
-            bits.append(f"started row {int(stage['start'])}, {stage['rows_in']} rows in")
+            sd = live["stage_done"] if live else None
+            when = ""
+            # the logged end of the step before this one is this one's start
+            if (sd is not None and stage["done"] and sd["stage"] == stage["done"][-1]
+                    and live["t_end"] is not None):
+                when = f" ({_age(live['log_age_min'] + _mins(sd['t'], live['t_end']))})"
+            bits.append(f"started row {int(stage['start'])}{when}, {stage['rows_in']} rows in")
         row("stage", f"<b>{_e(stage['name'])}</b> &middot; " + " &middot; ".join(bits)
             + (f" <span class='dim'>(done: {_e(', '.join(stage['done']))})</span>"
                if stage["done"] else ""))
-    rat = []
-    if stage and stage.get("name"):
-        rat.append("store: DONE (stop stamped)" if stage.get("ratchet_done")
-                   else "store: no stop stamp")
-    if live and live.get("gate"):
-        rat.append(f"latest gate <b>{_e(live['gate'])}</b>"
-                   + (f" <span class='dim'>({live['gate_ts']:%Y-%m-%d %H:%M})</span>"
-                      if live.get("gate_ts") else ""))
-    if live and live.get("verdict"):
-        rat.append("verdict: " + _e(verdict_phrase(live["verdict"])))
-    row("galfor ratchet", " &middot; ".join(rat) if rat else "<span class='dim'>n/a</span>")
-    if live is None:
-        row("pace", "<span class='dim'>n/a (no head log or job stdout in the run dir)</span>")
-    else:
-        bits = []
-        if live["saves"]:
-            bits.append(f"last [SAVE] {live['saves'][-1]:%Y-%m-%d %H:%M:%S} (log clock)")
-        if live["cadence"]:
-            c = live["cadence"]
-            bits.append(f"row cadence: last {c[-1]:.0f} min, median of {len(c)} = "
-                        f"{sorted(c)[len(c) // 2]:.0f} min")
-        elif live["saves"]:
-            bits.append("one [SAVE] in the log tail, no cadence yet")
-        else:
-            bits.append("no [SAVE] lines in the log tail")
-        bits.append(f"log age {_age(live['log_age_min'])}")
-        row("pace", " &middot; ".join(bits)
-            + f" <span class='dim'>({_e(os.path.basename(live['log']))})</span>")
-        if live.get("replica"):
-            row("replica pe", _e(live["replica"][:160]))
-        if live.get("stage_line"):
-            row("stage log", _e(live["stage_line"][:160]))
+    _live_rows(row, live, stage)
     if gpu is None:
         row("gpu (head node)", "<span class='dim'>n/a (no gpu_util_*.csv in the run dir)</span>")
     else:
         parts = [f"GPU{i} util {d['util']:.0f}% (60 s {d['util_avg']:.0f}%), mem "
-                 f"{d['mem_used_gb']:.1f}/{d['mem_total_gb']:.1f} GiB, "
-                 f"{d['power_w']:.0f} W, {d['temp_c']:.0f} C"
+                 f"{d['mem_used_gb']:.1f}/{d['mem_total_gb']:.1f} GiB, job peak "
+                 f"{d['mem_peak_gb']:.1f}"
                  for i, d in gpu["gpus"].items()]
         stale = gpu["age_min"] is not None and gpu["age_min"] > 5
         row("gpu (head node)", " &middot; ".join(parts)
             + f" <span class='{'warn' if stale else 'dim'}'>sample "
-            f"{gpu['t_last']:%Y-%m-%d %H:%M:%S}, {_e(_age(gpu['age_min']))}"
-            f"{' -- STALE' if stale else ''}; head node only, a second node is not sampled "
-            f"({_e(os.path.basename(gpu['csv']))})</span>")
+            f"{_e(_age(gpu['age_min']))}{' -- STALE' if stale else ''}; head node only, a "
+            f"second node is not sampled ({_e(os.path.basename(gpu['csv']))})</span>")
     L = ll[nit - 1]
     txt = (f"max <b>{_f(L.max())}</b> &middot; mean {_f(L.mean())} &middot; min "
            f"{_f(L.min())} &middot; spread {_f(L.max() - L.min())}")
@@ -1081,6 +1464,11 @@ def _topline(S, stage, live, gpu, ov, noise_bias, run_dir) -> str:
         if others:
             txt += "<br><span class='dim'>fixed-size branches:</span> " + " &middot; ".join(others)
         row("cold leaves", txt)
+    if S.get("vgb_snr") is not None:
+        snr = S["vgb_snr"]
+        row("verification binaries", f"<b>{int((snr > 7.0).sum())}</b> of {snr.size} above "
+            f"SNR 7 <span class='dim'>(walker-mean optimal SNR; median "
+            f"{float(np.median(snr)):.1f})</span>")
     if ov is not None:
         if ov.get("mm") is not None:
             row("overlap match", f"<b>{ov['n_match']:,}</b> of {ov['ndet']:,} detectable "
@@ -1098,29 +1486,80 @@ def _topline(S, stage, live, gpu, ov, noise_bias, run_dir) -> str:
     return '<table class="top">' + "".join(R) + "</table>"
 
 
-def _gate_table(gates) -> str:
-    if not gates:
-        return ""
-    show = gates[-GATE_ROWS_SHOWN:]
-    has_lv = all("leaves" in g_ for g_ in show)
-    head = ("<tr><th>row</th><th class='l'>kind</th><th>cold lnL change at the row</th>"
-            "<th>then, through row</th><th>cold lnL gained</th>"
-            + ("<th>GB leaves at the row</th><th>leaves gained</th>" if has_lv else "")
-            + "</tr>")
-    body = []
-    for g_ in show:
-        col = "var(--amber)" if g_["kind"] == "nudge" else (
-            "var(--green)" if g_["kind"] == "moved" else "var(--dim)")
-        body.append(
-            f"<tr><td>{g_['row']}</td><td class='l' style='color:{col}'>{g_['kind']}</td>"
-            f"<td>{g_['dll']:+,.1f}</td><td>{g_['end']}</td><td>{g_['dll_after']:+,.1f}</td>"
-            + (f"<td>{g_['leaves']:,.1f}</td><td>{g_['dleaves_after']:+,.1f}</td>"
-               if has_lv else "") + "</tr>")
-    return '<table class="gates">' + head + "".join(body) + "</table>"
+def _sources_html(src: dict, nit: int) -> str:
+    """One table per fixed-dimension branch: a row per source."""
+    if not src:
+        return ('<div class="missing">No MBHB / EMRI / SOBHB branch in this store '
+                '(or its chains are unreadable).</div>')
+    parts = []
+    pool = nw = None
+    for b in SRC_BRANCHES:
+        if b not in src:
+            continue
+        d = src[b]
+        pool, nw = d["pool"], d["nw"]
+        head = (f"<tr><th class='l'>{_e(d['cls'])}</th><th>SNR</th>"
+                f"<th>walkers</th>"
+                + "".join(f"<th>{_e(p)}</th>" for p in d["params"])
+                + "<th class='l'>note</th></tr>")
+        body = []
+        for r in d["rows"]:
+            sid = f"src {r['id']}" if r["id"] is not None else f"leaf {r['leaf']}"
+            if r["snr"] is not None and np.all(np.isfinite(r["snr"])):
+                snr = f"<b>{float(np.median(r['snr'])):.1f}</b>"
+                rng_ = f"{float(np.min(r['snr'])):.1f}-{float(np.max(r['snr'])):.1f}"
+            else:
+                snr, rng_ = "-", ""
+            cells = []
+            for p in r["pulls"]:
+                if p is None or not np.isfinite(p):
+                    cells.append("<td class='dim'>-</td>")
+                    continue
+                cls = " class='p3'" if abs(p) >= 3 else (" class='p2'" if abs(p) >= 2 else "")
+                cells.append(f"<td{cls}>{p:+.1f}</td>")
+            note = ""
+            if r["off"]:
+                med = float(np.median(r["snr"]))
+                note = "; ".join(f"w{w} at SNR {float(r['snr'][w]):.1f} (median {med:.1f})"
+                                 for w in r["off"])
+            elif not r["truth"]:
+                note = "<span class='dim'>no catalogue truth</span>"
+            body.append(f"<tr><td class='l'>{_e(sid)}</td><td>{snr}</td><td class='dim'>{rng_}</td>"
+                        + "".join(cells)
+                        + f"<td class='off'>{note}</td></tr>")
+        parts.append("<table class='src'>" + head + "".join(body) + "</table>")
+    return ('<div class="panel">' + "".join(parts)
+            + f'<div class="caption">Every MBHB, EMRI and SOBHB source at row {nit - 1}. '
+            "<b>SNR</b> is the matched SNR &lang;d|h&rang;/&radic;&lang;h|h&rang; from the "
+            f"sub-backend, median over the {nw} cold walkers, with their range; a walker more "
+            f"than {SRC_SNR_OFF:.0%} (and {SRC_SNR_OFF_ABS:g} SNR units) off the median is named in "
+            "the note column &mdash; it sits on a different mode or has lost the source, which "
+            "in-model sampling rarely fixes by itself (tempering swaps or a leaf copy do). The "
+            "parameter columns are each key parameter&rsquo;s (median &minus; catalogue truth) / "
+            f"&sigma; over the last {pool} stored rows &times; the cold walkers, the pool the full "
+            "page&rsquo;s per-source panels draw: |pull| &ge; 2 amber, &ge; 3 red. Early in a "
+            "run that pool is the walkers&rsquo; scatter, not a posterior, so a large pull there "
+            "reads as &ldquo;not there yet&rdquo; rather than as a bias.</div></div>")
 
 
-def render_short_page(run_dir: str, *, mojito: Optional[str] = None, now=None) -> str:
-    """The short page for ``run_dir`` as one self-contained HTML string."""
+def _chips(steps, stage) -> str:
+    out = ""
+    for s in steps:
+        cls = "done" if s["status"] else ("now" if stage and s["name"] == stage["name"] else "")
+        out += (f'<span class="chip {cls}">{s["order"]}. {_e(s["name"])}'
+                f'{" &#10003;" if s["status"] else ""}</span> ')
+    return out
+
+
+def build_glance(run_dir: str, *, mojito: Optional[str] = None) -> dict:
+    """Render the at-a-glance block for ``run_dir``.
+
+    Returns ``dict(html, notes, phases, elapsed, chips, label, tobs_txt, nit,
+    store, nav)``: ``html`` is the block's ``<section>`` elements (topline,
+    likelihood, leaves, other sources, overlap, current noise) and ``nav``
+    their ``(id, label)`` pairs. The short page wraps it in a page of its own;
+    the full page puts it first. Uses ``GLANCE_CSS`` on top of the base style.
+    """
     import matplotlib
 
     from . import check_truth, resolve_mojito_path
@@ -1144,18 +1583,17 @@ def render_short_page(run_dir: str, *, mojito: Optional[str] = None, now=None) -
     ns["STAGE_BOUNDS"] = stage_bounds(S["steps"])
     stage = current_stage(S["steps"], nit, S["saved_after"])
     gb_leaves = S["leaves"].get("gb")
-    gates = gate_rows(S["saved_after"], S["gal_phys"], S["ll"], gb_leaves)
 
     live = gpu = None
     try:
-        live = read_live(run_dir, now=now)
+        live = read_live(run_dir)
     except Exception as e:  # noqa: BLE001
         notes.append(f"head log unreadable ({type(e).__name__}: {_e(e)})")
     if live is None:
         notes.append("no head log (*_artifacts/globalfit_run.log or _tail) and no "
-                     "slurm_stdout_*.log: no pace or ratchet log lines.")
+                     "slurm_stdout_*.log: no pace, leg, valve or F-stat lines.")
     try:
-        gpu = read_gpu(run_dir, now=now)
+        gpu = read_gpu(run_dir)
     except Exception as e:  # noqa: BLE001
         notes.append(f"gpu_util csv unreadable ({type(e).__name__}: {_e(e)})")
     if gpu is None:
@@ -1170,6 +1608,13 @@ def render_short_page(run_dir: str, *, mojito: Optional[str] = None, now=None) -
         notes.append(f"no mojito tree ({_e(moj_src)}): the injected Soms_d / Sa_a are "
                      "the round analytic values, not the brick fit.")
     _lap("noise truth")
+
+    src = {}
+    try:
+        src = source_summary(S, run_dir, ns, moj, notes)
+    except Exception as e:  # noqa: BLE001
+        notes.append(f"source table failed: {type(e).__name__}: {_e(e)}")
+    _lap("sources")
 
     show_match = os.environ.get("GF_MONITOR_MATCH_STATS", "1") != "0"
     thresh = float(os.environ.get("GF_MONITOR_MATCH_MM", "0.8"))
@@ -1199,19 +1644,20 @@ def render_short_page(run_dir: str, *, mojito: Optional[str] = None, now=None) -
     psd_bias = {}
     imgs = {}
     with matplotlib.rc_context(STYLE):
-        imgs["lnl"] = fig_history(ns, S["ll"] - S["ll"][nit - 1].max(), gates, CYAN,
+        imgs["lnl"] = fig_history(ns, S["ll"] - S["ll"][nit - 1].max(), CYAN,
                                   f"cold lnL - {S['ll'][nit - 1].max():,.1f}",
                                   "cold log-likelihood")
         if gb_leaves is not None:
-            imgs["leaves"] = fig_history(ns, gb_leaves, gates, GREEN, "cold GB leaves",
-                                         "GB leaf count")
+            tgt = ((ov["ndet"], f"{ov['ndet']} detectable (SNR > 7)")
+                   if ov is not None else None)
+            imgs["leaves"] = fig_history(ns, gb_leaves, GREEN, "cold GB leaves",
+                                         "GB leaf count", target=tgt)
         if ov is not None and ov.get("mm") is not None and ov["mm"].size:
             imgs["overlap"] = fig_overlap(ns, ov)
         _lap("history+overlap figures")
         if S["psd"] is not None and S["gal_phys"] is not None and S["psd"].shape[0]:
             try:
-                imgs["psd_now"], imgs["psd_params"], imgs["noise_traces"] = noise_figures(
-                    S, soms_inj, sa_inj, gates, ns)
+                imgs["psd_now"], imgs["psd_params"] = noise_figures(S, soms_inj, sa_inj)
             except Exception as e:  # noqa: BLE001
                 notes.append(f"noise panels failed: {type(e).__name__}: {_e(e)}")
             _lap("noise figures")
@@ -1220,14 +1666,6 @@ def render_short_page(run_dir: str, *, mojito: Optional[str] = None, now=None) -
                 psd_bias[k] = float(np.median(S["psd"][-nsh:, :, j]) / injv - 1.0)
         else:
             notes.append("no psd/galfor chains in the store: no noise panels.")
-
-    chips = ""
-    for s in S["steps"]:
-        cls = "done" if s["status"] else ("now" if stage and s["name"] == stage["name"] else "")
-        chips += (f'<span class="chip {cls}">{s["order"]}. {_e(s["name"])}'
-                  f'{" &#10003;" if s["status"] else ""}</span> ')
-    label = os.path.basename(run_dir)
-    tobs_txt = f"{S['tobs'] / 86400.0:.0f}-day" if S["tobs"] else "unknown-Tobs"
 
     if ov is not None and ov.get("mm") is not None:
         kpi = (f'<div class="kpi"><div><b>{ov["n_match"]:,}</b><span>matched, overlap '
@@ -1250,7 +1688,7 @@ def render_short_page(run_dir: str, *, mojito: Optional[str] = None, now=None) -
                    f'that row, waveforms on {_e(ov.get("orbits", "?"))}. Left: how many pairs '
                    f'reach each overlap (the red line is the threshold); right: where the poor '
                    f'ones sit in frequency. Same criterion and numbers as the full page&rsquo;s '
-                   f'headline.</div></div>')
+                   f'recovery group.</div></div>')
     elif ov is not None:
         ov_html = (f'<div class="missing">Waveform overlaps unavailable (see Notes). '
                    f'2-bin f0 proxy: {ov["n_proxy"]:,} of {ov["ndet"]:,} detectable paired, '
@@ -1259,52 +1697,7 @@ def render_short_page(run_dir: str, *, mojito: Optional[str] = None, now=None) -
     else:
         ov_html = f'<div class="missing">{ov_note}</div>'
 
-    nudges = [g_["row"] for g_ in gates if g_["kind"] == "nudge"]
-    gate_txt = (f"Dashed verticals mark the ratchet gate rows (amber: nudge rows "
-                f"{nudges}; green: rows where the noise moved)." if gates else "")
-    ratchet_html = (
-        f'<div class="panel">{_gate_table(gates)}<div class="caption">Rows saved right '
-        'after the gated noise step (<code>saved_after = noise_ratchet_search</code>), '
-        'classified off the stored galfor chain: <b>nudge</b> = the amplitude stepped '
-        'with alpha and f_1 held (the forced step), <b>moved</b> = the noise was sampled '
-        '(a release, or noise PE after one), <b>held</b> = nothing moved. The next '
-        'columns are what the search legs did from that row to the row before the next '
-        f'gate: cold lnL and GB leaves, walker means. The last {GATE_ROWS_SHOWN} gate rows '
-        'are listed.</div></div>' if gates else
-        '<div class="missing">No row in this store was saved after the gated noise '
-        'step (ratchet or search legs off, or not reached yet).</div>')
-    if live and (live.get("gate") or live.get("verdict")):
-        ratchet_html += (f'<div class="caption">Head log: {_e(live.get("gate") or "no gate line")}'
-                         + (f' &middot; {_e(verdict_phrase(live.get("verdict")))}'
-                            if live.get("verdict") else "") + "</div>")
-
-    elapsed = time.perf_counter() - t0
-    phase_txt = ", ".join(f"{k} {v:.1f}" for k, v in phases.items())
-    logger.info("short page phases (s): %s", phase_txt)
-    notes_html = "".join(f"<li>{n}</li>" for n in notes) or "<li>none</li>"
-    built = (now or datetime.now())
-    full_page = os.path.basename(run_dir) + "_monitor.html"
-    page = f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GF short &middot; {_e(label)} &middot; row {nit - 1}</title>
-<style>{CSS}</style>
-</head>
-<body>
-<header>
-  <h1>LISA Global Fit &middot; short status</h1>
-  <span class="stamp">{_e(label)} &middot; {tobs_txt} &middot; row {nit - 1} &middot; built {built:%Y-%m-%d %H:%M}</span>
-  <span>{chips}</span>
-</header>
-<nav>
-  <a href="#topline">topline</a><a href="#lnl">likelihood</a><a href="#leaves">leaves</a>
-  <a href="#overlap">overlap</a><a href="#noise">noise</a><a href="#ratchet">ratchet gates</a>
-  <a href="#notes">notes</a>
-</nav>
-<main>
-<section id="topline"><h2>Topline</h2>
+    html = f"""<section id="topline"><h2>Topline</h2>
 {_topline(S, stage, live, gpu, ov, psd_bias, run_dir)}
 </section>
 
@@ -1313,21 +1706,25 @@ def render_short_page(run_dir: str, *, mojito: Optional[str] = None, now=None) -
 <div class="caption">Cold-chain total log-likelihood per stored row, relative to the best
 walker at the last row: the band spans min to max over the {nw} walkers, the white line is
 the mean. Left the whole run, right the recent window. Grey dashed verticals are recipe stage
-boundaries (completed and start iterations from the store's recipe group). {gate_txt}</div></div>
+boundaries (completed and start iterations from the store's recipe group).</div></div>
 </section>
 
 <section id="leaves"><h2>GB Leaf Count</h2>
 <div class="panel">{_img(imgs.get("leaves"), "GB leaf count")}
 <div class="caption">Galactic-binary leaves per cold walker per stored row, min / mean /
-max over walkers, same layout and marks. The fixed-size branches are listed in the
-topline.</div></div>
+max over walkers, same layout and marks{", against the detectable target (dotted red)" if ov else ""}.
+The fixed-size branches are listed in the topline.</div></div>
+</section>
+
+<section id="sources"><h2>Other Sources</h2>
+{_sources_html(src, nit)}
 </section>
 
 <section id="overlap"><h2>Phase-Maximised Overlap</h2>
 {ov_html}
 </section>
 
-<section id="noise"><h2>Noise: Current Measurement</h2>
+<section id="noise-now"><h2>Noise: Current Measurement</h2>
 <div class="panel">{_img(imgs.get("psd_now"), "current sensitivity per walker")}
 <div class="caption">The fitted noise at the last stored row as the sky-averaged
 sensitivity: every cold walker's instrument + galactic foreground (amber) against the
@@ -1337,29 +1734,60 @@ the foreground by a tabulated time modulation these static curves do not carry.<
 <div class="panel">{_img(imgs.get("psd_params"), "instrument-noise posteriors")}
 <div class="caption">The two instrument-noise parameters, the only noise parameters with a
 truth to compare against.</div></div>
-<div class="panel">{_img(imgs.get("noise_traces"), "noise parameters vs row")}
-<div class="caption">All seven noise parameters per cold walker against stored row (galfor
-in its sampling basis), and the fitted foreground at 3 mHz. Dotted red: injected. Gate rows
-marked as above.</div></div>
 </section>
+"""
+    label = os.path.basename(run_dir)
+    return dict(
+        html=html, notes=notes, phases=phases, elapsed=time.perf_counter() - t0,
+        chips=_chips(S["steps"], stage), label=label, nit=nit, store=store,
+        tobs_txt=f"{S['tobs'] / 86400.0:.0f}-day" if S["tobs"] else "unknown-Tobs",
+        nav=(("topline", "topline"), ("lnl", "likelihood"), ("leaves", "leaves"),
+             ("sources", "other sources"), ("overlap", "overlap"),
+             ("noise-now", "noise now")))
 
-<section id="ratchet"><h2>Ratchet Gates</h2>
-{ratchet_html}
-</section>
 
+def render_short_page(run_dir: str, *, mojito: Optional[str] = None, now=None) -> str:
+    """The short page for ``run_dir`` as one self-contained HTML string: the
+    at-a-glance block (:func:`build_glance`) and its notes."""
+    G = build_glance(run_dir, mojito=mojito)
+    phase_txt = ", ".join(f"{k} {v:.1f}" for k, v in G["phases"].items())
+    logger.info("short page phases (s): %s", phase_txt)
+    notes_html = "".join(f"<li>{n}</li>" for n in G["notes"]) or "<li>none</li>"
+    built = now or datetime.now()
+    full_page = G["label"] + "_monitor.html"
+    nav = "".join(f'<a href="#{i}">{_e(t)}</a>' for i, t in G["nav"]) + '<a href="#notes">notes</a>'
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GF short &middot; {_e(G["label"])} &middot; row {G["nit"] - 1}</title>
+<style>{BASE_CSS}{GLANCE_CSS}</style>
+</head>
+<body>
+<header>
+  <h1>LISA Global Fit &middot; short status</h1>
+  <span class="stamp">{_e(G["label"])} &middot; {G["tobs_txt"]} &middot; row {G["nit"] - 1} &middot; built {built:%Y-%m-%d %H:%M}</span>
+  <span>{G["chips"]}</span>
+</header>
+<nav>
+  {nav}
+</nav>
+<main>
+{G["html"]}
 <section id="notes"><h2>Notes</h2>
 <ul>{notes_html}</ul>
-<p class="caption">This is the SHORT page. The residual spectrum, recovered population,
-search gates, F-statistic, verification binaries and detectability table are on the full
-page, <code>{_e(full_page)}</code> beside the run folder
-(<code>python -m lisatools.globalfit.monitor RUN_DIR</code>). Built in {elapsed:.1f} s
-({_e(phase_txt)}) from <code>{_e(os.path.basename(store))}</code>.</p>
+<p class="caption">This is the SHORT page, and the same block opens the full page,
+<code>{_e(full_page)}</code> beside the run folder
+(<code>python -m lisatools.globalfit.monitor RUN_DIR</code>), where the residual spectrum,
+recovered population, search gates, F-statistic, per-source posteriors, verification binaries
+and detectability table follow in collapsed groups. Built in {G["elapsed"]:.1f} s
+({_e(phase_txt)}) from <code>{_e(os.path.basename(G["store"]))}</code>.</p>
 </section>
 </main>
 </body>
 </html>
 """
-    return page
 
 
 def build_short_monitor(run_dir: str, out_path: Optional[str] = None, *,
