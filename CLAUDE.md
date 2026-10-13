@@ -67,6 +67,15 @@ Maps: [`docs/codebase-map.md`](docs/codebase-map.md) (this repo's internal
 layout) and [`docs/architecture-map.md`](docs/architecture-map.md)
 (cross-repo dependency graph, capability→module table, backend-wheel model).
 
+**Global-fit production work (read these before touching a run or its
+code):** [`docs/global-fit-navigation.md`](docs/global-fit-navigation.md)
+(launcher → driver → recipe → moves → store → monitor; the gates and valves;
+the store layout; the log-tag glossary; where every knob is read) and
+[`docs/global-fit-deep-dives.md`](docs/global-fit-deep-dives.md) (how a
+production run is examined: the tar routine, the health checklist in order,
+how to read the gating, the stuck-source signature, the known failure
+signatures, the standing rulings, the readout format).
+
 ## Project Overview
 
 `lisaanalysistools` (imported as `lisatools`) is a Python package for LISA (Laser Interferometer Space Antenna) data analysis, including building the LISA Global Fit. It is a hybrid Python / C++ / CUDA project built with `scikit-build-core` and CMake. Python 3.12+ is required.
