@@ -4373,9 +4373,13 @@ echo "[DATA] SOURCE_TYPES=${SOURCE_TYPES} (COMBINED = pre-summed stream; GB/VGB 
 # ######################################################################### #
 export MBH_NTEMPS=2
 export EMRI_NTEMPS=2
-# EMRI ladder cap, as in the 6mo / 9mo / 1yr scripts (user ruling 2026-10-13:
-# "use max temperature for an snr 100 source for the EMRIs", T_max = 100).
-export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-100}
+# Ladder caps, as in the 6mo / 9mo / 1yr scripts (user ruling 2026-10-13:
+# main-mode tempering -- EMRI T_max 6 with the lost-rung guard at 50 nats,
+# MBH T_max 10 with the guard off).
+export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-6}
+export EMRI_LADDER_REANCHOR_NATS=${EMRI_LADDER_REANCHOR_NATS:-50}
+export MBH_LADDER_TMAX=${MBH_LADDER_TMAX:-10}
+export MBH_LADDER_REANCHOR_NATS=${MBH_LADDER_REANCHOR_NATS:-0}
 # 12 -> 8 (user ruling 2026-09-16, with repeats 25 -> 20: sobbh cost
 # trim now that the single-call fix landed). NOTE: SOBHB's ladder lives
 # in the stored PerLeafLadderState (betas_all per leaf), so on a RESUME

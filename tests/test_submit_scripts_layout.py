@@ -842,9 +842,12 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             # this is going to improve sampling in general then lets try it");
             # code default mix 0. EigenJumpMixLauncherTest pins the block.
             *EIGEN_JUMP_MIX_KNOBS,
-            # 2026-10-13: the EMRI ladder cap (Mike: "use max temperature for an
-            # snr 100 source for the EMRIs", T_max = 100); code default None.
-            "EMRI_LADDER_TMAX",
+            # 2026-10-13: the ladder caps (first ruling: EMRI T_max 100; second
+            # ruling the same day: main-mode tempering -- EMRI T_max 6, MBH
+            # T_max 10, the MBH lost-rung guard off, the EMRI guard at 50 nats);
+            # code defaults None / 200.
+            "EMRI_LADDER_TMAX", "EMRI_LADDER_REANCHOR_NATS",
+            "MBH_LADDER_TMAX", "MBH_LADDER_REANCHOR_NATS",
             # V9-26 (2026-10-02): the EMRI direct-to-WDM scoring path's knobs
             # (default full = the v8 path); SixMonthEMRIDirectTest pins the block.
             "EMRI_LIKELIHOOD", "EMRI_BATCH_MAX_SIZE", "EMRI_DIRECT_TABLE",
@@ -1808,8 +1811,9 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             # 2026-10-13: the eigen jump mixture block of the 6mo / 1yr / 9mo
             # launchers (no source branch is armed in the 3mo v9 twin)
             *EIGEN_JUMP_MIX_KNOBS,
-            # 2026-10-13: the EMRI ladder cap export, mirrored in the 3mo twin
-            "EMRI_LADDER_TMAX",
+            # 2026-10-13: the ladder cap exports, mirrored in the 3mo twin
+            "EMRI_LADDER_TMAX", "EMRI_LADDER_REANCHOR_NATS",
+            "MBH_LADDER_TMAX", "MBH_LADDER_REANCHOR_NATS",
             # 3MO-8 (2026-10-02): nor is the 6mo EMRI direct-to-WDM block: no
             # EMRI branch is armed here, and its lookup table is built for the
             # 6-month grid's Nf and dt only.
@@ -3051,10 +3055,15 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
     twins export 10 % of the draws at 3 sigma for EMRI, MBH and SOBBH, each
     overridable from the launch line (the rollback is ``..._MIX=0``).
 
-    The per-leaf ladder knobs of the same day are NOT exports:
-    ``{BRANCH}_LADDER_RESET_ON_RESUME`` is a one-off launch-line knob (a
-    standing export would reset the ladders at every relaunch) and
-    ``{BRANCH}_LADDER_REANCHOR_NATS`` runs at its code default (200).
+    Of the per-leaf ladder knobs of the same day, ``{BRANCH}_LADDER_RESET_ON_RESUME``
+    is a one-off launch-line knob (a standing export would reset the ladders
+    at every relaunch), ``SOBBH_LADDER_REANCHOR_NATS`` runs at the code
+    default (200), ``MBH_LADDER_REANCHOR_NATS`` is exported OFF (0) and
+    ``EMRI_LADDER_REANCHOR_NATS`` at 50: the second ruling of 2026-10-13
+    ("focus on sampling the main modes (+ the sky move for MBHs) in terms of
+    tempering") after the guard was measured re-anchoring MBHB hot rungs that
+    merely sat in a secondary sky mode, while 200 missed the lost rungs of
+    every EMRI but the two loudest.
     """
 
     def test_the_block_is_on_in_every_v9_production_launcher(self):
@@ -3073,26 +3082,36 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
             src = open(path).read()
             with self.subTest(script=os.path.basename(path)):
                 for b in ("EMRI", "MBH", "SOBBH"):
-                    for suffix in ("LADDER_RESET_ON_RESUME", "LADDER_REANCHOR_NATS"):
-                        knob = f"{b}_{suffix}"
-                        self.assertNotIn(knob, exports, knob)
-                        self.assertNotRegex(src, rf"(?m)^export {knob}=", knob)
+                    knob = f"{b}_LADDER_RESET_ON_RESUME"
+                    self.assertNotIn(knob, exports, knob)
+                    self.assertNotRegex(src, rf"(?m)^export {knob}=", knob)
+                knob = "SOBBH_LADDER_REANCHOR_NATS"
+                self.assertNotIn(knob, exports, knob)
+                self.assertNotRegex(src, rf"(?m)^export {knob}=", knob)
 
-    def test_the_emri_ladder_cap_is_an_snr_100_source(self):
-        """User ruling 2026-10-13: "use max temperature for an snr 100 source
-        for the EMRIs" -- the hottest EMRI rung turns an SNR-100 source into
-        an SNR-10 one, T_max = (100 / 10)^2 = 100. Exported in every v9
-        production launcher (overridable on the line); MBH and SOBBH stay on
-        the uncapped make_ladder spacing."""
+    def test_the_ladder_caps_are_main_mode(self):
+        """User ruling 2026-10-13 (the second of the day, after the T_max 100
+        EMRI ladder was measured putting 5 of 8 rungs in the prior and the
+        MBH guard re-anchoring hot rungs out of secondary sky modes): "I want
+        to focus on sampling the main modes (+ the sky move for MBHs) in terms
+        of tempering". EMRI T_max 6 (an SNR-15 EMRI keeps SNR 6 on the top
+        rung), MBH T_max 10 (SNR 180-1000 keeps SNR 56-330), the MBH lost-rung
+        guard off and the EMRI guard at 50 nats (a lost EMRI rung is SNR^2/2
+        down, 72-1150; 200 only caught the two loudest); SOBBH stays on the
+        uncapped make_ladder spacing. Exported in every v9 production
+        launcher, overridable on the line."""
+        want = {"EMRI_LADDER_TMAX": "6", "EMRI_LADDER_REANCHOR_NATS": "50",
+                "MBH_LADDER_TMAX": "10", "MBH_LADDER_REANCHOR_NATS": "0"}
         for path in V9_PRODUCTION:
             exports = _exports(path)
             src = open(path).read()
             with self.subTest(script=os.path.basename(path)):
-                self.assertEqual(exports.get("EMRI_LADDER_TMAX"), "100")
-                self.assertRegex(src, r"(?m)^export EMRI_LADDER_TMAX=\$\{EMRI_LADDER_TMAX:-100\}")
-                for b in ("MBH", "SOBBH"):
-                    self.assertNotIn(f"{b}_LADDER_TMAX", exports)
-                    self.assertNotRegex(src, rf"(?m)^export {b}_LADDER_TMAX=")
+                for knob, val in want.items():
+                    self.assertEqual(exports.get(knob), val, knob)
+                    self.assertRegex(
+                        src, rf"(?m)^export {knob}=\$\{{{knob}:-{val}\}}$", knob)
+                self.assertNotIn("SOBBH_LADDER_TMAX", exports)
+                self.assertNotRegex(src, r"(?m)^export SOBBH_LADDER_TMAX=")
 
     def test_the_launch_line_can_switch_it_off(self):
         lines = [l for l in open(NINE_MO_V9).read().split("\n")

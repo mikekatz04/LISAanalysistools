@@ -4725,13 +4725,53 @@ echo "[DATA] SOURCE_TYPES=${SOURCE_TYPES} (COMBINED = pre-summed stream; classes
 # tempering drop, to the cold state ("[EMRI_LADDER] leaf N: re-anchored ...").
 export MBH_NTEMPS=${MBH_NTEMPS:-8}
 export EMRI_NTEMPS=${EMRI_NTEMPS:-8}
-# EMRI ladder cap (user ruling 2026-10-13: "use max temperature for an snr 100
-# source for the EMRIs"): the hottest rung turns an SNR-100 EMRI into an
-# SNR-10 one, T_max = (100 / 10)^2 = 100, so make_ladder spaces the 8 rungs
-# geometrically from 1 to 100 (common.default_source_ladder, settings field
-# ladder_tmax). Uncapped, the 25 % spacing of a 12-dim Gaussian reaches
-# T ~ 120. MBH (SNR 180-1000) and SOBBH (SNR 5-10) stay uncapped.
-export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-100}
+# Ladder caps (user ruling 2026-10-13, second ruling of the day: "I want to
+# focus on sampling the main modes (+ the sky move for MBHs) in terms of
+# tempering"). The first ruling capped the EMRI ladder at T_max = 100 (an
+# SNR-100 EMRI at SNR 10 on the hottest rung) and left MBH on make_ladder's
+# own spacing (T_max ~ 150). Measured on the 9mo store (job 759 rows 200-349
+# vs rows 110-197 on the old 1/1.2^k ladder) that put 5 of the 8 EMRI rungs
+# below beta 0.07, where every EMRI but the two loudest has lost the source
+# (hot-rung lnL deficit = the whole SNR^2/2, in-model acceptance 0.9-0.98 =
+# diffusing in the prior), cut the cold-pair swap acceptance 0.5-0.74 ->
+# 0.13-0.30 and raised the cold-chain autocorrelation time 1.3-2.7 -> 5-16
+# iterations for BOTH branches. Main-mode ladders instead: the hottest rung
+# keeps an effective SNR (SNR / sqrt(T_max)) that still sees the source --
+#   EMRI_LADDER_TMAX=6:  an SNR-15 EMRI keeps SNR 6 on the top rung
+#                        ((15 / 6)^2 ~ 6; SNR 12 -> 4.9, SNR 48 -> 20);
+#                        make_ladder spaces the 8 rungs 1..6 (ratio 1.29,
+#                        swaps ~0.5-0.6 as on the old ladder).
+#   MBH_LADDER_TMAX=10:  SNR 180-1000 MBHBs keep SNR 56-330 on the top rung;
+#                        the discrete sky / inclination modes are the sky
+#                        hops' job (MBH_SKY_MOVE_*), not the ladder's.
+#   MBH_LADDER_REANCHOR_NATS=0: the lost-rung guard OFF for MBHBs. An MBHB
+#                        rung is never "lost" (that would be 15k-500k nats
+#                        down); what the guard caught (61 times in 152
+#                        iterations of job 759, deficits 620-1350 nats) were
+#                        hot rungs sitting in a secondary sky mode a few
+#                        hundred RAW nats down -- 4-8 tempered nats, i.e. it
+#                        was undoing the tempering.
+#   EMRI_LADDER_REANCHOR_NATS=50 (code default 200): on the T_max 6 ladder a
+#                        legitimate rung sits (ndim/2)(T-1) <= 30 nats below
+#                        the cold rung with a spread of T sqrt(ndim/2) ~ 15,
+#                        while a rung that LOST its EMRI is the whole SNR^2/2
+#                        down (72 at SNR 12, 240 at SNR 22, 1150 at SNR 48).
+#                        200 only caught the two loudest; 50 (3.4 sigma above
+#                        a legitimate rung) catches every EMRI but the
+#                        faintest's top rung. Matters at the reset below: the
+#                        old T_max 100 rungs 5-7 hold prior states for every
+#                        EMRI but 3 and 6, and on the new ladder nothing else
+#                        brings them back (a swap into a state 100 nats worse
+#                        never happens).
+# SOBBH (SNR 4-10) stays on the uncapped make_ladder spacing. A RESUMED store
+# keeps its stored ladders: put EMRI_LADDER_RESET_ON_RESUME=1
+# MBH_LADDER_RESET_ON_RESUME=1 on the relaunch line ONCE to replace them
+# (logged leaf by leaf; the old rungs' states stay where they are and the
+# guard re-anchors the lost EMRI ones at the first block).
+export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-6}
+export EMRI_LADDER_REANCHOR_NATS=${EMRI_LADDER_REANCHOR_NATS:-50}
+export MBH_LADDER_TMAX=${MBH_LADDER_TMAX:-10}
+export MBH_LADDER_REANCHOR_NATS=${MBH_LADDER_REANCHOR_NATS:-0}
 # 12 -> 8 (user ruling 2026-09-16, with repeats 25 -> 20: sobbh cost
 # trim now that the single-call fix landed). NOTE: SOBHB's ladder lives
 # in the stored PerLeafLadderState (betas_all per leaf), so on a RESUME
