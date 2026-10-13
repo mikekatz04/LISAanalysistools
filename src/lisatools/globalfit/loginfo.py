@@ -7,7 +7,14 @@ import numpy as np
 # from global_fit_input.global_fit_settings import get_global_fit_settings
 
 
-def init_logger(filename=None, level=logging.DEBUG, name="GlobalFit", log_dir=None, console=False):
+def init_logger(
+    filename=None,
+    level=logging.DEBUG,
+    name="GlobalFit",
+    log_dir=None,
+    console=False,
+    shared_console=True,
+):
     """Initialize a logger.
 
     Args:
@@ -20,18 +27,28 @@ def init_logger(filename=None, level=logging.DEBUG, name="GlobalFit", log_dir=No
             run-level ``verbose`` knob). Default False: log statements are
             still captured in the log files, but the console only sees
             warnings and errors.
+        shared_console: When True (default) this call also (re)configures the
+            console handler of the shared ``lisatools`` logger -- the
+            run-level owners (``GeneralSetup``, ``GlobalFit``) do that with
+            the run's ``verbose``. Per-branch Setups pass ``False``: they own
+            only their named logger. (Before 2026-10-13 every branch Setup
+            re-ran this with ``console=False`` and so DOWNGRADED the shared
+            console to WARNING part-way through ``fit.build()``, silencing
+            every build-time INFO line from ``lisatools.*`` after the first
+            branch Setup -- e.g. the MBH inner-move stack report.)
     """
     lisatools_logger = logging.getLogger("lisatools")
     lisatools_logger.setLevel(level)
-    # Propagated lisatools.* records: a named stdout handler when verbose, a
-    # stderr WARNING handler when quiet (installed/removed per call, so the
-    # knob can flip within one process). propagate=False because the run owns
-    # the lisatools console output: with a root handler also installed (e.g. a
-    # run script's logging.basicConfig), propagation prints every line TWICE
-    # when verbose and leaks the full DEBUG stream when quiet (root handlers
-    # do not re-check ancestor logger levels).
-    lisatools_logger.propagate = False
-    _set_console_handler(lisatools_logger, console, level, quiet_stream=sys.stderr)
+    if shared_console:
+        # Propagated lisatools.* records: a named stdout handler when verbose, a
+        # stderr WARNING handler when quiet (installed/removed per call, so the
+        # knob can flip within one process). propagate=False because the run owns
+        # the lisatools console output: with a root handler also installed (e.g. a
+        # run script's logging.basicConfig), propagation prints every line TWICE
+        # when verbose and leaks the full DEBUG stream when quiet (root handlers
+        # do not re-check ancestor logger levels).
+        lisatools_logger.propagate = False
+        _set_console_handler(lisatools_logger, console, level, quiet_stream=sys.stderr)
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False

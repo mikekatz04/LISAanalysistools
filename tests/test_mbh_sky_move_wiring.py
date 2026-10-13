@@ -110,10 +110,26 @@ class MakeMBHInnerMovesTest(unittest.TestCase):
 
         mbh = self._settings(MBH_SKY_MOVE_BOTH_WEIGHT="0", MBH_SKY_MOVE_LAT_WEIGHT="0",
                              MBH_SKY_MOVE_LONG_WEIGHT="0", MBH_INNER_MOVE_KIND="stretch")
-        moves = sr.make_mbh_inner_moves(mbh, SimpleNamespace(), SimpleNamespace())
+        with self.assertLogs(sr.logger, level="INFO") as cm:
+            moves = sr.make_mbh_inner_moves(mbh, SimpleNamespace(), SimpleNamespace())
+        self.assertIn("DISABLED", cm.output[0])
         self.assertEqual(len(moves), 1)
         self.assertIsInstance(moves[0][0], StretchMove)
         self.assertEqual(moves[0][1], 1.0)
+
+    def test_stack_report_names_every_move(self):
+        from lisatools.globalfit.moves.addremovemove import describe_inner_moves
+        from lisatools.globalfit.stock.erebor import source_runtime as sr
+
+        mbh = self._settings()
+        with self.assertLogs(sr.logger, level="INFO") as cm:
+            moves = sr.make_mbh_inner_moves(mbh, SimpleNamespace(orbits=_orbits()), SimpleNamespace(mbh_waveform_t0=0.0))
+        self.assertIn("constellation phase table", cm.output[0])
+        text = describe_inner_moves([m for m, _ in moves], [w for _, w in moves])
+        self.assertEqual(
+            text,
+            "EigenAxisMove 0.920 | SkyMove(both, icrs) 0.020 | SkyMove(lat, icrs) 0.040 | SkyMove(long, icrs) 0.020",
+        )
 
     def test_weights_must_leave_room_for_the_stack(self):
         from lisatools.globalfit.stock.erebor import source_runtime as sr

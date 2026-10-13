@@ -102,7 +102,7 @@ class EMRISetup(Setup):
 
         level = logging.DEBUG
         name = "EMRISetup"
-        self.logger = init_logger(filename="emri_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
+        self.logger = init_logger(filename="emri_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None), shared_console=False)
 
         self.init_setup()
 

@@ -183,7 +183,7 @@ class PSDSetup(Setup):
 
         level = logging.DEBUG
         name = "PSDSetup"
-        self.logger = init_logger(filename="psd_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
+        self.logger = init_logger(filename="psd_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None), shared_console=False)
 
         self.init_setup()
 
@@ -651,7 +651,7 @@ class GalForSetup(Setup):
 
         level = logging.DEBUG
         name = "GalForSetup"
-        self.logger = init_logger(filename="galfor_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
+        self.logger = init_logger(filename="galfor_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None), shared_console=False)
 
         self.init_setup()
 

@@ -45,6 +45,20 @@ from .globalfitmove import GlobalFitMove
 from .walkerfanout import WalkerFanoutMixin, pooled_ladder_step
 
 logger = logging.getLogger(__name__)
+
+
+def describe_inner_moves(moves, weights) -> str:
+    """One-line ``ClassName[(which, frame)] weight | ...`` summary of an
+    inner-move stack (``SkyMove`` carries its ``which`` / ``coord_frame``)."""
+    parts = []
+    for move, weight in zip(moves, weights):
+        label = type(move).__name__
+        which = getattr(move, "which", None)
+        frame = getattr(move, "coord_frame", None)
+        if which is not None and frame is not None:
+            label = f"{label}({which}, {frame})"
+        parts.append(f"{label} {float(weight):.3f}")
+    return " | ".join(parts)
 DEBUG_MODE = False
 
 if TYPE_CHECKING:
@@ -204,6 +218,16 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         move_weights = [move[1] if isinstance(move, tuple) else 1.0 for move in inner_moves]
         self.moves = moves_tmp
         self.move_weights = move_weights / np.sum(move_weights)
+        # The resolved inner-move stack, at move construction: this runs on
+        # every rank after the run's logger is up, so it is the ground truth
+        # for what the branch actually proposes with (the build-time report
+        # in stock.erebor.source_runtime used to be silenced by the branch
+        # Setups' logger init -- 2026-10-13, 9mo job 758).
+        logger.info(
+            "[%s] inner-move stack: %s",
+            self.branch_name.upper(),
+            describe_inner_moves(self.moves, self.move_weights),
+        )
 
         self.temperature_controls = [None for _ in range(self.nleaves_max)]
         for i in range(self.nleaves_max):

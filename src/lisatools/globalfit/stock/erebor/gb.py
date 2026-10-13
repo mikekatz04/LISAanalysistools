@@ -980,7 +980,7 @@ class GBSetup(Setup, GBSettings):
 
         level = logging.DEBUG
         name = "GBSetup"
-        self.logger = init_logger(filename="gb_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
+        self.logger = init_logger(filename="gb_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None), shared_console=False)
 
         self.init_setup()
 

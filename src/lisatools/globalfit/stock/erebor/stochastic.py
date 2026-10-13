@@ -89,6 +89,7 @@ class SGWBSetup(Setup):
             level=level,
             name=name,
             log_dir=getattr(self, "log_dir", None),
+            shared_console=False,
         )
 
         self.init_setup()
