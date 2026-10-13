@@ -534,6 +534,26 @@ from lisatools.globalfit.monitor._png import shrink_png as _shrink_png  # noqa: 
 _base = os.path.basename(os.path.normpath(RUN_DIR))
 RUN_LABEL, RUN_KIND = _run_identity(_base)
 
+# ---- ADDED RUNS (user request 2026-10-12) ---------------------------------
+# "add a second run to the same html only in specific places where it is
+# reasonable visually to compare between runs, so the base of everything stays
+# the specific one you want". GF_MONITOR_ADD_INFO (the CLI's --add-info sets
+# it for this build; the in-run monitor inherits the launcher's export) names
+# run directories whose LAST stored row is drawn onto exactly eight figures:
+# f3_match, f6_snr, f5_counts (lower panel), f11_psd, f11_fg, psd_curves,
+# psd_hist, gal_hist -- every one through an ``_add.overlay_*`` call just
+# before its fig_b64, and nowhere else. Phase 1 here reads each added store's
+# last row and noise chains (small arrays, one store open at a time); phase 2,
+# the match against each run's own truth set, runs in the recovery section.
+# ``ADD_BASE_LABEL`` is the label the overlap figures give THIS run (its arm
+# tag), so a legend reads "9mo_v9 ... / 6mo ...". An empty list (the default)
+# leaves every figure and caption exactly as before.
+from lisatools.globalfit.monitor import _add_info as _add  # noqa: E402
+
+ADD_BASE_LABEL = _arm_tag(RUN_KIND)
+ADDED = _add.load_added_runs(_add.parse_add_info(base_run_dir=RUN_DIR),
+                             base_label=ADD_BASE_LABEL, missing=MISSING)
+
 # ---- persistent commentary sidecar (2026-08-27) --------------------------
 # Hand-written notes must survive page regeneration (the page is rebuilt
 # from scratch every snapshot): drop HTML into commentary_{RUN_KIND}.html
@@ -1176,6 +1196,10 @@ for j, (name, inj, unit) in enumerate(
     ax[j].set_title(f"{name}  [{unit}]", fontsize=10)
     ax[j].legend(fontsize=8)
     ax[j].ticklabel_format(axis="x", style="sci", scilimits=(0, 0))
+if ADDED:
+    _add.overlay_hist(ax, ADDED, lambda A, j: A["psd"][:, :, j], bins=26,
+                      base_color=VIOLET, base_label=ADD_BASE_LABEL, legend_axes=(0, 1),
+                      legend_kw=dict(fontsize=8))
 NOISE_BIAS = [float(np.median(psd_cold[-_nsh:, :, j]) / inj - 1.0)
               for j, inj in enumerate((SOMS_INJ, SA_INJ))]
 fig.suptitle(f"instrument-noise posteriors, last {_nsh} stored iterations "
@@ -1294,6 +1318,8 @@ try:
                            if (_w == 0 and k in (0, SUB_NIT - 1)) else None))
     ax.plot(fr, sens_curves(*pm), color=FG, lw=1.4, ls=":",
             label="instrument only (latest)")
+    if ADDED:
+        _add.overlay_curves(ax, ADDED, lambda p, gp: (fr, sens_curves(p[0], p[1], gp)))
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("Frequency [Hz]")
     ax.set_ylabel("PSD, TDI X channel  [1/Hz]")
@@ -1356,6 +1382,10 @@ for j, (name, inj) in enumerate([("Soms_d", SOMS_INJ), ("Sa_a", SA_INJ)]):
     ax[j].hist(v, bins=min(30, nwalk), color=CYAN, alpha=0.85)
     ax[j].axvline(inj, color=RED, lw=1.4, ls=":")
     ax[j].set_title(f"{name} posterior (last {min(3,NIT)} iters x {nwalk} walkers)")
+if ADDED:
+    _add.overlay_hist(ax, ADDED, lambda A, j: A["psd"][:, :, j],
+                      bins=min(30, nwalk), base_color=CYAN, base_label=ADD_BASE_LABEL,
+                      legend_kw=dict(fontsize=7.5), figure_legend=True)
 fig_b64(fig, "psd_hist")
 
 fig, ax = plt.subplots(1, 5, figsize=(14, 2.7))
@@ -1368,6 +1398,12 @@ fig, ax = plt.subplots(1, 5, figsize=(14, 2.5))
 for j in range(5):
     ax[j].hist(gal_cold[-min(3, SUB_NIT):, :, j].ravel(), bins=20, color=AMBER, alpha=0.85)
     ax[j].set_title(GAL_NAMES[j], fontsize=9)
+if ADDED:
+    # each added run's foreground in THIS run's sampling basis (GALFOR_LOG)
+    _add.overlay_hist(ax, ADDED,
+                      lambda A, j: _add.galfor_in_basis(A["gal_phys"], GALFOR_LOG)[:, :, j],
+                      bins=20, base_color=AMBER, base_label=ADD_BASE_LABEL,
+                      legend_kw=dict(fontsize=7.5), figure_legend=True)
 fig_b64(fig, "gal_hist")
 
 # ---- RESTORED: LISASens curve pair (instrument vs instrument+foreground) ---
@@ -1419,6 +1455,8 @@ try:
             label="injected instrument")
     ax.plot(fr, sens_lisasens(SOMS_INJ, SA_INJ) + _gal_fht, color=RED, ls="-.",
             lw=1.3, alpha=0.8, label="injected + FittedHT foreground")
+    if ADDED:
+        _add.overlay_curves(ax, ADDED, lambda p, gp: (fr, sens_lisasens(p[0], p[1], gp)))
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("f [Hz]"); ax.set_ylabel("Sn(f) [LISASens]")
     ax.legend(fontsize=9); ax.set_title(
@@ -5304,6 +5342,18 @@ if TRU is not None:
     for _i, _tag in enumerate(sorted(t for t in ARMS if t not in ARM_COL)):
         ARM_COL[_tag] = _ARM_CYCLE[_i % max(len(_ARM_CYCLE), 1)]
 
+    # ---- ADDED RUNS, phase 2: each against its OWN truth set ------------
+    # (see "ADDED RUNS" near the top). One run at a time: its truth set, the
+    # same headline match as this run's (pairing, phase-maximised overlap,
+    # GF_MONITOR_MATCH_MM) at its own Tobs, noise and GB epoch, then only the
+    # small per-run results are kept for f3_match / f6_snr / f5_counts.
+    if ADDED and SHOW_MATCH_STATS:
+        _add.compute_recoveries(
+            ADDED, mojito_tree=MOJITO_INFO_PATH or (
+                MOJITO_CAT_DIR if os.path.isdir(os.path.join(MOJITO_CAT_DIR, "catalogues"))
+                else None),
+            thresh=MATCH_MM_THRESH, missing=MISSING)
+
     # ================= FIGURES ==========================================
     import matplotlib.colors as _mcol
 
@@ -5351,6 +5401,8 @@ if TRU is not None:
         ax[1].set_yscale("log"); ax[1].set_ylim(1, 2500); ax[1].set_xlim(0, 1)
         ax[1].set_xlabel("phase-maximised overlap with the matched injection")
         ax[1].set_ylabel("sources at or above")
+        if ADDED and _add.overlay_overlap(ax[0], ax[1], ADDED, survival=_survival):
+            ax[0].legend(fontsize=8, loc="upper left")
         fig_b64(fig, "f3_match")
 
     if RPHYS is not None:
@@ -5592,6 +5644,9 @@ if TRU is not None:
                      ms=3.5, color=GREEN, ecolor=GREEN, alpha=0.9, capsize=2)
         ax1.set_xscale("log"); ax1.set_ylim(0, 100)
         ax1.set_xlabel("Frequency [Hz]"); ax1.set_ylabel("recovered [%]")
+        if ADDED:
+            _add.overlay_recovery_vs_freq(ax1, ADDED, _eds, base_color=GREEN,
+                                          base_label=ADD_BASE_LABEL)
     else:
         ax0.set_xscale("log"); ax0.set_xlabel("Frequency [Hz]")
     fig_b64(fig, "f5_counts")
@@ -5631,6 +5686,11 @@ if TRU is not None:
         ax.set_xticks(range(len(_lab))); ax.set_xticklabels(_lab)
         ax.set_xlabel("optimal SNR of the injection")
         ax.set_ylabel("recovered [%]"); ax.set_ylim(0, 100)
+        if ADDED:
+            # each added run's bins hold ITS OWN detectable sources (the n=
+            # labels above are this run's)
+            _add.overlay_snr_completeness(ax, ADDED, _seds, wilson=_wilson,
+                                          n_base=len(_tags))
         ax.legend(fontsize=8, loc="upper left")
         fig_b64(fig, "f6_snr")
 
@@ -8088,6 +8148,30 @@ if SCI and not SHOW_MATCH_STATS:
         "the same distribution for the injections. Sub-bin spacing in the "
         "model relative to the injections indicates template sharing.")
 
+# ---- the added runs' sentence on each overlay figure's caption -------------
+# (see "ADDED RUNS" near the top): which runs are drawn, at which stored row
+# each added run was read, which requested runs are not drawn and why. Empty
+# strings without an added run, so the page is then exactly as before.
+ADD_CAP_REC = (_add.caption_html(ADDED, "recovery", base_label=ADD_BASE_LABEL,
+                                 base_row=NIT - 1, thresh=MATCH_MM_THRESH)
+               if SCI and SHOW_MATCH_STATS else "")
+cap_f3 += ADD_CAP_REC
+cap_f5 += ADD_CAP_REC
+if ADD_CAP_REC:
+    # this panel's recovered fraction is the 2-bin f0 pairing (FOUND), and the
+    # added runs' curves follow it, whatever criterion the sentence above names
+    cap_f5 += (" In this panel every run's recovered fraction is the 2-bin f<sub>0</sub> "
+               "pairing, as this run's own points are.")
+cap_f6 += ADD_CAP_REC
+if ADDED and SHOW_MATCH_STATS and not SCI:
+    MISSING.append("added runs: no recovery overlays, because this run has no usable "
+                   "truth set (its recovery figures are not drawn at all).")
+ADD_CAP_NOISE = _add.caption_html(ADDED, "noise", base_label=ADD_BASE_LABEL,
+                                  base_row=SUB_NIT - 1)
+ADD_CAP_NOISE_DIV = (f'<div class="caption">{ADD_CAP_NOISE.strip()}</div>'
+                     if ADD_CAP_NOISE else "")
+MISSING.extend(_add.OVERLAY_ERRORS)      # an overlay that failed to draw (never the page)
+
 # A PARTIAL DTR means the data/template/residual analysis raised partway
 # through -- it is truthy but missing the keys the captions read. Rendering
 # "nan of 0 bins" would be worse than saying nothing, so report it as a
@@ -8731,15 +8815,15 @@ rather than as credible intervals.</div>
 <div class="panel">{img("f11_psd", "instrument noise posteriors")}
 <div class="caption">The two instrument-noise parameters against their injected
 values. Medians sit {NOISE_TXT} from injection. These are the only noise parameters
-with a truth to compare against.</div></div>
+with a truth to compare against.{ADD_CAP_NOISE}</div></div>
 <div class="panel">{img("f11_fg", "foreground evolution")}
 <div class="caption">The fitted noise-plus-foreground curve at every stored
 iteration, light to dark with time, over the instrument-only curve. The galactic
-shoulder should walk down as resolved sources leave the residual.</div></div>
+shoulder should walk down as resolved sources leave the residual.{ADD_CAP_NOISE}</div></div>
 <div class="panel">{img("psd_curves", "sensitivity curves")}
 <div class="caption">The same model as the sky-averaged sensitivity the mission documents
 quote: instrument only, instrument plus the fitted foreground, and the injected instrument
-curve. This is the only panel carrying the injected curve.</div></div>
+curve. This is the only panel carrying the injected curve.{ADD_CAP_NOISE}</div></div>
 <div class="panel">{img("psd_evolution", "sensitivity evolution")}
 <div class="caption">The decline watch on the same axes, one curve per stored iteration,
 light to dark with time.</div></div>
@@ -8748,12 +8832,12 @@ light to dark with time.</div></div>
 <div class="panel">{img("psd_trace")}
 <div class="caption">Instrument-parameter traces per cold walker; dotted red is the
 injected value.</div></div>
-<div class="panel">{img("psd_hist")}</div>
+<div class="panel">{img("psd_hist")}{ADD_CAP_NOISE_DIV}</div>
 <div class="panel">{img("gal_trace")}
 <div class="caption">The five foreground parameters. There is no truth line: the injection
 is a source population, not a hyperbolic-tangent model, so these are checked through the
 curve above and through the residual, never against a number.</div></div>
-<div class="panel">{img("gal_hist")}</div>
+<div class="panel">{img("gal_hist")}{ADD_CAP_NOISE_DIV}</div>
 </section>
 
 <section id="resid"><h2>Residual Spectrum</h2>

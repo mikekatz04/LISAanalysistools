@@ -252,6 +252,9 @@ def build_products(run_dir, watchdog=None):
     elif _want_page:
         from . import build_monitor
 
+        # No add_info here, on purpose: the page then reads the run's own
+        # GF_MONITOR_ADD_INFO export (the 9mo / 1yr launchers overlay the 6mo
+        # run on the comparison figures; _add_info.py).
         build_monitor(run_dir, out, timeout=timeout, check=False)
     if _want_snap:
         from .snapshot import build_snapshot

@@ -2470,6 +2470,28 @@ _RECIPE_REPLACEMENTS = (
      "export FSTAT_STAGEB_GROUP_MAX_GB=${FSTAT_STAGEB_GROUP_MAX_GB:-1.0}   # 9mo/1yr: halve the stage-B per-group transient (batching only, no grid change; 2.0 at 6mo)\n", 1),
 )
 
+#: THE 6MO RUN ON THE 9MO / 1YR MONITOR PAGE (user request 2026-10-12): the one
+#: monitor-only entry BOTH generators append to their tables, verbatim. The 6mo
+#: launcher never adds itself.
+ADD_INFO_DEFAULT = "/shared/data/global_fit_output/gf_prod_6mo_v9_4gpu"
+_MONITOR_ADD_INFO_REPLACEMENTS = (
+    ("export GF_MONITOR_TIMEOUT=1800\n# Requires MOJITO_INFO_PATH, exported above.\n",
+     "export GF_MONITOR_TIMEOUT=1800\n# Requires MOJITO_INFO_PATH, exported above.\n"
+     "# ---- 9MO / 1YR: THE 6MO RUN ON THIS RUN'S MONITOR PAGE (user request 2026-10-12)\n"
+     "# \"add a second run to the same html only in specific places where it is\n"
+     "# reasonable visually to compare between runs ... plot the phase maximized\n"
+     "# overlap plots, a comparison of the final psd and foreground measurements\n"
+     "# (final for the previous run and current for the ongoing run)\". The page stays\n"
+     "# this run's; each run directory listed here (':'-joined) is read at ITS last\n"
+     "# stored row and drawn onto the overlap CDF / survival, recovered-vs-SNR and\n"
+     "# recovered-vs-frequency figures (matched against its own gb_truth_*.npz) and\n"
+     "# the noise + foreground posteriors and curves. A missing dir / store / truth\n"
+     "# set costs only its overlay (a caption note + a MISSING line). The monitor rank\n"
+     "# inherits it; the CLI twin is python -m lisatools.globalfit.monitor --add-info.\n"
+     "# GF_MONITOR_ADD_INFO=none on the launch line drops it.\n"
+     "export GF_MONITOR_ADD_INFO=${GF_MONITOR_ADD_INFO:-" + ADD_INFO_DEFAULT + "}\n", 1),
+)
+
 #: the recipe as the 1yr / 9mo launchers resolve it (and the 6mo's values)
 _RECIPE_EXPORTS = {
     "GB_SEARCH_SEED_ITERS": ("3", "5"),
@@ -2571,7 +2593,7 @@ class OneYearV9TwinTest(unittest.TestCase):
          "GB_WARM_START_SOURCE_TOBS=${GB_WARM_START_SOURCE_TOBS:-15552000}   # the 6-month parent", 1),
         ("export GB_WARM_START_LAST_K=${GB_WARM_START_LAST_K:-10}\n",
          "export GB_WARM_START_LAST_K=${GB_WARM_START_LAST_K:-300}   # 9mo/1yr (Mike 2026-10-08): the last 300 stored cold-chain rows x 4 walkers = 1,200 samples of the 6mo full_pe (~2.9M leaf rows into the fit; build the npz by hand on a login node if the in-job build is slow)\n", 1),
-    ) + _RECIPE_REPLACEMENTS
+    ) + _RECIPE_REPLACEMENTS + _MONITOR_ADD_INFO_REPLACEMENTS
 
     def setUp(self):
         self.six_text = open(SIX_MO_V9).read()
@@ -2652,6 +2674,7 @@ class OneYearV9TwinTest(unittest.TestCase):
             # walkers = 1,200 samples of the 6mo (the 6mo took 10 rows of the 3mo)
             "GB_WARM_START_LAST_K",
             "SOURCE_WARM_START_STORE",      # 2026-10-08: the source warm start (= GF_SEED_STORE)
+            "GF_MONITOR_ADD_INFO",          # 2026-10-12: the 6mo run on this run's page (1YR-10)
         } | set(_RECIPE_EXPORTS)          # the 2026-10-07 recipe (1YR-6)
         keys = (set(self.one) | set(self.six)) - {"_", "SHLVL", "PWD"}
         drift = {k: (self.six.get(k), self.one.get(k))
@@ -2728,7 +2751,7 @@ class NineMonthV9TwinTest(unittest.TestCase):
          "GB_WARM_START_SOURCE_TOBS=${GB_WARM_START_SOURCE_TOBS:-15552000}   # the 6-month parent", 1),
         ("export GB_WARM_START_LAST_K=${GB_WARM_START_LAST_K:-10}\n",
          "export GB_WARM_START_LAST_K=${GB_WARM_START_LAST_K:-300}   # 9mo/1yr (Mike 2026-10-08): the last 300 stored cold-chain rows x 4 walkers = 1,200 samples of the 6mo full_pe (~2.9M leaf rows into the fit; build the npz by hand on a login node if the in-job build is slow)\n", 1),
-    ) + _RECIPE_REPLACEMENTS
+    ) + _RECIPE_REPLACEMENTS + _MONITOR_ADD_INFO_REPLACEMENTS
 
     # the only exports that may resolve differently from the 1yr script
     TOBS_DRIVEN = {"TOBS_TARGET", "SIGHET_NT_LAYER", "BASE_FILE_NAME",
@@ -2845,6 +2868,45 @@ class NineMonthV9TwinTest(unittest.TestCase):
         self.assertIn("#SBATCH --job-name=gf9mo_v9", self.nine_text)
         self.assertIn("/shared/data/global_fit_output/gf9mo_v9_%j.log", self.nine_text)
         self.assertNotIn("gf9mo_v9_4gpu", self.nine_text)
+
+
+class MonitorAddInfoLauncherTest(unittest.TestCase):
+    """The 6mo v9 run overlaid on the 9mo / 1yr monitor pages (user request
+    2026-10-12: "we want to be able to add the 6mo v9 run ... something like
+    --add-info /path/to/gf_prod_6mo_v9_4gpu"). The in-run monitor reads
+    GF_MONITOR_ADD_INFO from the environment the launcher exports; the 6mo
+    launcher never adds itself."""
+
+    def test_the_9mo_and_1yr_overlay_the_6mo_run_and_the_line_can_change_it(self):
+        six_exports = _exports(SIX_MO_V9)
+        for path in (NINE_MO_V9, ONE_YR_V9):
+            exports = _exports(path)
+            src = open(path).read()
+            with self.subTest(script=os.path.basename(path)):
+                self.assertEqual(exports.get("GF_MONITOR_ADD_INFO"), ADD_INFO_DEFAULT)
+                self.assertRegex(src, r"(?m)^export GF_MONITOR_ADD_INFO="
+                                      r"\$\{GF_MONITOR_ADD_INFO:-/shared/data/"
+                                      r"global_fit_output/gf_prod_6mo_v9_4gpu\}$")
+                self.assertEqual(src.count("export GF_MONITOR_ADD_INFO="), 1)
+        self.assertNotIn("GF_MONITOR_ADD_INFO", six_exports)
+        six = open(SIX_MO_V9).read()
+        self.assertNotIn("GF_MONITOR_ADD_INFO", six)
+        # the default IS the 6mo launcher's store directory
+        self.assertIn("STORE_DIR=${STORE_DIR:-" + ADD_INFO_DEFAULT + "/}", six)
+
+    def test_a_launch_line_value_wins(self):
+        src = open(NINE_MO_V9).read()
+        line = next(l for l in src.split("\n") if l.startswith("export GF_MONITOR_ADD_INFO="))
+        env = {k: v for k, v in os.environ.items() if not k.isupper()}
+        env["GF_MONITOR_ADD_INFO"] = "/a/run:/b/run"
+        out = subprocess.run(["bash", "-c", line + "\necho \"$GF_MONITOR_ADD_INFO\""],
+                             capture_output=True, text=True, env=env).stdout.strip()
+        self.assertEqual(out, "/a/run:/b/run")
+
+    def test_the_knob_is_the_monitors_own_name(self):
+        from lisatools.globalfit.monitor import _add_info
+
+        self.assertEqual(_add_info.ENV, "GF_MONITOR_ADD_INFO")
 
 
 class PeTwoFstatMovesLauncherTest(unittest.TestCase):

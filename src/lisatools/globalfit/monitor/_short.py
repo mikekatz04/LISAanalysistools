@@ -965,7 +965,7 @@ def _l1_orbits_from(mojito_tree):
 
 
 def compute_overlap(S: dict, truth_path: str, ns: dict, mojito_tree, t_ref: float,
-                    notes: list, thresh: float) -> Optional[dict]:
+                    notes: list, thresh: float, orbits=None) -> Optional[dict]:
     """The full page's headline match at the last row, for the max-lnL walker.
 
     Same route as ``_generator.py``'s recovery section: the frozen truth set's
@@ -974,6 +974,13 @@ def compute_overlap(S: dict, truth_path: str, ns: dict, mojito_tree, t_ref: floa
     noise-weighted overlap of each pair under the walker-median noise of the
     last row, with GBGPU waveforms on the injected L1 orbits. ``matched`` =
     overlap at or above ``thresh`` (``GF_MONITOR_MATCH_MM``).
+
+    ``orbits`` = an ``(orbits, where)`` pair already built by
+    :func:`_l1_orbits_from` (the page's added runs share one); ``None`` builds
+    it here. The result also carries the detectable set's f0 and SNR
+    (``det_f0``, ``det_snr``) and the paired truth indices into it (``ti``;
+    ``ti_ov`` = those at or above ``thresh``), which the full page's added-run
+    overlays (``_add_info``) bin the way the page bins its own run.
     """
     T = np.load(truth_path)
     tobs = S["tobs"]
@@ -999,7 +1006,8 @@ def compute_overlap(S: dict, truth_path: str, ns: dict, mojito_tree, t_ref: floa
     MI, TI, _ = ns["_match_pairs"](f_rec, t_f0, TOL_BINS * df)
     out.update(n_band=int(rec9.shape[0]), n_proxy=int(MI.size),
                completeness_proxy=MI.size / max(ndet, 1),
-               purity_proxy=MI.size / max(rec9.shape[0], 1), mm=None)
+               purity_proxy=MI.size / max(rec9.shape[0], 1), mm=None,
+               ti=TI, det_f0=t_f0, det_snr=np.asarray(T["snr"], float)[sel])
     try:
         from gbgpu.gbgpu import GBGPU
         from lisatools import detector as lisa_models
@@ -1009,7 +1017,7 @@ def compute_overlap(S: dict, truth_path: str, ns: dict, mojito_tree, t_ref: floa
 
         SA, SE = sens_grids(np.median(S["psd"][-1], axis=0),
                             np.median(S["gal_phys"][-1], axis=0), df)
-        orb, where = _l1_orbits_from(mojito_tree)
+        orb, where = orbits if orbits is not None else _l1_orbits_from(mojito_tree)
         if orb is None:
             notes.append("overlap: no mojito L1 brick reachable, so the waveforms use "
                          "the analytic DefaultOrbits ephemeris -- overlaps above ~5 mHz "
@@ -1039,7 +1047,7 @@ def compute_overlap(S: dict, truth_path: str, ns: dict, mojito_tree, t_ref: floa
                      "back to the 2-bin f0 proxy.")
         return out
     kept = mm >= thresh
-    out.update(mm=mm, t_f0=t_f0[TI], n_match=int(kept.sum()),
+    out.update(mm=mm, t_f0=t_f0[TI], ti_ov=TI[kept], n_match=int(kept.sum()),
                completeness=float(kept.sum()) / max(ndet, 1),
                purity=float(kept.sum()) / max(rec9.shape[0], 1),
                mm_med=float(np.median(mm)) if mm.size else float("nan"),

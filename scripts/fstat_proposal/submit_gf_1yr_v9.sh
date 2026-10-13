@@ -74,6 +74,13 @@
 #          / 'truth' PSD pair is the unequal-arm fit on this fresh store (the
 #          6mo's =0 pin only keeps its own resumable identity; the 3mo v9 dropped
 #          it on 2026-09-26; ruling 2026-10-04: unequal arm only).
+#   1YR-10. GF_MONITOR_ADD_INFO defaults to the 6mo v9 run directory
+#          /shared/data/global_fit_output/gf_prod_6mo_v9_4gpu (user request
+#          2026-10-12, shared with the 9mo's 9MO-10): that run, read at its
+#          last stored row, is overlaid on this run's monitor page on the
+#          phase-maximised overlap figures and the noise / foreground
+#          posteriors and curves only (monitor/_add_info.py). Not a run knob:
+#          the sampler never reads it.
 #
 # WAVEFORM SETTINGS AT 1 YR (all three windows, 2026-10-03): NO export line
 # changes. EMRI direct: same table; EMRIs 0 (347 d) and 3 (256 d) plunge INSIDE
@@ -824,6 +831,19 @@ export GF_MONITOR_SNAPSHOT=1
 # pathological build cannot sit on the saver indefinitely.
 export GF_MONITOR_TIMEOUT=1800
 # Requires MOJITO_INFO_PATH, exported above.
+# ---- 9MO / 1YR: THE 6MO RUN ON THIS RUN'S MONITOR PAGE (user request 2026-10-12)
+# "add a second run to the same html only in specific places where it is
+# reasonable visually to compare between runs ... plot the phase maximized
+# overlap plots, a comparison of the final psd and foreground measurements
+# (final for the previous run and current for the ongoing run)". The page stays
+# this run's; each run directory listed here (':'-joined) is read at ITS last
+# stored row and drawn onto the overlap CDF / survival, recovered-vs-SNR and
+# recovered-vs-frequency figures (matched against its own gb_truth_*.npz) and
+# the noise + foreground posteriors and curves. A missing dir / store / truth
+# set costs only its overlay (a caption note + a MISSING line). The monitor rank
+# inherits it; the CLI twin is python -m lisatools.globalfit.monitor --add-info.
+# GF_MONITOR_ADD_INFO=none on the launch line drops it.
+export GF_MONITOR_ADD_INFO=${GF_MONITOR_ADD_INFO:-/shared/data/global_fit_output/gf_prod_6mo_v9_4gpu}
 
 export USE_GPU=1
 export GPU_BACKEND=cuda13x

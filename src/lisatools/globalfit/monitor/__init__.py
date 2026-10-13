@@ -397,8 +397,21 @@ def build_truth_set(run_dir, extra_argv=()):
     return out
 
 
+def _add_info_env(add_info):
+    """``GF_MONITOR_ADD_INFO`` for an explicit ``add_info`` list, or ``None``
+    when the caller did not give one (the build then inherits the
+    environment's -- which is how the in-run monitor picks up the launcher's
+    export). See ``_add_info``."""
+    if add_info is None:
+        return None
+    from ._add_info import add_info_env_value
+
+    return add_info_env_value(add_info)
+
+
 def build_monitor_in_process(run_dir: str, out_path: str,
-                             mojito: Optional[str] = None) -> str:
+                             mojito: Optional[str] = None,
+                             add_info: Optional[list] = None) -> str:
     """Render the page in THIS interpreter -- one python, no child.
 
     ⚠ READ THIS BEFORE PREFERRING IT. The generator sets its own dark
@@ -426,13 +439,22 @@ def build_monitor_in_process(run_dir: str, out_path: str,
     """
     import gc
 
+    from ._add_info import ENV as _ADD_ENV
+
     argv = [generator_path(), str(run_dir), str(out_path)]
     saved_argv, saved_env = sys.argv, os.environ.get("MOJITO_INFO_PATH")
+    saved_add = os.environ.get(_ADD_ENV)
     _moj, _src = resolve_mojito_path(run_dir=run_dir, explicit=mojito)
     sys.argv = argv
     if _moj:
         os.environ["MOJITO_INFO_PATH"] = _moj
         logger.info("monitor: mojito data from %s (%s)", _moj, _src)
+    # ADDED RUNS: an explicit list (the CLI's --add-info) is handed to the
+    # generator through its knob for this build only; without one the
+    # generator reads whatever the environment carries (the in-run case).
+    _add_val = _add_info_env(add_info)
+    if _add_val is not None:
+        os.environ[_ADD_ENV] = _add_val
     # ⚠ OWN THE NAMESPACE -- do NOT go back to ``runpy.run_path``.
     # run_path hands the module globals back only on SUCCESS, so a
     # generator that RAISED left ``ns`` None, the teardown below closed
@@ -494,6 +516,10 @@ def build_monitor_in_process(run_dir: str, out_path: str,
             os.environ.pop("MOJITO_INFO_PATH", None)
         else:
             os.environ["MOJITO_INFO_PATH"] = saved_env
+        if saved_add is None:
+            os.environ.pop(_ADD_ENV, None)
+        else:
+            os.environ[_ADD_ENV] = saved_add
     return out_path
 
 
@@ -501,8 +527,15 @@ def build_monitor(run_dir: str, out_path: Optional[str] = None, *,
                   timeout: float = 1800.0,
                   mojito: Optional[str] = None,
                   in_process: bool = True,
-                  check: bool = True) -> Optional[str]:
+                  check: bool = True,
+                  add_info: Optional[list] = None) -> Optional[str]:
     """Build the HTML page for ``run_dir``.
+
+    ``add_info``: run directories to overlay on the page's comparison figures
+    (``_add_info``; user request 2026-10-12). ``None`` = whatever
+    ``GF_MONITOR_ADD_INFO`` the environment carries (the in-run monitor's
+    route); a list (the CLI's ``--add-info``) replaces it for this build, ``[]``
+    meaning none.
 
     ⚠ DOCSTRING CORRECTED 2026-09-27. This used to say the build happens
     "in a FRESH interpreter" and that the subprocess was "a correctness
@@ -531,6 +564,11 @@ def build_monitor(run_dir: str, out_path: Optional[str] = None, *,
     # already-set MOJITO_INFO_PATH still wins inside resolve_mojito_path.
     env = dict(os.environ)
     _moj, _src = resolve_mojito_path(run_dir=run_dir, explicit=mojito)
+    _add_val = _add_info_env(add_info)
+    if _add_val is not None:
+        from ._add_info import ENV as _ADD_ENV
+
+        env[_ADD_ENV] = _add_val
     if _moj:
         env["MOJITO_INFO_PATH"] = _moj
         logger.info("monitor: mojito data from %s (%s)", _moj, _src)
@@ -553,7 +591,7 @@ def build_monitor(run_dir: str, out_path: Optional[str] = None, *,
         "GF_MONITOR_SUBPROCESS", "0").strip() not in ("1", "true", "yes", "on")
     try:
         if _inproc:
-            build_monitor_in_process(run_dir, tmp, mojito=_moj)
+            build_monitor_in_process(run_dir, tmp, mojito=_moj, add_info=add_info)
         else:
             subprocess.run(
                 [sys.executable, generator_path(), run_dir, tmp],

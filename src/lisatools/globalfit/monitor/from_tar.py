@@ -154,6 +154,10 @@ def main(argv=None) -> int:
                          "peak and any matplotlib fault out of this process.")
     ap.add_argument("--timeout", type=float, default=1800.0,
                     help="seconds before the page build is killed")
+    ap.add_argument("--add-info", action="append", default=None, metavar="OTHER_RUN_DIR",
+                    help="overlay another run directory (e.g. a second extracted "
+                         "snapshot) at its last stored row on the full page's comparison "
+                         "figures. Repeatable; see python -m lisatools.globalfit.monitor -h.")
     # FIRST-CLASS, not just pass-through. These are the two overrides
     # anyone actually reaches for, and requiring `-- --catalogue X` for
     # them is a trap: the natural spelling produced "unrecognized
@@ -252,6 +256,13 @@ extra_argv=_passthru)
         f"{'_short' if a.short_page else ''}.html")
 
     from . import build_monitor, build_short_monitor
+    from ._add_info import parse_add_info
+
+    add_info = (parse_add_info(a.add_info, base_run_dir=run_dir)
+                if a.add_info is not None else None)
+    if add_info:
+        print(f"[from_tar] added runs: {', '.join(add_info)}"
+              + ("  (full page only; not used by --short-page)" if a.short_page else ""))
 
     st = time.perf_counter()
     try:
@@ -260,7 +271,7 @@ extra_argv=_passthru)
         else:
             # ONE PYTHON: no child interpreter. See build_monitor_in_process.
             build_monitor(run_dir, out, timeout=a.timeout, mojito=_moj,
-                          in_process=not a.subprocess)
+                          in_process=not a.subprocess, add_info=add_info)
     except Exception as e:                       # noqa: BLE001
         print(f"[from_tar] page build FAILED ({type(e).__name__}: {e})",
               file=sys.stderr)

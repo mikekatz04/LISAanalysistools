@@ -30,6 +30,15 @@ full page's name is untouched). The user's request and the page's contents
 are in ``_short.py``. It composes with ``--snapshot`` and ``--build-truth``,
 not with ``--snapshot-only``. In-run equivalent: ``GF_MONITOR_PAGE_SHORT=1``.
 
+``--add-info OTHER_RUN_DIR`` (repeatable; user request 2026-10-12) overlays
+another run, read at ITS last stored row, on the full page's comparison
+figures only: the phase-maximised overlap CDF and survival count, recovered
+[%] vs injected SNR and vs frequency (each run against its own truth set), the
+Soms_d / Sa_a and galfor posterior histograms, and the PSD + foreground and
+sensitivity curves. Everything else stays this run's. In-run equivalent:
+``GF_MONITOR_ADD_INFO`` (directories joined by ``:``); the flag wins over it,
+and ``--add-info none`` drops an exported list. See ``_add_info.py``.
+
 ``--build-truth`` generates the detectability truth set into the run
 directory first. Anything after ``--`` goes straight to ``build_truth``
 (``--catalogue``, ``--l1-brick``, ``--flo`` ...), though normally none of
@@ -46,12 +55,16 @@ import time
 from . import (build_monitor, build_short_monitor, build_truth_set,
                check_truth, default_out_path, default_short_out_path,
                describe_run)
+from ._add_info import ENV as ADD_ENV
+from ._add_info import parse_add_info
 from .snapshot import build_snapshot
 
 USAGE = ("usage: python -m lisatools.globalfit.monitor [--snapshot] "
-         "[--short-page] [--build-truth] [--keep N] RUN_DIR [OUT.html] "
-         "[-- BUILD_TRUTH_ARGS...]\n"
+         "[--short-page] [--build-truth] [--keep N] [--add-info OTHER_RUN_DIR ...] "
+         "RUN_DIR [OUT.html] [-- BUILD_TRUTH_ARGS...]\n"
          "       --snapshot     also build <RUN_DIR>_snapshot.tar.gz\n"
+         "       --add-info D   overlay run D's last row on the comparison figures "
+         "(repeatable)\n"
          "       --short-page   the SHORT page <RUN_DIR>_monitor_short.html "
          "instead of the full one\n"
          "       --build-truth  generate the truth set into RUN_DIR first\n"
@@ -128,6 +141,15 @@ def _parser():
                          "for a different Tobs. Tens of minutes, CPU-only.")
     ap.add_argument("--subprocess", action="store_true",
                     help="render in a child interpreter. Output identical.")
+    # REPEATABLE, order kept (user request 2026-10-12: "It should be something
+    # like --add-info /path/to/gf_prod_6mo_v9_4gpu" ... "it should be able to
+    # add a number of runs").
+    ap.add_argument("--add-info", action="append", default=None, metavar="OTHER_RUN_DIR",
+                    help="overlay another run (its last stored row) on the full page's "
+                         "comparison figures: the phase-maximised overlap figures and the "
+                         "noise / foreground posteriors and curves. Repeatable; the page "
+                         "stays this run's everywhere else. Wins over the in-run knob "
+                         "GF_MONITOR_ADD_INFO (':'-joined dirs); '--add-info none' drops it.")
     # FIRST-CLASS, not just pass-through. These are the two overrides
     # anyone actually reaches for, and requiring `-- --catalogue X` for
     # them is a trap: the natural spelling produced "unrecognized
@@ -193,12 +215,25 @@ def main(argv=None):
     if _state:
         print(f"[monitor] run state: {_state}")
 
+    # ADDED RUNS: the flag's list (or None: the environment's, read by the
+    # generator itself), resolved here only to say what the page will carry.
+    add_info = (parse_add_info(a.add_info, base_run_dir=run_dir)
+                if a.add_info is not None else None)
+    _shown = add_info if add_info is not None else parse_add_info(base_run_dir=run_dir)
+    if _shown and (a.short_page or a.snapshot_only):
+        print("[monitor] NOTE: added runs overlay the FULL page only; "
+              f"{_shown} not used here.", file=sys.stderr)
+    elif _shown:
+        print("[monitor] added runs (last stored row each, on the comparison figures): "
+              + ", ".join(_shown)
+              + ("" if add_info is not None else f"  (from {ADD_ENV})"))
+
     if not a.snapshot_only:
         st = time.perf_counter()
         if a.short_page:
             build_short_monitor(run_dir, out)
         else:
-            build_monitor(run_dir, out, in_process=not a.subprocess)
+            build_monitor(run_dir, out, in_process=not a.subprocess, add_info=add_info)
         print(f"[monitor] wrote {out} in {time.perf_counter() - st:.1f} s")
 
     if a.snapshot or a.snapshot_only or a.short:

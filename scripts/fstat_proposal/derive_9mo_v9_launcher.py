@@ -213,6 +213,24 @@ REPL = [
     # sacrifice needed accuracy"): the grouping only batches the evaluation
     ("export FSTAT_STAGEB_GROUP_MAX_GB=2.0\n",
      "export FSTAT_STAGEB_GROUP_MAX_GB=${FSTAT_STAGEB_GROUP_MAX_GB:-1.0}   # 9mo/1yr: halve the stage-B per-group transient (batching only, no grid change; 2.0 at 6mo)\n", 1),
+    # the 6mo v9 run overlaid on this run's monitor page (user request
+    # 2026-10-12; the same entry in derive_1yr_v9_launcher.py; the 6mo itself
+    # never adds itself)
+    ("export GF_MONITOR_TIMEOUT=1800\n# Requires MOJITO_INFO_PATH, exported above.\n",
+     "export GF_MONITOR_TIMEOUT=1800\n# Requires MOJITO_INFO_PATH, exported above.\n"
+     "# ---- 9MO / 1YR: THE 6MO RUN ON THIS RUN'S MONITOR PAGE (user request 2026-10-12)\n"
+     "# \"add a second run to the same html only in specific places where it is\n"
+     "# reasonable visually to compare between runs ... plot the phase maximized\n"
+     "# overlap plots, a comparison of the final psd and foreground measurements\n"
+     "# (final for the previous run and current for the ongoing run)\". The page stays\n"
+     "# this run's; each run directory listed here (':'-joined) is read at ITS last\n"
+     "# stored row and drawn onto the overlap CDF / survival, recovered-vs-SNR and\n"
+     "# recovered-vs-frequency figures (matched against its own gb_truth_*.npz) and\n"
+     "# the noise + foreground posteriors and curves. A missing dir / store / truth\n"
+     "# set costs only its overlay (a caption note + a MISSING line). The monitor rank\n"
+     "# inherits it; the CLI twin is python -m lisatools.globalfit.monitor --add-info.\n"
+     "# GF_MONITOR_ADD_INFO=none on the launch line drops it.\n"
+     "export GF_MONITOR_ADD_INFO=${GF_MONITOR_ADD_INFO:-/shared/data/global_fit_output/gf_prod_6mo_v9_4gpu}\n", 1),
 ]
 for old, new, n in REPL:
     c = text.count(old)
@@ -305,6 +323,13 @@ HEADER = """#!/bin/bash
 #          / 'truth' PSD pair is the unequal-arm fit on this fresh store (the
 #          6mo's =0 pin only keeps its own resumable identity; the 3mo v9 dropped
 #          it on 2026-09-26; ruling 2026-10-04: unequal arm only).
+#   9MO-10. GF_MONITOR_ADD_INFO defaults to the 6mo v9 run directory
+#          /shared/data/global_fit_output/gf_prod_6mo_v9_4gpu (user request
+#          2026-10-12, the SAME entry as the 1yr's 1YR-10): that run, read at
+#          its last stored row, is overlaid on this run's monitor page on the
+#          phase-maximised overlap figures and the noise / foreground
+#          posteriors and curves only (monitor/_add_info.py). Not a run knob:
+#          the sampler never reads it.
 #
 # EVERYTHING ELSE = the 1yr script = the 6mo script (NineMonthV9TwinTest
 # diffs the resolved exports against submit_gf_1yr_v9.sh: only TOBS_TARGET,
