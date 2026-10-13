@@ -2178,27 +2178,36 @@ def cold_band_lnl(state, branch_name="gb"):
     return _ColdBandLnL(bi)
 
 
-def relearn_valve_window(band_info, rule=VALVE_WINDOW_RULE):
-    """Re-learn the per-(walker, band) valve once under a newer window rule.
+def relearn_valve_window(band_info, current, rule=VALVE_WINDOW_RULE):
+    """Re-base the per-(walker, band) valve once under a newer window rule.
 
-    The valve's record -- the all-time running max, the cycle peak, the
-    legacy per-step best, the streak and the reset counts -- is only
-    meaningful under the window rule it was learned on
-    (``state.VALVE_WINDOW_RULE``). Under the CENTRES rule (every store
-    before 2026-10-13) 3 in 4 of the 9mo sub-bands owned no window and
-    learned a gain of exactly 0; the rest learned on the same layer they
-    own now. When ``band_info``'s stamp is older than ``rule`` this resets
-    that record IN PLACE (the arrays the judge's view and the saver hold),
-    re-stamps ``band_info["band_window_rule"]`` and returns
-    ``(stored_rule, n_pairs, n_shut)``; the next judge then sees every pair
-    improve on ``-inf`` and starts a fresh patience window. The shut set
-    is NOT reopened (a shut pair stays shut within its stage, user ruling
-    2026-09-28; the next stage entry releases it), and the per-iteration
-    value is not touched (the judge overwrites it).
+    The valve's running maxima -- the all-time running max, the cycle peak
+    and the legacy per-step best -- are only comparable with gains formed
+    under the window rule they were learned on (``state.VALVE_WINDOW_RULE``).
+    Under the CENTRES rule (every store before 2026-10-13) 3 in 4 of the 9mo
+    sub-bands owned no window and learned a gain of exactly 0, and half of
+    the rest learned on two layers where they now own one. When
+    ``band_info``'s stamp is older than ``rule`` this sets those three
+    arrays IN PLACE (the arrays the judge's view and the saver hold) to
+    ``current`` -- this judge's gain under the new rule, ``(nwalkers,
+    num_bands)`` -- wherever ``current`` is finite, leaves the other
+    entries as stored, re-stamps ``band_info["band_window_rule"]`` and
+    returns ``(stored_rule, n_pairs, n_shut, n_rebased)``.
 
-    Returns None when the stamp already reads ``rule`` or ``band_info``
-    carries no valve window. The stamp is saved with the band info, so a
-    store is re-learned exactly once.
+    What it does NOT touch (user ruling 2026-10-13: "a reset mid stage does
+    not adjust anything about convergence/turn over. Even if you want to
+    adjust the gate, it should stay in its current state through a
+    reset"): the streaks, the reset counts and the shut set. A pair keeps
+    its patience count and a shut pair stays shut (the next stage entry
+    releases it, ruling 2026-09-28). The caller must not judge on the step
+    it re-bases, so the re-basing counts neither as an improvement nor as
+    a quiet round; judging resumes at the next step against the re-based
+    maxima.
+
+    Returns None when the stamp already reads ``rule``, when ``band_info``
+    carries no valve window, or when ``current`` is absent or the wrong
+    shape (nothing is stamped then; the next judge retries). The stamp is
+    saved with the band info, so a store is re-based exactly once.
     """
     if not isinstance(band_info, dict) or not isinstance(
             band_info.get("band_cold_logl_max_w"), np.ndarray):
@@ -2206,18 +2215,23 @@ def relearn_valve_window(band_info, rule=VALVE_WINDOW_RULE):
     stored = ensure_valve_window_rule(band_info)
     if stored == int(rule):
         return None
-    for name, fill in (("band_cold_logl_max_w", -np.inf),
-                       ("band_shutoff_best_w", -np.inf),
-                       ("band_cold_logl_peak_w", -np.inf),
-                       ("band_shutoff_streak_w", 0),
-                       ("band_shutoff_reset_w", 0)):
+    ref = band_info["band_cold_logl_max_w"]
+    if current is None:
+        return None
+    cur = np.asarray(current, dtype=float)
+    if cur.shape != ref.shape:
+        return None
+    ok = np.isfinite(cur)
+    for name in ("band_cold_logl_max_w", "band_shutoff_best_w",
+                 "band_cold_logl_peak_w"):
         arr = band_info.get(name)
-        if isinstance(arr, np.ndarray):
-            arr[...] = fill
+        if isinstance(arr, np.ndarray) and arr.shape == cur.shape:
+            arr[ok] = cur[ok]
     band_info[VALVE_WINDOW_RULE_FIELD][...] = int(rule)
     shut = band_info.get("band_rj_shutoff_w")
-    return (int(stored), int(np.size(band_info["band_cold_logl_max_w"])),
-            0 if shut is None else int(np.count_nonzero(shut)))
+    return (int(stored), int(np.size(ref)),
+            0 if shut is None else int(np.count_nonzero(shut)),
+            int(np.count_nonzero(ok)))
 
 
 def wdm_window_layers(edges_hz, layer_df, ind_min_f, n_layers, cover=True,
@@ -23361,13 +23375,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # normal from the next iteration. gb_search_2's fresh entry resets
         # the max anyway (``reset_valves``).
         #
-        # ⚠ WINDOW-RULE TRANSITION (user ruling 2026-10-13, persisted): a
+        _cur_obs = np.where(np.isnan(lls), -np.inf, lls)
+        # ⚠ WINDOW-RULE TRANSITION (user rulings 2026-10-13, persisted): a
         # record learned under an older window rule (``band_window_rule``
         # 1, the CENTRES rule: 3 in 4 of the 9mo sub-bands judged a gain of
-        # exactly 0 on an empty window) is RE-LEARNED here, once per store,
-        # before this judge reads it -- see :func:`relearn_valve_window`.
-        self._relearn_valve_window_once(self._shutoff_band_info)
-        _cur_obs = np.where(np.isnan(lls), -np.inf, lls)
+        # exactly 0 on an empty window) is RE-BASED here, once per store:
+        # the running max / best / peak take THIS step's gain under the new
+        # geometry so the next judges compare like with like, while the
+        # streaks, the reset counts and the shut set stay exactly as stored
+        # ("a reset mid stage does not adjust anything about convergence /
+        # turn over ... it should stay in its current state through a
+        # reset"). The re-basing step itself does not judge: counting it as
+        # a quiet round would advance every streak, counting it as an
+        # improvement would reset every streak. The pending census is
+        # published unchanged -- see :func:`relearn_valve_window`.
+        if self._relearn_valve_window_once(self._shutoff_band_info,
+                                           _cur_obs) is not None:
+            self._publish_shutoff_w_pending(shut, occ)
+            return
         np.maximum(_view.peak, _cur_obs, out=_view.peak)
         converged = _view.judge(tol, self.search_shutoff_conv_iter, occ,
                                 require_occ=self._shutoff_require_occ())
@@ -23477,14 +23502,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     int(occ[w, b]), int(_view.streak[w, b]),
                 )
 
-    def _relearn_valve_window_once(self, band_info):
-        """:func:`relearn_valve_window` on the judge's ``band_info`` + its
-        one log line. A no-op (None) once the stamp reads the current rule,
-        i.e. on every judge after the first one under it, on this store."""
-        out = relearn_valve_window(band_info)
+    def _relearn_valve_window_once(self, band_info, current):
+        """:func:`relearn_valve_window` on the judge's ``band_info`` with
+        this step's gain ``current`` + its one log line. A no-op (None) once
+        the stamp reads the current rule, i.e. on every judge after the
+        first one under it, on this store; the caller skips the judge on
+        the one step this returns a record."""
+        out = relearn_valve_window(band_info, current)
         if out is None:
             return None
-        stored, n_pairs, n_shut = out
+        stored, n_pairs, n_shut, n_rebased = out
         census = ""
         try:
             bs = self._basis_settings
@@ -23505,14 +23532,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "[GB_GATE %s] window geometry v%d: every sub-band now owns its "
             "covering WDM layer(s) as the valve window (user ruling "
             "2026-10-13); the stored record was learned under rule %d, so "
-            "re-learning the per-(walker, band) running max: "
+            "re-basing the per-(walker, band) running max: "
             "band_cold_logl_max_w / band_shutoff_best_w / band_cold_logl_peak_w "
-            "-> -inf, streaks and reset counts -> 0 on %d pairs; %d pair(s) "
-            "shut under the old rule stay shut until the next stage entry "
-            "releases them.%s Stamped band_window_rule=%d (saved with the band "
-            "info: a resume does not repeat this).",
-            self.name, int(VALVE_WINDOW_RULE), stored, n_pairs, n_shut,
-            census, int(VALVE_WINDOW_RULE))
+            "take this step's gain on %d of %d pairs (the rest keep their "
+            "stored value); streaks, reset counts and the shut set are "
+            "untouched (%d pair(s) stay shut until the next stage entry "
+            "releases them) and this step is not judged.%s Stamped "
+            "band_window_rule=%d (saved with the band info: a resume does "
+            "not repeat this).",
+            self.name, int(VALVE_WINDOW_RULE), stored, n_rebased, n_pairs,
+            n_shut, census, int(VALVE_WINDOW_RULE))
         return out
 
     def _shutoff_exempt_bands(self, fmin_hz, num_bands):

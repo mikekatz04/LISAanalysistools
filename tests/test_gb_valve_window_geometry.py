@@ -27,10 +27,13 @@ the centres rule: its resolution test depends on sub-layer cells coming back
 empty.
 
 THE TRANSITION is persisted: ``band_info["band_window_rule"]`` (1 = centres,
-2 = covering). A record learned under rule 1 is re-learned ONCE at the first
-judge under rule 2 (running max / best / peak -> -inf, streaks and reset
-counts -> 0; shut pairs stay shut until the next stage entry), the stamp is
-saved, and a resume does not repeat it.
+2 = covering). A record learned under rule 1 is re-BASED once at the first
+judge under rule 2: the running max / best / peak take that step's gain under
+the new geometry, the streaks, reset counts and shut set stay exactly as
+stored and that step is not judged (user ruling 2026-10-13: "a reset mid
+stage does not adjust anything about convergence/turn over ... it should
+stay in its current state through a reset"); the stamp is saved, and a
+resume does not repeat it.
 """
 
 import logging
@@ -596,22 +599,50 @@ class OneTimeRelearnTest(unittest.TestCase):
         with _no_tol_env(), self.assertLogs(gbs.logger, level="INFO") as logs:
             self._judge_stash(m, bi, gain, occ)
         self.assertEqual(len(self._relearn_lines(logs)), 1, logs.output)
-        self.assertIn("re-learning the per-(walker, band) running max",
+        self.assertIn("re-basing the per-(walker, band) running max",
                       self._relearn_lines(logs)[0])
         self.assertEqual(int(bi[VALVE_WINDOW_RULE_FIELD][0]), VALVE_WINDOW_RULE)
-        # re-learned: the stale 900 max is gone, every pair judged fresh
+        # re-based: the stale 900 max (band 0) and the 0 maxima of the blind
+        # bands are replaced by this step's gain under the new geometry...
         np.testing.assert_array_equal(bi["band_cold_logl_max_w"], 250.0)
-        np.testing.assert_array_equal(bi["band_shutoff_streak_w"], 0)
-        np.testing.assert_array_equal(bi["band_shutoff_reset_w"], 0)
-        self.assertTrue(np.all(np.isneginf(bi["band_shutoff_best_w"])))
-        self.assertTrue(np.all(np.isneginf(bi["band_cold_logl_peak_w"])))
-        # the shut pairs stay shut (released only at the next stage entry)
+        np.testing.assert_array_equal(bi["band_shutoff_best_w"], 250.0)
+        np.testing.assert_array_equal(bi["band_cold_logl_peak_w"], 250.0)
+        # ...while NOTHING about convergence moves (user ruling 2026-10-13:
+        # "it should stay in its current state through a reset"): the
+        # streaks and reset counts are exactly as stored, the step is not
+        # judged (band 0, 650 nats below its stale max with a streak of 2,
+        # would otherwise have shut here), and the two shut pairs stay shut
+        np.testing.assert_array_equal(bi["band_shutoff_streak_w"], 2)
+        np.testing.assert_array_equal(bi["band_shutoff_reset_w"], 1)
         self.assertEqual(int(bi["band_rj_shutoff_w"].sum()), 2)
-        # ...and the next judges are ordinary ones: no second re-learn
+        self.assertFalse(bi["band_rj_shutoff_w"][1:, 0].any())
+        # ...and the next judges are ordinary ones against the re-based
+        # maxima: no second re-base; an improvement resets the streak
         with _no_tol_env(), self.assertLogs(gbs.logger, level="INFO") as logs2:
-            self._judge_stash(m, bi, gain, occ)
+            self._judge_stash(m, bi, np.full((nw, nb), 300.0), occ)
         self.assertEqual(self._relearn_lines(logs2), [])
-        np.testing.assert_array_equal(bi["band_shutoff_streak_w"][0, 0], 1)
+        np.testing.assert_array_equal(bi["band_cold_logl_max_w"], 300.0)
+        np.testing.assert_array_equal(bi["band_shutoff_streak_w"][0, 0], 0)
+        np.testing.assert_array_equal(bi["band_shutoff_reset_w"][0, 0], 2)
+
+    def test_a_quiet_round_after_the_rebase_continues_the_stored_streak(self):
+        """The stored patience count carries through: a pair at streak 2
+        that does not improve on the re-based max at the next judge reaches
+        CONV and shuts THEN, not at the re-basing step."""
+        nw, nb = 4, 5
+        bi = {"nwalkers": nw, "num_bands": nb}
+        ensure_search_shutoff_fields(bi, nb, per_walker=True)
+        _learned(bi)
+        m = self._move(bi)
+        gain = np.full((nw, nb), 250.0)
+        occ = np.ones((nw, nb), dtype=np.int64)
+        with _no_tol_env():
+            self._judge_stash(m, bi, gain, occ)          # the re-base: no judge
+        self.assertEqual(int(bi["band_rj_shutoff_w"].sum()), 2)
+        with _no_tol_env():
+            self._judge_stash(m, bi, gain, occ)          # quiet: streak 2 -> 3
+        self.assertTrue(bi["band_rj_shutoff_w"].all())
+        np.testing.assert_array_equal(bi["band_shutoff_streak_w"], CONV)
 
     def test_without_the_relearn_the_stale_max_would_shut_every_pair(self):
         """The control: judged on the centres-rule max (900 in band 0), a
@@ -704,7 +735,8 @@ class PersistedRelearnStoreTest(unittest.TestCase):
         self.assertEqual(
             len([l for l in logs.output if "window geometry v2" in l]), 1)
         np.testing.assert_array_equal(bi["band_cold_logl_max_w"], 250.0)
-        np.testing.assert_array_equal(bi["band_shutoff_streak_w"], 0)
+        # the stored convergence state rides through the re-base untouched
+        np.testing.assert_array_equal(bi["band_shutoff_streak_w"], 2)
         self.assertEqual(int(bi["band_rj_shutoff_w"].sum()), 2)
         with self.assertLogs("lisatools.globalfit.hdfbackend", level="INFO") as slog:
             self._save(backend, state)
@@ -724,13 +756,15 @@ class PersistedRelearnStoreTest(unittest.TestCase):
         bi2 = state2.sub_states["gb"].band_info
         self.assertEqual(int(bi2[VALVE_WINDOW_RULE_FIELD][0]), VALVE_WINDOW_RULE)
         np.testing.assert_array_equal(bi2["band_cold_logl_max_w"], 250.0)
+        np.testing.assert_array_equal(bi2["band_shutoff_streak_w"], 2)
         m2 = self._move()
         with _no_tol_env(), self.assertLogs(gbs.logger, level="INFO") as logs2:
-            self._judge(m2, state2, gain)
+            self._judge(m2, state2, np.full((NWALKERS, RT_NB), 300.0))
         self.assertEqual(
             [l for l in logs2.output if "window geometry v2" in l], [])
-        np.testing.assert_array_equal(bi2["band_cold_logl_max_w"], 250.0)
-        np.testing.assert_array_equal(bi2["band_shutoff_streak_w"], 1)
+        # an ordinary judge against the re-based max: an improvement
+        np.testing.assert_array_equal(bi2["band_cold_logl_max_w"], 300.0)
+        np.testing.assert_array_equal(bi2["band_shutoff_streak_w"], 0)
 
     def test_a_rewind_onto_a_pre_stamp_row_relearns_again(self):
         """Row 1 was learned under the centres rule; a resume from it (a

@@ -342,9 +342,10 @@ runs inside `rj_fstat_search`):
   39.0 % by row 138, the stage's last). Since then every sub-band owns its covering layer (the 8
   sub-bands of a layer tile share its gain; the 308 window owners kept
   theirs). A store that crossed the switch logs `[GB_GATE <move>] window
-  geometry v2: ... re-learning` ONCE at its first judge: every pair restarts
-  its patience window (nothing shuts for the next 3 judges), pairs shut
-  before stay shut until the next stage entry, and `band_window_rule` reads
+  geometry v2: ... re-basing` ONCE at its first judge: the running maxima
+  take that step's gain, every pair keeps its streak, reset count and shut
+  flag (user ruling 2026-10-13: a reset mid stage changes nothing about
+  convergence), that one step is not judged, and `band_window_rule` reads
   1 on every row before that judge and 2 after. When reading a store's
   gain per band, expect runs of 8 identical values (one per tile), not a
   per-sub-band statistic; a sum over bands overcounts each layer.

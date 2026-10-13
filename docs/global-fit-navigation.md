@@ -346,9 +346,11 @@ rule (`cover=False`; `_cap_cells_resolvable` needs sub-layer cells to come
 back empty). The rule is stamped per store in
 `sub_backend/gb/band_window_rule` (1 = centres, 2 = covering; `state.py`
 `VALVE_WINDOW_RULE*`, `ensure_valve_window_rule`); the first judge on a
-record learned under an older rule re-learns it once
-(`relearn_valve_window`: running max / best / peak -> -inf, streaks and
-reset counts -> 0, shut pairs kept until the next stage entry; log
+record learned under an older rule re-bases it once
+(`relearn_valve_window`: running max / best / peak take that step's gain
+under the new geometry; streaks, reset counts and the shut set are
+untouched and that step is not judged -- user ruling 2026-10-13, "a reset
+mid stage does not adjust anything about convergence/turn over"; log
 `[GB_GATE <move>] window geometry v2: ...`). Rows written before the stamp
 existed read 1 (`GBState.predating_fill_values`). Readers that SUM the gain
 over bands now count each layer up to 8 times
@@ -463,7 +465,7 @@ sites in the tree are a fair proxy for importance.
 | `[LEG <stage>] cycle c leg i/n: ran [...] -> row saved after 'x'` / `[LEG ..] resume: ...` / `the stage's stored move order [...] differs from the live composition` (grep `stored move order`) | `globalfitmove.py`, `recipe.py` | which leg landed; a resume point; a cycle restarted at its head after a composition change |
 | `[V9-STAGE <stage>] entering (recipe step k): profile {...}` and every mutation / `RELEASED at step entry` / `reset_valves` / `STAGE COMPLETE ...` | `recipe.py` | stage entry, what the profile set on each GB move, valve release, stage end |
 | `[GB_GATE <move>] occupied N \| shut N (x%) \| active N -- streak p50 .. p90 .. of 3 ...` | `gbspecialstretch.py` | THE valve census; quote it, never infer the valve from leaf counts |
-| `[GB_GATE <move>] window geometry v2: every sub-band now owns its covering WDM layer(s) ... re-learning the per-(walker, band) running max ... Stamped band_window_rule=2` | `gbspecialstretch.py::_relearn_valve_window_once` | once per store, at the first judge of a store learned under the centres rule (2026-10-13); every pair restarts its patience window there, so nothing can shut for 3 more judges |
+| `[GB_GATE <move>] window geometry v2: every sub-band now owns its covering WDM layer(s) ... re-basing the per-(walker, band) running max ... Stamped band_window_rule=2` | `gbspecialstretch.py::_relearn_valve_window_once` | once per store, at the first judge of a store learned under the centres rule (2026-10-13); the maxima take that step's gain, every pair keeps its streak and shut flag, and that one step is not judges |
 | `[GB_BAND_SHUTOFF <move>] status ...` / `[GB_BAND_REVIVE <move>]` | `gbspecialstretch.py` | the empty-band valve: bands off, since-revive counter, revive events (`the noise model has moved by x%`; grep `has moved by`) |
 | `[GB_ACCEPT rj-split <move>] ...` / `[GB_ACCEPT in_model]` | `gbspecialstretch.py` | births / deaths proposed vs accepted per rung and cold, PER RANK |
 | `[GB_IMGROUP <move>] pass k: cold dlnL +x over N occupied sub-band(s); shut/open` | `gbspecialstretch.py` | the level-2 passes of the pure in-model moves |
