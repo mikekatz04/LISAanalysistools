@@ -310,6 +310,16 @@ def _seconds_to_l3c_datetime(t: float) -> str:
     dt = datetime.fromtimestamp(t + lisa_epoch_seconds)
     return dt.strftime("%Y.%m.%d.%H.%M.%S")
 
+def _l3c_datetime_to_seconds(dt_str: str) -> float:
+    """Convert a L3C datetime string yyyy.mm.dd.hh.mm.ss to seconds with respect to LISA_EPOCH_TCB."""
+    from lisaconstants import LISA_EPOCH_TCB
+
+    format_str = "%Y-%m-%dT%H:%M:%S.%f"
+    lisa_epoch_seconds = datetime.strptime(LISA_EPOCH_TCB, format_str).timestamp()
+
+    dt = datetime.strptime(dt_str, "%Y.%m.%d.%H.%M.%S")
+    return dt.timestamp() - lisa_epoch_seconds
+
 
 def _seconds_to_duration_str(t: float) -> str:
     """Express a duration in seconds as L3C effective_observation_duration string."""
@@ -1082,7 +1092,7 @@ class RunMetadata(MetadataBase):
             f"Reconstructing TDSettings object with t0: {self.observation_period_begin}, N: {self.number_of_time_samples}, dt: {self.time_step}"
         )
         return TDSettings(
-            t0=self.observation_period_begin,
+            t0=_l3c_datetime_to_seconds(self.observation_period_begin),
             N=self.number_of_time_samples,
             dt=self.time_step,
             force_backend="cpu",
