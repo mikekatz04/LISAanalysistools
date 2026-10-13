@@ -342,6 +342,9 @@ def _add_current_gb_tables(path, nw=NW):
                   60 + i)
         _fill(gb.create_dataset("band_shutoff_w_step", (NSTEPS, 1),
                                 dtype="i8"), 80)
+        # the valve's window-rule stamp (2026-10-13): the first save on the
+        # new code creates it on every v9 store
+        _fill(gb.create_dataset("band_window_rule", (NSTEPS, 1), dtype="i8"), 82)
         _fill(gb.create_dataset("band_stage", (NSTEPS, GB_NB), dtype="i8"), 81)
         ds = g.create_dataset("saved_after", (IT,), maxshape=(None,),
                               dtype=h5py.string_dtype(encoding="utf-8"))
@@ -366,9 +369,28 @@ class CurrentLayoutTest(unittest.TestCase):
         axes = {e.path: e.axis for e in entries}
         for name in rsw.PER_WALKER_BAND_TABLES:
             self.assertEqual(axes[f"sub_backend/gb/{name}"], 1, name)
-        for name in ("band_shutoff_w_step", "band_stage"):
+        for name in ("band_shutoff_w_step", "band_window_rule", "band_stage"):
             self.assertIsNone(axes[f"sub_backend/gb/{name}"], name)
         self.assertIsNone(axes["saved_after"])
+
+    def test_the_valve_stamps_stay_walker_free_on_a_one_walker_store(self):
+        """A ``(rows, 1)`` stamp carries an axis of length nwalkers when
+        nwalkers is 1, so only its signature entry keeps it from being read
+        as a walker table (or refused): the step stamp and, since
+        2026-10-13, the window-rule stamp."""
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        src = make_store(os.path.join(tmp, "one_testing.h5"), nw=1)
+        _add_current_gb_tables(src, nw=1)
+        with h5py.File(src, "r") as f:
+            entries, refusals, _, _ = rsw.plan_rescale(f, "global_fit", 2)
+        axes = {e.path: e.axis for e in entries}
+        for name in ("band_shutoff_w_step", "band_window_rule"):
+            self.assertEqual([r for r in refusals if f"/{name}:" in r], [], name)
+            self.assertIn(f"sub_backend/gb/{name}", axes, name)
+            self.assertIsNone(axes[f"sub_backend/gb/{name}"], name)
 
     def test_the_table_list_matches_the_state_module(self):
         from lisatools.globalfit import state as S

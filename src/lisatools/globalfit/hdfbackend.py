@@ -1587,7 +1587,9 @@ class ModuleSubBackend(eryn_HDFBackend):
     growable per-iteration dataset shaped ``(0, *arr.shape)``); ``save_step``
     writes ``state.sub_states[self.sub_name].storage_arrays()`` by name
     (creating the dataset of any array the store lacks, earlier rows at the
-    array's fresh-state value) and then zeroes the sub-state's delta
+    array's fresh-state value, or at the sub-state's
+    ``predating_fill_values`` entry where it names one) and then zeroes the
+    sub-state's delta
     counters; ``get_a_sample`` rebuilds a
     sub-state via ``state_class.from_stored``. Subclasses set
     :attr:`state_class`; :class:`GFHDFBackend` stamps :attr:`sub_name` with
@@ -1715,6 +1717,11 @@ class ModuleSubBackend(eryn_HDFBackend):
         ``-1/2 <r|r>``, never positive) and would shut every pair of a walker
         that loaded such a row. Zeros only where there is no single fresh
         value or no template can be built.
+
+        A sub-state can name a different value for rows that PREDATE the
+        array (``predating_fill_values``; GB: the valve's window-rule stamp
+        reads 1, the rule those rows were learned under, where a fresh
+        valve is stamped with the current rule). That value wins.
         """
         static = set(self.state_class.static_names)
         lengths = [
@@ -1724,13 +1731,18 @@ class ModuleSubBackend(eryn_HDFBackend):
         ]
         nrows = max(lengths + [int(iteration) + 1])
         legacy_dtype = set(getattr(sub_state, "legacy_dtype_names", ()))
-        fresh = self._fresh_storage_arrays(sub_state, names)
+        predating = dict(getattr(sub_state, "predating_fill_values", None) or {})
+        _need_fresh = [n for n in names if n not in predating]
+        fresh = (self._fresh_storage_arrays(sub_state, _need_fresh)
+                 if _need_fresh else {})
 
         for name in names:
             arr = np.asarray(arrays[name])
             dtype = self.dtype if name in legacy_dtype else arr.dtype
             fill = None
-            if name in fresh and np.shape(fresh[name]) == arr.shape:
+            if name in predating:
+                fill = np.asarray(predating[name]).astype(dtype)[()]
+            elif name in fresh and np.shape(fresh[name]) == arr.shape:
                 fill = _uniform_value(fresh[name], dtype)
             if fill is not None and fill == 0:
                 fill = None  # h5py's own default fill is already zero (NaN != 0)

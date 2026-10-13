@@ -325,9 +325,29 @@ runs inside `rj_fstat_search`):
 - **The da45aa98 unit switch** (residual term -> band gain) leaves a trace
   on any store that crossed it (the 9mo at row 57): the stored
   `band_cold_logl_max_w` were in the old units, so every streak reset ONCE at
-  the first judge after the change; the monitor's per-band lnL panels show a
-  +1,400-nat step at that row; and the in-model observation site is live
-  since then, so a mid-cycle high can reset a streak.
+  the first judge after the change; a store whose `band_cold_logl_w` holds
+  residual-unit rows shows a +1,400-nat step at the switch row (the
+  2026-10-13 9mo extract holds `-inf`, no statistic, in rows 0-56 instead; the
+  monitor's `gb_band_evo` raster blanks both kinds of row when it falls back
+  to this array); and the in-model observation site is live since then, so a
+  mid-cycle high can reset a streak.
+- **The window-rule switch (2026-10-13, `band_window_rule` 1 -> 2)**: on a
+  WDM grid the gain is formed on whole layers, and until then a sub-band
+  owned only the layers whose CENTRE it contains, i.e. none for 924 of the
+  1232 9mo sub-bands (band index 1-6 mod 8): their `band_cold_logl_w` is
+  exactly 0 on every row and walker, and their occupied pairs shut after 3
+  judges whatever their sources did (9mo row 66, the first gb_search_2 row
+  with a shut pair: 40.6 % of ALL blind (walker, band) pairs shut, about
+  every occupied one, against 7.7 % of the window-owning pairs; 41.6 % vs
+  39.0 % by row 138, the stage's last). Since then every sub-band owns its covering layer (the 8
+  sub-bands of a layer tile share its gain; the 308 window owners kept
+  theirs). A store that crossed the switch logs `[GB_GATE <move>] window
+  geometry v2: ... re-learning` ONCE at its first judge: every pair restarts
+  its patience window (nothing shuts for the next 3 judges), pairs shut
+  before stay shut until the next stage entry, and `band_window_rule` reads
+  1 on every row before that judge and 2 after. When reading a store's
+  gain per band, expect runs of 8 identical values (one per tile), not a
+  per-sub-band statistic; a sum over bands overcounts each layer.
 - **Stage end**: `[V9-STAGE <stage>] STAGE COMPLETE on the SHUTOFF rule
   ("every occupied pair has shut off")` (9mo search 1 at row 55, cycle 8
   leg 2) or on the nleaves plateau. Estimate the handover from the active
@@ -461,6 +481,7 @@ runs inside `rj_fstat_search`):
 | valve census `shut 0` forever, `band_cold_logl_max_w` all -inf while `_peak_w` is finite | the judge wrote into the state object eryn discards (`_arm_search_stage` ran before the state copy) | fixed fe26e09f (09-28) |
 | `[GB_IMGROUP in_model] pass 1: cold dlnL +0.000 ... shut 1232 / open 0`, 1-s in_model as the first move of a new stage | the pure in-model move bound the previous stage's all-shut table; release lived only in the RJ moves' bind path | fixed c3527ef6: release at step entry |
 | every resume: `RELEASED at step entry (stored step != 2): 0 pairs reopened`, active pairs jump 232 -> 1942 | the per-walker valve datasets were never created in the store; `save_step` skips missing datasets | fixed 8e1f5f5a (10-10); first resume on the new code still fresh |
+| 3 in 4 sub-bands (index 1-6 mod 8 on the 9mo grid) hold `band_cold_logl_w` exactly 0 on every row; their occupied pairs shut after exactly 3 judges, a wave of shuts at the first judge after every stage entry | the valve window held only the layers whose centre lies in the band; a 1/8-layer sub-band without a centre had an EMPTY window (`_window_bins`) | fixed 2026-10-13 (covering-layer window, `band_window_rule` 2, one persisted re-learn per store) |
 | births on ONE rank only in `[GB_ACCEPT rj-split rj_prior_removal]`; ranks 1-3 at opt-SNR 8 in a stage declared 5 | the stage profile / PE declarations were applied on the head only; compute ranks held their own move objects | fixed 9ebe7d9d (10-02; pushed in the merge ca61955d): live attrs shipped in the fan-out payload |
 | `KeyError: 'Unable to synchronously open object (message not aligned)'` on `global_fit/recipe/<step>` at resume; the backup copy identical | head-side stage stamps raced the saver (two HDF5 writers) at a stage transition; the validator never opened the recipe group so the torn header was byte-copied into the backup | fixed: validator 0a8c7d7f, head stamps routed through the saver 5bf31e7b; repair tools `salvage_recipe_group.py` / `repair_recipe_group.py` |
 | saver dies with `OSError: Unable to synchronously open file (file is already open for read-only)` after a page build | the in-process monitor generator left the store open after raising (`runpy` returns globals only on success) | fixed 95c1734a; monitor moved to its own rank 12dab4e2 |

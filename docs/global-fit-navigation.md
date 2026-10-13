@@ -220,7 +220,7 @@ commands for a login-node pre-build. Design: `docs/superpowers/specs/2026-09-18-
 | tool | command | what |
 |---|---|---|
 | the dashboard | `python scripts/diagnostics/gf_last_iteration.py RUN_DIR [--rows N] [--line]` | one screen: last row, stage, pace, the leg in flight, the RJ valve clock, empty bands, F-stat epochs, GPU, lnL, leaves, the stage cycle with per-move walls. Reads the store + the newest `slurm_stdout_<job>.log` (falls back to it when the artifacts log is absent). First thing to run on any run dir or extracted tar. |
-| the page (full + short) | `python -m lisatools.globalfit.monitor RUN_DIR [OUT.html] [--short-page] [--snapshot] [--build-truth]` | the html; `_short.build_glance` is the "at a glance" block on top; detail groups collapsed. In-run it is built by the monitor rank every `GF_MONITOR_ITER` saves. `GF_MONITOR_MATCH_STATS=1` for the overlap panels (default 1 since 2026-09-30). |
+| the page (full + short) | `python -m lisatools.globalfit.monitor RUN_DIR [OUT.html] [--short-page] [--snapshot] [--build-truth]` | the html; `_short.build_glance` is the "at a glance" block on top; detail groups collapsed. In-run it is built by the monitor rank every `GF_MONITOR_ITER` saves. `GF_MONITOR_MATCH_STATS=1` for the overlap panels (default 1 since 2026-09-30). Per-sub-band history (GB search group, "Model Size & Likelihood", 2026-10-13; generator section 5a-1, read shared with 5a-0's `BAND_HIST`): `gb_band_evo` = three band x iteration rasters on one y axis (the sub-bands that ever held a cold leaf, one row each): band lnL (sum of `d_h - h_h/2` over its live leaves) minus its final value, GB count minus the final count, share of walkers with the per-walker valve shut; pooled to the pixel grid. `gb_band_movers` = the 16 sub-bands that moved most over the last 100 rows, a line per walker, a valve-shut strip on top. Both need every row's leaf frequencies, i.e. the full store; on a snapshot extract the lnL raster falls back to the valve gain `band_cold_logl_w` (residual-unit rows before da45aa98 blanked, window-sharing sub-band pairs folded) and the count raster says it is unavailable. The older `gb_band_ll` line panel sits below them. |
 | page from a tar | `python -m lisatools.globalfit.monitor.from_tar SNAP.tar.gz [OUT.html] [--short-page]` | finds the run dir inside the tar; caches one extraction per tar under the temp dir (fills a laptop disk; `rm -rf` is safe). |
 | truth set | `python scripts/diagnostics/build_truth.py STORE.h5 --out RUN_DIR/gb_truth_3to21.npz --kappa-out RUN_DIR/kappa_grid.npz [--iteration ROW]` | the detectable-GB denominator the page matches against. The default row is the latest usable one (filled, not rewound, not torn; since 2026-09-26); pass `--iteration ROW` only to pin a row, e.g. to keep a previous denominator. Always route `--kappa-out` into the run dir (the CWD default clobbers the LAT-root 3-month cache). |
 | snapshot tars | `bash scripts/fstat_proposal/make_snapshots.sh RUN_DIR` (shell) and `monitor/snapshot.py` (the saver's in-package twin; both must change together) | a reduced `*_extract.h5` (full history of the small arrays, last `KEEP` rows of the big chains) + everything small in the run dir + the newest job logs. `--add-fstat` keeps the epoch payloads. |
@@ -329,6 +329,33 @@ Four distinct mechanisms print "shutoff" or "converged". Never conflate them.
 | **Level 3**: the per-walker RJ valve = the stage-end clock | an occupied (walker, band) PAIR | the band GAIN `1/2<d|d> - 1/2<r|r>` under the current noise (da45aa98; before that the residual term) vs a running best, tolerance `GB_SEARCH_BAND_SHUTOFF_LL_TOL` (20 nats), `GB_SEARCH_BAND_SHUTOFF_CONV_ITER` (3) judged cycles; judged once per cycle inside `rj_fstat_search` | `_ColdBandLnL.judge`, `_update_search_band_shutoff`, `_arm_search_stage`, `_release_search_band_shutoff`; stage side `release_band_shutoff_window`, `band_shutoff_w_pending_total` | `[GB_GATE <move>] occupied N \| shut N (x%) \| active N -- streak p50/p90 of 3 ...` and `[V9-STAGE ...] ... pair(s) still active` | `sub_backend/gb/band_rj_shutoff_w`, `band_shutoff_w_step`, `band_shutoff_best_w`, `band_shutoff_streak_w`, `band_cold_logl_max_w`, `band_cold_logl_w`, `band_shutoff_reset_w`, `band_cold_logl_peak_w` (per row, per walker, per band) |
 | **Empty-band valve**: births off in barren high-f bands | a BAND (all walkers) | cold occupancy 0 for `GB_RJ_BAND_SHUTOFF_ITERS` iterations; floor `GB_RJ_BAND_SHUTOFF_FMIN_MHZ` (10 mHz); revive check every `GB_RJ_BAND_SHUTOFF_RESET_ITERS` (10) iterations, revives only if the noise fingerprint moved | `_update_band_shutoff`, `_band_shutoff_restore`, `_band_shutoff_revive` | `[GB_BAND_SHUTOFF <move>] ...`, `[GB_BAND_REVIVE]` | `sub_backend/gb/band_rj_shutoff` (per row, per band), `band_occ_streak`, `band_shutoff_since_revive` |
 
+The level-3 window (user ruling 2026-10-13, "Give every sub-band its
+covering layer as the valve window"): the gain is formed on whole WDM
+layers, `gbspecialstretch.wdm_window_layers` via `GBSpecialBase._window_bins`,
+the one geometry the residual term, the data term (`_window_residual_lls` on
+the band grid) and the in-model sites' per-slot window (`_slot_band_windows`
+-> `_observed_band_gain`) all read. Layer `m` is CENTRED on `m * layer_df`
+(tile `[(m - 1/2), (m + 1/2)) * layer_df`; a GB at `f` lands in layer
+`round(f / layer_df)`). Since 2026-10-13 every band owns each layer whose
+tile it overlaps (`cover=True`), so the 8 sub-bands of a 9mo tile SHARE one
+gain (4 at the two grid ends). Before, only the layers whose centre lies in
+the band counted: 924 of the 1232 9mo sub-bands (all but band index 0 and 7
+mod 8) had an empty window, a gain of exactly 0 on every row, and shut after
+3 judges whatever their sources did. The cap-cell grid keeps that centres
+rule (`cover=False`; `_cap_cells_resolvable` needs sub-layer cells to come
+back empty). The rule is stamped per store in
+`sub_backend/gb/band_window_rule` (1 = centres, 2 = covering; `state.py`
+`VALVE_WINDOW_RULE*`, `ensure_valve_window_rule`); the first judge on a
+record learned under an older rule re-learns it once
+(`relearn_valve_window`: running max / best / peak -> -inf, streaks and
+reset counts -> 0, shut pairs kept until the next stage entry; log
+`[GB_GATE <move>] window geometry v2: ...`). Rows written before the stamp
+existed read 1 (`GBState.predating_fill_values`). Readers that SUM the gain
+over bands now count each layer up to 8 times
+(`scripts/diagnostics/walker_lnl_sources.py`), and the monitor's
+`gb_band_evo` fallback folds "window-sharing pairs" by adjacency, which
+under rule 2 folds whole runs of bands: both written for rule 1.
+
 How a shut level-3 pair behaves (user ruling 2026-09-28): it runs NOTHING
 until the next stage: no births, no deaths, no in-model repeats, no pure
 in-model passes, no vertical swaps. Shut pairs never reopen within a stage
@@ -436,6 +463,7 @@ sites in the tree are a fair proxy for importance.
 | `[LEG <stage>] cycle c leg i/n: ran [...] -> row saved after 'x'` / `[LEG ..] resume: ...` / `the stage's stored move order [...] differs from the live composition` (grep `stored move order`) | `globalfitmove.py`, `recipe.py` | which leg landed; a resume point; a cycle restarted at its head after a composition change |
 | `[V9-STAGE <stage>] entering (recipe step k): profile {...}` and every mutation / `RELEASED at step entry` / `reset_valves` / `STAGE COMPLETE ...` | `recipe.py` | stage entry, what the profile set on each GB move, valve release, stage end |
 | `[GB_GATE <move>] occupied N \| shut N (x%) \| active N -- streak p50 .. p90 .. of 3 ...` | `gbspecialstretch.py` | THE valve census; quote it, never infer the valve from leaf counts |
+| `[GB_GATE <move>] window geometry v2: every sub-band now owns its covering WDM layer(s) ... re-learning the per-(walker, band) running max ... Stamped band_window_rule=2` | `gbspecialstretch.py::_relearn_valve_window_once` | once per store, at the first judge of a store learned under the centres rule (2026-10-13); every pair restarts its patience window there, so nothing can shut for 3 more judges |
 | `[GB_BAND_SHUTOFF <move>] status ...` / `[GB_BAND_REVIVE <move>]` | `gbspecialstretch.py` | the empty-band valve: bands off, since-revive counter, revive events (`the noise model has moved by x%`; grep `has moved by`) |
 | `[GB_ACCEPT rj-split <move>] ...` / `[GB_ACCEPT in_model]` | `gbspecialstretch.py` | births / deaths proposed vs accepted per rung and cold, PER RANK |
 | `[GB_IMGROUP <move>] pass k: cold dlnL +x over N occupied sub-band(s); shut/open` | `gbspecialstretch.py` | the level-2 passes of the pure in-model moves |

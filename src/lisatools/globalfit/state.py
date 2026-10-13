@@ -648,6 +648,69 @@ SEARCH_SHUTOFF_ABSOLUTE_FIELD = "band_cold_logl_max_w"
 #: sentinel for "no recipe step recorded yet" in ``band_shutoff_w_step``
 SEARCH_SHUTOFF_STEP_UNSET = -1
 
+#: THE VALVE'S WINDOW RULE (user ruling 2026-10-13: "Give every sub-band its
+#: covering layer as the valve window"). The valve's gain is formed on a
+#: window of whole WDM layers (``GBSpecialBase._window_bins``), and the rule
+#: that picks those layers is versioned here, stamped per store in
+#: ``band_info["band_window_rule"]`` (shape ``(1,)``, int64), so a record
+#: learned under one rule is never judged as if it had been learned under
+#: another.
+#:
+#: * ``1`` -- CENTRES (every store written before 2026-10-13): the layers
+#:   whose CENTRE ``m * layer_df`` lies inside the band. The production
+#:   sub-bands are 1/8 of a layer wide, so 924 of the 1232 9mo sub-bands held
+#:   no centre, had an EMPTY window and a gain of exactly 0 on every row, and
+#:   their occupied pairs shut after the patience count whatever their
+#:   sources did (9mo row 66, the first gb_search_2 row with a shut pair:
+#:   40.6 % of all blind pairs shut -- about every occupied one -- against
+#:   7.7 % of the window-owning pairs).
+#: * ``2`` -- COVERING: every band owns the layer(s) whose WDM tile
+#:   ``[(m - 1/2), (m + 1/2)) * layer_df`` it overlaps. A superset of rule 1
+#:   (identical wherever the centre nearest each band edge lies inside the
+#:   band: the 308 window-owning 9mo sub-bands keep their layer), never
+#:   empty.
+#:
+#: The fit's first judge under a newer rule than the stamp RE-LEARNS the
+#: running max, peak, best and streak of every (walker, band) once and
+#: re-stamps (``gbspecialstretch.relearn_valve_window``); the stamp is saved
+#: with the rest of ``band_info``, so a resume never repeats it.
+VALVE_WINDOW_RULE_FIELD = "band_window_rule"
+VALVE_WINDOW_RULE_CENTRES = 1
+VALVE_WINDOW_RULE_COVERING = 2
+#: the rule this code judges under
+VALVE_WINDOW_RULE = VALVE_WINDOW_RULE_COVERING
+
+
+def ensure_valve_window_rule(band_info: dict) -> int:
+    """Make sure ``band_info`` carries the valve's window-rule stamp.
+
+    A stored stamp is kept (dtype and shape pinned). An ABSENT stamp is
+    inferred from the record it would describe: a window that holds
+    anything learned (a finite running max, best or peak, or a non-zero
+    streak) was learned by code older than the stamp, i.e. under
+    :data:`VALVE_WINDOW_RULE_CENTRES`; an empty one (a fresh valve, or one
+    that never judged) has nothing to re-learn and is stamped with the
+    current rule. Returns the rule now on ``band_info``.
+    """
+    cur = band_info.get(VALVE_WINDOW_RULE_FIELD)
+    if cur is not None:
+        arr = np.asarray(cur, dtype=np.int64).reshape(-1)[:1]
+        if arr.size == 1:
+            band_info[VALVE_WINDOW_RULE_FIELD] = arr
+            return int(arr[0])
+    learned = False
+    for name in ("band_cold_logl_max_w", "band_shutoff_best_w",
+                 "band_cold_logl_peak_w"):
+        a = band_info.get(name)
+        if a is not None and np.isfinite(np.asarray(a, dtype=float)).any():
+            learned = True
+    a = band_info.get("band_shutoff_streak_w")
+    if a is not None and np.any(np.asarray(a) != 0):
+        learned = True
+    rule = VALVE_WINDOW_RULE_CENTRES if learned else VALVE_WINDOW_RULE
+    band_info[VALVE_WINDOW_RULE_FIELD] = np.full(1, rule, dtype=np.int64)
+    return rule
+
 
 def _zero_search_shutoff_window(band_info: dict, num_bands: int,
                                 nwalkers: int) -> None:
@@ -786,8 +849,12 @@ def ensure_search_shutoff_fields(band_info: dict, num_bands: int,
         )
     present = [f for f in SEARCH_SHUTOFF_FIELDS
                if band_info.get(f) is not None]
+    # Every return below carries the window-rule stamp (see
+    # VALVE_WINDOW_RULE): judged after the valve and its window are in
+    # place, because an absent stamp is inferred from what the window holds.
     if not present:
         _zero_search_shutoff(band_info, num_bands, _nw)
+        ensure_valve_window_rule(band_info)
         return "fresh"
     if len(present) != len(SEARCH_SHUTOFF_FIELDS):
         missing = [f for f in SEARCH_SHUTOFF_FIELDS if f not in present]
@@ -796,6 +863,7 @@ def ensure_search_shutoff_fields(band_info: dict, num_bands: int,
             "discarding the partial record and reopening every "
             "(walker, band).", missing)
         _zero_search_shutoff(band_info, num_bands, _nw)
+        ensure_valve_window_rule(band_info)
         return "reset(partial)"
     _want = (_nw, int(num_bands))
     got = tuple(np.shape(band_info["band_rj_shutoff_w"]))
@@ -806,12 +874,14 @@ def ensure_search_shutoff_fields(band_info: dict, num_bands: int,
             "between runs, so the valve is being reopened rather than "
             "restored onto a grid it was not measured on.", got, _want)
         _zero_search_shutoff(band_info, num_bands, _nw)
+        ensure_valve_window_rule(band_info)
         return "reset(shape)"
     band_info["band_rj_shutoff_w"] = np.asarray(
         band_info["band_rj_shutoff_w"], dtype=bool)
     band_info["band_shutoff_w_step"] = np.asarray(
         band_info["band_shutoff_w_step"], dtype=np.int64).reshape(-1)[:1]
     _win = ensure_search_shutoff_window(band_info, num_bands, _nw)
+    ensure_valve_window_rule(band_info)
     if _win != "restored":
         # The valve survives; only its window restarts. Say which, because
         # "restored" on the valve with a fresh window means the run has to
@@ -1605,6 +1675,8 @@ class GBState(ModuleSubState):
                 "band_shutoff_best_w": 2, "band_shutoff_streak_w": 2,
                 "band_cold_logl_max_w": 2, "band_cold_logl_w": 2,
                 "band_shutoff_reset_w": 2, "band_cold_logl_peak_w": 2,
+                # the valve's window-rule stamp (2026-10-13)
+                VALVE_WINDOW_RULE_FIELD: 1,
             }
             for _key, _nd in _bare_ndim.items():
                 _arr = bi.get(_key)
@@ -1798,6 +1870,7 @@ class GBState(ModuleSubState):
                     "band_shutoff_best_w", "band_shutoff_streak_w",
                     "band_cold_logl_max_w", "band_cold_logl_w",
                     "band_shutoff_reset_w", "band_cold_logl_peak_w",
+                    VALVE_WINDOW_RULE_FIELD,
                 ):
                     bi.pop(_cap_key, None)
                 return _stored_nt
@@ -1948,6 +2021,15 @@ class GBState(ModuleSubState):
     #: band_info entries that are STATIC (written once at backend reset),
     #: not per-iteration storage arrays
     _static_band_info_names = ("band_edges", "cap_edges")
+
+    #: What a stored row written BEFORE an array existed means, where that
+    #: differs from the array's fresh-state value. Read by
+    #: ``ModuleSubBackend._create_missing_datasets`` for the earlier rows of
+    #: a dataset it creates on a store that predates it. The valve's window
+    #: rule: a fresh valve is stamped with the current rule (nothing learned),
+    #: but every row written before the stamp existed was learned under the
+    #: CENTRES rule -- a resume or a rewind onto such a row must re-learn.
+    predating_fill_values = {VALVE_WINDOW_RULE_FIELD: VALVE_WINDOW_RULE_CENTRES}
 
     def storage_arrays(self):
         """Every per-band array plus the tempered ``chain``/``inds``.

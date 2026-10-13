@@ -109,6 +109,9 @@ from ..state import (
     CAP_CELL_PER_WALKER_FIELDS,
     SEARCH_STAGE_COARSE,
     SEARCH_STAGE_FINE,
+    VALVE_WINDOW_RULE,
+    VALVE_WINDOW_RULE_FIELD,
+    ensure_valve_window_rule,
     ensure_band_shutoff_fields,
     ensure_cap_cell_fields,
     ensure_leaf_cap_fields,
@@ -2173,6 +2176,99 @@ def cold_band_lnl(state, branch_name="gb"):
         if not isinstance(bi.get(_k), np.ndarray):
             return None
     return _ColdBandLnL(bi)
+
+
+def relearn_valve_window(band_info, rule=VALVE_WINDOW_RULE):
+    """Re-learn the per-(walker, band) valve once under a newer window rule.
+
+    The valve's record -- the all-time running max, the cycle peak, the
+    legacy per-step best, the streak and the reset counts -- is only
+    meaningful under the window rule it was learned on
+    (``state.VALVE_WINDOW_RULE``). Under the CENTRES rule (every store
+    before 2026-10-13) 3 in 4 of the 9mo sub-bands owned no window and
+    learned a gain of exactly 0; the rest learned on the same layer they
+    own now. When ``band_info``'s stamp is older than ``rule`` this resets
+    that record IN PLACE (the arrays the judge's view and the saver hold),
+    re-stamps ``band_info["band_window_rule"]`` and returns
+    ``(stored_rule, n_pairs, n_shut)``; the next judge then sees every pair
+    improve on ``-inf`` and starts a fresh patience window. The shut set
+    is NOT reopened (a shut pair stays shut within its stage, user ruling
+    2026-09-28; the next stage entry releases it), and the per-iteration
+    value is not touched (the judge overwrites it).
+
+    Returns None when the stamp already reads ``rule`` or ``band_info``
+    carries no valve window. The stamp is saved with the band info, so a
+    store is re-learned exactly once.
+    """
+    if not isinstance(band_info, dict) or not isinstance(
+            band_info.get("band_cold_logl_max_w"), np.ndarray):
+        return None
+    stored = ensure_valve_window_rule(band_info)
+    if stored == int(rule):
+        return None
+    for name, fill in (("band_cold_logl_max_w", -np.inf),
+                       ("band_shutoff_best_w", -np.inf),
+                       ("band_cold_logl_peak_w", -np.inf),
+                       ("band_shutoff_streak_w", 0),
+                       ("band_shutoff_reset_w", 0)):
+        arr = band_info.get(name)
+        if isinstance(arr, np.ndarray):
+            arr[...] = fill
+    band_info[VALVE_WINDOW_RULE_FIELD][...] = int(rule)
+    shut = band_info.get("band_rj_shutoff_w")
+    return (int(stored), int(np.size(band_info["band_cold_logl_max_w"])),
+            0 if shut is None else int(np.count_nonzero(shut)))
+
+
+def wdm_window_layers(edges_hz, layer_df, ind_min_f, n_layers, cover=True,
+                      eps=1e-9):
+    """``(k0, k1)``: each frequency window's ``[k0, k1)`` in ACTIVE WDM layers.
+
+    THE WDM TILING (``lisatools.domains.WDMSettings``): layer ``m`` is
+    CENTRED on ``m * layer_df`` (``f_arr``) and its tile is
+    ``[(m - 1/2), (m + 1/2)) * layer_df`` (the boundaries ``get_slice``
+    builds a box from). A GB at ``f`` puts its power in layer
+    ``round(f / layer_df)``: measured with ``TDSignal.transform`` on a
+    tone, 100 % in layer ``n`` at ``f = (n + 1/16) * layer_df``, 100 % in
+    layer ``n + 1`` at ``(n + 15/16) * layer_df``, and the two layers
+    trade places across the tile edge ``(n + 1/2) * layer_df`` (54/45 %
+    at ``n + 0.484``, 36/63 % at ``n + 0.516``).
+
+    ``cover=True`` -- the VALVE rule since 2026-10-13 (user ruling: "Give
+    every sub-band its covering layer as the valve window";
+    ``state.VALVE_WINDOW_RULE_COVERING``): a window owns every layer whose
+    tile it overlaps, so a window of positive width is never empty. A
+    sub-band inside one tile owns that one layer (on the 9mo grid the 8
+    sub-bands of a tile share it, 4 at the two ends of the grid); one that
+    straddles a tile edge owns both. A superset of the centres rule, equal
+    to it wherever each edge's nearest centre lies inside the window (every
+    window-owning 9mo sub-band keeps its layer; a one-layer-per-band grid
+    on centre-aligned edges is unchanged).
+
+    ``cover=False`` -- the CENTRES rule (every store before 2026-10-13,
+    ``state.VALVE_WINDOW_RULE_CENTRES``; still the cap-cell grid's): only
+    the layers whose centre lies in the closed window. EMPTY for a window
+    narrower than a layer that holds no centre -- 924 of the 1232 9mo
+    sub-bands -- which is what ``_cap_cells_resolvable`` detects.
+
+    ``eps`` (layer units) keeps an edge on a tile boundary (cover) or on a
+    centre (centres) from gaining a layer on float noise. Clipped to
+    ``[0, n_layers]``; ``k1 >= k0``.
+    """
+    be = np.asarray(_to_numpy(edges_hz), dtype=float)
+    x_lo = be[:-1] / float(layer_df)
+    x_hi = be[1:] / float(layer_df)
+    if cover:
+        k0 = np.floor(x_lo + 0.5 + eps).astype(int)
+        k1 = np.floor(x_hi + 0.5 - eps).astype(int) + 1
+        # a window of positive width always owns its covering layer
+        k1 = np.maximum(k1, k0 + (x_hi > x_lo).astype(int))
+    else:
+        k0 = np.ceil(x_lo - eps).astype(int)
+        k1 = np.floor(x_hi + eps).astype(int) + 1
+    k0 = np.clip(k0 - int(ind_min_f), 0, int(n_layers))
+    k1 = np.clip(k1 - int(ind_min_f), 0, int(n_layers))
+    return k0, np.maximum(k1, k0)
 
 
 def _valve_data_array(acs):
@@ -21463,7 +21559,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """Each slot's own band window ``[lo, hi)`` along ITS frequency axis.
 
         The band's window comes from :meth:`_window_bins` -- the geometry the
-        residual and data terms use -- shifted by the slot's origin in the
+        residual and data terms use, i.e. the band's covering layer(s) on a
+        WDM grid (``cover=True``, 2026-10-13) -- shifted by the slot's origin in the
         parent (WDM: ``slab_min_f - ind_min_f``, 0 without narrow slabs; FD:
         ``buffer_start_index - start_freq_ind``). Returns ``(lo, hi, ok)``,
         host int arrays aligned with ``slots``; ``ok`` is False where the
@@ -21503,7 +21600,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         ⚠ THE WINDOW, NOT THE SLAB. The whole-slot reading this replaces
         covered the slab (the band plus its support margins: 5 layers
-        against the band's 2 on the 9mo grid), so its ``-1/2 <r|r>`` sat
+        against the band's 1 on the 9mo grid), so its ``-1/2 <r|r>`` sat
         thousands of nats below the band's and never won the peak's
         maximum. As a gain the slab would carry its NEIGHBOURS' explained
         power instead, and win every time.
@@ -21532,13 +21629,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                                     dtype=np.float64)
         return out
 
-    def _window_bins(self, acs, edges):
+    def _window_bins(self, acs, edges, cover=True):
         """``(k0, k1, n_bins, window_dof)``: each window's ``[k0, k1)``.
 
         Indices along the ACA's frequency axis (WDM: active layers; FD:
         stored bins). The ONE place this geometry lives: the residual term,
         the data term and the valve's per-slot window all read it, so the
         three cannot cover different pixels.
+
+        WDM: :func:`wdm_window_layers`. ``cover=True`` (the default, and
+        every BAND-grid caller: the valve's gain, its in-model observation,
+        the band residual term the leaf-cap gate and ``band_cold_ll``
+        record) gives every window its covering layer(s) -- user ruling
+        2026-10-13, ``state.VALVE_WINDOW_RULE_COVERING``; until then every
+        sub-band narrower than a layer that held no layer centre had an
+        empty window and a valve gain of exactly 0 (924 of the 1232 9mo
+        sub-bands). ``cover=False`` keeps the CENTRES rule for the cap-cell
+        grid, whose resolution test (:meth:`_cap_cells_resolvable`) and
+        partition windows depend on sub-layer cells coming back empty. FD
+        windows are the stored bins either way.
         """
         bs = self._basis_settings
         be = _to_numpy(edges)
@@ -21548,13 +21657,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             ind_min_f = int(bs.ind_min_f)
             Nf = int(bs.Nf_active)
             Nt = int(bs.Nt_active)
-            k0 = np.clip(
-                np.ceil(be[:-1] / layer_df - 1e-9).astype(int) - ind_min_f, 0, Nf
-            )
-            k1 = np.clip(
-                np.floor(be[1:] / layer_df + 1e-9).astype(int) + 1 - ind_min_f,
-                0, Nf,
-            )
+            k0, k1 = wdm_window_layers(be, layer_df, ind_min_f, Nf, cover=cover)
             # real WDM coefficients: 1 dof per (channel, layer, time) pixel
             dof_per_bin = nchannels * Nt
         else:
@@ -21568,7 +21671,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         k1 = np.maximum(k1, k0)
         return k0, k1, Nf, (k1 - k0) * dof_per_bin
 
-    def _window_residual_lls(self, acs, edges, data=None):
+    def _window_residual_lls(self, acs, edges, data=None, cover=True):
         """Cold-walker residual ll ``-1/2 <r|r>`` per frequency window.
 
         Returns ``(lls, dof)`` with ``lls`` a host
@@ -21587,7 +21690,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         is one ``layer_df`` wide, so sub-layer cap cells come back with
         EMPTY (``k1 == k0``) windows and zero dof -- which is precisely what
         :meth:`_cap_cells_resolvable` detects and what pushes the cap gate
-        onto the source-attributed statistic instead.
+        onto the source-attributed statistic instead. That is the CENTRES
+        rule, ``cover=False``, which the two cap-grid callers pass; the band
+        grid (``cover=True``, default) gives every window its covering
+        layer(s), so a sub-layer BAND shares its layer's value with the
+        other bands in that layer (:meth:`_window_bins`).
 
         ``data`` (default None): reduce THIS array -- the run's data, one
         ``(nchannels, *end_shape)`` plane shared by every walker -- in place
@@ -21604,7 +21711,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # XYZ runs carry the full cross-channel inverse covariance
         # (shape_sens == (nc, nc)); AET/AE runs a per-channel diagonal.
         is_xyz = len(acs.shape_sens) == 2
-        k0, k1, Nf, window_dof = self._window_bins(acs, edges)
+        k0, k1, Nf, window_dof = self._window_bins(acs, edges, cover=cover)
 
         # ``w`` labels the reduced array's walker axis: the residual has a row
         # per walker, the DATA is one plane they all share -- contracted as
@@ -23253,6 +23360,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # streak ONCE (one count in ``band_shutoff_reset_w``); judging is
         # normal from the next iteration. gb_search_2's fresh entry resets
         # the max anyway (``reset_valves``).
+        #
+        # ⚠ WINDOW-RULE TRANSITION (user ruling 2026-10-13, persisted): a
+        # record learned under an older window rule (``band_window_rule``
+        # 1, the CENTRES rule: 3 in 4 of the 9mo sub-bands judged a gain of
+        # exactly 0 on an empty window) is RE-LEARNED here, once per store,
+        # before this judge reads it -- see :func:`relearn_valve_window`.
+        self._relearn_valve_window_once(self._shutoff_band_info)
         _cur_obs = np.where(np.isnan(lls), -np.inf, lls)
         np.maximum(_view.peak, _cur_obs, out=_view.peak)
         converged = _view.judge(tol, self.search_shutoff_conv_iter, occ,
@@ -23362,6 +23476,44 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     float(_view.max[w, b]), float(_view.value[w, b]),
                     int(occ[w, b]), int(_view.streak[w, b]),
                 )
+
+    def _relearn_valve_window_once(self, band_info):
+        """:func:`relearn_valve_window` on the judge's ``band_info`` + its
+        one log line. A no-op (None) once the stamp reads the current rule,
+        i.e. on every judge after the first one under it, on this store."""
+        out = relearn_valve_window(band_info)
+        if out is None:
+            return None
+        stored, n_pairs, n_shut = out
+        census = ""
+        try:
+            bs = self._basis_settings
+            if isinstance(bs, WDMSettings):
+                be = _to_numpy(self.band_edges)
+                args = (be, float(bs.layer_df), int(bs.ind_min_f),
+                        int(bs.Nf_active))
+                k0, k1 = wdm_window_layers(*args, cover=False)
+                n0, n1 = wdm_window_layers(*args, cover=True)
+                census = (
+                    f" Under rule {stored} {int(np.sum(k1 == k0))} of "
+                    f"{k0.size} sub-bands owned no layer (gain exactly 0); "
+                    f"now {int(np.sum(n1 == n0))} do, "
+                    f"{int(np.sum((n0 != k0) | (n1 != k1)))} changed window.")
+        except Exception as exc:  # noqa: BLE001 -- telemetry only
+            census = f" (window census unavailable: {exc!r})"
+        logger.info(
+            "[GB_GATE %s] window geometry v%d: every sub-band now owns its "
+            "covering WDM layer(s) as the valve window (user ruling "
+            "2026-10-13); the stored record was learned under rule %d, so "
+            "re-learning the per-(walker, band) running max: "
+            "band_cold_logl_max_w / band_shutoff_best_w / band_cold_logl_peak_w "
+            "-> -inf, streaks and reset counts -> 0 on %d pairs; %d pair(s) "
+            "shut under the old rule stay shut until the next stage entry "
+            "releases them.%s Stamped band_window_rule=%d (saved with the band "
+            "info: a resume does not repeat this).",
+            self.name, int(VALVE_WINDOW_RULE), stored, n_pairs, n_shut,
+            census, int(VALVE_WINDOW_RULE))
+        return out
 
     def _shutoff_exempt_bands(self, fmin_hz, num_bands):
         """``(num_bands,)`` bool: bands whose CENTRE lies below ``fmin_hz``.
@@ -23981,7 +24133,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         cached = getattr(self, "_cap_resolvable_cache", None)
         if cached is not None:
             return cached
-        _, dof = self._window_residual_lls(acs, self.cap_edges)
+        # The CENTRES rule (cover=False): a cap cell with no layer centre of
+        # its own has no window -- the test this method makes. The covering
+        # rule would hand every sub-layer cell its tile's layer, shared with
+        # its neighbours, and call every grid resolvable.
+        _, dof = self._window_residual_lls(acs, self.cap_edges, cover=False)
         ok = bool(np.all(np.asarray(dof) > 0))
         self._cap_resolvable_cache = ok
         logger.info(
@@ -24029,8 +24185,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the band gate would see one iteration later.
         """
         if self._cap_cells_resolvable(model.analysis_container_arr):
+            # the PARTITION windows (centres rule): see _cap_cell_source_lls
             lls, dof = self._window_residual_lls(
-                model.analysis_container_arr, self.cap_edges
+                model.analysis_container_arr, self.cap_edges, cover=False
             )
             self._cap_ll_check(lls, band_lls)
             return lls, dof

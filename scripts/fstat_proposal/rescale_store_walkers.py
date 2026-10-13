@@ -222,6 +222,9 @@ def _sub_signatures(a):
         # the valve's recipe-step stamp and the min-over-walkers stage
         # mirror: walker-free despite the names
         sig["band_shutoff_w_step"] = (None, (1,))
+        # the valve's window-rule stamp (state.VALVE_WINDOW_RULE_FIELD,
+        # 2026-10-13): one int per row, walker-free
+        sig["band_window_rule"] = (None, (1,))
         sig["band_stage"] = (None, (nb,))
         # per-band and per-(band, temp) state: the leaf caps, the shutoff
         # ladder and the swap census. All walker-free, which is exactly why
