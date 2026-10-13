@@ -134,6 +134,36 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(len(ns["MISSING"]), 1)
         self.assertIn("only 1 of the 20 rows", ns["MISSING"][0])
 
+    def test_empty_sub_bands_raise_no_all_nan_warning(self):
+        # 2026-10-13, 9mo: 724 of 1232 sub-bands hold no live leaf in any walker,
+        # and the per-band peak, np.nanargmax(np.nanmax(_last, axis=0)), warned
+        # "All-NaN slice encountered" on every build. Two of these four bands are
+        # empty in both walkers.
+        import warnings
+
+        global EDGES
+        saved = EDGES
+        EDGES = np.array([1e-3, 2e-3, 4e-3, 8e-3, 9e-3, 1e-2])
+        self.addCleanup(globals().__setitem__, "EDGES", saved)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            ns = self._run(130)
+        self.assertEqual(ns["MISSING"], [])
+        cap = ns["GB_BAND_LL_CAP"]
+        self.assertIn("At the last row (129) 3 of 5 sub-bands are occupied", cap)
+        # the peak: row 129, both walkers, the 3-4 mHz band (two leaves each in
+        # walker 0): 2 x (h_h/2 + 2) with h_h = 10 (1 + 129/130)
+        peak = 2 * (5.0 * (1 + 129 / 130) + 2.0)
+        self.assertIn(f"the largest is {peak:,.0f} nats at 3.00 mHz", cap)
+
+    def test_an_unwritten_newest_row_is_named_in_the_caption(self):
+        # a live store read mid-save: the newest rows carry no d_h / h_h yet
+        ns = self._run(130, written_rows=range(0, 127))
+        cap = ns["GB_BAND_LL_CAP"]
+        self.assertIn("At row 126, the newest row with d_h / h_h (rows 127-129 are "
+                      "unwritten or unreadable in this store),", cap)
+        self.assertNotIn("At the last row", cap)
+
     def test_the_page_places_the_panel(self):
         with open(generator_path(), encoding="utf-8") as fh:
             src = fh.read()

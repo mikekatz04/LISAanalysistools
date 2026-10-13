@@ -369,6 +369,69 @@ def _l1_usable(fp):
         return False, f"{type(e).__name__}: {e}"
 
 
+#: Bricks already reported unusable in this process. ``find_l1_brick`` runs
+#: several times per monitor build (the truth build, the at-a-glance overlap,
+#: each ``--add-info`` run's overlap), and each used to print the same list
+#: again (2026-10-13).
+_REPORTED_BAD_BRICKS = set()
+
+
+def brick_loss_note(fp):
+    """What the MONITOR loses when L1 brick ``fp`` cannot be opened, by type.
+
+    Orbits never: every L1 brick carries the same orbit / light-travel-time
+    tables, so the truth build and the overlap waveforms take the next
+    readable one. What a broken brick does cost is its OWN content:
+
+    * ``NOISE_*`` -- the injected Soms_d / Sa_a the noise panels draw as truth
+      (full page and at-a-glance) fall back to the round analytic injection
+      (1.5e-11 / 3e-15; the brick refit agrees to 3e-6 / 4e-5), and the page
+      says so in its Notes.
+    * a source brick (``GB`` / ``VGB`` / ``MBHB`` / ``EMRI`` / ``SOBHB``) --
+      the full page's data / template / residual rebuild leaves that source
+      out of the data it sums, with a Notes line, but ONLY for a run that did
+      not read mojito's ``COMBINED`` stream (a COMBINED run's page reads the
+      combined brick and nothing else).
+    * ``COMBINED`` -- the page sums the run's own per-type bricks instead
+      (Notes line); with none of those readable either, the data / template /
+      residual and whitened-residual panels are not drawn.
+    """
+    base = os.path.basename(str(fp))
+    kind = base.split("_", 1)[0].upper()
+    if kind == "NOISE":
+        return ("noise truth lines fall back to the analytic injection "
+                "(full page + at-a-glance)")
+    if kind == "COMBINED":
+        return ("the page's data / template / residual rebuild sums the run's per-type "
+                "bricks instead")
+    if kind in ("GB", "VGB", "MBHB", "EMRI", "SOBHB", "GALFOR"):
+        return (f"this {kind} source is left out of the page's data sum, but only "
+                "on a run that did not read COMBINED")
+    return "nothing the monitor reads"
+
+
+def report_skipped_bricks(skipped, used=None, out=print):
+    """The one warning for unreadable L1 bricks, at most once per brick per
+    process: a header, then ONE line per brick (path, error, what the page
+    loses), then what to do. Returns the lines printed."""
+    new = [(fp, why) for fp, why in skipped if fp not in _REPORTED_BAD_BRICKS]
+    if not new:
+        return []
+    _REPORTED_BAD_BRICKS.update(fp for fp, _ in new)
+    lines = [f"WARNING: skipped {len(new)} unusable mojito L1 brick(s)"
+             + (f"; orbits read from {os.path.basename(used)} instead (every L1 "
+                "brick carries the same orbit tables, so the truth set loses nothing)"
+                if used else "") + ":"]
+    for fp, why in new:
+        lines.append(f"    {fp}: {why.splitlines()[0][:160] if why else 'unreadable'}"
+                     f" -> {brick_loss_note(fp)}")
+    lines.append("    These files are truncated or corrupt on disk: re-fetch them into "
+                 "the mojito cache. The page notes each loss under Notes.")
+    for ln in lines:
+        out(ln)
+    return lines
+
+
 def find_l1_brick(path=None):
     """Any mojito L1 file -- they all carry the same orbits/ltt tables.
 
@@ -429,10 +492,7 @@ def find_l1_brick(path=None):
             ok, why = _l1_usable(fp)
             if ok:
                 if skipped:
-                    print(f"WARNING: skipped {len(skipped)} unusable L1 "
-                          f"brick(s) before {os.path.basename(fp)}:")
-                    for bad, reason in skipped:
-                        print(f"    {bad}\n      {reason}")
+                    report_skipped_bricks(skipped, used=fp)
                 return fp
             skipped.append((fp, why))
     if skipped:
@@ -440,9 +500,8 @@ def find_l1_brick(path=None):
         # directory full of BROKEN bricks is a different problem from a
         # directory with none, and only this distinguishes them.
         print(f"WARNING: found {len(skipped)} mojito L1 brick(s) and NONE "
-              f"could be opened:")
-        for bad, reason in skipped:
-            print(f"    {bad}\n      {reason}")
+              f"could be opened; the orbits fall back to the analytic ephemeris:")
+        report_skipped_bricks(skipped)
     return None
 
 
@@ -534,15 +593,35 @@ def catalogue_phys(t_ref, flo=FLO, fhi=FHI, catalogue=None):
     return phys
 
 
-def opt_snr(phys, sa, se, gbw, df, tobs, nw, batch=20000):
+def snr_progress_due(done, total, shown):
+    """``(print_now, shown)`` for the ``snr:`` progress line of :func:`opt_snr`.
+
+    At most one line per QUARTER of ``total`` and always one at the end
+    (user request 2026-10-13: the monitor log carried 51 lines of
+    ``snr: 20000/1008443`` ... ``snr: 1008443/1008443``). ``shown`` is the
+    number of quarters already reported.
+    """
+    total = max(int(total), 1)
+    q = min(4, (4 * int(done)) // total)
+    if int(done) >= total:
+        return True, 4
+    if q > shown:
+        return True, q
+    return False, shown
+
+
+def opt_snr(phys, sa, se, gbw, df, tobs, nw, batch=20000, progress=True):
     """Optimal SNR of each row: 4 df sum(|A|^2/SA + |E|^2/SE), sqrt.
 
     ``tobs`` is the run's observation time -- it enters BOTH the waveform
     (``T=`` in ``run_wave``, which sets how long the source integrates) and
     the inner-product measure ``df = 1/tobs``; ``sa``/``se`` must already be
-    sampled on that same ``df`` grid.
+    sampled on that same ``df`` grid. ``progress=False`` prints nothing (the
+    kappa prefilter's eight small calls); otherwise at most one ``snr:`` line
+    per quarter of the rows, the last at completion.
     """
     out = np.zeros(len(phys))
+    _shown = 0
     # One batch holds ``batch x nw`` complex A and E. That was harmless at
     # 4.7k rows and nw=128; over the full band the kept set is tens of
     # thousands and a 1-year build carries nw=512, so the knob is exposed --
@@ -561,7 +640,10 @@ def opt_snr(phys, sa, se, gbw, df, tobs, nw, batch=20000):
             out[lo + i] = np.sqrt(
                 4 * df * (np.abs(A[i]) ** 2 / _sa
                           + np.abs(E[i]) ** 2 / _se).real.sum())
-        print(f"  snr: {min(lo + B, len(phys))}/{len(phys)}", flush=True)
+        _done = min(lo + B, len(phys))
+        _due, _shown = snr_progress_due(_done, len(phys), _shown)
+        if progress and _due:
+            print(f"  snr: {_done}/{len(phys)}", flush=True)
     return out
 
 
@@ -722,7 +804,8 @@ def main(argv=None):
             np.zeros(fgrid.size), np.zeros(fgrid.size),
             np.zeros(fgrid.size), np.zeros(fgrid.size),
             np.full(fgrid.size, lam), np.full(fgrid.size, beta)])
-        kap = np.maximum(kap, opt_snr(proto, sa, se, gbw, df, tobs, nw) / A0)
+        kap = np.maximum(kap, opt_snr(proto, sa, se, gbw, df, tobs, nw,
+                                      progress=False) / A0)
     keep = phys[:, 0] * np.interp(phys[:, 1], fgrid, kap) > 0.5 * SNR_DET
     print(f"kappa prefilter keeps {keep.sum()} / {len(phys)}")
     # keys are the monitor's contract: kappa_grid.npz carries fgrid/fit. The

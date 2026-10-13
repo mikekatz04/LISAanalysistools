@@ -852,8 +852,13 @@ def _safe(node, key, default=None, label=None):
                 # The backup is PREALLOCATED to the full run length, so slice
                 # to the iterations it has actually written -- otherwise a
                 # 5-row store returns 2000 rows of zeros and every plot built
-                # on it is mostly empty padding.
+                # on it is mostly empty padding. And never past NIT: a backup
+                # opened late in a build on a LIVE store can be AHEAD of the
+                # page (rows the page does not describe), and a dataset longer
+                # than its siblings breaks every panel that pairs them.
                 _bn = int(bg.attrs.get("iteration", 0))
+                if _bn and NIT:
+                    _bn = min(_bn, NIT)
                 arr = bg[sub_key][:_bn] if _bn else bg[sub_key][()]
                 MISSING.append(
                     f"{label or key}: torn in the live store, recovered from "
@@ -911,6 +916,62 @@ def _row(name, sel):
             pass
     _TORN_ROWS.append(f"{name} {where} SKIPPED")
     return None
+
+
+# RE-OPEN THE STORE BEFORE A LATE READ (2026-10-13). A hand build against the
+# LIVE 9mo store (job 759, `python -m lisatools.globalfit.monitor RUN_DIR`,
+# 973 s) lost every MBHB on the page and every MBH / EMRI / SOBBH row in the
+# at-a-glance block. HDF5 caches a file's metadata (chunk B-trees, object
+# headers) when it is opened, and a reader without SWMR never refreshes it.
+# The run saved a row every few minutes, rewriting and relocating the
+# compressed chunks of every chain, so the later a dataset was read the more
+# of the cached addresses pointed at freed or reused space: "filter returned
+# failure during read" on chain/mbh, chain/gb rows 192-198 and the ratchet
+# scorecard, "addr overflow ... eoa" on the RJ counters -- all read 10-15
+# minutes into the build. Re-opening on the SAME handle does not help: a
+# second ``h5py.File`` on a path this process already holds open shares that
+# file's (stale) cache, which is why the glance block, opened last with its
+# own handle, failed too. Closing every handle and opening again does. Rows
+# below NIT are final, so the page stays one snapshot of rows 0..NIT-1. The
+# backup copy is dropped as well: the saver replaces it atomically, and a
+# handle opened early keeps the OLD file, rows short of NIT.
+def _close_store():
+    """Close this page's handles on the store and on the backup copy."""
+    global _BACKUP_G
+    for _h in (globals().get("f"), _BACKUP_G.file if _BACKUP_G else None):
+        try:
+            if _h is not None and _h.id.valid:
+                _h.close()
+        except Exception:                          # noqa: BLE001
+            pass
+    _BACKUP_G = None
+
+
+def _reopen_store():
+    """Close and re-open the store so the reads that follow see it as it is NOW
+    (see the note above). Rebinds the module handles ``f``, ``g``, ``sub``,
+    ``rg`` and ``_gb_inds_ds``; any other handle taken before is invalid after."""
+    global f, g, sub, rg, _gb_inds_ds
+    _close_store()
+    f = h5py.File(h5path, "r")
+    g = f["global_fit"]
+    sub = g.get("sub_backend")
+    rg = f.get("global_fit/recipe", f.get("recipe"))
+    _gb_inds_ds = g.get("inds/gb")
+
+
+def _fresh_store(where):
+    """``_reopen_store`` at the start of a late section that takes its own
+    dataset handles (the ratchet panels, the scorecard, the RJ counters, the
+    source dropdowns: on the 9mo page those failed with "filter returned
+    failure" / "addr overflow"). Every caller is followed by a section that
+    sits in its own try, so a store that cannot be opened again costs that
+    section and a Notes line, never the page."""
+    try:
+        _reopen_store()
+    except Exception as _e:                        # noqa: BLE001
+        MISSING.append(f"{where}: re-opening the store failed "
+                       f"({type(_e).__name__}: {_e}).")
 
 
 # Every GB panel stands on these two; without them there is no page to degrade to.
@@ -1119,6 +1180,35 @@ SOMS_INJ, SA_INJ = psd_truth_levels(
     # only appears in whatever scrollback the operator happens to keep.
     mojito_data_path=MOJITO_INFO_PATH or os.environ.get("MOJITO_DATA_PATH")
 )
+from lisatools.globalfit.monitor.build_truth import (  # noqa: E402
+    _l1_usable, brick_loss_note)
+
+
+def unusable_brick_note(fp, what):
+    """A Notes line for an L1 brick that exists but does not open (truncated
+    download), or ``None`` when ``fp`` is absent or fine. ``what`` names the
+    panel that loses it (2026-10-13: four truncated bricks on the cluster
+    cache cost the page in silence -- only build_truth's stdout named them)."""
+    if not fp or not os.path.exists(fp):
+        return None
+    ok, why = _l1_usable(fp)
+    if ok:
+        return None
+    return (f"{what}: mojito brick {os.path.basename(fp)} is unreadable "
+            f"({str(why).splitlines()[0][:160]}) -- {brick_loss_note(fp)}. The file is "
+            "truncated or corrupt on disk; re-fetch it.")
+
+
+if MOJITO_INFO_PATH or os.environ.get("MOJITO_DATA_PATH"):
+    try:
+        from lisatools.globalfit.stock.erebor.noise import resolve_noise_file
+        _nb = unusable_brick_note(
+            resolve_noise_file(MOJITO_INFO_PATH or os.environ.get("MOJITO_DATA_PATH")),
+            "noise truth lines")
+        if _nb and not os.environ.get("PSD_TRUTH"):
+            MISSING.append(_nb + f" Drawn instead: Soms_d {SOMS_INJ:.4g}, Sa_a {SA_INJ:.4g}.")
+    except Exception:                                # noqa: BLE001 - a note, never the page
+        pass
 if not (MOJITO_INFO_PATH or os.environ.get("MOJITO_DATA_PATH")):
     MISSING.append(
         "no MOJITO_INFO_PATH: the Soms_d / Sa_a truth lines are the analytic "
@@ -1802,10 +1892,28 @@ try:
     _cb.set_label("sub-band centre frequency [mHz]")
     fig_b64(fig, "gb_band_ll")
 
-    _last = _bl[np.nonzero(_bl_have)[0][-1]]                  # (walker, band)
+    # THE LAST ROW THAT CARRIES d_h / h_h, and its per-band peak (2026-10-13).
+    # Most sub-bands hold no live leaf in ANY walker (724 of 1232 on the 9mo
+    # store at row 203: the 15-22 mHz bands are empty), and the old
+    # ``np.nanargmax(np.nanmax(_last, axis=0))`` warned "All-NaN slice
+    # encountered" for every one of those columns on every build. Empty bands
+    # are expected, not a fault: take the per-band max over the walkers that
+    # HAVE a value (-inf elsewhere) and name the row the caption describes,
+    # which is not the last stored row when the newest rows' d_h / h_h were
+    # unwritten or unreadable (a live store read mid-save).
+    _k_last = int(np.nonzero(_bl_have)[0][-1])
+    _row_last = int(_bl_rows[_k_last])
+    _last = _bl[_k_last]                                       # (walker, band)
     _occ = np.isfinite(_last).sum(axis=1)
     _neg = int((np.nan_to_num(_last, nan=1.0) <= 0).sum())
-    _bmax = int(np.nanargmax(np.nanmax(_last, axis=0)))
+    _colmax = np.where(np.isfinite(_last), _last, -np.inf).max(axis=0)
+    _bmax = int(np.argmax(_colmax))
+    _lmax = float(_colmax[_bmax])
+    _at_row = (f"At the last row ({_row_last})" if _row_last == NIT - 1 else
+               f"At row {_row_last}, the newest row with d_h / h_h (rows "
+               f"{_row_last + 1}-{NIT - 1} are unwritten or unreadable in this store),")
+    _peak = (f"the largest is {_lmax:,.0f} nats at {_fc[_bmax]:.2f} mHz"
+             if np.isfinite(_lmax) else "no sub-band holds a live leaf with a finite value")
     GB_BAND_LL_CAP = (
         f"One line per (cold walker, sub-band), all {gb_inds.shape[1]} walkers drawn "
         "alike and coloured by the sub-band's centre frequency in fixed classes "
@@ -1813,9 +1921,8 @@ try:
         "The value is the log-likelihood the band's live GB leaves buy: the sum over "
         "them of &lang;d|h&rang; &minus; &lang;h|h&rang;/2, with d the residual plus "
         "that leaf's own template, so roughly half the band's summed SNR&sup2;. "
-        f"At the last row {int(np.median(_occ))} of {_last.shape[1]} sub-bands are "
-        f"occupied (median over walkers); the largest is "
-        f"{np.nanmax(_last):,.0f} nats at {_fc[_bmax]:.2f} mHz. A band appears when "
+        f"{_at_row} {int(np.median(_occ))} of {_last.shape[1]} sub-bands are "
+        f"occupied (median over walkers); {_peak}. A band appears when "
         "it gains its first leaf and drops out when it loses its last. Left: "
         f"{len(_bl_rows) - min(BAND_LL_ZOOM, NIT)} strided rows plus the last "
         f"{min(BAND_LL_ZOOM, NIT)}; right: every one of the last "
@@ -3238,6 +3345,19 @@ def walker_residual_x(w, wbest, snap, page_resid_x, tmpl_x, snap_fd_x, data_x):
                        f"walker {s})")
 
 
+def ad_statistic(v):
+    """Anderson-Darling A^2 of ``v`` against a normal, without SciPy 1.17's
+    FutureWarning (2026-10-13). ``method="interpolate"`` only adds a table
+    p-value to the result; the statistic is the same number, and the residual
+    panel keeps computing its own p-value from it (Stephens' closed form).
+    SciPy < 1.17 has no ``method`` keyword."""
+    from scipy.stats import anderson
+    try:
+        return float(anderson(v, dist="norm", method="interpolate").statistic)
+    except TypeError:
+        return float(anderson(v, dist="norm").statistic)
+
+
 DTR = {}
 FGW = {}        # whitened-residual-per-band readout (filled inside the block below)
 FG_RESID_SRC = ""   # one sentence: how the whitened panels' residuals were built
@@ -3336,12 +3456,16 @@ try:
     _files = {}
     if "COMBINED" in _stypes:
         try:
-            _files["COMBINED"] = find_combined_file(
+            _cfp = find_combined_file(
                 os.path.join(MOJITO_CAT_DIR, "data", "COMBINED", "L1"))
+            _bad = unusable_brick_note(_cfp, "data/template/residual data stream")
+            if _bad:
+                raise OSError(_bad)
+            _files["COMBINED"] = _cfp
             _types = ["COMBINED"]
         except (FileNotFoundError, OSError) as _exc:
             MISSING.append(
-                f"the run read mojito's COMBINED stream, which is not in this "
+                f"the run read mojito's COMBINED stream, which is not usable in this "
                 f"machine's cache ({_exc}); the data here is the sum of the "
                 f"run's own per-type bricks that ARE cached instead.")
     if not _files:
@@ -3352,11 +3476,19 @@ try:
                     if _ids else [0])
             for _sid in _ids:
                 try:
-                    _files[f"{_t}{_sid}" if len(_ids) > 1 else _t] = find_file(
-                        _folder, _t, _sid)
+                    _fp_b = find_file(_folder, _t, _sid)
                 except (FileNotFoundError, OSError):
                     MISSING.append(f"mojito {_t} source {_sid} brick not in this "
                                    f"machine's cache; left out of the data.")
+                    continue
+                # A TRUNCATED brick used to raise inside MojitoL1File below and
+                # take the whole data/template/residual section with it; leave
+                # that one source out instead and say which.
+                _bad = unusable_brick_note(_fp_b, f"data/template/residual ({_t} {_sid})")
+                if _bad:
+                    MISSING.append(_bad)
+                    continue
+                _files[f"{_t}{_sid}" if len(_ids) > 1 else _t] = _fp_b
         if not _files:
             raise FileNotFoundError("no local mojito L1 brick for this run")
 
@@ -3847,7 +3979,6 @@ try:
     # about, and the bins would no longer be comparable to each other.
     _adp = np.full(_NB, np.nan)
     try:
-        from scipy.stats import anderson as _anderson
         _rng = np.random.default_rng(0)
         _ord = np.argsort(_bi, kind="stable")
         _zs = _zA[_ord]
@@ -3859,7 +3990,7 @@ try:
             _v = np.concatenate([_v.real, _v.imag])
             if _v.size > 600:
                 _v = _rng.choice(_v, 600, replace=False)
-            _A2 = float(_anderson(_v, dist="norm").statistic)
+            _A2 = ad_statistic(_v)
             _n = _v.size
             _As = _A2 * (1 + 0.75 / _n + 2.25 / _n ** 2)
             if _As < 0.2:
@@ -4104,9 +4235,12 @@ try:
                  for _k, (_w, _wc, _wl) in enumerate(_WSHOW)]
         FG_RESID_SRC = f" Residuals: {_wsrc}."
 
+        # NO hspace in gridspec_kw (2026-10-13): a gridspec carrying its own
+        # subplot params is one tight_layout refuses ("This figure includes
+        # Axes that are not compatible with tight_layout"), so the call below
+        # was a silent no-op on every build. The spacing is set after it.
         fig, ax = plt.subplots(4, 1, figsize=(11.6, 10.4), sharex=True,
-                               gridspec_kw=dict(height_ratios=[2.4, 1.2, 1.2, 0.9],
-                                                hspace=0.08))
+                               gridspec_kw=dict(height_ratios=[2.4, 1.2, 1.2, 0.9]))
         for a_ in ax:
             a_.axvspan(3.0, 5.0, color=FG, alpha=0.05, lw=0)
             a_.set_xscale("log")
@@ -4148,12 +4282,13 @@ try:
             f"carries exactly the power the fitted noise says\nresiduals -- {_wsrc_t}",
             fontsize=9, color=FG)
         fig.tight_layout(rect=[0, 0, 1, 0.945])
+        fig.subplots_adjust(hspace=0.08)
         fig_b64(fig, "fg_whitened_bands")
 
         # ---- ZOOM 2.5-5.5 mHz, linear frequency (user request 2026-10-02) ----
         _zm = (_bfc >= 2.5) & (_bfc <= 5.5)
         fig, ax = plt.subplots(3, 1, figsize=(11.6, 8.4), sharex=True,
-                               gridspec_kw=dict(height_ratios=[2.0, 1.1, 1.1], hspace=0.08))
+                               gridspec_kw=dict(height_ratios=[2.0, 1.1, 1.1]))
         for _k, (_w, _wc, _wl) in enumerate(_WSHOW):
             ax[0].scatter(_bfc[_zm], _rat_tot[_k][_zm], s=6, color=_wc, alpha=0.3, lw=0)
             ax[0].plot(_bfc[_zm], _run_mean(_rat_tot[_k], half=2)[_zm], color=_wc, lw=2.0,
@@ -4186,6 +4321,7 @@ try:
                      f"against its own fitted noise (linear frequency)\nresiduals -- {_wsrc_t}",
                      fontsize=9, color=FG)
         fig.tight_layout(rect=[0, 0, 1, 0.93])
+        fig.subplots_adjust(hspace=0.08)
         fig_b64(fig, "fg_whitened_zoom")
 
         # ---- ZOOM 2.5-5.5 mHz: the UNWHITENED residual against the curves ----
@@ -4292,6 +4428,7 @@ except Exception as e:
 RATCHET = {}
 cap_fgA = cap_fgB = cap_fgC = ""
 cap_fgD = cap_fgE = ""      # filled by the ratchet scorecard after the truth set loads
+_fresh_store("ratchet panels")
 try:
     _sa = g.get("saved_after")
     SAVED_AFTER = ([s.decode() if isinstance(s, bytes) else str(s) for s in _sa[:NIT]]
@@ -4327,8 +4464,10 @@ try:
     leaves_w = gb_inds.sum(-1).astype(int)                     # (it, nw)
     _dll = ll - ll[REF][None, :]                                 # (it, nw)
     _x0 = max(REF - 3, 0)
+    # hspace is set after tight_layout: in gridspec_kw it makes tight_layout a
+    # warning-raising no-op (see the whitened-residual figures)
     fig, ax = plt.subplots(3, 1, figsize=(11.6, 8.8), sharex=True,
-                           gridspec_kw=dict(height_ratios=[1.6, 1.2, 1.2], hspace=0.08))
+                           gridspec_kw=dict(height_ratios=[1.6, 1.2, 1.2]))
     _bounds = sorted(_kind)
     for _j, _r in enumerate(_bounds):
         _r_next = _bounds[_j + 1] if _j + 1 < len(_bounds) else NIT
@@ -4372,6 +4511,7 @@ try:
     fig.suptitle(f"galfor ratchet: stored rows {_x0}-{NIT - 1}, reference row {REF}",
                  fontsize=10, color=FG)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.subplots_adjust(hspace=0.08)
     fig_b64(fig, "fg_ratchet_timeline")
     _mean_dll = _dll[REF:].mean(axis=1)
     RATCHET.update(
@@ -4727,6 +4867,7 @@ if TRU is not None and abs(SCI_TOBS - TRU_TOBS) > 1.0:
 # the two independent TDI combinations), so the unresolved set's mean PSD over
 # a band of N_bin bins is S_tot * sum(SNR^2) / (4 N_bin).
 RSC = {}
+_fresh_store("ratchet scorecard")
 try:
     if TRU is None:
         raise RuntimeError("no truth set in this snapshot")
@@ -4869,6 +5010,7 @@ except Exception as _e:
 # detectable sources are". An extract carries the counters only in its keep
 # window, so a short snapshot shows the last few legs.
 RJB = {}
+_fresh_store("RJ-per-band panel")
 try:
     _pr = sub["gb/band_num_proposed_rj"]; _ac = sub["gb/band_num_accepted_rj"]
     _rows_c = [i for i in range(1, NIT) if np.any(_pr[i, :, 0] > 0) and np.any(_pr[i - 1, :, 0] > 0)]
@@ -5746,15 +5888,58 @@ vgb_last = vgb_c[VGB_SAMP_ROWS].reshape(-1, 55, _vgb_chain_ndim)  # (S, 55, 5 or
 # Same for the all-NaN case: nanmean on all-NaN returns NaN with a warning,
 # but we don't want a NaN cascade downstream. Fall back to a zero-SNR
 # vector so ``VGB_DET`` is empty and the panel renders with no bars.
+def finite_mean(a, axis):
+    """Mean over ``axis`` of the FINITE entries of ``a``; NaN where there are
+    none, and no "Mean of empty slice" RuntimeWarning for those (np.nanmean
+    warns once per all-NaN slice, which is every unscored VGB on every row)."""
+    a = np.asarray(a, dtype=float)
+    ok = np.isfinite(a)
+    n = ok.sum(axis=axis)
+    s = np.where(ok, a, 0.0).sum(axis=axis)
+    return np.where(n > 0, s / np.maximum(n, 1), np.nan)
+
+
+def vgb_unscored_note(hh, ids=None, f0_mhz=None, row=None):
+    """``(unscored, note)`` for the VGB <h|h> table ``hh`` (rows, walkers, 55).
+
+    A VGB leaf whose ``<h|h>`` is NaN in EVERY cold walker at the last row has
+    no SNR to show. That is not a faint source: the VGB move records a leaf's
+    ``<d|h>`` / ``<h|h>`` only when it scores it, and on the 9mo run (2026-10-13)
+    the eight VGBs below 0.42 mHz -- the branch's lowest band -- were never
+    scored on any stored row, so their column is NaN from row 0 on. They count
+    as below SNR 7; the caption says so instead of numpy warning about it.
+    Returns the leaf indices and an HTML caption fragment ("" when none).
+    """
+    hh = np.asarray(hh, dtype=float)
+    if hh.ndim != 3 or hh.shape[0] == 0:
+        return np.zeros(0, dtype=int), ""
+    un = np.nonzero(~np.isfinite(hh[-1]).any(axis=0))[0]
+    if not un.size:
+        return un, ""
+    never = not np.isfinite(hh[:, :, un]).any()
+    names = ", ".join(
+        (f"{ids[k]}" if ids is not None else f"leaf {k}")
+        + (f" ({f0_mhz[k]:.2f} mHz)" if f0_mhz is not None else "") for k in un)
+    row_txt = f"row {row}" if row is not None else "the last stored row"
+    return un, (
+        f" {un.size} of {hh.shape[2]} carry no &lang;h|h&rang; in any cold walker at "
+        f"{row_txt}" + (" or on any earlier stored row" if never else "")
+        + f": {names}. The VGB move records a leaf&rsquo;s &lang;d|h&rang; / "
+        "&lang;h|h&rang; only when it scores that leaf, so these have no SNR on this "
+        "page and are counted below SNR 7 &mdash; unscored, not measured faint.")
+
+
 _nv = int(vgb_hh.shape[-1]) if vgb_hh.ndim >= 1 else 55
+VGB_UNSCORED, VGB_HH_NOTE = np.zeros(0, dtype=int), ""
 try:
     if vgb_hh.shape[0] == 0:
         raise ValueError("no VGB h_h rows retained (SUB_NIT trimmed to 0)")
-    with np.errstate(invalid="ignore"):
-        snr = np.sqrt(np.clip(np.nanmean(vgb_hh[-1], axis=0), 0, None))
+    snr = np.sqrt(np.clip(finite_mean(vgb_hh[-1], axis=0), 0, None))
     if snr.ndim != 1 or snr.shape[0] != _nv:
         raise ValueError(f"unexpected SNR shape {snr.shape}")
     snr = np.where(np.isfinite(snr), snr, 0.0)
+    VGB_UNSCORED, VGB_HH_NOTE = vgb_unscored_note(
+        vgb_hh, ids=VGB_IDS, f0_mhz=VGB_F0, row=int(vgb_hh.shape[0]) - 1)
 except Exception as _e:
     snr = np.zeros(_nv)
     MISSING.append(f"VGB SNR>7 panel: could not compute per-VGB SNRs "
@@ -5861,7 +6046,9 @@ fig_b64(fig, "vgb_dist")
 # SNR evolution over iterations: noise-weighted sqrt(<h|h>) rises as the
 # galactic foreground is fit/subtracted down -- the source-side twin of
 # the PSD decline-watch panel.
-snr_it = np.sqrt(np.clip(np.nanmean(vgb_hh[:VGB_NIT], axis=1), 0, None))  # (it, 55)
+# finite_mean, not np.nanmean: a VGB with no <h|h> on a row (unscored, or a
+# row before the branch started) is a NaN gap in its markers, not a warning
+snr_it = np.sqrt(np.clip(finite_mean(vgb_hh[:VGB_NIT], axis=1), 0, None))  # (it, 55)
 import matplotlib.colors as _mc
 _vramp = _mc.LinearSegmentedColormap.from_list(
     "violet", ["#E3D9FF", "#9B7BFF", "#4A2FA8"])
@@ -6701,9 +6888,17 @@ GB1_JSON = json.dumps(GB1)
 # in the collapsed appendix rather than the body -- but it is the only
 # view of where the wall time goes and what the devices are holding.
 # ---- 8. efficiency: proposals/s + wall per propose (GB_TIMING records) ----
+# The tail after "|" may be EMPTY (2026-10-13): under fan-out the head's
+# [GB_TIMING <move>] line degenerates to "total=... untracked=... | " -- its
+# stage spans and counters live in the per-rank session timers
+# (gbspecialstretch, "the INFO line above degenerates to untracked") -- and the
+# old ``\| ([^|]+)$`` matched none of those lines: the 9mo page drew ONE propose
+# out of 94 and a throughput of exactly zero on a log axis ("Data has no
+# positive values"). The wall is real on every line; the counters are not.
 TIM_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ .*?\[GB_TIMING (\w+)\] "
-    r"total=([\d.]+)s.*\| ([^|]+)$")
+    r"total=([\d.]+)s.*\|\s*([^|]*)$")
+TIMING_TXT = ""
 recs = []
 for line in log_text.splitlines():
     m = TIM_RE.match(line)
@@ -6729,14 +6924,30 @@ if recs:
         series[name]["t"].append((t - t0r).total_seconds() / 60)
         series[name]["rate"].append(props / max(tot, 1e-9))
         series[name]["wall"].append(tot)
+    # a propose with no proposal counters on its line has no throughput: drop
+    # it from the left panel rather than drawing a zero a log axis cannot hold
+    _any_rate = any(r > 0 for d in series.values() for r in d["rate"])
     for name, d in sorted(series.items()):
         c = MOVE_COLOR.get(name, CYAN)
-        ax[0].plot(d["t"], d["rate"], "o-", ms=3.5, lw=1.0, color=c,
+        _t, _r = np.asarray(d["t"]), np.asarray(d["rate"])
+        ax[0].plot(_t[_r > 0], _r[_r > 0], "o-", ms=3.5, lw=1.0, color=c,
                    label=f"{name} (n={len(d['t'])})")
-        ax[1].plot(d["t"], d["wall"], "o-", ms=3.5, lw=1.0, color=c)
-    ax[0].set_yscale("log")
+        ax[1].plot(d["t"], d["wall"], "o-", ms=3.5, lw=1.0, color=c,
+                   label=f"{name} (n={len(d['t'])})")
+    if _any_rate:
+        ax[0].set_yscale("log")
+        ax[0].legend(fontsize=7)
+    else:
+        ax[0].text(0.5, 0.5, "no proposal counters on any\n[GB_TIMING <move>] line",
+                   ha="center", va="center", transform=ax[0].transAxes, color=DIM)
+        ax[1].legend(fontsize=7)
+        TIMING_TXT = (
+            f" None of the {len(recs)} <code>[GB_TIMING &lt;move&gt;]</code> lines carries "
+            "proposal counters (under fan-out the head&rsquo;s line keeps only its wall "
+            "clock; the counters stay in the per-rank session timers), so the "
+            "throughput panel is empty and only the wall per propose is drawn.")
     ax[0].set_ylabel("proposals / s"); ax[0].set_xlabel("minutes since first record")
-    ax[0].set_title("proposal throughput per propose"); ax[0].legend(fontsize=7)
+    ax[0].set_title("proposal throughput per propose")
     ax[1].set_yscale("log")
     ax[1].set_ylabel("move wall [s]"); ax[1].set_xlabel("minutes since first record")
     ax[1].set_title("wall time per propose")
@@ -7889,6 +8100,10 @@ _SRC_PNG_BYTES = []
 _src_t0 = time.perf_counter() if False else None  # time tracked below via `time`
 import time as _src_time_mod  # local import, keep page-build time clean
 _src_build_start = _src_time_mod.perf_counter()
+# This section runs 10-15 minutes into a full build: read it through a fresh
+# handle, not the one opened at the top (see _reopen_store). If the store
+# cannot be opened again, every branch below degrades to a MISSING line.
+_fresh_store("source dropdowns")
 for _branch, _spec in _SRC_BRANCH_SPECS.items():
     _cls = _spec["cls"]
     _chain_ds = _safe(g, f"chain/{_branch}", label=f"chain/{_branch}")
@@ -7916,6 +8131,26 @@ for _branch, _spec in _SRC_BRANCH_SPECS.items():
                      label=f"sub_backend/{_branch}/h_h")
     _dh_all = _sub_dh if _sub_dh is not None else None
     _hh_all = _sub_hh if _sub_hh is not None else None
+    # ONE ROW COUNT FOR THE BRANCH (2026-10-13, the missing MBHBs). ``_safe``
+    # hands back the backup copy's rows for a dataset torn in the live store,
+    # and the backup lags: on the 9mo page chain/mbh came back with 197 rows
+    # while inds/mbh, read live, had 199, and every MBH leaf died in the trace
+    # mask with "boolean index did not match indexed array along axis 0; size
+    # of axis is 197 but size of corresponding boolean axis is 199" -- six
+    # MISSING lines and an empty MBHB dropdown. Cut every array to the rows
+    # they all hold (the shared rows are identical: a stored row is final).
+    _rows_of = {"chain": _chain_all, "inds": _inds_all, "d_h": _dh_all, "h_h": _hh_all}
+    _rows_of = {k: v for k, v in _rows_of.items() if v is not None}
+    _nrows = min(int(v.shape[0]) for v in _rows_of.values())
+    if any(int(v.shape[0]) != _nrows for v in _rows_of.values()):
+        MISSING.append(
+            f"{_branch}: its datasets hold different row counts ("
+            + ", ".join(f"{k} {int(v.shape[0])}" for k, v in _rows_of.items())
+            + ": one came from the run's backup copy, which lags the live store), so "
+            f"its panels end at row {_nrows - 1}, the last row all of them hold.")
+        _chain_all, _inds_all = _chain_all[:_nrows], _inds_all[:_nrows]
+        _dh_all = _dh_all[:_nrows] if _dh_all is not None else None
+        _hh_all = _hh_all[:_nrows] if _hh_all is not None else None
     _cat = _src_load_catalogue(_spec["cat_files"])
     _ids = _SRC_IDS.get(_cls, list(range(_nleaves)))
     if _cat is None:
@@ -7965,7 +8200,7 @@ for _branch, _spec in _SRC_BRANCH_SPECS.items():
                 f"{_branch} leaf {_leaf} PNG render failed: {e!r}")
             continue
         _pool_W = _src_pool_window(int(_chain.shape[0]))
-        _n_pe = (max(0, NIT - _SRC_FULL_PE_START)
+        _n_pe = (max(0, _nrows - _SRC_FULL_PE_START)
                  if _SRC_FULL_PE_START is not None else 0)
         _sub = (f"leaf {int(_leaf)} · {int(_chain.shape[0])} iterations · "
                 f"corner pool: last {_pool_W} iters x {int(_nwalkers)} cold "
@@ -7977,6 +8212,7 @@ for _branch, _spec in _SRC_BRANCH_SPECS.items():
     SRC_PANEL_JSON[_branch] = json.dumps(_blob)
     SRC_PANEL_META[_branch] = {
         "nleaves": int(_nleaves),
+        "nrows": int(_nrows),
         "n_rendered": len(_blob["src"]),
         "n_fail": _n_fail,
         "png_total_mb": sum(_per_branch_bytes) / 1024 ** 2,
@@ -8001,11 +8237,14 @@ for _b in ("mbh", "emri", "sobbh"):
             "no chain found in this snapshot (branch not sampled yet, or "
             "chain/inds unreadable); dropdown is empty.")
     else:
-        _fp = (f"the last {NIT - _SRC_FULL_PE_START} full_pe iteration(s)"
+        _nr = int(_m.get("nrows", NIT))
+        _fp = (f"the last {max(0, _nr - _SRC_FULL_PE_START)} full_pe iteration(s)"
                if _SRC_FULL_PE_START is not None else "no full_pe rows yet")
         SRC_PANEL_COUNT_TXT[_b] = (
             f"{_n} of {_nl} leaves rendered; marginals are over {_fp}."
-            + (f" {_fail} leaf render(s) failed." if _fail else ""))
+            + (f" Rows end at {_nr - 1}, not {NIT - 1}: the branch's datasets were "
+               "read partly from the run's backup copy (see Notes)." if _nr < NIT else "")
+            + (f" {_fail} leaf render(s) failed (see Notes)." if _fail else ""))
 
 MBH_PANEL_JSON = SRC_PANEL_JSON["mbh"]
 EMRI_PANEL_JSON = SRC_PANEL_JSON["emri"]
@@ -8454,11 +8693,17 @@ import html as _html_mod  # noqa: E402
 from lisatools.globalfit.monitor._short import GLANCE_CSS, build_glance  # noqa: E402
 
 GLANCE_HTML = GLANCE_NAV = GLANCE_NOTES_HTML = ""
+GLANCE_NOTES = []
+# Nothing below reads the store. Close this page's handles so the glance block
+# opens a FRESH one: while ours is open, its h5py.File on the same path shares
+# our cache, which on a live store is minutes stale (see _reopen_store).
+_close_store()
 try:
     _G = build_glance(RUN_DIR, mojito=MOJITO_INFO_PATH or (
         MOJITO_CAT_DIR if os.path.isdir(os.path.join(MOJITO_CAT_DIR, "catalogues")) else None))
     GLANCE_HTML = _G["html"]
     GLANCE_NAV = "".join(f'<a href="#{_i}">{_t}</a>' for _i, _t in _G["nav"])
+    GLANCE_NOTES = list(_G["notes"])
     GLANCE_NOTES_HTML = "".join(f"<li>at a glance: {_n}</li>" for _n in _G["notes"])
     print(f"[glance] at-a-glance block built in {_G['elapsed']:.1f} s")
 except Exception as _e:  # noqa: BLE001
@@ -8697,7 +8942,7 @@ SNR 7 at three months, with their distance posteriors against the catalogue valu
 The other {55 - VGB_N_DET} are prior-dominated. Full-55 SNR-vs-frequency, all-55
 distance posteriors, the SNR-per-iteration trend, and the interactive zoom cloud were
 removed for the 16 MB size budget; the median VGB SNR is {VGB_SNR_MED:.1f} and the
-{55 - VGB_N_DET} prior-dominated leaves are an absence of signal, not a fit failure.</div></div>
+{55 - VGB_N_DET} prior-dominated leaves are an absence of signal, not a fit failure.{VGB_HH_NOTE}</div></div>
 <div class="panel">{img("vgb_hists")}
 <div class="caption">The four remaining sampled parameters pooled over all 55 leaves, so
 the truth is a distribution rather than a line. The frequency-derivative ratio is the
@@ -8921,7 +9166,7 @@ model fills. {GB_FATE_TXT}</div></div>
      effectively invisible this deep in the scroll). See TRACKERS_TOP. -->
 <div class="panel">{img("timing_moves", "per-move throughput")}
 <div class="caption">Proposal throughput and wall time per propose, per move, against
-elapsed run time.</div></div>
+elapsed run time.{TIMING_TXT}</div></div>
 <div class="panel">{img("search_efficiency", "search efficiency")}
 <div class="caption">What the recipe COSTS against what it BUYS. Left: where an
 iteration's wall time goes, per move. Middle: seconds per NEW cold leaf per walker,
@@ -9521,3 +9766,24 @@ open(OUT, "w").write(html)
 print(f"wrote {OUT}: {len(html)//1024} KB ({len(html)/1024**2:.2f} MB), "
       f"{len(IMGS)} plots + {len(VGB_CORNER['src'])} VGB corners, "
       f"missing={len(MISSING)}")
+
+
+def missing_log_lines(missing, glance_notes=()):
+    """One plain-text log line per Notes entry (user request 2026-10-13: the
+    reasons were only in the written html, so a cluster build said
+    "missing=18" and nothing else). Tags and entities are stripped; a line
+    keeps at most 600 characters."""
+    import html as _h
+    out = []
+    for prefix, items in (("", missing), ("at a glance: ", glance_notes)):
+        for m in items:
+            t = _h.unescape(re.sub(r"<[^>]+>", "", str(m)))
+            t = " ".join(t.split())
+            if len(t) > 600:
+                t = t[:597] + "..."
+            out.append(f"[monitor] MISSING: {prefix}{t}")
+    return out
+
+
+for _ln in missing_log_lines(MISSING, GLANCE_NOTES):
+    print(_ln)
