@@ -1824,18 +1824,110 @@ def gb_band_ll(d_h, h_h, f0_hz, alive, edges):
     return out
 
 
+# ---- the per-sub-band HISTORY read (2026-10-13) ----------------------------
+# User: "examine making the PER-subband evolution of lnL and counts of GBs
+# clearer over iteration." One pass over the stored rows feeds both the line
+# panel below and the band x iteration rasters of section 5a-1 (after the
+# cap cells): per row, cold walker and band, the source-attributed band lnL
+# (gb_band_ll) and the live-leaf count. The rows are the line panel's own
+# (strided history + every row of the zoom) joined with the rasters' (every
+# row up to BAND_EVO_MAX_ROWS, then the last row of each block), so a store
+# below that size is read exactly once, row by row, as before.
+BAND_EVO_MAX_ROWS = 400       # rows the rasters read before they read blocks
+BAND_HIST = {}                # filled below; section 5a-1 draws from it
+
+
+def band_evo_rows(nit, max_rows=400):
+    """``(rows, x_edges)`` the per-sub-band rasters read and draw.
+
+    Every stored row when ``nit <= max_rows``. Past that the rows are cut into
+    blocks of ``ceil(nit / max_rows)`` and the LAST row of each block is read:
+    the state the block ended in (the newest row is always one of them).
+    ``x_edges`` (one more than ``rows``) are the block boundaries in stored-row
+    units, so each raster column spans the rows it stands for.
+    """
+    nit = int(nit)
+    if nit <= 0:
+        return [], np.zeros(1)
+    b = max(1, -(-nit // max(int(max_rows), 1)))
+    starts = list(range(0, nit, b))
+    rows = [min(s + b - 1, nit - 1) for s in starts]
+    return rows, np.array(starts + [nit], float) - 0.5
+
+
+def gb_band_counts(f0_hz, alive, edges):
+    """``(nwalkers, nbands)`` live leaves per band, binned like :func:`gb_band_ll`.
+
+    ``None`` when a live leaf carries no coordinate (f0 <= 0 or non-finite):
+    an extract's rows outside its keep window read back as zeros, and binned
+    as they are they would pile every leaf into the first band.
+    """
+    f0 = np.asarray(f0_hz, float)
+    al = np.asarray(alive, bool)
+    if al.any() and not np.all(np.isfinite(f0[al]) & (f0[al] > 0)):
+        return None
+    nb = len(edges) - 1
+    band = np.clip(np.searchsorted(edges, np.nan_to_num(f0), side="right") - 1, 0, nb - 1)
+    out = np.zeros((al.shape[0], nb))
+    for w in range(al.shape[0]):
+        out[w] = np.bincount(band[w][al[w]], minlength=nb)[:nb]
+    return out
+
+
+def band_history(rows, read_row, alive, edges, has_dh=True):
+    """Read the per-(row, cold walker, band) lnL and leaf count for ``rows``.
+
+    ``read_row(name, sel)`` is the page's torn-row-safe reader (``_row``),
+    ``alive`` the cold ``inds/gb`` (rows, walkers, leaves). Returns a dict:
+    ``rows`` (int array), ``ll`` (len(rows), walkers, bands) float64 (the line
+    panel draws it as it always did) and ``n`` the same shape in float32 (small
+    integers, exact), both NaN where the row could not be read; inside a
+    readable row ``ll`` is NaN for a (walker, band) with no live leaf (as
+    :func:`gb_band_ll`) and ``n`` is 0 there. ``ll`` is read only where the
+    row's d_h is written (non-zero), ``n`` only where every live leaf has a
+    coordinate. ``has_dh`` False skips the d_h / h_h reads (a store without
+    them).
+    """
+    rows = [int(r) for r in rows]
+    nw, nb = alive.shape[1], len(edges) - 1
+    ll = np.full((len(rows), nw, nb), np.nan)
+    n = np.full((len(rows), nw, nb), np.nan, dtype=np.float32)
+    for k, i in enumerate(rows):
+        f0 = read_row("chain/gb", (i, 0, 0, slice(None), slice(None), 1))
+        if f0 is None:
+            continue                             # unreadable: a gap in both
+        f0 = np.asarray(f0, float) * 1e-3
+        c = gb_band_counts(f0, alive[i], edges)
+        if c is not None:
+            n[k] = c
+        if not has_dh:
+            continue
+        dh = read_row("sub_backend/gb/d_h", (i,))
+        hh = read_row("sub_backend/gb/h_h", (i,))
+        if dh is None or hh is None or not np.any(dh):
+            continue                             # unreadable or unwritten
+        ll[k] = gb_band_ll(dh, hh, f0, alive[i], edges)
+    return dict(rows=np.asarray(rows, dtype=int), ll=ll, n=n, has_dh=bool(has_dh))
+
+
 try:
-    if _opt(sub, "gb/d_h") is None or _opt(sub, "gb/h_h") is None:
+    _bh_dh = (sub is not None and sub.get("gb/d_h") is not None
+              and sub.get("gb/h_h") is not None)
+    _bh_rows = sorted(set(gb_band_ll_rows(NIT, BAND_LL_ZOOM, BAND_LL_MAX_ROWS))
+                      | set(band_evo_rows(NIT, BAND_EVO_MAX_ROWS)[0]))
+    BAND_HIST = band_history(_bh_rows, _row, gb_inds, band_edges, _bh_dh)
+except Exception as _exc:  # noqa: BLE001 - a missing panel, never a dead page
+    BAND_HIST = {}
+    MISSING.append(f"per-sub-band history unreadable: {type(_exc).__name__}: {_exc}")
+
+try:
+    if not BAND_HIST:
+        raise ValueError("the per-sub-band read failed (see the note above)")
+    if not BAND_HIST["has_dh"]:
         raise ValueError("the store carries no gb d_h / h_h")
     _bl_rows = gb_band_ll_rows(NIT, BAND_LL_ZOOM, BAND_LL_MAX_ROWS)
-    _bl = np.full((len(_bl_rows), gb_inds.shape[1], len(band_edges) - 1), np.nan)
-    for _k, _i in enumerate(_bl_rows):
-        _dh = _row("sub_backend/gb/d_h", (_i,))
-        _hh = _row("sub_backend/gb/h_h", (_i,))
-        _f0 = _row("chain/gb", (_i, 0, 0, slice(None), slice(None), 1))
-        if _dh is None or _hh is None or _f0 is None or not np.any(_dh):
-            continue                     # unreadable or unwritten: a gap
-        _bl[_k] = gb_band_ll(_dh, _hh, _f0 * 1e-3, gb_inds[_i], band_edges)
+    _bh_at = {int(r): k for k, r in enumerate(BAND_HIST["rows"])}
+    _bl = BAND_HIST["ll"][[_bh_at[r] for r in _bl_rows]].astype(float)
     _bl_have = np.isfinite(_bl).any(axis=(1, 2))
     if _bl_have.sum() < 2:
         raise ValueError(
@@ -2116,6 +2208,639 @@ if cap_cells is not None and cap_cells.size and cap_edges_arr is not None:
         f"({100*_occ_last/ncell:.0f}%): <strong>{_exact1:.0f}</strong> cells "
         f"hold exactly one source and <strong>{_atcap_last:.0f}</strong> sit "
         f"at or over their cap.")
+
+# ---- 5a-1. PER-SUB-BAND HISTORY: lnL, GB count, RJ valve (2026-10-13) -----
+# User: "examine making the PER-subband evolution of lnL and counts of GBs
+# clearer over iteration. The current plots we have at the per sub-band level
+# over iteration are not very clear." The line panel (gb_band_ll, 5a-0) draws
+# ~2,000 (walker, band) lines on a six-decade log axis: a band moving by the
+# valve's 20 nats on a level of 5,000 nats is invisible there, no band can be
+# told from its neighbours, and there was no per-band GB count over iteration
+# anywhere on the page. Two figures, drawn from the read of 5a-0 (BAND_HIST):
+#
+#   gb_band_evo     three band x iteration rasters on ONE y axis -- the
+#                   sub-bands that ever held a cold leaf, one row each, in
+#                   frequency order -- (a) the band lnL MINUS ITS FINAL VALUE
+#                   (walker median; symmetric-log colour, linear inside
+#                   +-BAND_EVO_LINTHRESH nats), (b) the cold GB count minus
+#                   the final count (walker mean), (c) the share of walkers
+#                   whose per-walker RJ valve holds the pair shut. Columns and
+#                   rows are pooled (NaN-ignoring mean) to at most one per
+#                   pixel: an un-pooled raster drops columns (the 2026-10-10
+#                   time-frequency lesson).
+#   gb_band_movers  small multiples of the BAND_EVO_MOVERS sub-bands that
+#                   moved most over the last BAND_LL_ZOOM rows: one line per
+#                   cold walker (lnL minus that walker's final value; the
+#                   count below) and that walker's valve-shut rows as a bar in
+#                   its colour.
+#
+# THE STATISTIC is 5a-0's: per band, the sum over its live cold leaves of
+# d_h - h_h/2. It needs every row's leaf frequencies, which only the full
+# store carries; a snapshot extract keeps them for its last row(s). There the
+# lnL rasters fall back to the valve's own statistic, band_cold_logl_w = the
+# band GAIN 1/2<d|d> - 1/2<r|r> (full history in an extract), with the two
+# caveats the caption states: rows written before da45aa98 (2026-10-10) hold
+# the residual term -1/2<r|r> (~ -1,400 nats per band: the unit step at the
+# switch row), detected per row by the sign of the median non-zero value and
+# left blank; and the gain is formed on WDM layer windows, so it is
+# identically 0 in the sub-bands that own no window (3 in 4 on the 9mo grid),
+# which are not drawn. The count raster is then unavailable and says so.
+BAND_EVO_MOVERS = 16          # small multiples on the movers figure
+BAND_EVO_MOVERS_BY_COUNT = 4  # of them picked by the count range, not the lnL
+BAND_EVO_LINTHRESH = 10.0     # nats: the lnL raster's linear core
+GB_BAND_EVO_CAP = GB_BAND_MOVERS_CAP = ""
+
+
+def valve_gain_rows(G):
+    """Rows of a stored ``band_cold_logl_w`` (rows, walkers, bands) in GAIN units.
+
+    Before da45aa98 (2026-10-10) the valve stored the residual term
+    ``-1/2 <r|r>`` (<= 0, ~ -1,400 nats per band); since, the band gain
+    ``1/2 <d|d> - 1/2 <r|r>`` (>= 0 for a band its templates explain, exactly
+    0 for one with no window or no template). A row is in gain units when its
+    finite non-zero values have a median >= 0; a row with none (unwritten,
+    ``-inf`` before the valve was armed, all 0) is not.
+    """
+    G = np.asarray(G, float)
+    out = np.zeros(G.shape[0], dtype=bool)
+    for i in range(G.shape[0]):
+        v = G[i][np.isfinite(G[i]) & (G[i] != 0)]
+        out[i] = bool(v.size) and float(np.median(v)) >= 0.0
+    return out
+
+
+def valve_residual_rows(G):
+    """Rows of a stored ``band_cold_logl_w`` in the RESIDUAL units of before
+    da45aa98: finite non-zero values with a median < 0. The rows that are
+    neither these nor :func:`valve_gain_rows` carry no valve statistic at all
+    (``-inf`` before the valve was armed, or before the array was added to the
+    store)."""
+    G = np.asarray(G, float)
+    out = np.zeros(G.shape[0], dtype=bool)
+    for i in range(G.shape[0]):
+        v = G[i][np.isfinite(G[i]) & (G[i] != 0)]
+        out[i] = bool(v.size) and float(np.median(v)) < 0.0
+    return out
+
+
+def band_rel_final(v, empty_as_zero=True):
+    """``(rel, last)``: each walker's per-band value minus ITS OWN value at the
+    newest row that carries data.
+
+    ``v`` is (rows, walkers, bands). A row with no finite entry at all
+    (unreadable, or no coordinates) stays NaN in ``rel``. With
+    ``empty_as_zero`` a non-finite entry inside a row that carries data is a
+    (walker, band) with no live leaf and counts as 0 (an empty band buys no
+    lnL); without it, it stays NaN. ``last`` is the index of that newest row
+    (None when no row carries data).
+    """
+    v = np.asarray(v, float)
+    have = np.isfinite(v).any(axis=tuple(range(1, v.ndim)))
+    rel = np.full(v.shape, np.nan)
+    if not have.any():
+        return rel, None
+    x = v[have]
+    if empty_as_zero:
+        x = np.where(np.isfinite(x), x, 0.0)
+    rel[have] = x - x[-1][None]
+    return rel, int(np.nonzero(have)[0][-1])
+
+
+def band_pool(a, edges, target):
+    """Pool the LAST axis of ``a`` to at most ``target`` columns.
+
+    Contiguous blocks of ``ceil(n / target)`` columns, NaN-ignoring mean (an
+    all-NaN block stays NaN), ragged last block; ``edges`` (``n + 1``) are
+    pooled alike so each pooled column keeps the extent it covers. A target
+    at least as large as the axis returns the input unchanged. Display only.
+    """
+    a = np.asarray(a, float)
+    e = np.asarray(edges, float)
+    n = a.shape[-1]
+    b = max(1, -(-n // max(int(target), 1)))
+    if b == 1:
+        return a, e
+    nout = -(-n // b)
+    pad = nout * b - n
+    if pad:
+        a = np.concatenate([a, np.full(a.shape[:-1] + (pad,), np.nan)], axis=-1)
+    a = a.reshape(a.shape[:-1] + (nout, b))
+    cnt = np.sum(~np.isnan(a), axis=-1)
+    s = np.nansum(a, axis=-1)
+    out = np.full(s.shape, np.nan)
+    np.divide(s, cnt, out=out, where=cnt > 0)
+    return out, np.append(e[0:n:b], e[-1])
+
+
+def band_rank_ticks(fc_mhz, marks=(0.5, 1, 2, 3, 4, 5, 6, 8, 10, 15, 20), min_gap=0.04):
+    """``(positions, labels)`` for a RANK axis: band k drawn on [k, k + 1] in
+    frequency order, so the axis is not linear in frequency. Each mark [mHz]
+    lands where it falls between band centres; marks outside the bands' range
+    are dropped, as is a mark closer than ``min_gap`` of the axis to the last
+    one kept."""
+    fc = np.asarray(fc_mhz, float)
+    n = fc.size
+    pos, lab = [], []
+    for m in marks:
+        if n == 0 or m < fc[0] or m > fc[-1]:
+            continue
+        p = float(np.interp(m, fc, np.arange(n) + 0.5))
+        if pos and p - pos[-1] < min_gap * n:
+            continue
+        pos.append(p)
+        lab.append(f"{m:g}")
+    return pos, lab
+
+
+def band_movers(ll_win, n_win=None, k=16, k_count=4):
+    """The bands that moved most over a window of rows, in band order.
+
+    ``ll_win`` / ``n_win`` are (rows, walkers, bands) or None; a row with no
+    data is skipped and a NaN inside a row is an empty pair (0). A band's
+    score is the largest RANGE (max - min over the rows) of any one walker, so
+    a birth and a death inside the window count although the net change is 0.
+    Picks up to ``k - k_count`` bands by lnL range, then up to ``k_count`` more
+    by count range, then fills to ``k`` by lnL range (by count range when there
+    is no lnL). A band whose score is 0 is never picked.
+    """
+    def _rng(a):
+        if a is None:
+            return None
+        a = np.asarray(a, float)
+        have = np.isfinite(a).any(axis=(1, 2))
+        if not have.any():
+            return None
+        x = np.where(np.isfinite(a[have]), a[have], 0.0)
+        return (x.max(axis=0) - x.min(axis=0)).max(axis=0)
+
+    s_ll, s_n = _rng(ll_win), _rng(n_win)
+    picked = []
+
+    def _take(score, m):
+        if score is None:
+            return
+        for b in np.argsort(-score, kind="stable"):
+            if m <= 0 or len(picked) >= k or score[b] <= 0:
+                return
+            if int(b) not in picked:
+                picked.append(int(b))
+                m -= 1
+
+    _take(s_ll, k - (k_count if s_n is not None else 0))
+    _take(s_n, k_count)
+    _take(s_ll, k)
+    _take(s_n, k)
+    return sorted(picked)
+
+
+def shut_runs(flags):
+    """Contiguous True runs of a 1-D bool series, as ``(start, stop)`` index
+    pairs (stop exclusive)."""
+    f = np.asarray(flags, bool).astype(np.int8).reshape(-1)
+    d = np.diff(np.concatenate([[0], f, [0]]))
+    return list(zip(np.nonzero(d == 1)[0].tolist(), np.nonzero(d == -1)[0].tolist()))
+
+
+def band_evo_cmaps():
+    """``(diverging, sequential)`` colormaps of the per-sub-band rasters, for
+    this page's dark panel. Diverging: blue (below the final value) <-> red
+    (above it) through a neutral dark grey at 0, each arm lightening with
+    magnitude, so "already at its final value" recedes and a change stands
+    out (the data-viz reference blue / red ramps, midpoint #383835). Sequential:
+    the page's amber -- the colour of "shut" on the valve panels -- rising from
+    just above the panel colour. No-data cells draw in the page background."""
+    import matplotlib.colors as mc
+
+    div = mc.LinearSegmentedColormap.from_list(
+        "band_evo_div", ["#b7d3f6", "#3987e5", "#1c4f8f", "#383835",
+                         "#8f3434", "#e66767", "#f6c1c1"], N=255)   # odd: 0 lands on the grey
+    seq = mc.LinearSegmentedColormap.from_list(
+        "band_evo_seq", ["#1c2633", "#6b4c1a", "#F5A623"])
+    for c in (div, seq):
+        c.set_bad("#0A0E14")
+    return div, seq
+
+
+try:
+    if not BAND_HIST:
+        raise ValueError("the per-sub-band read failed (see the note above)")
+    import matplotlib.colors as _be_mc
+    from matplotlib.lines import Line2D as _be_L2D
+
+    _be_rows_all = np.asarray(BAND_HIST["rows"], int)
+    _be_at = {int(r): k for k, r in enumerate(_be_rows_all)}
+    _be_rows, _be_xe = band_evo_rows(NIT, BAND_EVO_MAX_ROWS)
+    _be_k = [_be_at[r] for r in _be_rows]
+    _be_nb = len(band_edges) - 1
+    _be_nw = int(gb_inds.shape[1])
+    _be_fc = 0.5 * (band_edges[:-1] + band_edges[1:]) * 1e3          # mHz
+    _be_div, _be_seq = band_evo_cmaps()
+
+    # ---- the lnL statistic: d_h - h_h/2 where >= 2 rows carry it, else the gain
+    _be_ll = BAND_HIST["ll"][_be_k]                                  # (rows, w, b)
+    _be_n = BAND_HIST["n"][_be_k].astype(float)
+    _be_ll_n = int(np.isfinite(_be_ll).any(axis=(1, 2)).sum())
+    _be_n_n = int(np.isfinite(_be_n).any(axis=(1, 2)).sum())
+    _be_G = _opt(sub, "gb/band_cold_logl_w")
+    if _be_G is not None and (np.ndim(_be_G) != 3 or _be_G.shape[1:] != (_be_nw, _be_nb)):
+        _be_G = None
+    _be_Gg = _be_gain = None
+    if _be_G is not None:
+        _be_G = np.asarray(_be_G, float)[:NIT]
+        _be_gain = valve_gain_rows(_be_G)
+        _be_Gg = np.where(np.isfinite(_be_G), _be_G, np.nan)
+        _be_Gg[~_be_gain] = np.nan                                   # not gain units
+    _be_dup = np.zeros(_be_nb, dtype=bool)
+    _be_g_end = None
+    if _be_ll_n >= 2:
+        _be_src = "dh"
+    elif _be_Gg is not None and _be_gain[_be_rows].sum() >= 2:
+        _be_src = "gain"
+        _be_ll = _be_Gg[_be_rows]
+        _be_ll_n = int(_be_gain[_be_rows].sum())
+        # The two sub-bands touching a layer centre share ONE window (a layer is ~8
+        # sub-bands wide, so no other two window owners are neighbours): their
+        # gains are near-copies, differing only by when in the cycle each was
+        # observed (<1 % on the 9mo store). Draw the window once, at the lower one.
+        _be_nzG = (np.nan_to_num(_be_Gg[_be_gain]) != 0).any(axis=(0, 1))
+        _be_dup[1:] = _be_nzG[1:] & _be_nzG[:-1]
+        # G moves only at a search judge and is frozen after: its "now" is the
+        # newest row where it changed
+        _be_gr = np.nonzero(_be_gain)[0]
+        _be_chg = [int(i) for i in _be_gr[1:]
+                   if np.any(np.nan_to_num(_be_Gg[i]) != np.nan_to_num(_be_Gg[i - 1]))]
+        _be_g_end = _be_chg[-1] if _be_chg else int(_be_gr[-1])
+    else:
+        _be_src = None
+    _be_has_n = _be_n_n >= 2
+    if _be_src is None and not _be_has_n:
+        raise ValueError(
+            f"the band lnL is in {_be_ll_n} and the band count in {_be_n_n} of the "
+            f"{len(_be_rows)} rows read (a snapshot extract keeps the leaf "
+            "frequencies of its last row(s) only; the history is drawn from the "
+            "full store), and the store carries no valve-gain history")
+
+    # ---- the y axis: every sub-band that ever held a cold leaf (window owners for G)
+    _be_show = np.zeros(_be_nb, dtype=bool)
+    if _be_src is not None:
+        _be_show |= (np.isfinite(_be_ll) & (_be_ll != 0)).any(axis=(0, 1))
+    if _be_has_n:
+        _be_show |= (np.nan_to_num(_be_n) > 0).any(axis=(0, 1))
+    _be_show &= ~_be_dup
+    _be_bi = np.nonzero(_be_show)[0]
+    if _be_bi.size == 0:
+        raise ValueError("no sub-band holds a cold leaf in any row read")
+    _be_ns = int(_be_bi.size)
+
+    # ---- the three rasters, (rows, bands shown)
+    _be_A = _be_B = _be_C = None
+    _be_last_ll = _be_last_n = None
+    if _be_src is not None:
+        _be_rel, _be_last_ll = band_rel_final(_be_ll[:, :, _be_bi])
+        _be_A = np.full((len(_be_rows), _be_ns), np.nan)
+        _be_h = np.isfinite(_be_rel).any(axis=(1, 2))
+        _be_A[_be_h] = np.median(_be_rel[_be_h], axis=1)
+    if _be_has_n:
+        _be_rel, _be_last_n = band_rel_final(_be_n[:, :, _be_bi])
+        _be_B = np.full((len(_be_rows), _be_ns), np.nan)
+        _be_h = np.isfinite(_be_rel).any(axis=(1, 2))
+        _be_B[_be_h] = np.mean(_be_rel[_be_h], axis=1)
+    _be_sw = _opt(sub, "gb/band_rj_shutoff_w")
+    if _be_sw is not None and (np.ndim(_be_sw) != 3 or _be_sw.shape[1:] != (_be_nw, _be_nb)
+                               or _be_sw.shape[0] < NIT):
+        _be_sw = None
+    if _be_sw is not None:
+        _be_sw = np.asarray(_be_sw[:NIT], bool)
+        _be_C = _be_sw[_be_rows][:, :, _be_bi].mean(axis=1)
+
+    fig = plt.figure(figsize=(15.5, 7.6))
+    _be_gs = fig.add_gridspec(2, 3, height_ratios=[1.0, 0.03], hspace=0.30, wspace=0.05,
+                              left=0.07, right=0.99, top=0.90, bottom=0.10)
+    _be_ax = [fig.add_subplot(_be_gs[0, 0])]
+    _be_ax += [fig.add_subplot(_be_gs[0, j], sharey=_be_ax[0]) for j in (1, 2)]
+    _be_cax = [fig.add_subplot(_be_gs[1, j]) for j in range(3)]
+    _be_fw, _be_fh = fig.get_size_inches()
+    _be_px = min(int(a.get_position().width * _be_fw * fig.dpi) - 1 for a in _be_ax)
+    _be_py = min(int(a.get_position().height * _be_fh * fig.dpi) - 1 for a in _be_ax)
+    _be_ye = np.arange(_be_ns + 1, dtype=float)
+
+    def _be_draw(ax, cax, M, cmap, norm, title, missing):
+        ax.set_title(title, fontsize=9.5)
+        if M is None:
+            ax.text(0.5, 0.5, missing, transform=ax.transAxes, ha="center", va="center",
+                    color=DIM, fontsize=8.5, wrap=True)
+            cax.set_visible(False)
+            return None
+        Mp, xe = band_pool(M.T, _be_xe, _be_px)                    # (bands, cols)
+        Mp, ye = band_pool(Mp.T, _be_ye, _be_py)                   # (cols, bands)
+        # below zorder 0, so the recipe-stage rules (mark_stages) draw over it
+        qm = ax.pcolormesh(xe, ye, np.ma.masked_invalid(Mp.T), cmap=cmap, norm=norm,
+                           shading="flat", zorder=-1)
+        cb = fig.colorbar(qm, cax=cax, orientation="horizontal")
+        cb.ax.tick_params(labelsize=7.5)
+        return cb, Mp.shape
+
+    _be_V = 100.0
+    if _be_A is not None and np.isfinite(_be_A).any():
+        _be_V = max(100.0, 10.0 ** np.ceil(np.log10(
+            max(np.nanpercentile(np.abs(_be_A), 99.5), 1.0))))
+    _be_stat = ("band lnL" if _be_src == "dh" else "valve gain G")
+    _be_cbA = _be_draw(
+        _be_ax[0], _be_cax[0], _be_A, _be_div,
+        _be_mc.SymLogNorm(linthresh=BAND_EVO_LINTHRESH, linscale=0.6,
+                          vmin=-_be_V, vmax=_be_V, base=10),
+        f"(a) {_be_stat} minus its final value\n(walker median, nats)",
+        "no per-band lnL history in this store")
+    if _be_cbA:
+        _be_cbA[0].set_label("nats  (blue: below the final value)", fontsize=8)
+    _be_bounds = [-3, -2, -1, -0.5, -1e-6, 1e-6, 0.5, 1, 2, 3]
+    _be_ncmap = _be_mc.ListedColormap(_be_div(np.linspace(0.0, 1.0, 9)))
+    _be_ncmap.set_bad("#0A0E14")
+    _be_cbB = _be_draw(
+        _be_ax[1], _be_cax[1],
+        None if _be_B is None else np.clip(_be_B, -2.999, 2.999), _be_ncmap,
+        _be_mc.BoundaryNorm(_be_bounds, 9),
+        "(b) GB count minus the final count\n(walker mean)",
+        f"per-band GB counts need every row's leaf\nfrequencies: the full store has them,\n"
+        f"this one only in {_be_n_n} of {len(_be_rows)} rows read")
+    if _be_cbB:
+        _be_cbB[0].set_ticks([-2, -1, -0.5, 0, 0.5, 1, 2])
+        _be_cbB[0].set_ticklabels(["-2", "-1", "-½", "0", "+½", "+1", "+2"])
+        _be_cbB[0].set_label("leaves  (clipped at ±3)", fontsize=8)
+    _be_cbC = _be_draw(
+        _be_ax[2], _be_cax[2], _be_C, _be_seq, _be_mc.Normalize(0.0, 1.0),
+        "(c) per-walker RJ valve:\nshare of walkers with the pair shut",
+        "no per-walker RJ valve in this store\n(band_rj_shutoff_w)")
+    if _be_cbC:
+        if _be_nw <= 6:
+            _be_cbC[0].set_ticks([k / _be_nw for k in range(_be_nw + 1)])
+            _be_cbC[0].set_ticklabels([f"{k}/{_be_nw}" for k in range(_be_nw + 1)])
+        _be_cbC[0].set_label("walkers shut", fontsize=8)
+    _be_tp, _be_tl = band_rank_ticks(_be_fc[_be_bi])
+    _be_ax[0].set_yticks(_be_tp)
+    _be_ax[0].set_yticklabels(_be_tl)
+    _be_ax[0].set_ylim(0, _be_ns)
+    _be_ax[0].set_ylabel(f"sub-band centre [mHz]  ({_be_ns} sub-bands, one row each)")
+    for _be_j, _be_a in enumerate(_be_ax):
+        _be_a.set_xlim(_be_xe[0], _be_xe[-1])
+        _be_a.set_xlabel("stored iteration (row)")
+        _be_a.grid(False)
+        mark_stages(_be_a, label=(_be_j == 0), max_it=int(NIT - 1))
+        if _be_j:
+            plt.setp(_be_a.get_yticklabels(), visible=False)
+    fig.suptitle(f"per-sub-band history, stored rows 0-{NIT - 1}"
+                 + ("" if len(_be_rows) == NIT else
+                    f" ({len(_be_rows)} blocks of {int(round(_be_xe[1] - _be_xe[0]))} rows)"),
+                 fontsize=10.5, color=FG)
+    fig_b64(fig, "gb_band_evo")
+
+    # ---- caption numbers
+    _be_K = min(_zoom_its(NIT), len(_be_rows) - 1) if len(_be_rows) > 1 else 0
+    _be_parts = []
+    if _be_A is not None:
+        _be_lastA = int(np.nonzero(np.isfinite(_be_A).any(axis=1))[0][-1])
+        if _be_g_end is not None:                  # G: count back from its newest change
+            _be_lastA = int(np.searchsorted(_be_rows, _be_g_end, side="right")) - 1
+        _be_refA = max(0, _be_lastA - _be_K)
+        _be_mvA = int((np.abs(np.nan_to_num(_be_A[_be_refA])) > 20.0).sum())
+        _be_parts.append(
+            f"{_be_mvA} of the {_be_ns} sub-bands sit more than 20 nats (walker median) "
+            f"from their final {_be_stat} at row {_be_rows[_be_refA]}, "
+            f"{_be_rows[_be_lastA] - _be_rows[_be_refA]} rows before "
+            + ("the newest row with data" if _be_g_end is None else "its newest change")
+            + f" ({_be_rows[_be_lastA]})")
+    if _be_B is not None:
+        _be_lastB = int(np.nonzero(np.isfinite(_be_B).any(axis=1))[0][-1])
+        _be_refB = max(0, _be_lastB - _be_K)
+        _be_mvB = int((np.abs(np.nan_to_num(_be_B[_be_refB])) > 1e-6).sum())
+        _be_nlast = _be_n[_be_lastB][:, _be_bi]
+        _be_spread = int(((_be_nlast.max(axis=0) - _be_nlast.min(axis=0)) >= 2).sum())
+        _be_parts.append(
+            f"{_be_mvB} have a different walker-mean count than at row "
+            f"{_be_rows[_be_refB]}, and at row {_be_rows[_be_lastB]} the walkers disagree by "
+            f"2 or more leaves in {_be_spread}")
+    _be_vtxt = ""
+    if _be_C is not None:
+        _be_vl = int(np.nonzero(_be_C.any(axis=1))[0][-1]) if _be_C.any() else None
+        if _be_vl is None:
+            _be_vtxt = " The per-walker valve holds no pair shut in any row read."
+        else:
+            _be_vtxt = (f" The newest row with a shut pair is {_be_rows[_be_vl]}: "
+                        f"{int(round(_be_C[_be_vl].sum() * _be_nw))} (walker, band) pairs of "
+                        "the sub-bands drawn are shut there.")
+        # The valve's blind sub-bands, as observed in this store: a gain of exactly
+        # 0 in every gain-unit row, against the occupancy of the newest row that
+        # carries leaf counts (an extract's last row does).
+        _be_nrow = np.nonzero(np.isfinite(BAND_HIST["n"]).any(axis=(1, 2)))[0]
+        if _be_Gg is not None and _be_gain.any() and _be_nrow.size:
+            _be_gz = ~(np.nan_to_num(_be_Gg[_be_gain]) != 0).any(axis=(0, 1))   # (bands,)
+            _be_occ = (np.nan_to_num(BAND_HIST["n"][_be_nrow[-1]]) > 0).any(axis=0)
+            _be_vtxt += (
+                f" Of the {int(_be_occ.sum())} sub-bands occupied at row "
+                f"{int(_be_rows_all[_be_nrow[-1]])}, {int((_be_gz & _be_occ).sum())} have a "
+                "valve gain of exactly 0 in every gain-unit row: the gain is formed on WDM "
+                "layer windows, and a sub-band that owns no window has none, so the valve "
+                "cannot see its sources improve and shuts its occupied pairs after its "
+                "patience count whatever they do.")
+    _be_src_txt = (
+        "Panel (a) is the log-likelihood the band's live cold leaves buy, the sum over "
+        "them of &lang;d|h&rang; &minus; &lang;h|h&rang;/2 (the statistic of the line panel "
+        "below), with an empty band counting 0"
+        if _be_src == "dh" else
+        "Panel (a) is the valve's own statistic, the band gain G = &frac12;&lang;d|d&rang; "
+        "&minus; &frac12;&lang;r|r&rang; (<code>band_cold_logl_w</code>): this store keeps the "
+        "leaf frequencies of its last row(s) only, so the source-attributed band lnL of the "
+        "full store cannot be formed. G is updated once per search cycle by the valve's "
+        "judge and frozen outside the search stages. Rows that do not hold the gain are "
+        f"left blank: {int(valve_residual_rows(_be_G[_be_rows]).sum())} of the rows read "
+        "hold the residual term &minus;&frac12;&lang;r|r&rang; written before the "
+        "2026-10-10 switch to the gain (a ~1,400-nat unit step) and "
+        f"{int((~_be_gain[_be_rows] & ~valve_residual_rows(_be_G[_be_rows])).sum())} "
+        "carry no valve statistic at all (the valve not yet armed, or the array added to "
+        "the store later). Only sub-bands that own a WDM layer window are drawn (G is "
+        "identically 0 elsewhere); the two sub-bands touching a layer centre share one "
+        "window, so their gains are near-copies (they differ only by when in the cycle "
+        f"each was observed) and the window is drawn once, at the lower one "
+        f"({int(_be_dup.sum())} rows folded)"
+        if _be_src == "gain" else
+        "Panel (a) is empty: no row carries a per-band lnL")
+    GB_BAND_EVO_CAP = (
+        "Each row of the three panels is one GB sub-band "
+        + ("that held a cold leaf in some walker in some row read" if _be_src != "gain" else
+           "whose valve gain is non-zero in some row read")
+        + f" ({_be_ns} of {_be_nb}), stacked in frequency order with "
+        "equal height, so the frequency axis is not linear (the ticks mark where each mHz "
+        f"falls); each column is a stored row, rows 0-{NIT - 1}"
+        + ("" if len(_be_rows) == NIT else
+           f", read as {len(_be_rows)} blocks of {int(round(_be_xe[1] - _be_xe[0]))} rows "
+           "drawn at each block's last row")
+        + ". Columns and rows are pooled by their mean to at most one per pixel. "
+        + _be_src_txt
+        + ("; colour is each walker's value minus its own final value, the walker median, "
+           f"on a symmetric log scale linear inside &plusmn;{BAND_EVO_LINTHRESH:g} nats and "
+           f"saturating at &plusmn;{_be_V:,.0f}: blue is a band still below where it ended, "
+           "red one that has since lost lnL, grey has arrived. " if _be_A is not None
+           else ". ")
+        + ("Panel (b) is the cold GB count per band minus each walker's final count, walker "
+           f"mean (1/{_be_nw} is one walker). " if _be_B is not None else
+           "Panel (b) is empty: the per-band GB count needs every row's leaf frequencies, "
+           f"which this store holds in {_be_n_n} of the {len(_be_rows)} rows read (a snapshot "
+           "extract keeps its last row(s) only; the in-run page reads the full store). ")
+        + ("Panel (c) is the share of walkers whose per-walker RJ valve holds the "
+           "(walker, band) pair shut; the valve runs only in the GB search stages and is "
+           "released at every stage entry. " if _be_C is not None else
+           "Panel (c) is empty: this store carries no per-walker RJ valve "
+           "(<code>band_rj_shutoff_w</code>). ")
+        + "Dashed lines are completed recipe stages; black cells carry no data. "
+        + ("; ".join(_be_parts) + "." if _be_parts else "")
+        + _be_vtxt)
+
+    try:
+        # ---- the movers: small multiples over the last BAND_LL_ZOOM rows
+        if _be_src == "dh" or (_be_src is None and _be_has_n):
+            _be_z0 = max(0, NIT - BAND_LL_ZOOM)
+            _be_wk = [k for k, r in enumerate(_be_rows_all) if r >= _be_z0]
+            _be_wx = _be_rows_all[_be_wk]
+            _be_wll = BAND_HIST["ll"][_be_wk] if _be_src == "dh" else None
+            _be_wn = BAND_HIST["n"][_be_wk].astype(float) if _be_has_n else None
+            _be_wdesc = f"the last {len(_be_wx)} stored rows ({_be_wx[0]}-{_be_wx[-1]})"
+        else:
+            # the gain moves only at a search judge: the window ends at its last change
+            _be_wx = np.arange(max(int(_be_gr[0]), _be_g_end - BAND_LL_ZOOM + 1),
+                               _be_g_end + 1)
+            _be_wll = _be_Gg[_be_wx].copy()
+            _be_wll[:, :, _be_dup] = np.nan          # a folded twin is never picked
+            _be_wn = None
+            _be_wdesc = (f"rows {_be_wx[0]}-{_be_wx[-1]}, the last {len(_be_wx)} rows up to "
+                         "the valve gain's newest change")
+        _be_sel = band_movers(_be_wll, _be_wn, BAND_EVO_MOVERS, BAND_EVO_MOVERS_BY_COUNT)
+        if not _be_sel:
+            raise ValueError(f"no sub-band moved over {_be_wdesc}")
+        _be_nc = 4
+        _be_nr = -(-len(_be_sel) // _be_nc)
+        _be_H = 2.55 * _be_nr + 0.9
+        fig = plt.figure(figsize=(15.5, _be_H))
+        _be_og = fig.add_gridspec(_be_nr, _be_nc, hspace=0.55, wspace=0.24, left=0.06,
+                                  right=0.99, top=1.0 - 0.75 / _be_H, bottom=0.05)
+        _be_wrel = (band_rel_final(_be_wll[:, :, _be_sel])[0]
+                    if _be_wll is not None else None)
+        _be_wsw = _be_sw[_be_wx][:, :, _be_sel] if _be_sw is not None else None
+        _be_two = _be_wn is not None
+        _be_hr = ([0.42] if _be_wsw is not None else []) + [2.3] + ([1.0] if _be_two else [])
+        _be_mtxt = []
+        for _be_j, _be_b in enumerate(_be_sel):
+            _be_ig = _be_og[_be_j // _be_nc, _be_j % _be_nc].subgridspec(
+                len(_be_hr), 1, height_ratios=_be_hr, hspace=0.08)
+            _be_a1 = fig.add_subplot(_be_ig[1 if _be_wsw is not None else 0])
+            _be_top = _be_a1
+            if _be_wsw is not None:
+                # the valve strip: one lane per walker (walker 0 on top), a bar in its
+                # colour over the rows its per-walker RJ valve had this pair shut
+                _be_top = fig.add_subplot(_be_ig[0], sharex=_be_a1)
+                for _be_w in range(_be_nw):
+                    for _be_s, _be_e in shut_runs(_be_wsw[:, _be_w, _be_j]):
+                        _be_top.hlines(_be_w, _be_wx[_be_s] - 0.5, _be_wx[_be_e - 1] + 0.5,
+                                       color=walker_color(_be_w),
+                                       lw=max(1.0, 7.0 / max(_be_nw, 1) * 2.0))
+                _be_top.set_ylim(_be_nw - 0.5, -0.5)
+                _be_top.set_yticks([])
+                _be_top.grid(False)
+                plt.setp(_be_top.get_xticklabels(), visible=False)
+                _be_top.tick_params(length=0)
+                if _be_j % _be_nc == 0:
+                    _be_top.set_ylabel("shut", fontsize=7, rotation=0, ha="right",
+                                       va="center")
+            _be_fin = ""
+            if _be_wrel is not None:
+                for _be_w in range(_be_nw):
+                    # walkers past the named colours: thin, translucent, one muted hue
+                    _be_named = _be_w < len(WALKER_COLORS)
+                    _be_a1.plot(_be_wx, _be_wrel[:, _be_w, _be_j], color=walker_color(_be_w),
+                                lw=1.0 if _be_named else 0.6, alpha=0.9 if _be_named else 0.35,
+                                zorder=2 if _be_named else 1)
+                _be_a1.axhline(0.0, color=DIM, lw=0.7, ls=":")
+                # the raster's scale: linear inside +-linthresh, log beyond, so the
+                # late +-20-nat moves stay visible next to a birth's thousands
+                _be_a1.set_yscale("symlog", linthresh=BAND_EVO_LINTHRESH, linscale=0.6)
+                _be_fv = _be_wll[:, :, _be_b]
+                _be_fh2 = np.nonzero(np.isfinite(_be_fv).any(axis=1))[0]
+                if _be_fh2.size:
+                    _be_fin = (f" · now {np.median(np.nan_to_num(_be_fv[_be_fh2[-1]])):,.0f}"
+                               + (" nats" if _be_src == "dh" else " (G)"))
+            else:
+                _be_a1.text(0.5, 0.5, "no lnL in these rows", transform=_be_a1.transAxes,
+                            ha="center", va="center", color=DIM, fontsize=7)
+            _be_top.set_title(f"{_be_fc[_be_b]:.3f} mHz (band {_be_b}){_be_fin}",
+                              fontsize=8.0, pad=3)
+            _be_a1.tick_params(labelsize=7)
+            _be_a1.grid(True, alpha=0.25, lw=0.5)
+            _be_a1.set_xlim(_be_wx[0] - 0.5, _be_wx[-1] + 0.5)
+            if _be_j % _be_nc == 0:
+                _be_a1.set_ylabel("lnL - final" if _be_src == "dh" else "G - final",
+                                  fontsize=8)
+            _be_lab = f"{_be_fc[_be_b]:.3f} mHz"
+            if _be_two:
+                _be_a2 = fig.add_subplot(_be_ig[-1], sharex=_be_a1)
+                for _be_w in range(_be_nw):
+                    # a few hundredths apart, so walkers on the same count stay visible
+                    _be_off = 0.09 * (_be_w - (_be_nw - 1) / 2.0) if _be_nw <= 6 else 0.0
+                    _be_a2.step(_be_wx, _be_wn[:, _be_w, _be_b] + _be_off, where="mid",
+                                color=walker_color(_be_w), lw=1.0, alpha=0.9)
+                _be_a2.tick_params(labelsize=7)
+                _be_a2.grid(True, alpha=0.25, lw=0.5)
+                _be_a2.yaxis.set_major_locator(plt.MaxNLocator(3, integer=True))
+                plt.setp(_be_a1.get_xticklabels(), visible=False)
+                if _be_j % _be_nc == 0:
+                    _be_a2.set_ylabel("leaves", fontsize=8)
+                _be_nh = np.nonzero(np.isfinite(_be_wn[:, 0, _be_b]))[0]
+                if _be_nh.size and _be_nw <= 6:
+                    _be_lab += " (n = " + "/".join(
+                        str(int(v)) for v in _be_wn[_be_nh[-1], :, _be_b]) + ")"
+            _be_mtxt.append(_be_lab)
+        _be_hd = [_be_L2D([], [], color=walker_color(_be_w), lw=1.4, label=f"walker {_be_w}")
+                  for _be_w in range(min(_be_nw, len(WALKER_COLORS)))]
+        if _be_nw > len(WALKER_COLORS):
+            _be_hd.append(_be_L2D([], [], color=walker_color(len(WALKER_COLORS)), lw=1.4,
+                                  label=f"walkers {len(WALKER_COLORS)}-{_be_nw - 1}"))
+        if _be_wsw is not None:
+            _be_hd.append(_be_L2D([], [], color=FG, lw=2.6,
+                                  label="top strip: that walker's valve has the pair shut"))
+        fig.legend(handles=_be_hd, loc="upper center", ncol=len(_be_hd), fontsize=7.5,
+                   bbox_to_anchor=(0.5, 1.0), handlelength=1.6, columnspacing=1.2)
+        fig_b64(fig, "gb_band_movers")
+        GB_BAND_MOVERS_CAP = (
+            f"The {len(_be_sel)} sub-bands that moved most over {_be_wdesc}, in frequency "
+            "order: " + ", ".join(_be_mtxt) + ". "
+            + (f"Up to {BAND_EVO_MOVERS - BAND_EVO_MOVERS_BY_COUNT} are the largest range of "
+               f"any one walker's band lnL over the window and up to "
+               f"{BAND_EVO_MOVERS_BY_COUNT} more the largest range of its leaf count (a birth "
+               "and a death both count, although they net to zero). "
+               if _be_wll is not None and _be_two else
+               "Picked by the largest range of any one walker's value over the window. ")
+            + ("Top of each pair: each cold walker's band lnL (&lang;d|h&rang; &minus; "
+               "&lang;h|h&rang;/2 summed over its live leaves) minus that walker's own value "
+               "at the newest row, so every line ends at 0 and the text gives the "
+               "walker-median level now; bottom: each walker's leaf count in the band, offset "
+               "by a few hundredths per walker so coinciding walkers stay visible. "
+               if _be_src == "dh" else
+               "Each cold walker's valve gain G (see the caption above for what G is and "
+               "where it is blind) minus its own newest value. "
+               if _be_src == "gain" else
+               "Each walker's leaf count in the band (no per-band lnL in this store). ")
+            + ("The lnL axis is the raster's symmetric log (linear inside "
+               f"&plusmn;{BAND_EVO_LINTHRESH:g} nats). " if _be_wrel is not None else "")
+            + ("The thin strip on top has one lane per walker (walker 0 uppermost) with a "
+               "bar in its colour over the rows where its per-walker RJ valve held the pair "
+               "shut: a bar that starts while its walker's "
+               "line is still climbing marks a pair the valve stopped while the band kept "
+               "moving."
+               if _be_wsw is not None else
+               "This store carries no per-walker RJ valve, so no shut rows are marked."))
+    except Exception as _exc:  # noqa: BLE001 - the rasters above stand without it
+        MISSING.append(f"per-sub-band movers panel unavailable: {type(_exc).__name__}: {_exc}")
+    del _be_ll, _be_n, _be_A, _be_B, _be_C, _be_G, _be_Gg
+except Exception as _exc:  # noqa: BLE001 - a missing panel, never a dead page
+    MISSING.append(f"per-sub-band history unavailable: {type(_exc).__name__}: {_exc}")
 
 # ---- 5b. PER-(WALKER, BAND) SEARCH STATE ----------------------------------
 # Three families landed on 2026-09-22/24, all indexed by (walker, band or
@@ -9127,11 +9852,11 @@ there; where the fitted curve sits above row 0 the release raised the foreground
 </div>
 </details>
 
-<details class="group" id="grp-gbsearch"><summary><span class="gt">Galactic binaries: search</span><span class="gs">leaf count and lnL in detail, lnL per sub-band, birth fates, efficiency, cap cells, the search gates, the F-statistic</span></summary>
+<details class="group" id="grp-gbsearch"><summary><span class="gt">Galactic binaries: search</span><span class="gs">leaf count and lnL in detail, lnL and GB count per sub-band over iteration, birth fates, efficiency, cap cells, the search gates, the F-statistic</span></summary>
 <div class="gbody">
 <section id="trackers"><h2>Model Size &amp; Likelihood</h2>
 <!-- The detailed trackers (leaf count with the cap-cell map, lnL with the walker
-     spread, lnL per sub-band). The at-a-glance block carries the short versions
+     spread, lnL / GB count / valve per sub-band). The at-a-glance block carries the short versions
      (user request 2026-10-11: succinct first, detail collapsed). -->
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
 <div class="panel">{img("gb_leaves")}
@@ -9146,6 +9871,10 @@ cap over time. Rows marked in red have had their births shut off by the barren-b
 its own colour (the same as on the leaf count) with their mean as the thick light line, and
 the max-minus-min spread. At equilibrium the spread sits at a few units.</div></div>
 </div>
+<div class="panel">{img("gb_band_evo", "per-sub-band history: lnL, GB count, RJ valve")}
+<div class="caption">{GB_BAND_EVO_CAP}</div></div>
+<div class="panel">{img("gb_band_movers", "the sub-bands that moved most recently, per walker")}
+<div class="caption">{GB_BAND_MOVERS_CAP}</div></div>
 <div class="panel">{img("gb_band_ll", "GB log-likelihood per sub-band")}
 <div class="caption">{GB_BAND_LL_CAP}</div></div>
 </section>
