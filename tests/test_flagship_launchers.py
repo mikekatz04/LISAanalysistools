@@ -681,6 +681,10 @@ class EveryOtherKnobIsTheNineMonthsTest(unittest.TestCase):
                 "GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE": "6.5", "GB_PE_RJ_FSTAT_RESIDUAL_SPLIT": "0.5",
                 "MBH_SKY_MOVE_BOTH_WEIGHT": "0.02", "MBH_SKY_MOVE_LAT_WEIGHT": "0.04",
                 "MBH_SKY_MOVE_LONG_WEIGHT": "0.02",
+                # 2026-10-13: the eigen jump mixture (10 % of the draws at 3 sigma)
+                "EMRI_EIGEN_JUMP_MIX": "0.1", "EMRI_EIGEN_JUMP_FACTOR": "3.0",
+                "MBH_EIGEN_JUMP_MIX": "0.1", "MBH_EIGEN_JUMP_FACTOR": "3.0",
+                "SOBBH_EIGEN_JUMP_MIX": "0.1", "SOBBH_EIGEN_JUMP_FACTOR": "3.0",
                 "GALFOR_FK_PRIOR": "0.8e-3,1e-2", "GALFOR_F1_PRIOR": "1e-4,1e-2",
                 "GALFOR_F2_PRIOR": "0.8e-3,1e-2", "NWALKERS": "4", "GB_NTEMPS": "24",
                 "MOJITO_PSD_REFERENCE_FIT_UNEQUAL_ARM": "1", "UNEQUAL_ARM": "1"}

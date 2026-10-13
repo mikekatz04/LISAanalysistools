@@ -48,8 +48,11 @@ logger = logging.getLogger(__name__)
 
 
 def describe_inner_moves(moves, weights) -> str:
-    """One-line ``ClassName[(which, frame)] weight | ...`` summary of an
-    inner-move stack (``SkyMove`` carries its ``which`` / ``coord_frame``)."""
+    """One-line ``ClassName[(which, frame)] weight [(jump mix f x k)] | ...``
+    summary of an inner-move stack (``SkyMove`` carries its ``which`` /
+    ``coord_frame``; the eigen jump-mixture move its ``jump_mix`` /
+    ``jump_mix_factor``, e.g. ``EigenAxisJumpMixMove 1.000 (jump mix 0.10 x
+    3.0)`` -- the log proof that ``{BRANCH}_EIGEN_JUMP_MIX`` took effect)."""
     parts = []
     for move, weight in zip(moves, weights):
         label = type(move).__name__
@@ -57,7 +60,14 @@ def describe_inner_moves(moves, weights) -> str:
         frame = getattr(move, "coord_frame", None)
         if which is not None and frame is not None:
             label = f"{label}({which}, {frame})"
-        parts.append(f"{label} {float(weight):.3f}")
+        part = f"{label} {float(weight):.3f}"
+        mix = getattr(move, "jump_mix", None)
+        if mix is not None and float(mix) > 0.0:
+            part += (
+                f" (jump mix {float(mix):.2f} x "
+                f"{float(getattr(move, 'jump_mix_factor', 1.0)):.1f})"
+            )
+        parts.append(part)
     return " | ".join(parts)
 DEBUG_MODE = False
 
@@ -147,6 +157,9 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             of each prior-box width. ``None`` reads
             ``{BRANCH}_EIGEN_GRAM_EPS_REL``, then the ll route's
             :meth:`_eigen_eps_rel`.
+        ladder_reanchor_nats: the lost-rung guard's threshold in lnL nats
+            (:meth:`_reanchor_lost_rungs`); ``0`` disables the guard.
+            ``None`` reads ``{BRANCH}_LADDER_REANCHOR_NATS``, then 200.
         **kwargs: additional keyword arguments for the Move class.
     """
 
@@ -177,6 +190,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         eigen_info: str = None,
         eigen_gram_target: float = None,
         eigen_gram_eps_rel: float = None,
+        ladder_reanchor_nats: float = None,
         **kwargs,
     ):
 
@@ -261,6 +275,9 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         self.eigen_info = eigen_info
         self.eigen_gram_target = eigen_gram_target
         self.eigen_gram_eps_rel = eigen_gram_eps_rel
+        # lost-rung guard threshold (kwarg > env > 200 at USE time, like the
+        # eigen knobs above; see _ladder_reanchor_nats)
+        self.ladder_reanchor_nats = ladder_reanchor_nats
 
         self._setup_debug()
 
@@ -1815,6 +1832,189 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                 _sub.d_h[_w, leaf] = float(np.real(_d_h_w))
                 _sub.h_h[_w, leaf] = float(np.real(_h_h_w))
 
+    # ---- lost-rung guard (user ruling 2026-10-13) -----------------------------
+    #: per-propose record of the guard, ``{leaf: [(global walker, rung,
+    #: deficit nats), ...]}``; reset at the top of every propose_local
+    _ladder_reanchor_log = None
+
+    def _ladder_reanchor_nats(self) -> float:
+        """kwarg > ``{BRANCH}_LADDER_REANCHOR_NATS`` env > 200 nats (<= 0 = off)."""
+        val = getattr(self, "ladder_reanchor_nats", None)
+        if val is None:
+            val = os.environ.get(
+                f"{str(self.branch_name).upper()}_LADDER_REANCHOR_NATS", None
+            )
+        if val is None or (isinstance(val, str) and not val.strip()):
+            val = 200.0
+        return float(val)
+
+    def _walker_offset(self) -> int:
+        """Global index of this body's walker 0.
+
+        Under the walker-block fan-out every rank runs ``propose_local`` on
+        its own slice ``[w0, w1)``, so local walker ``j`` is global walker
+        ``w0 + j``. Single process and the flat (replica) body run the whole
+        ensemble: offset 0.
+        """
+        if not getattr(self, "_fanout_body", False):
+            return 0
+        fanout = getattr(self, "fanout", None)
+        if fanout is None or getattr(self, "row_fanout", None) is not None:
+            return 0
+        try:
+            return int(fanout.layout.block_of(fanout.rank)[0])
+        except Exception:  # noqa: BLE001 -- a log label must never raise
+            return 0
+
+    @staticmethod
+    def _int_runs(values) -> str:
+        """``[2, 3, 4, 7]`` -> ``"2-4,7"``."""
+        vals = sorted(int(v) for v in values)
+        out, i = [], 0
+        while i < len(vals):
+            j = i
+            while j + 1 < len(vals) and vals[j + 1] == vals[j] + 1:
+                j += 1
+            out.append(f"{vals[i]}" if i == j else f"{vals[i]}-{vals[j]}")
+            i = j + 1
+        return ",".join(out)
+
+    def _reanchor_lost_rungs(self, work, leaf, prev_logl, prev_logp, betas):
+        """Re-anchor this leaf's LOST hot rungs to the cold state.
+
+        Why (9mo v9, 2026-10-13): the loudest EMRI (leaf 3, SNR 49) had rungs
+        2-7 ~1,000 nats below its cold rung on every walker since the first
+        source_search block -- the hot rungs lost the source and never found
+        it again (in-model acceptance 0.8-0.85 = wandering on a flat floor,
+        swap acceptance between rungs 1 and 2 = 0.00), so the cold walkers
+        sat on separate islands with no bridge. User ruling 2026-10-13: a
+        rung more than ``THRESH`` nats below its OWN cold rung for that leaf
+        is re-anchored to the cold state at the start of the leaf's block.
+
+        Criterion, per walker ``w`` and hot rung ``k >= 1``::
+
+            lnL[0, w] - lnL[k, w] > THRESH + (ndim / 2) * (1 / beta_k - 1)
+
+        ``lnL`` is ``prev_logl``: the walker's total lnL with this leaf at
+        that rung's parameters, scored against the walker's exposed residual
+        at this visit -- the quantity the move's MH steps and swaps use (the
+        sub-state ``log_like[leaf]`` is the end-of-visit copy of it). The
+        second term is the rung's EXPECTED drop below the cold rung for an
+        ``ndim``-dimensional Gaussian at temperature ``1 / beta_k`` -- the
+        "expected tempering drop" the ruling measured the 200 nats against
+        (<= 15.5 nats on the 8-rung 1/1.2^k ladder, where this reduces to
+        the ruling as stated; ~700-800 at the top rung of the 8-rung
+        make_ladder ladder, where a hot rung that far down is legitimate).
+        ``beta_k == 0`` (an infinite-temperature rung) never fires. A
+        cold rung at the out-of-domain sentinel (or non-finite) never
+        anchors anything; a non-finite hot rung under a valid cold rung is
+        re-anchored.
+
+        What is copied, cold -> rung ``k`` of walker ``w`` (the set the
+        temperature swap exchanges between rungs: coords, inds, lnL, log
+        prior -- branch supplementals are ``None`` for these branches --
+        plus this leaf's per-(temperature, walker) eigen table row when the
+        ``per_walker`` scope is on): ``work.coords[k, w, leaf]``,
+        ``work.inds[k, w, leaf]``, ``prev_logl[k, w]``, ``prev_logp[k, w]``.
+        The tempered posterior is recomputed by the caller from the edited
+        arrays, and the end-of-visit telemetry writes ``log_like`` /
+        ``log_prior`` from them. The cold rung, the residual and the ladder
+        are untouched (a within-walker, within-leaf edit), so nothing needs
+        replaying across ranks: under the walker-block fan-out each rank
+        edits its own slice and ``merge_walkers`` returns the columns.
+
+        Not reversible (no detailed balance); fires only in the pathological
+        state. Runs in search and PE stages alike. Threshold:
+        ``{BRANCH}_LADDER_REANCHOR_NATS`` (default 200; 0 disables).
+
+        Returns ``(prev_logl, prev_logp, records)``; ``records`` is a list of
+        ``(global walker, rung, deficit)`` (empty when nothing fired, in
+        which case the inputs are returned untouched).
+        """
+        thresh = self._ladder_reanchor_nats()
+        nt = int(self.ntemps)
+        if not thresh > 0.0 or nt < 2:
+            return prev_logl, prev_logp, []
+        ll = np.asarray(asnumpy(prev_logl), dtype=float)
+        nt = min(nt, ll.shape[0])
+        b = np.asarray(asnumpy(betas), dtype=float).ravel()[:nt]
+        if nt < 2 or b.size < nt:
+            return prev_logl, prev_logp, []
+        cold = ll[0]
+        valid_cold = np.isfinite(cold) & (cold > -1e299)
+        hot = ll[1:nt]
+        deficit = cold[None, :] - hot
+        with np.errstate(divide="ignore", invalid="ignore"):
+            margin = 0.5 * float(self.ndim) * (1.0 / b[1:nt] - 1.0)
+        margin = np.where(np.isnan(margin), np.inf, np.maximum(margin, 0.0))
+        lost = valid_cold[None, :] & (
+            (deficit > thresh + margin[:, None]) | ~np.isfinite(hot)
+        )
+        if not np.any(lost):
+            return prev_logl, prev_logp, []
+
+        k_idx, w_idx = np.nonzero(lost)
+        k_idx = k_idx + 1
+        leaf = int(leaf)
+
+        work.coords[k_idx, w_idx, leaf] = work.coords[0, w_idx, leaf]
+        work.inds[k_idx, w_idx, leaf] = work.inds[0, w_idx, leaf]
+        if not isinstance(prev_logl, np.ndarray):
+            prev_logl = np.array(asnumpy(prev_logl), dtype=float)
+        if not isinstance(prev_logp, np.ndarray):
+            prev_logp = np.array(asnumpy(prev_logp), dtype=float)
+        prev_logl[k_idx, w_idx] = prev_logl[0, w_idx]
+        prev_logp[k_idx, w_idx] = prev_logp[0, w_idx]
+
+        # per-(temperature, walker) eigen tables (per_walker scope): the
+        # re-anchored row takes the cold row's table (built at the cold point)
+        tabs = getattr(self, "_eigen_tables", None)
+        if tabs and leaf in tabs:
+            axes, sigmas = tabs[leaf]
+            if getattr(axes, "ndim", 2) == 4:
+                try:
+                    xp_t = get_array_module(axes)
+                    ki, wi = xp_t.asarray(k_idx), xp_t.asarray(w_idx)
+                    axes[ki, wi] = axes[0, wi]
+                    sigmas[ki, wi] = sigmas[0, wi]
+                except Exception as exc:  # noqa: BLE001 -- the next refresh rebuilds it
+                    logger.warning(
+                        "[%s_LADDER] leaf %d: per-walker eigen table rows not "
+                        "re-anchored (%r); the next table refresh rebuilds them",
+                        str(self.branch_name).upper(), leaf, exc,
+                    )
+
+        w0 = self._walker_offset()
+        defs = deficit[k_idx - 1, w_idx]
+        records = [
+            (int(w) + w0, int(k), float(d)) for k, w, d in zip(k_idx, w_idx, defs)
+        ]
+        log = getattr(self, "_ladder_reanchor_log", None)
+        if log is None:
+            log = self._ladder_reanchor_log = {}
+        log.setdefault(leaf, []).extend(records)
+
+        by_walker = {}
+        for w, k, _ in records:
+            by_walker.setdefault(w, []).append(k)
+        where = "; ".join(
+            f"walker {w} rung{'s' if len(ks) > 1 else ''} {self._int_runs(ks)}"
+            for w, ks in sorted(by_walker.items())
+        )
+        finite = defs[np.isfinite(defs)]
+        span = (
+            f"{finite.min():.0f}-{finite.max():.0f} nats below cold"
+            if finite.size else "non-finite lnL"
+        )
+        m_used = margin[np.unique(k_idx - 1)]
+        logger.info(
+            "[%s_LADDER] leaf %d: re-anchored %d rung(s) to the cold state "
+            "(%s, %s; threshold %.0f + expected tempering drop %.1f-%.1f nats)",
+            str(self.branch_name).upper(), leaf, len(records), where, span,
+            thresh, float(np.min(m_used)), float(np.max(m_used)),
+        )
+        return prev_logl, prev_logp, records
+
     def setup(self, model, state):
         """Per-iteration setup hook (no-op by default)."""
         return
@@ -2206,6 +2406,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         # iteration -- must NOT pay the swap).
         self._fancy_swap_clock = getattr(self, "_fancy_swap_clock", 0) + 1
         self._fanout_swap_tally = {}
+        self._ladder_reanchor_log = {}
 
         # cold-row agreement between the main state and this branch's
         # sub-state (GF_SUBSTATE_CHECK=0 disables)
@@ -2386,6 +2587,17 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                 self.priors[self.branch_name]
                 .logpdf(old_coords)
                 .reshape((self.ntemps, self.nwalkers))
+            )
+
+            # LOST-RUNG GUARD (user ruling 2026-10-13): a hot rung of this
+            # leaf sitting far below the leaf's own cold rung is re-anchored
+            # to the cold state BEFORE the in-model repeats (coords + the
+            # per-rung bookkeeping the swaps carry). Search AND PE: this body
+            # is the propose of every stage, and under the walker-block
+            # fan-out each rank runs it on its own block (merge_walkers
+            # returns the edited columns to the head).
+            prev_logl, prev_logp, _ = self._reanchor_lost_rungs(
+                work, leaf, prev_logl, prev_logp, temperature_control_here.betas
             )
 
             prev_logP = temperature_control_here.compute_log_posterior_tempered(

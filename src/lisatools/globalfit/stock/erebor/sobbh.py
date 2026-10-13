@@ -69,6 +69,27 @@ class SOBBHSettings(Settings):
     )
     num_prop_repeats: Optional[int] = 10
     sobbh_search_file_key: Optional[str] = "_sobbh_search_tmp_file"
+    # ---- per-leaf ladder + eigen-step knobs (user rulings 2026-10-13) -------
+    # Same meaning as the EMRISettings fields of the same names
+    # (SOBBH_LADDER_RESET_ON_RESUME / SOBBH_LADDER_REANCHOR_NATS /
+    # SOBBH_EIGEN_JUMP_MIX / SOBBH_EIGEN_JUMP_FACTOR).
+    ladder_reset_on_resume: bool = dataclasses.field(
+        default_factory=env_default("SOBBH_LADDER_RESET_ON_RESUME", False, bool)
+    )
+    ladder_reanchor_nats: float = dataclasses.field(
+        default_factory=env_default("SOBBH_LADDER_REANCHOR_NATS", 200.0, float)
+    )
+    # Cap on the default ladder's top temperature (None = eryn's uncapped
+    # ~25 % spacing, T ~ 150 at 8 rungs). See common.default_source_ladder.
+    ladder_tmax: Optional[float] = dataclasses.field(
+        default_factory=env_default("SOBBH_LADDER_TMAX", None, float)
+    )
+    eigen_jump_mix: float = dataclasses.field(
+        default_factory=env_default("SOBBH_EIGEN_JUMP_MIX", 0.0, float)
+    )
+    eigen_jump_factor: float = dataclasses.field(
+        default_factory=env_default("SOBBH_EIGEN_JUMP_FACTOR", 3.0, float)
+    )
 
 
 class SOBBHSetup(Setup):
@@ -132,10 +153,14 @@ class SOBBHSetup(Setup):
         self.setup_priors(input_basis)
 
         if self.betas is None:
-            # sized by the branch's own ntemps knob (SOBBH_NTEMPS); a
-            # hard-coded 24 here used to shadow it (and the lite presets)
-            betas = 1 / 1.2 ** np.arange(self.ntemps)
-            self.betas = betas
+            # make_ladder(ndim, ntemps=SOBBH_NTEMPS), not 1/1.2^k (user
+            # ruling 2026-10-13); sized by the branch's own ntemps knob (a
+            # hard-coded 24 here used to shadow it and the lite presets).
+            # An explicit ``betas`` wins. See common.default_source_ladder.
+            from .common import default_source_ladder
+
+            self.betas = default_source_ladder(self.ndim, input_basis, self.ntemps,
+                                               tmax=self.ladder_tmax)
 
         self.logger.info(f"Using betas: {self.betas} in SOBBH branch")
 

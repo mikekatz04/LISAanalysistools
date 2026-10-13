@@ -85,6 +85,36 @@ class EMRISettings(Settings):
     )
     num_prop_repeats: Optional[int] = 10
     emri_search_file_key: Optional[str] = "_emri_search_tmp_file"
+    # ---- per-leaf ladder + eigen-step knobs (user rulings 2026-10-13) -------
+    # RESUME: the store's per-leaf ladders (betas_all) are kept; True replaces
+    # every leaf's ladder with this branch's configured ladder (logged per
+    # leaf, old -> new). One-off launch-line knob (EMRI_LADDER_RESET_ON_RESUME=1);
+    # inert on a fresh store. See recipe.SingleSourcePEBuilder.build.
+    ladder_reset_on_resume: bool = dataclasses.field(
+        default_factory=env_default("EMRI_LADDER_RESET_ON_RESUME", False, bool)
+    )
+    # Lost-rung guard of the add/remove move: at each leaf visit a rung whose
+    # lnL sits more than this many nats below the leaf's cold rung (beyond
+    # the rung's expected tempering drop) is re-anchored to the cold state.
+    # 0 disables. See ResidualAddOneRemoveOneMove._reanchor_lost_rungs.
+    ladder_reanchor_nats: float = dataclasses.field(
+        default_factory=env_default("EMRI_LADDER_REANCHOR_NATS", 200.0, float)
+    )
+    # Cap on the default ladder's top temperature (None = eryn's uncapped
+    # ~25 % spacing, T ~ 120 at 8 rungs). See common.default_source_ladder
+    # for why a loud source wants ~10. Ignored when ``betas`` is explicit.
+    ladder_tmax: Optional[float] = dataclasses.field(
+        default_factory=env_default("EMRI_LADDER_TMAX", None, float)
+    )
+    # Eigen inner move: this fraction of the proposals draws its axis step at
+    # eigen_jump_factor x the table width (0 = every draw bit-identical to the
+    # plain EigenAxisMove). See lisatools.sampling.moves.eigenjumpmix.
+    eigen_jump_mix: float = dataclasses.field(
+        default_factory=env_default("EMRI_EIGEN_JUMP_MIX", 0.0, float)
+    )
+    eigen_jump_factor: float = dataclasses.field(
+        default_factory=env_default("EMRI_EIGEN_JUMP_FACTOR", 3.0, float)
+    )
 
 
 class EMRISetup(Setup):
@@ -142,36 +172,15 @@ class EMRISetup(Setup):
         self.setup_priors(input_basis)
 
         if self.betas is None:
-            snrs_ladder = np.array(
-                [
-                    1.0,
-                    1.5,
-                    2.0,
-                    3.0,
-                    4.0,
-                    5.0,
-                    7.5,
-                    10.0,
-                    15.0,
-                    20.0,
-                    35.0,
-                    50.0,
-                    75.0,
-                    125.0,
-                    250.0,
-                    5e2,
-                ]
-            )
-            # self.ntemps, NOT a hardcoded 24 (fixed 2026-08-26): the
-            # EMRI_NTEMPS knob (and the _lite presets' ntemps=2!) was
-            # silently ignored -- the observed ladders were always 24
-            # rungs. Field default is now 24 so an UNSET knob keeps the
-            # validated full-year ladder bit-identical.
-            ntemps_pe = int(self.ntemps)
-            # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
-            betas = 1 / 1.2 ** np.arange(ntemps_pe)
-            # betas[-1] = 0.0001
-            self.betas = betas
+            # make_ladder, not 1/1.2^k (user ruling 2026-10-13: "the default
+            # ladders for non-RJ sources should be from make_ladder"): the
+            # geometric spacing for ~25 % swap acceptance of an ndim Gaussian,
+            # sized by this branch's own EMRI_NTEMPS. An explicit ``betas``
+            # still wins (this block never runs then).
+            from .common import default_source_ladder
+
+            self.betas = default_source_ladder(self.ndim, input_basis, self.ntemps,
+                                               tmax=self.ladder_tmax)
 
         self.logger.info(f"Using betas: {self.betas} in EMRI branch")
 

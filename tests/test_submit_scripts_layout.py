@@ -80,6 +80,17 @@ _MONITOR_RANK_SCRIPTS = V9_PRODUCTION
 def _ntasks(script, run_tasks):
     return f"--ntasks={run_tasks + (1 if script in _MONITOR_RANK_SCRIPTS else 0)}"
 
+
+#: The eigen jump-mixture exports of the v9 production launchers (2026-10-13):
+#: {BRANCH}_EIGEN_JUMP_MIX 0.1 / {BRANCH}_EIGEN_JUMP_FACTOR 3.0 for the three
+#: add/remove branches. Code defaults stay 0 / 3.0; the launchers turn it on.
+EIGEN_JUMP_MIX_LINE = {
+    f"{b}_EIGEN_JUMP_{k}": v
+    for b in ("EMRI", "MBH", "SOBBH")
+    for k, v in (("MIX", "0.1"), ("FACTOR", "3.0"))
+}
+EIGEN_JUMP_MIX_KNOBS = tuple(EIGEN_JUMP_MIX_LINE)
+
 _STUB_SBATCH = """#!/usr/bin/env bash
 for a in "$@"; do printf '%s\\n' "$a"; done
 exit 0
@@ -827,6 +838,13 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             # of the per-leaf draws, user ruling). New knobs, same code defaults.
             "MBH_SKY_MOVE_BOTH_WEIGHT", "MBH_SKY_MOVE_LAT_WEIGHT",
             "MBH_SKY_MOVE_LONG_WEIGHT",
+            # 2026-10-13: the eigen jump mixture ON in the launchers (Mike: "if
+            # this is going to improve sampling in general then lets try it");
+            # code default mix 0. EigenJumpMixLauncherTest pins the block.
+            *EIGEN_JUMP_MIX_KNOBS,
+            # 2026-10-13: the EMRI ladder cap (Mike: "use max temperature for an
+            # snr 100 source for the EMRIs", T_max = 100); code default None.
+            "EMRI_LADDER_TMAX",
             # V9-26 (2026-10-02): the EMRI direct-to-WDM scoring path's knobs
             # (default full = the v8 path); SixMonthEMRIDirectTest pins the block.
             "EMRI_LIKELIHOOD", "EMRI_BATCH_MAX_SIZE", "EMRI_DIRECT_TABLE",
@@ -1787,6 +1805,11 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             # of the per-leaf draws, user ruling). New knobs, same code defaults.
             "MBH_SKY_MOVE_BOTH_WEIGHT", "MBH_SKY_MOVE_LAT_WEIGHT",
             "MBH_SKY_MOVE_LONG_WEIGHT",
+            # 2026-10-13: the eigen jump mixture block of the 6mo / 1yr / 9mo
+            # launchers (no source branch is armed in the 3mo v9 twin)
+            *EIGEN_JUMP_MIX_KNOBS,
+            # 2026-10-13: the EMRI ladder cap export, mirrored in the 3mo twin
+            "EMRI_LADDER_TMAX",
             # 3MO-8 (2026-10-02): nor is the 6mo EMRI direct-to-WDM block: no
             # EMRI branch is armed here, and its lookup table is built for the
             # 6-month grid's Nf and dt only.
@@ -3018,6 +3041,69 @@ class V930ProductionDefaultsTest(unittest.TestCase):
                 for knob in ("GB_FSTAT_FORCE_REFIT", "GB_FSTAT_PE_REF"):
                     self.assertNotIn(knob, exports, knob)
                     self.assertNotRegex(src, rf"(?m)^export {knob}=", knob)
+
+
+class EigenJumpMixLauncherTest(unittest.TestCase):
+    """2026-10-13 (Mike, on the eigen jump mixture): "if this is going to
+    improve sampling in general then lets try it. We can always rewind. but
+    let's make sure it takes effect for EMRIs". The code default stays mix 0
+    (bit-identical draws); the 6mo v9 launcher and its derived 1yr / 9mo
+    twins export 10 % of the draws at 3 sigma for EMRI, MBH and SOBBH, each
+    overridable from the launch line (the rollback is ``..._MIX=0``).
+
+    The per-leaf ladder knobs of the same day are NOT exports:
+    ``{BRANCH}_LADDER_RESET_ON_RESUME`` is a one-off launch-line knob (a
+    standing export would reset the ladders at every relaunch) and
+    ``{BRANCH}_LADDER_REANCHOR_NATS`` runs at its code default (200).
+    """
+
+    def test_the_block_is_on_in_every_v9_production_launcher(self):
+        for path in V9_PRODUCTION:
+            exports = _exports(path)
+            src = open(path).read()
+            for knob, want in EIGEN_JUMP_MIX_LINE.items():
+                with self.subTest(script=os.path.basename(path), knob=knob):
+                    self.assertEqual(exports.get(knob), want)
+                    self.assertRegex(
+                        src, rf"(?m)^export {knob}=\$\{{{knob}:-{want}\}}$")
+
+    def test_the_ladder_knobs_are_not_exported(self):
+        for path in V9_PRODUCTION:
+            exports = _exports(path)
+            src = open(path).read()
+            with self.subTest(script=os.path.basename(path)):
+                for b in ("EMRI", "MBH", "SOBBH"):
+                    for suffix in ("LADDER_RESET_ON_RESUME", "LADDER_REANCHOR_NATS"):
+                        knob = f"{b}_{suffix}"
+                        self.assertNotIn(knob, exports, knob)
+                        self.assertNotRegex(src, rf"(?m)^export {knob}=", knob)
+
+    def test_the_emri_ladder_cap_is_an_snr_100_source(self):
+        """User ruling 2026-10-13: "use max temperature for an snr 100 source
+        for the EMRIs" -- the hottest EMRI rung turns an SNR-100 source into
+        an SNR-10 one, T_max = (100 / 10)^2 = 100. Exported in every v9
+        production launcher (overridable on the line); MBH and SOBBH stay on
+        the uncapped make_ladder spacing."""
+        for path in V9_PRODUCTION:
+            exports = _exports(path)
+            src = open(path).read()
+            with self.subTest(script=os.path.basename(path)):
+                self.assertEqual(exports.get("EMRI_LADDER_TMAX"), "100")
+                self.assertRegex(src, r"(?m)^export EMRI_LADDER_TMAX=\$\{EMRI_LADDER_TMAX:-100\}")
+                for b in ("MBH", "SOBBH"):
+                    self.assertNotIn(f"{b}_LADDER_TMAX", exports)
+                    self.assertNotRegex(src, rf"(?m)^export {b}_LADDER_TMAX=")
+
+    def test_the_launch_line_can_switch_it_off(self):
+        lines = [l for l in open(NINE_MO_V9).read().split("\n")
+                 if re.match(r"^export [A-Z]+_EIGEN_JUMP_(MIX|FACTOR)=", l)]
+        env = {k: v for k, v in os.environ.items() if not k.isupper()}
+        env["EMRI_EIGEN_JUMP_MIX"] = "0"
+        out = subprocess.run(["bash", "-c", "\n".join(lines) + "\nenv | sort\n"],
+                             capture_output=True, text=True, env=env).stdout
+        got = dict(l.split("=", 1) for l in out.split("\n") if "=" in l)
+        self.assertEqual(got["EMRI_EIGEN_JUMP_MIX"], "0")
+        self.assertEqual(got["MBH_EIGEN_JUMP_MIX"], "0.1")
 
 
 if __name__ == "__main__":

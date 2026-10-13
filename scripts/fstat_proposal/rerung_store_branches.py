@@ -161,7 +161,11 @@ def new_ladder(new_nt, per_leaf, ndim, ratio=None, betas=None):
             raise ValueError(f"--ratio {ratio} must be > 1")
         return 1.0 / float(ratio) ** np.arange(int(new_nt))
     if per_leaf:
-        # stock/erebor/{mbh,emri,sobbh}.py: pure geometric 1/1.2^k
+        # The stock/erebor/{mbh,emri,sobbh}.py default UNTIL 2026-10-13: pure
+        # geometric 1/1.2^k. Since then a fresh run builds
+        # make_ladder(ndim, ntemps) (common.default_source_ladder); this tool
+        # keeps the old default (tests pin it) -- pass --betas for the new one,
+        # or re-rung and relaunch with {BRANCH}_LADDER_RESET_ON_RESUME=1.
         return 1.0 / 1.2 ** np.arange(int(new_nt))
     from eryn.moves.tempering import make_ladder
 

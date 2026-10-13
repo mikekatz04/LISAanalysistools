@@ -66,6 +66,28 @@ class MBHSettings(Settings):
     num_prop_repeats: Optional[int] = 200
     mbh_search_file_key: Optional[str] = "_mbh_search_tmp_file"
     injection: Optional[np.ndarray] = None
+    # ---- per-leaf ladder + eigen-step knobs (user rulings 2026-10-13) -------
+    # Same meaning as the EMRISettings fields of the same names
+    # (MBH_LADDER_RESET_ON_RESUME / MBH_LADDER_REANCHOR_NATS /
+    # MBH_EIGEN_JUMP_MIX / MBH_EIGEN_JUMP_FACTOR). The jump mixture applies to
+    # the eigen part of the stack only, never to the sky-mode hops.
+    ladder_reset_on_resume: bool = dataclasses.field(
+        default_factory=env_default("MBH_LADDER_RESET_ON_RESUME", False, bool)
+    )
+    ladder_reanchor_nats: float = dataclasses.field(
+        default_factory=env_default("MBH_LADDER_REANCHOR_NATS", 200.0, float)
+    )
+    # Cap on the default ladder's top temperature (None = eryn's uncapped
+    # ~25 % spacing, T ~ 150 at 8 rungs). See common.default_source_ladder.
+    ladder_tmax: Optional[float] = dataclasses.field(
+        default_factory=env_default("MBH_LADDER_TMAX", None, float)
+    )
+    eigen_jump_mix: float = dataclasses.field(
+        default_factory=env_default("MBH_EIGEN_JUMP_MIX", 0.0, float)
+    )
+    eigen_jump_factor: float = dataclasses.field(
+        default_factory=env_default("MBH_EIGEN_JUMP_FACTOR", 3.0, float)
+    )
 
 
 
@@ -142,46 +164,19 @@ class MBHSetup(Setup):
             self.priors = {"mbh": ProbDistContainer(priors_mbh)}
 
         if self.betas is None:
-            snrs_ladder = np.array(
-                [
-                    1.0,
-                    1.5,
-                    2.0,
-                    3.0,
-                    4.0,
-                    5.0,
-                    7.5,
-                    10.0,
-                    15.0,
-                    20.0,
-                    35.0,
-                    50.0,
-                    75.0,
-                    125.0,
-                    250.0,
-                    5e2,
-                ]
-            )
-            # self.ntemps, NOT a hardcoded 24 (fixed 2026-08-26): the
-            # MBH_NTEMPS knob (and the _lite presets' ntemps=2!) was
-            # silently ignored -- the observed ladders were always 24
-            # rungs. Field default is now 24 so an UNSET knob keeps the
-            # validated full-year ladder bit-identical.
-            ntemps_pe = int(self.ntemps)
-            # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
-            betas = 1 / 1.2 ** np.arange(ntemps_pe)
-            # Pure geometric, matching EMRI and SOBBH (user ruling
-            # 2026-08-27). The old ``betas[-1] = 0.0001`` pinned the last
-            # rung to a near-prior temperature, which is harmless at 24
-            # rungs but DEGENERATE once the ladder is short: at
-            # MBH_NTEMPS=2 it produced ``[1, 1e-4]`` -- cold plus
-            # near-prior with nothing between them, so swaps essentially
-            # never accept and the branch is untempered. Job 353 ran
-            # exactly that. EMRI carries the same line commented out.
-            # A run that wants the old hot rung sets ``mbh.betas``
-            # explicitly (the field is already an override).
-            # betas[-1] = 0.0001
-            self.betas = betas
+            # make_ladder(ndim, ntemps=MBH_NTEMPS), not 1/1.2^k (user ruling
+            # 2026-10-13: "the default ladders for non-RJ sources should be
+            # from make_ladder"); see common.default_source_ladder. Still no
+            # pinned near-prior last rung (the 2026-08-27 ruling: at
+            # MBH_NTEMPS=2 ``betas[-1] = 1e-4`` left the branch untempered,
+            # job 353). A run that wants another ladder sets ``mbh.betas``
+            # explicitly (the field is an override and wins).
+            from .common import default_source_ladder
+
+            self.betas = default_source_ladder(self.ndim, input_basis, self.ntemps,
+                                               tmax=self.ladder_tmax)
+
+        self.logger.info(f"Using betas: {self.betas} in MBH branch")
 
         # TODO: maybe combine this into Setup
         if self.other_tempering_kwargs is None:

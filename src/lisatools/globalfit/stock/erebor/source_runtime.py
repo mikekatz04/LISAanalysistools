@@ -1228,7 +1228,7 @@ def make_mbh_inner_moves(mbh, general_setup, gs) -> list:
     """
     from lisatools.sampling.moves.skymodehop import ConstellationPhase, SkyMove
 
-    from .common import make_default_inner_moves
+    from .common import inner_move_kwargs, make_default_inner_moves
 
     weights = {
         "both": float(getattr(mbh, "sky_move_both_weight", 0.0)),
@@ -1244,7 +1244,9 @@ def make_mbh_inner_moves(mbh, general_setup, gs) -> list:
             "the MBH sky-move weights must leave room for the in-model stack "
             f"(sum {total} >= 1)."
         )
-    base = make_default_inner_moves(getattr(mbh, "inner_move_kind", "eigen"))
+    # the eigen jump mixture (MBH_EIGEN_JUMP_MIX / _FACTOR) rides the base
+    # stack; the sky hops below are separate moves and never take it
+    base = make_default_inner_moves(**inner_move_kwargs(mbh))
     base_total = float(sum(w for _, w in base))
     moves = [(move, (1.0 - total) * w / base_total) for move, w in base]
     if total == 0.0:

@@ -6731,6 +6731,101 @@ def resume_ladder_wins(branch_name, info, sub, ntemps):
     return stored_nt, betas
 
 
+def _stored_per_leaf_ladders(sub, nleaves, ntemps):
+    """The sub-state's per-leaf ladders when they are a usable RESUMED set.
+
+    ``None`` on a fresh start (``load_info`` builds the sub-state with
+    ``betas_all=None``; the builder fills it) and for anything that is not a
+    valid ``(nleaves, ntemps)`` ladder set -- finite, cold rung exactly 1,
+    strictly decreasing, positive -- so a zeros template can never pass as a
+    stored ladder.
+    """
+    if sub is None:
+        return None
+    stored = getattr(sub, "betas_all", None)
+    if stored is None:
+        return None
+    arr = np.asarray(stored, dtype=float)
+    if arr.shape != (int(nleaves), int(ntemps)):
+        return None
+    if not np.all(np.isfinite(arr)) or not np.all(arr[:, 0] == 1.0):
+        return None
+    if np.any(arr <= 0.0) or (int(ntemps) > 1 and np.any(np.diff(arr, axis=1) >= 0.0)):
+        return None
+    return arr.copy()
+
+
+def resolve_resumed_ladders(branch_name, info, sub, betas, ntemps, configured_betas=None):
+    """The per-leaf ``betas_all`` a single-source move is built with.
+
+    * FRESH store (no usable stored ladders): every leaf gets ``betas``.
+    * RESUMED store: every leaf KEEPS its stored, adapted ladder (the store's
+      ``sub_backend/<branch>/betas_all`` row). Until 2026-10-13 the builder
+      re-tiled the configured ladder here on every build, so each resume
+      silently reset the per-leaf adaptation to the configuration -- in the
+      9mo v9 store every leaf of mbh / emri / sobbh reads exactly 1/1.2^k
+      (to 1e-16) at row 113, the first row of job 757's resume, while row 112
+      had drifted from it by up to ~2e-3 (EMRI) and later rows by ~1e-2.
+    * RESUMED store with ``{BRANCH}_LADDER_RESET_ON_RESUME=1`` (settings
+      field ``ladder_reset_on_resume``): every leaf's ladder is REPLACED by
+      the configured ladder, logged leaf by leaf (old -> new). The rung count
+      stays the store's (``resume_ladder_wins`` ran first): a LONGER
+      configured ladder is truncated to it (the builder's own rule; for a
+      make_ladder ladder that is make_ladder at the store's count), a SHORTER
+      one gives way to ``make_ladder(ndim, ntemps=<the store's count>)`` with
+      a warning -- re-rung the store (``rerung_store_branches.py``) to change
+      the count.
+
+    ``betas`` is the ladder the builder resolved (configuration, or the
+    store's leaf-0 row after a rung-count mismatch); ``configured_betas`` is
+    the branch's configured ladder BEFORE ``resume_ladder_wins`` rewrote
+    ``info.betas``. Returns a fresh ``(nleaves_max, ntemps)`` array.
+    """
+    nleaves = int(info.nleaves_max)
+    ntemps = int(ntemps)
+    tiled = np.tile(np.asarray(betas, dtype=float), (nleaves, 1))
+    stored = _stored_per_leaf_ladders(sub, nleaves, ntemps)
+    if stored is None:
+        return tiled
+    tag = f"[{str(branch_name).upper()}_LADDER]"
+    knob = f"{str(branch_name).upper()}_LADDER_RESET_ON_RESUME"
+    if not bool(getattr(info, "ladder_reset_on_resume", False)):
+        logger.info(
+            "%s resume keeps the STORED per-leaf ladders (%d leaves x %d rungs; "
+            "leaf 0 %s). %s=1 replaces them with the configured ladder.",
+            tag, nleaves, ntemps, np.array2string(stored[0], precision=5), knob,
+        )
+        return stored
+    new = None
+    if configured_betas is not None:
+        cfg = np.asarray(configured_betas, dtype=float).ravel()
+        if cfg.size >= ntemps:
+            new = cfg[:ntemps].copy()
+    if new is None:
+        new = np.asarray(make_ladder(int(info.ndim), ntemps=ntemps), dtype=float)
+        logger.warning(
+            "%s %s=1: the configured ladder (%s rungs) does not fit the store's "
+            "%d rungs; resetting to make_ladder(ndim=%d, ntemps=%d) instead. "
+            "Re-rung the store to change the rung count.",
+            tag, knob,
+            "no" if configured_betas is None else len(np.ravel(configured_betas)),
+            ntemps, int(info.ndim), ntemps,
+        )
+    out = np.tile(new, (nleaves, 1))
+    logger.info(
+        "%s %s=1: REPLACING the stored per-leaf ladders of %d leaves with %s",
+        tag, knob, nleaves, np.array2string(new, precision=5),
+    )
+    for leaf in range(nleaves):
+        logger.info(
+            "%s leaf %d ladder reset: old %s -> new %s",
+            tag, leaf, np.array2string(stored[leaf], precision=5),
+            np.array2string(out[leaf], precision=5),
+        )
+    info.betas = new
+    return out
+
+
 class SingleSourcePEBuilder(SourceMoveBuilder):
     """Build a :class:`ResidualAddOneRemoveOneMove` PE move for one branch.
 
@@ -6830,6 +6925,12 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
             if _info_betas is not None
             else int(getattr(info, "ntemps", None) or gi.ntemps)
         )
+        # the CONFIGURED ladder, before resume_ladder_wins may overwrite
+        # info.betas with the store's (the {BRANCH}_LADDER_RESET_ON_RESUME
+        # path below needs the configuration, not the store)
+        _configured_betas = (
+            None if _info_betas is None else np.asarray(_info_betas, dtype=float).copy()
+        )
         # RESUME: the STORED rung count wins (same rule as the banded
         # branches, GBState.initialize_band_information step 3). A resumed
         # sub-state carries its coords / per-leaf log_like / counters at the
@@ -6848,8 +6949,9 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
 
         # Ladder resolution honors the class contract ("any argument left
         # None falls back to the matching field on source_info"): an explicit
-        # builder ladder wins, then the branch-configured ladder
-        # (e.g. EMRISetup's dense 1/1.2^k), then the make_ladder default.
+        # builder ladder wins, then the branch-configured ladder (the Setups'
+        # make_ladder(ndim, ntemps) default since 2026-10-13, or an explicit
+        # betas), then the make_ladder default here.
         # Previously info.betas was skipped entirely, so the configured EMRI
         # ladder never reached the move's per-leaf temperature controls.
         # On a rung-count resume mismatch the store's own ladder is the one
@@ -6875,11 +6977,14 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
                     )
                     betas = betas[:ntemps]
         if betas is None:
-            betas = make_ladder(info.ndim, ntemps=ntemps)
+            betas = make_ladder(int(info.ndim), ntemps=int(ntemps))
         # Side effects (parity with the old build_mbh_moves_phenom): stash the
-        # ladder on the source info and the tiled ladder on the sub-state.
+        # ladder on the source info and the per-leaf ladders on the sub-state.
         info.betas = betas
-        betas_all = np.tile(betas, (info.nleaves_max, 1))
+        betas_all = resolve_resumed_ladders(
+            self.branch_name, info, state.sub_states.get(self.branch_name),
+            betas, ntemps, _configured_betas,
+        )
         state.sub_states[self.branch_name].betas_all = betas_all
         logger.debug(f"{self.branch_name} betas: {betas}")
 
@@ -6924,6 +7029,12 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
         _extra_kwargs.setdefault(
             "eigen_table_scope",
             getattr(info, "eigen_table_scope", None),
+        )
+        # the lost-rung guard's threshold ({BRANCH}_LADDER_REANCHOR_NATS via
+        # the settings field; None lets the move read the env / its default)
+        _extra_kwargs.setdefault(
+            "ladder_reanchor_nats",
+            getattr(info, "ladder_reanchor_nats", None),
         )
         move = self.move_class(
             self.branch_name,

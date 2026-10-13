@@ -4391,8 +4391,27 @@ echo "[DATA] SOURCE_TYPES=${SOURCE_TYPES} (COMBINED = pre-summed stream; classes
 # DEFAULT 8 since 2026-10-07 (V9-30): the 6mo store was re-rung to 8 on 10-02
 # and every relaunch line since carried MBH_NTEMPS=8 EMRI_NTEMPS=8; a FRESH
 # store (1yr, 9mo) builds its MBH / EMRI ladders from these.
+# WHERE THE LADDER COMES FROM (2026-10-13): {MBH,EMRI,SOBBH}_NTEMPS size the
+# DEFAULT per-leaf ladder each branch builds when no explicit betas is set:
+# eryn make_ladder(ndim, ntemps) (EMRI ndim 12, MBH / SOBBH 11; the ~25 %
+# swap-acceptance geometric spacing), in stock/erebor/{mbh,emri,sobbh}.py via
+# common.default_source_ladder (user ruling 2026-10-13; was 1/1.2^k). A
+# RESUMED store keeps its stored per-leaf ladders (betas_all);
+# {MBH,EMRI,SOBBH}_LADDER_RESET_ON_RESUME=1 on the LAUNCH LINE (one-off, not
+# exported here) replaces them with this ladder, logged leaf by leaf
+# (recipe.resolve_resumed_ladders). The add/remove move's lost-rung guard
+# re-anchors a hot rung more than {BRANCH}_LADDER_REANCHOR_NATS (code default
+# 200; 0 = off) below its leaf's cold rung, beyond the rung's expected
+# tempering drop, to the cold state ("[EMRI_LADDER] leaf N: re-anchored ...").
 export MBH_NTEMPS=${MBH_NTEMPS:-8}
 export EMRI_NTEMPS=${EMRI_NTEMPS:-8}
+# EMRI ladder cap (user ruling 2026-10-13: "use max temperature for an snr 100
+# source for the EMRIs"): the hottest rung turns an SNR-100 EMRI into an
+# SNR-10 one, T_max = (100 / 10)^2 = 100, so make_ladder spaces the 8 rungs
+# geometrically from 1 to 100 (common.default_source_ladder, settings field
+# ladder_tmax). Uncapped, the 25 % spacing of a 12-dim Gaussian reaches
+# T ~ 120. MBH (SNR 180-1000) and SOBBH (SNR 5-10) stay uncapped.
+export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-100}
 # 12 -> 8 (user ruling 2026-09-16, with repeats 25 -> 20: sobbh cost
 # trim now that the single-call fix landed). NOTE: SOBHB's ladder lives
 # in the stored PerLeafLadderState (betas_all per leaf), so on a RESUME
@@ -4593,6 +4612,28 @@ export EMRI_INNER_MOVE_KIND=eigen
 export MBH_SKY_MOVE_BOTH_WEIGHT=${MBH_SKY_MOVE_BOTH_WEIGHT:-0.02}
 export MBH_SKY_MOVE_LAT_WEIGHT=${MBH_SKY_MOVE_LAT_WEIGHT:-0.04}
 export MBH_SKY_MOVE_LONG_WEIGHT=${MBH_SKY_MOVE_LONG_WEIGHT:-0.02}
+# ---- EIGEN JUMP MIXTURE (2026-10-13) ---------------------------------------
+# A share of each branch's eigen inner-move proposals draws its axis step at
+# {BRANCH}_EIGEN_JUMP_FACTOR x the table width (lisatools.sampling.moves.
+# eigenjumpmix.EigenAxisJumpMixMove: a fixed mixture of two symmetric
+# kernels, the Metropolis factor stays 0). Why: on the 9mo v9 the loud
+# EMRIs' cold walkers sat on separate islands 23-38 nats below the best
+# walker with no bridge; a 1-sigma axis step cannot cross that. Mike
+# 2026-10-13: "if this is going to improve sampling in general then lets
+# try it. We can always rewind. but let's make sure it takes effect for
+# EMRIs so we can make this current sampling more efficient." CODE defaults
+# stay mix 0 (bit-identical to the plain EigenAxisMove); this block turns it
+# ON (10 % of the draws at 3 sigma) for all three branches. The job log
+# proves it at move construction, one line per branch and rank:
+#   [EMRI] inner-move stack: EigenAxisJumpMixMove 1.000 (jump mix 0.10 x 3.0)
+# MBH: the mix rides the eigen part (0.92) only, never the sky hops above.
+# Rollback: {BRANCH}_EIGEN_JUMP_MIX=0 on the launch line.
+export EMRI_EIGEN_JUMP_MIX=${EMRI_EIGEN_JUMP_MIX:-0.1}
+export EMRI_EIGEN_JUMP_FACTOR=${EMRI_EIGEN_JUMP_FACTOR:-3.0}
+export MBH_EIGEN_JUMP_MIX=${MBH_EIGEN_JUMP_MIX:-0.1}
+export MBH_EIGEN_JUMP_FACTOR=${MBH_EIGEN_JUMP_FACTOR:-3.0}
+export SOBBH_EIGEN_JUMP_MIX=${SOBBH_EIGEN_JUMP_MIX:-0.1}
+export SOBBH_EIGEN_JUMP_FACTOR=${SOBBH_EIGEN_JUMP_FACTOR:-3.0}
 # TABLE SCOPE. SOBBH is set ABOVE (SOBBH_EIGEN_SCOPE, walker_max per the
 # 2026-09-16 ruling; the 2026-09-08 per-walker ruling it superseded cost
 # 12 rungs x 10 walkers = 120 points x ~245 rows ~ 29k batched likelihood
