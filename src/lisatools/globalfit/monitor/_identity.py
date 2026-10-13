@@ -29,6 +29,16 @@ __all__ = ["run_identity", "arm_tag"]
 #: ``gf_prod_23mo_v1`` from matching as ``3mo``).
 _VARIANT = re.compile(r"(?<![0-9])(\d+)(mo|yr)_v(\d+)")
 
+#: The flagship series (2026-10-11, scripts/flagship): ``gf_prod_<N>mo_<tag>``
+#: with a series tag from ``_SERIES_TAGS`` -> ``("<N>-Month <tag>",
+#: "<N>mo_<tag>")``. Checked FIRST so ``gf_prod_6mo_flagship`` never lands on
+#: the plain ``6mo`` arm cache of the live 6mo v9 run, and ``gf_prod_12mo_...``
+#: / ``gf_prod_24mo_...`` never fall through to the 3-month default. The 9mo
+#: keeps its live name (``gf_prod_9mo_v9``, the generic variant rule). A
+#: renamed series (runs.py ``SERIES``) must be added here.
+_SERIES_TAGS = ("flagship",)
+_SERIES = re.compile(r"(?<![0-9])(\d+)(mo|yr)_(" + "|".join(_SERIES_TAGS) + r")(?![a-z0-9])")
+
 #: Run kinds whose arm cache predates the per-kind naming (2026-08-22) and
 #: keeps its historical file name.
 _LEGACY_ARM_TAGS = {"3mo_v3": "v3", "3mo_v4": "v4", "3mo": "v2"}
@@ -49,6 +59,10 @@ def run_identity(base: str) -> tuple[str, str]:
     1-year run, whose store carries no version token).
     """
     base = str(base)
+    m = _SERIES.search(base)
+    if m is not None:
+        n, unit, tag = m.group(1), m.group(2), m.group(3)
+        return f"{n}-{'Month' if unit == 'mo' else 'Year'} {tag}", f"{n}{unit}_{tag}"
     if "23mo" in base:
         return "23-Month", "23mo"
     if "6mo" in base:

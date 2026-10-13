@@ -53,6 +53,30 @@ class RunIdentityTest(unittest.TestCase):
         ("gf_prod_2yr_v9", "2-Year v9", "2yr_v9"),
     )
 
+    # the flagship series (scripts/flagship, 2026-10-11): its own tag per run
+    FLAGSHIP = (
+        ("gf_prod_3mo_flagship", "3-Month flagship", "3mo_flagship"),
+        ("gf_prod_6mo_flagship", "6-Month flagship", "6mo_flagship"),
+        ("gf_prod_12mo_flagship", "12-Month flagship", "12mo_flagship"),
+        ("gf_prod_18mo_flagship", "18-Month flagship", "18mo_flagship"),
+        ("gf_prod_24mo_flagship", "24-Month flagship", "24mo_flagship"),
+        ("gf_prod_2yr_flagship", "2-Year flagship", "2yr_flagship"),
+    )
+
+    def test_the_flagship_series_gets_its_own_identity(self):
+        for base, label, kind in self.FLAGSHIP:
+            with self.subTest(base=base):
+                self.assertEqual(run_identity(base), (label, kind))
+                self.assertEqual(arm_tag(kind), kind)
+        # never the live 6mo's arm cache, never the v2 fall-through
+        self.assertNotEqual(run_identity("gf_prod_6mo_flagship")[1], "6mo")
+        self.assertNotEqual(arm_tag(run_identity("gf_prod_3mo_flagship")[1]), "v2")
+        self.assertNotEqual(run_identity("gf_prod_12mo_flagship")[1], "3mo")
+        # the flagship 9mo keeps the live run's store and therefore its identity
+        self.assertEqual(run_identity("gf_prod_9mo_v9"), ("9-Month v9", "9mo_v9"))
+        # the series tag must be a whole word
+        self.assertEqual(run_identity("gf_prod_3mo_flagshipx"), ("3-Month", "3mo"))
+
     def test_every_historical_name_resolves_as_before(self):
         for base, label, kind in self.HISTORICAL:
             with self.subTest(base=base):

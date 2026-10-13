@@ -166,3 +166,6 @@ cython_debug/
 /src/lisatools/_version.py
 # global-fit smoke-test output (tests/test_multirank_noise_smoke.py writes here)
 gf_output_noise/
+
+# the flagship one-off launchers (scripts/flagship/build.py --set ... --out)
+scripts/flagship/oneoff/
