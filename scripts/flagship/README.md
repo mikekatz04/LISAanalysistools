@@ -81,10 +81,46 @@ table + template build (the test suite runs it too).
 From the LAT root, on the cluster: `./scripts/flagship/submit_gf_<run>.sh`
 (a fresh store on the first submit, a resume after; `NGPUS=2` for the 1-node
 spot flow; the dispatch table supports 2 or 4 GPUs -- a larger count is a
-level-1 edit of the `case "${NGPUS}"` table). Before a child's first launch:
-dry-run the source warm start once per branch on a login node, and pre-build
-the warm-start npz if the in-job build is slow (the `[WARMSTART]` block prints
-the three commands).
+level-1 edit of the `case "${NGPUS}"` table).
+
+### A child whose parent is still running (the 12mo off the live 9mo)
+
+Three launch-line knobs decide what the child takes from the parent, all
+`${K:-v}`, so they go on the line (or into the child's `overrides` in
+`runs.py` once decided):
+
+```
+GF_SEED_STORE=/shared/data/global_fit_output/gf_prod_9mo_v9/gf_prod_9mo_testing_running_backup_copy.h5 \
+GB_WARM_START_LAST_K=<rows> \
+./scripts/flagship/submit_gf_12mo.sh
+```
+
+* `GF_SEED_STORE` -- while the parent job is WRITING its primary store, point
+  the child at the parent's `*_running_backup_copy.h5` (refreshed every
+  `BACKUP_ITER` saves): the GB warm-start fit, the psd pin and the source
+  warm start all read this one path (`GB_WARM_START_SOURCE_STORE` and
+  `SOURCE_WARM_START_STORE` default to it). The 9mo was launched off the live
+  6mo this way. Keep the SAME value on every resubmit: the warm-start npz
+  records the store it was fitted from.
+* `GB_WARM_START_LAST_K` -- the number of the parent's last STORED ROWS the
+  GB warm-start mixture is fitted from (x the parent's walkers). Rows, not
+  iterations: with `GB_SEARCH_LEGS=1` a search stage stores THREE rows per
+  cycle (after `in_model`, `in_model_fstat`, `in_model_removal`); `full_pe`
+  stores one per iteration. 300 (the 9mo's value off the 6mo full_pe) means
+  100 search cycles.
+* The source warm start copies the parent's SNR > 10 leaves at its LAST
+  stored row (`SOURCE_WARM_START_SNR_MIN`); the psd pin reads the parent's
+  maxlogL cold walker. Galfor stays the hand-set offline estimate (ruling
+  2026-09-25: "the galfor pin should come from our estimate"); the parent's
+  foreground is NOT taken unless the template's pin block changes.
+
+Before the first launch, on a login node: dry-run the source warm start once
+per branch (`python -m lisatools.globalfit.warmstart.sources --store <seed h5>
+--branch mbh --ids <the parent's MBHB_IDS>`, then emri / sobbh) -- a NaN SNR
+record refuses the launch -- and pre-build the GB warm-start npz if the in-job
+build would be slow (the 6mo -> 9mo build took ~45 min in-job; the
+`[WARMSTART]` block prints the three commands with this run's values; the
+npz must land at `${STORE_DIR}/warmstart/<parent dirname>_refereed.npz`).
 
 ## The guards (`tests/test_flagship_launchers.py`)
 

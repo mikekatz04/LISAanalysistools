@@ -44,13 +44,22 @@ logger = logging.getLogger(__name__)
 _STEPS = ("fit_from_store", "match_referee", "referee_apply")
 
 
-def _manual_recipe(path: str, store: str) -> str:
+def _manual_recipe(path: str, store: str, last_k: typing.Optional[int] = None,
+                   tobs: typing.Optional[float] = None) -> str:
+    """The three by-hand commands, with THIS build's last_k / source tobs
+    (``None`` = the environment, as the build itself resolves them; the hint
+    used to print the 3mo-parent values 10 / 7776000 whatever the run was
+    configured with; 2026-10-13)."""
+    if last_k is None:
+        last_k = int(os.environ.get("GB_WARM_START_LAST_K", "10"))
+    if tobs is None:
+        tobs = float(os.environ.get("GB_WARM_START_SOURCE_TOBS", "7776000.0"))
     stem = os.path.splitext(os.path.basename(path))[0]
     fit = os.path.join(os.path.dirname(path) or ".", stem + "_fit.npz")
     ref = os.path.splitext(fit)[0] + "_referee.npz"
     return (
         f"python -m lisatools.globalfit.warmstart.fit_from_store "
-        f"--store {store} --last-k 10 --tobs 7776000 --out {fit}\n"
+        f"--store {store} --last-k {int(last_k)} --tobs {float(tobs):.0f} --out {fit}\n"
         f"python -m lisatools.globalfit.warmstart.match_referee "
         f"--npz {fit} --store {store}\n"
         f"python -m lisatools.globalfit.warmstart.referee_apply "
@@ -181,7 +190,7 @@ def ensure_warm_start_components(
             "built automatically. Either set GB_WARM_START_SOURCE_STORE "
             "to the previous run's FULL FINAL store h5 (never a "
             "make_snapshots extract) or build the npz by hand:\n"
-            + _manual_recipe(path, "<previous-run store h5>")
+            + _manual_recipe(path, "<previous-run store h5>", last_k, tobs)
         )
     if not os.path.exists(store):
         raise FileNotFoundError(
