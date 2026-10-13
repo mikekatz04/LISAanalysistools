@@ -268,10 +268,26 @@ _add(Run(
     ),
 ))
 _add(Run(
-    name="12mo", days=360, parent="9mo",
+    name="12mo", days=360,
+    # The parent is a COPY of the 9mo run folder (Mike 2026-10-13: "i will copy
+    # the 9mo to *_copy folder and we should run off that so we do not mess
+    # that up"): every read -- the GB warm-start fit, the psd pin, the source
+    # warm start, the monitor overlay -- goes to gf_prod_9mo_v9_copy, never to
+    # the live gf_prod_9mo_v9 store the 9mo job keeps writing. The copy must
+    # hold the 9mo's primary h5 (gf_prod_9mo_testing.h5; the running backup
+    # copy beside it is the torn-primary fallback). Rename here if the copy
+    # is called something else; the id lists are the 9mo's own.
+    parent=Parent(name="9mo", store_dirname="gf_prod_9mo_v9_copy",
+                  base_file_name="gf_prod_9mo", days=270,
+                  mbhb_ids=mbhb_ids_for(270)),
     gb_nleaves_max=20000, gb_n_subbands=4096, gb_rj_inmodel_chunk=16384,
     edge_crop_wavelets=60,
     notes=(
+        "PARENT = gf_prod_9mo_v9_copy, a COPY of the live 9mo run folder taken",
+        "before this launch (Mike 2026-10-13) -- the live store is never read.",
+        "GB_WARM_START_LAST_K = the parent's last STORED ROWS (x 4 walkers; a",
+        "search stage stores 3 rows per cycle under GB_SEARCH_LEGS=1); set it on",
+        "the launch line or as an override here once decided.",
         "MBHB 10 (369.5 d, SNR ~1963) is IN under the two-week rule (the 1yr v9",
         "left it out under the 7-d code default). EMRIs 0 (347 d) and 3 (256 d)",
         "plunge inside the window.",

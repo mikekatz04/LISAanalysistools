@@ -19,14 +19,20 @@
 #   MBHB_IDS=0,2,3,4,5,7,9,10,12,15,16,18 (t_c < 360 + 14 d); EMRI / SOBHB: all;
 #   STORE_DIR /shared/data/global_fit_output/gf_prod_12mo_flagship/, BASE_FILE_NAME gf_prod_12mo,
 #   job gf12mo_flagship, log gf12mo_flagship_<jobid>.log; NGPUS default 4.
-#   PARENT = the 9mo (270 d): GF_SEED_STORE /shared/data/global_fit_output/gf_prod_9mo_v9/gf_prod_9mo_testing.h5
-#     (GB warm start fitted from its last 300 cold-chain rows -> warmstart/gf_prod_9mo_v9_refereed.npz, auto-built
-#     on the first launch when missing; psd + galfor pinned at its maxlogL cold walker; the source
+#   PARENT = the 9mo (270 d): GF_SEED_STORE /shared/data/global_fit_output/gf_prod_9mo_v9_copy/gf_prod_9mo_testing.h5
+#     (GB warm start fitted from its last GB_WARM_START_LAST_K stored rows -> warmstart/gf_prod_9mo_v9_copy_refereed.npz, auto-built
+#     on the first launch when missing; the psd pinned at its maxlogL cold walker (galfor stays the
+#     hand-set offline estimate, ruling 2026-09-25); the source
 #     warm start copies its SNR > 10 leaves by catalogue id: MBHB 2,5,7,12,16,18, every EMRI / SOBHB; the monitor page overlays
-#     it: GF_MONITOR_ADD_INFO=/shared/data/global_fit_output/gf_prod_9mo_v9).
+#     it: GF_MONITOR_ADD_INFO=/shared/data/global_fit_output/gf_prod_9mo_v9_copy).
 #     The parent store must be COMPLETE and readable when this launches.
 #
 # NOTES:
+#   PARENT = gf_prod_9mo_v9_copy, a COPY of the live 9mo run folder taken
+#   before this launch (Mike 2026-10-13) -- the live store is never read.
+#   GB_WARM_START_LAST_K = the parent's last STORED ROWS (x 4 walkers; a
+#   search stage stores 3 rows per cycle under GB_SEARCH_LEGS=1); set it on
+#   the launch line or as an override here once decided.
 #   MBHB 10 (369.5 d, SNR ~1963) is IN under the two-week rule (the 1yr v9
 #   left it out under the 7-d code default). EMRIs 0 (347 d) and 3 (256 d)
 #   plunge inside the window.
@@ -334,7 +340,7 @@ export GF_MONITOR_TIMEOUT=1800
 # inherits it; the CLI twin is python -m lisatools.globalfit.monitor --add-info.
 # The default is THIS RUN'S PARENT (runs.py); GF_MONITOR_ADD_INFO=none on the
 # launch line drops it. Not a run knob: the sampler never reads it.
-export GF_MONITOR_ADD_INFO=${GF_MONITOR_ADD_INFO:-/shared/data/global_fit_output/gf_prod_9mo_v9}
+export GF_MONITOR_ADD_INFO=${GF_MONITOR_ADD_INFO:-/shared/data/global_fit_output/gf_prod_9mo_v9_copy}
 
 export USE_GPU=1
 export GPU_BACKEND=cuda13x
@@ -3894,7 +3900,7 @@ export GB_ROUTER_THREADED=1
 # and invisible to a fresh-store rebuild. Every other use of STORE_DIR in this
 # script already writes ${STORE_DIR}/..., so the doubled slash the default
 # produces is the same one they produce, and harmless.
-export GB_WARM_START_COMPONENTS=${GB_WARM_START_COMPONENTS-${STORE_DIR}/warmstart/gf_prod_9mo_v9_refereed.npz}
+export GB_WARM_START_COMPONENTS=${GB_WARM_START_COMPONENTS-${STORE_DIR}/warmstart/gf_prod_9mo_v9_copy_refereed.npz}
 # AUTO-BUILD (2026-09-14, after the first launch died on the missing npz;
 # user: "Check if it is done, if not run it. I would like it to be
 # automatic."). When the npz is missing, recipe build now runs the
@@ -3943,7 +3949,7 @@ export GB_WARM_START_COMPONENTS=${GB_WARM_START_COMPONENTS-${STORE_DIR}/warmstar
 # another store would be the exact "warm start and noise pin from different
 # folders" split the ruling forbids. A store that cannot be resolved means
 # no pin, which means the noise stages run -- loudly, see below.
-export GF_SEED_STORE=${GF_SEED_STORE:-/shared/data/global_fit_output/gf_prod_9mo_v9/gf_prod_9mo_testing.h5}
+export GF_SEED_STORE=${GF_SEED_STORE:-/shared/data/global_fit_output/gf_prod_9mo_v9_copy/gf_prod_9mo_testing.h5}
 if [ ! -f "${GF_SEED_STORE}" ]; then
   _seed_dir="${GF_SEED_STORE}"
   [ -f "${_seed_dir}" ] || [ -d "${_seed_dir}" ] || _seed_dir=$(dirname "${GF_SEED_STORE}")
@@ -4011,7 +4017,7 @@ if [ -n "${GB_WARM_START_COMPONENTS}" ] && [ ! -f "${GB_WARM_START_COMPONENTS}" 
     echo "[WARMSTART] Point GB_WARM_START_SOURCE_STORE at the previous run's FULL FINAL h5,"
     echo "[WARMSTART] or build the npz by hand:"
     echo "[WARMSTART]   python -m lisatools.globalfit.warmstart.fit_from_store --store <store.h5> \\"
-    echo "[WARMSTART]       --last-k ${GB_WARM_START_LAST_K} --tobs ${GB_WARM_START_SOURCE_TOBS} --out <dir>/gf_prod_9mo_v9_fit.npz"
+    echo "[WARMSTART]       --last-k ${GB_WARM_START_LAST_K} --tobs ${GB_WARM_START_SOURCE_TOBS} --out <dir>/gf_prod_9mo_v9_copy_fit.npz"
     echo "[WARMSTART]   python -m lisatools.globalfit.warmstart.match_referee --npz <...fit.npz> --store <store.h5>"
     echo "[WARMSTART]   python -m lisatools.globalfit.warmstart.referee_apply --fit <...fit.npz> \\"
     echo "[WARMSTART]       --referee <...fit_referee.npz> --out ${GB_WARM_START_COMPONENTS}"
@@ -4402,13 +4408,53 @@ echo "[DATA] SOURCE_TYPES=${SOURCE_TYPES} (COMBINED = pre-summed stream; classes
 # tempering drop, to the cold state ("[EMRI_LADDER] leaf N: re-anchored ...").
 export MBH_NTEMPS=${MBH_NTEMPS:-8}
 export EMRI_NTEMPS=${EMRI_NTEMPS:-8}
-# EMRI ladder cap (user ruling 2026-10-13: "use max temperature for an snr 100
-# source for the EMRIs"): the hottest rung turns an SNR-100 EMRI into an
-# SNR-10 one, T_max = (100 / 10)^2 = 100, so make_ladder spaces the 8 rungs
-# geometrically from 1 to 100 (common.default_source_ladder, settings field
-# ladder_tmax). Uncapped, the 25 % spacing of a 12-dim Gaussian reaches
-# T ~ 120. MBH (SNR 180-1000) and SOBBH (SNR 5-10) stay uncapped.
-export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-100}
+# Ladder caps (user ruling 2026-10-13, second ruling of the day: "I want to
+# focus on sampling the main modes (+ the sky move for MBHs) in terms of
+# tempering"). The first ruling capped the EMRI ladder at T_max = 100 (an
+# SNR-100 EMRI at SNR 10 on the hottest rung) and left MBH on make_ladder's
+# own spacing (T_max ~ 150). Measured on the 9mo store (job 759 rows 200-349
+# vs rows 110-197 on the old 1/1.2^k ladder) that put 5 of the 8 EMRI rungs
+# below beta 0.07, where every EMRI but the two loudest has lost the source
+# (hot-rung lnL deficit = the whole SNR^2/2, in-model acceptance 0.9-0.98 =
+# diffusing in the prior), cut the cold-pair swap acceptance 0.5-0.74 ->
+# 0.13-0.30 and raised the cold-chain autocorrelation time 1.3-2.7 -> 5-16
+# iterations for BOTH branches. Main-mode ladders instead: the hottest rung
+# keeps an effective SNR (SNR / sqrt(T_max)) that still sees the source --
+#   EMRI_LADDER_TMAX=6:  an SNR-15 EMRI keeps SNR 6 on the top rung
+#                        ((15 / 6)^2 ~ 6; SNR 12 -> 4.9, SNR 48 -> 20);
+#                        make_ladder spaces the 8 rungs 1..6 (ratio 1.29,
+#                        swaps ~0.5-0.6 as on the old ladder).
+#   MBH_LADDER_TMAX=10:  SNR 180-1000 MBHBs keep SNR 56-330 on the top rung;
+#                        the discrete sky / inclination modes are the sky
+#                        hops' job (MBH_SKY_MOVE_*), not the ladder's.
+#   MBH_LADDER_REANCHOR_NATS=0: the lost-rung guard OFF for MBHBs. An MBHB
+#                        rung is never "lost" (that would be 15k-500k nats
+#                        down); what the guard caught (61 times in 152
+#                        iterations of job 759, deficits 620-1350 nats) were
+#                        hot rungs sitting in a secondary sky mode a few
+#                        hundred RAW nats down -- 4-8 tempered nats, i.e. it
+#                        was undoing the tempering.
+#   EMRI_LADDER_REANCHOR_NATS=50 (code default 200): on the T_max 6 ladder a
+#                        legitimate rung sits (ndim/2)(T-1) <= 30 nats below
+#                        the cold rung with a spread of T sqrt(ndim/2) ~ 15,
+#                        while a rung that LOST its EMRI is the whole SNR^2/2
+#                        down (72 at SNR 12, 240 at SNR 22, 1150 at SNR 48).
+#                        200 only caught the two loudest; 50 (3.4 sigma above
+#                        a legitimate rung) catches every EMRI but the
+#                        faintest's top rung. Matters at the reset below: the
+#                        old T_max 100 rungs 5-7 hold prior states for every
+#                        EMRI but 3 and 6, and on the new ladder nothing else
+#                        brings them back (a swap into a state 100 nats worse
+#                        never happens).
+# SOBBH (SNR 4-10) stays on the uncapped make_ladder spacing. A RESUMED store
+# keeps its stored ladders: put EMRI_LADDER_RESET_ON_RESUME=1
+# MBH_LADDER_RESET_ON_RESUME=1 on the relaunch line ONCE to replace them
+# (logged leaf by leaf; the old rungs' states stay where they are and the
+# guard re-anchors the lost EMRI ones at the first block).
+export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-6}
+export EMRI_LADDER_REANCHOR_NATS=${EMRI_LADDER_REANCHOR_NATS:-50}
+export MBH_LADDER_TMAX=${MBH_LADDER_TMAX:-10}
+export MBH_LADDER_REANCHOR_NATS=${MBH_LADDER_REANCHOR_NATS:-0}
 # 12 -> 8 (user ruling 2026-09-16, with repeats 25 -> 20: sobbh cost
 # trim now that the single-call fix landed). NOTE: SOBHB's ladder lives
 # in the stored PerLeafLadderState (betas_all per leaf), so on a RESUME

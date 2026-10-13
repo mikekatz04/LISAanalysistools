@@ -144,10 +144,11 @@ def header(run: "_runs.Run", tok: dict) -> str:
     if parent is not None:
         L.append(f"#   PARENT = the {parent.name} ({parent.days} d): GF_SEED_STORE "
                  f"{parent.seed_store}")
-        L.append(f"#     (GB warm start fitted from its last 300 cold-chain rows -> "
+        L.append(f"#     (GB warm start fitted from its last GB_WARM_START_LAST_K stored rows -> "
                  f"warmstart/{parent.warm_npz}, auto-built")
-        L.append("#     on the first launch when missing; psd + galfor pinned at its maxlogL "
-                 "cold walker; the source")
+        L.append("#     on the first launch when missing; the psd pinned at its maxlogL cold "
+                 "walker (galfor stays the")
+        L.append("#     hand-set offline estimate, ruling 2026-09-25); the source")
         L.append(f"#     warm start copies its SNR > 10 leaves by catalogue id: MBHB "
                  f"{parent.mbhb_ids}, every EMRI / SOBHB; the monitor page overlays")
         L.append(f"#     it: GF_MONITOR_ADD_INFO={_runs.OUTPUT_ROOT}/{parent.store_dirname}).")

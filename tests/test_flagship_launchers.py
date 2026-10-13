@@ -498,7 +498,10 @@ class ParentChainTest(unittest.TestCase):
         self.assertEqual(fr.RUNS["3mo"].parent, None)
         self.assertEqual(fr.RUNS["6mo"].parent, "3mo")
         self.assertIsInstance(fr.RUNS["9mo"].parent, fr.Parent)   # the LIVE 6mo v9 store
-        self.assertEqual(fr.RUNS["12mo"].parent, "9mo")
+        self.assertIsInstance(fr.RUNS["12mo"].parent, fr.Parent)  # a COPY of the 9mo folder
+        self.assertEqual(fr.RUNS["12mo"].parent.store_dirname, "gf_prod_9mo_v9_copy")
+        self.assertEqual(fr.RUNS["12mo"].parent.mbhb_ids, fr.RUNS["9mo"].mbhb_ids)
+        self.assertEqual(fr.RUNS["12mo"].parent.days, fr.RUNS["9mo"].days)
         self.assertEqual(fr.RUNS["18mo"].parent, "12mo")
         self.assertEqual(fr.RUNS["24mo"].parent, "18mo")
 
@@ -545,8 +548,13 @@ class ParentChainTest(unittest.TestCase):
         self.assertEqual(self.ex["6mo"]["GF_SEED_STORE"],
                          "/shared/data/global_fit_output/gf_prod_3mo_flagship/gf_prod_3mo_testing.h5")
         self.assertEqual(self.ex["6mo"]["MBH_SOURCE_WARM_START_IDS"], "18")
+        # the 12mo reads a COPY of the 9mo folder, never the live store (Mike 2026-10-13)
         self.assertEqual(self.ex["12mo"]["GF_SEED_STORE"],
-                         "/shared/data/global_fit_output/gf_prod_9mo_v9/gf_prod_9mo_testing.h5")
+                         "/shared/data/global_fit_output/gf_prod_9mo_v9_copy/gf_prod_9mo_testing.h5")
+        self.assertEqual(self.ex["12mo"]["GF_MONITOR_ADD_INFO"],
+                         "/shared/data/global_fit_output/gf_prod_9mo_v9_copy")
+        self.assertEqual(self.ex["12mo"]["MBH_SOURCE_WARM_START_IDS"], self.ex["9mo"]["MBHB_IDS"])
+        self.assertNotIn("gf_prod_9mo_v9/", _text("12mo").split("set -euo pipefail")[1])
 
 
 # ---------------------------------------------------------------------------
