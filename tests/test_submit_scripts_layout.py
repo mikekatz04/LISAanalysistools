@@ -2298,6 +2298,23 @@ class SubmitScriptsDispatchTest(unittest.TestCase):
                 # NGPUS=2 above stays on spot deliberately.
                 self.assertIn("--partition=gpu-80-ondemand", lines)
                 self.assertNotIn("--partition=gpu-80-spot", lines)
+
+    def test_ngpus_8_four_nodes_walker_block(self):
+        """2026-10-14 (Mike, timing tests): NGPUS=8 = 4 nodes x 2 GPUs on
+        the on-demand partition, 8 compute ranks + the saver (the walker
+        count must then be a multiple of 8: a cloned store). Anything else
+        is still refused. The v9 production launchers and the 3mo v9 twin
+        carry it; the v8 scripts are frozen history and do not."""
+        for script in (*V9_PRODUCTION, THREE_MO_V9):
+            with self.subTest(script=script):
+                lines = self._run_dispatch(script, {"NGPUS": "8"})
+                self.assertIn(_ntasks(script, 9), lines)
+                self.assertIn("--nodes=4", lines)
+                self.assertIn("--gres=gpu:2", lines)
+                self.assertIn("--partition=gpu-80-ondemand", lines)
+                self._assert_export_contains(lines, "GF_LEGACY_RANK_LAYOUT=0")
+                src = open(script).read()
+                self.assertIn("unsupported (2, 4 or 8)", src)
                 self.assertIn("--distribution=cyclic", lines)
                 self._assert_export_contains(lines, "GF_LEGACY_RANK_LAYOUT=0")
 

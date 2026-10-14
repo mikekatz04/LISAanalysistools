@@ -563,7 +563,10 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     # same work. NGPUS=2 stays on spot: it is a single node and the
     # midit-checkpoint path recovers it cheaply.
     4) _NGPU_PART=${PARTITION:-gpu-80-ondemand}; _NODES=2; _GRES=gpu:2 ;;
-    *) echo "[SUBMIT] NGPUS=${NGPUS} unsupported (2 or 4)."; exit 2 ;;
+    # NGPUS=8 (2026-10-14): 4 nodes x 2 GPUs, mirrored from the 6mo script;
+    # the walker count must be a multiple of 8.
+    8) _NGPU_PART=${PARTITION:-gpu-80-ondemand}; _NODES=4; _GRES=gpu:2 ;;
+    *) echo "[SUBMIT] NGPUS=${NGPUS} unsupported (2, 4 or 8)."; exit 2 ;;
   esac
   # NODES=<n> spreads the NGPUS GPUs over n nodes (gres = NGPUS/n per node).
   # One-walker replica gates (2026-09-16 ruling: test ACROSS nodes):
