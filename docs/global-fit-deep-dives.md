@@ -129,7 +129,8 @@ Facts that decide what you can read from it:
    dict with sed), `GB_ACCEPT rj-split`, `Number of active leaves`,
    `[GB_GATE`, `[GB_BAND_SHUTOFF status]`, `[V9-STAGE`, `[eigen_refresh]`,
    `different from the current device`, `[STORE-WRITE]`, `Traceback`,
-   `OutOfMemory`, `GPUassert`, `DISABLED`, `RESUM`.
+   `OutOfMemory`, `GPUassert`, `DISABLED`, `RESUM`, and on a run with
+   `GB_WARM_SELF=1`, `[GB_WARM_SELF]` (section 3.4).
 4. Read the store with h5py (one python at a time): cold lnL max / mean /
    min per row and per walker, leaves per walker per row, `saved_after`,
    the valve arrays at the last rows, `sub_backend/<src>/h_h` per leaf and
@@ -270,6 +271,27 @@ Cold lnL per walker per row (`global_fit/log_like[:, 0, 0, :]`), max / mean
   SNR 5-8 tail ("scored-dropped: snr 74k"). Since 73bb198b the candidate
   sequence differs per rank; identical `viable / prior-gated / SNR-dropped`
   tallies on every rank meant one shared seed (defect, fixed).
+- The warm-start SELF refit (`GB_WARM_SELF=1`, 2026-10-13; navigation 2.8),
+  the cross-walker GB exchange: grep `[GB_WARM_SELF]`. Healthy: on the saver
+  (`[r<k>/saver]`) one `epoch k built from rows a..b (200 samples, K
+  components) in T s` every 5 rows of `gb_search_2` and every 250 of
+  `full_pe`, `built_at_row` advancing by exactly the cadence (a resume
+  continues the clock, it does not rebuild at once); on EVERY compute rank
+  one `rank r adopted epoch k` per epoch, the same k on all ranks within a
+  propose or two; `this propose used SELF` on 3 proposes in 4 of each warm
+  move once an epoch exists (ORIG on every propose before). The point of the
+  feature is the `cold` birth acceptance of the `self` tally against the
+  `orig` one on the same line: the self mixture should land cold births the
+  original no longer does (walker-held SNR 6-12 leaves). Sick: `build
+  FAILED` (read its traceback; the epoch dir stays incomplete and is
+  ignored; it retries a cadence later), `HOLDING THE SAVER RANK UP` (the
+  build wall exceeds the time to the next save: every such build shows as a
+  slow leg on the head; quote the read / fit / referee / apply walls),
+  `STOPPING THE SELF REFIT` (stored rows were dropped; no more epochs this
+  run), an adoption on some ranks only (`epoch k is not complete` / `failed
+  to load`: a shared-filesystem lag or a corrupt npz; the rank keeps its
+  previous epoch). `warmstart/self/epoch_NNNN/DONE.json` carries the rows,
+  counts and walls of every build.
 
 ### 3.5 Gating: how to read the valves
 
@@ -591,7 +613,12 @@ Point-in-time; use them to recognise an order of magnitude, not as a spec.
   be cut properly is left out.
 - **Warm start**: the last 300 cold rows x 4 walkers of the parent; sources
   with parent SNR > 10 start from the parent's cold chain (EMRI 3 included,
-  plunge or not); below that, truth as at the parent's Tobs.
+  plunge or not); below that, truth as at the parent's Tobs. **Self refit**
+  (2026-10-13, `GB_WARM_SELF`): from `gb_search_2` on, refit the warm start
+  from the run's own last 50 rows x 4 walkers, every 5 rows in search and
+  every 250 iterations in `full_pe` (a periodic approximation in PE, like the
+  residual F-stat refit every 150), and KEEP the original: the warm moves
+  draw 25 % original / 75 % self refit.
 - **A 9mo instead of a 1yr** (2026-10-07): keep the 1yr settings; change
   only what Tobs forces (`TOBS_TARGET`, `SIGHET_NT_LAYER`, the MBHB set);
   capacity knobs stay at the 1yr values. Memory levers on the F-stat are

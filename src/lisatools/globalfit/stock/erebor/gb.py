@@ -627,6 +627,57 @@ class GBSettings(Settings):
     warm_start_weight: typing.Optional[float] = dataclasses.field(
         default_factory=env_default("GB_WARM_START_WEIGHT", None, float)
     )
+    # -- warm-start SELF refit (user rulings 2026-10-13;
+    # lisatools.globalfit.warmstart.self_refit) --------------------------
+    # "Starting in gb search 2 (and in full pe). Let's rebuild our warm
+    # start proposal with the last 50 samples (x4 walkers)." The SAVER rank,
+    # right after its own save, refits the warm-start mixture from the run's
+    # OWN last ``warm_self_last_k`` cold rows x every walker (the parent
+    # build's fit -> referee -> apply, at the run's Tobs) into
+    # ``<run_dir>/warmstart/self/epoch_NNNN/``; every rank adopts the newest
+    # complete epoch, and rj_warm_search / rj_warm_pe then draw from it
+    # ``warm_self_fraction`` of their proposes and from the ORIGINAL parent
+    # warm start the rest ("We should keep the original warm start in the
+    # fit"). Needs ``warm_start_components`` (no warm move otherwise).
+    #
+    # warm_self: master switch. False (default) -> no builder, no mixer, the
+    # warm moves hold their original container: bit-identical runs.
+    # Env: GB_WARM_SELF.
+    warm_self: bool = dataclasses.field(
+        default_factory=env_default("GB_WARM_SELF", False, bool)
+    )
+    # warm_self_every_search: STORED ROWS between self refits in the numbered
+    # search stages from gb_search_2 on ("during gb search 2, the warm start
+    # refit should occur every 5 iterations"). The clock is stage-relative
+    # (the stage's start row, or the latest complete epoch's built_at row,
+    # whichever is later) and read from disk, so a resume never rebuilds
+    # early. <= 0 -> no refit in search. Env: GB_WARM_SELF_EVERY_SEARCH.
+    warm_self_every_search: int = dataclasses.field(
+        default_factory=env_default("GB_WARM_SELF_EVERY_SEARCH", 5, int)
+    )
+    # warm_self_every_pe: stored rows (= iterations) between self refits in
+    # full_pe ("full pe adaptivity: just refit every 250 iterations"; a
+    # periodic approximation, like the residual F-stat refit every 150 PE
+    # iterations). <= 0 -> no refit in PE. Env: GB_WARM_SELF_EVERY_PE.
+    warm_self_every_pe: int = dataclasses.field(
+        default_factory=env_default("GB_WARM_SELF_EVERY_PE", 250, int)
+    )
+    # warm_self_last_k: how many of the run's latest stored cold rows feed a
+    # refit, every walker of each (50 x 4 walkers = 200 posterior samples).
+    # Env: GB_WARM_SELF_LAST_K.
+    warm_self_last_k: int = dataclasses.field(
+        default_factory=env_default("GB_WARM_SELF_LAST_K", 50, int)
+    )
+    # warm_self_fraction: the share of warm-move proposes that draw from the
+    # self refit once an epoch exists, by a deterministic cadence (0.75 ->
+    # exactly 3 proposes in 4; "sample from the previous full warm start 25%
+    # of the time and the updated refit warm start 75% of the time"). The
+    # chosen container serves the births AND every density of that propose.
+    # 100 % original until the first epoch. In [0, 1].
+    # Env: GB_WARM_SELF_FRACTION.
+    warm_self_fraction: float = dataclasses.field(
+        default_factory=env_default("GB_WARM_SELF_FRACTION", 0.75, float)
+    )
     # PE-stage extrinsic DRAW (user design ruling 2026-08-25). STAGE
     # SPLIT: the SEARCH RJ stages (rj_fstat_search / rj_prior_removal /
     # rj_replace) PIN phi0/cos_iota/psi deterministically at the F-stat

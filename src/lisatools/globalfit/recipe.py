@@ -4755,6 +4755,38 @@ def _warm_start_seed(gb_info, tag):
                .generate_state(1, dtype=np.uint32)[0])
 
 
+def _warm_self_wrap(container, *, gb_info, general_info, tag, name,
+                    load_kwargs):
+    """The warm move's birth law: ``container``, or the SELF-refit mixer around it.
+
+    USER RULINGS 2026-10-13 (``warmstart/self_refit.py``): from gb_search_2
+    on, the run refits its warm start from its own last
+    ``GB_WARM_SELF_LAST_K`` rows x every cold walker, and the warm moves
+    draw from that self refit ``GB_WARM_SELF_FRACTION`` (0.75) of their
+    proposes and from the ORIGINAL warm start the rest ("We should keep the
+    original warm start in the fit"). ``GB_WARM_SELF=0`` (default) returns
+    ``container`` itself: the move is bit-identical to before. The self
+    epochs load with the original's ``load_kwargs`` (Tobs, floor box,
+    floor_eps, p_floor, circ_images, use_cupy) and the per-rank seed
+    ``_warm_start_seed(gb_info, tag ^ (epoch + 1))``.
+    """
+    if not bool(getattr(gb_info, "warm_self", False)):
+        return container
+    from .warmstart.self_refit import WarmSelfMixer, self_epoch_root
+
+    root = self_epoch_root(general_info.main_file_path)
+    mixer = WarmSelfMixer(
+        container, epoch_root=root,
+        fraction=float(getattr(gb_info, "warm_self_fraction", 0.75)),
+        load_kwargs=load_kwargs, build_seed=getattr(gb_info, "build_seed", None),
+        tag=int(tag), name=str(name))
+    logger.info(
+        "[GB_WARM_SELF] %s: the original warm start (%d components) plus the "
+        "self refit from %s, %s of the proposes once an epoch exists.",
+        name, int(container.n_components), root, mixer.fraction)
+    return mixer
+
+
 def build_gb_moves(
     engine_info: Setup,
     curr: CurrentInfoGlobalFit,
@@ -5769,23 +5801,31 @@ def build_gb_moves(
             _dist_lims[-1], float(band_edges[_f0_hi_i]) * 1e3, _mc_lims[-1],
             2.0 * np.pi, 1.0, np.pi, 2.0 * np.pi, 1.0, _ratio_max,
         ]
+    # The load options BOTH twins share (the PE twin adds circ_images); the
+    # warm-start SELF refit loads its epochs with exactly these.
+    _warm_load_kwargs = None if not _warm_path else dict(
+        new_tobs=float(general_info.Tobs),
+        use_cupy=use_gpu_priors,
+        floor_box=(_warm_floor_lo, _warm_floor_hi),
+        floor_eps=float(os.environ.get("GB_WARM_START_FLOOR_EPS", "0.05")),
+        p_floor=float(os.environ.get("GB_WARM_START_P_FLOOR", "0")),
+    )
     if include_search and _warm_path:
         from .warmstart.proposal import WarmStartComponents
 
         _warm_container = WarmStartComponents.from_npz(
             _warm_path,
-            new_tobs=float(general_info.Tobs),
-            use_cupy=use_gpu_priors,
-            floor_box=(_warm_floor_lo, _warm_floor_hi),
-            floor_eps=float(os.environ.get("GB_WARM_START_FLOOR_EPS", "0.05")),
-            p_floor=float(os.environ.get("GB_WARM_START_P_FLOOR", "0")),
             # PER-RANK seed (see _warm_start_seed): the bare run seed here
             # gave every walker the identical candidate sequence (job 751)
             seed=_warm_start_seed(gb_info, _WARM_SEED_TAG_SEARCH),
+            **_warm_load_kwargs,
         )
         gb_warm_move = GBSpecialRJPriorMove(
             *gb_move_args,
-            rj_proposal_distribution={"gb": _warm_container},
+            rj_proposal_distribution={"gb": _warm_self_wrap(
+                _warm_container, gb_info=gb_info, general_info=general_info,
+                tag=_WARM_SEED_TAG_SEARCH, name="rj_warm_search",
+                load_kwargs=_warm_load_kwargs)},
             name="rj_warm_search",
             use_prior_removal=False,
             # Phase maximization follows GB_RJ_PHASE_MAXIMIZE exactly like
@@ -6038,20 +6078,22 @@ def build_gb_moves(
     if _warm_path:
         from .warmstart.proposal import WarmStartComponents
 
+        _warm_pe_load_kwargs = dict(
+            _warm_load_kwargs,
+            circ_images=int(os.environ.get("GB_WARM_START_CIRC_IMAGES", "3")),
+        )
         _warm_pe_container = WarmStartComponents.from_npz(
             _warm_path,
-            new_tobs=float(general_info.Tobs),
-            use_cupy=use_gpu_priors,
-            floor_box=(_warm_floor_lo, _warm_floor_hi),
-            floor_eps=float(os.environ.get("GB_WARM_START_FLOOR_EPS", "0.05")),
-            p_floor=float(os.environ.get("GB_WARM_START_P_FLOOR", "0")),
-            circ_images=int(os.environ.get("GB_WARM_START_CIRC_IMAGES", "3")),
             # PER-RANK seed, its own domain tag (see _warm_start_seed)
             seed=_warm_start_seed(gb_info, _WARM_SEED_TAG_PE),
+            **_warm_pe_load_kwargs,
         )
         gb_warm_pe_move = GBSpecialRJPriorMove(
             *gb_move_args,
-            rj_proposal_distribution={"gb": _warm_pe_container},
+            rj_proposal_distribution={"gb": _warm_self_wrap(
+                _warm_pe_container, gb_info=gb_info,
+                general_info=general_info, tag=_WARM_SEED_TAG_PE,
+                name="rj_warm_pe", load_kwargs=_warm_pe_load_kwargs)},
             name="rj_warm_pe",
             use_prior_removal=False,
             pe_extrinsic_draw=False,

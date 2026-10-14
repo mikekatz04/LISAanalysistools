@@ -168,7 +168,7 @@ Three spellings occur: `env_default("K", ...)` (stock fields),
 | file | what |
 |---|---|
 | `globalfitmove.py` | `GlobalFitMove`, `Move`, `MoveBuildContext`; `GFCombineMove` (bundles a stage's moves, runs the legs via `_propose_leg`, prints `[GF_TIMING]` and `[LEG]`); the max-lnL plateau wrapper that prints `[MAXLOGL]` (noise searches, `source_search`). |
-| `gbspecialstretch.py` | ALL GB and VGB moves. Classes: `GBSpecialBase` (everything shared), `GBSpecialStretchMove` (`in_model*`), `VGBSpecialStretchMove` (`vgb_pe`), `GBSpecialRJPriorMove` (`rj_prior_removal`, `rj_prior*`), `GBSpecialRJFStatGridMove` (`rj_fstat_search` / `rj_fstat_pe`: owns the F-stat fit call, the per-walker valve judge and the stage-end census), `GBSpecialRJSerialSearchMCMC`, `GBSpecialRJRefitMove`, plus `_ColdBandLnL` (the valve statistic and `judge`), `_InModelGroupState` / `_InModelConvergeState` (levels 2 / 1), `GBRankSession` (the per-rank body under fan-out). The warm-start RJ move (`rj_warm_search` / `rj_warm_pe`) is built around `warmstart/proposal.py`. |
+| `gbspecialstretch.py` | ALL GB and VGB moves. Classes: `GBSpecialBase` (everything shared), `GBSpecialStretchMove` (`in_model*`), `VGBSpecialStretchMove` (`vgb_pe`), `GBSpecialRJPriorMove` (`rj_prior_removal`, `rj_prior*`), `GBSpecialRJFStatGridMove` (`rj_fstat_search` / `rj_fstat_pe`: owns the F-stat fit call, the per-walker valve judge and the stage-end census), `GBSpecialRJSerialSearchMCMC`, `GBSpecialRJRefitMove`, plus `_ColdBandLnL` (the valve statistic and `judge`), `_InModelGroupState` / `_InModelConvergeState` (levels 2 / 1), `GBRankSession` (the per-rank body under fan-out). The warm-start RJ move (`rj_warm_search` / `rj_warm_pe`) is built around `warmstart/proposal.py`; with `GB_WARM_SELF=1` its birth law is `warmstart/self_refit.WarmSelfMixer` (original vs self refit per propose, section 2.8; hooks `_warm_self_begin` / `_warm_self_apply` / `_warm_self_note`). |
 | `gbbands.py`, `gb_likelihood.py`, `gb_chol_cache.py` | band sorter / scheduler / sub-band buffer; the GB likelihood engine; the host-side in-model proposal factor cache (`GB_CHOL_CACHE`). |
 | `addremovemove.py` | `ResidualAddOneRemoveOneMove`: the per-leaf add/remove scheme for MBH / EMRI / SOBBH, the eigen tables (`_build_eigen_table`, `_gram_info`), the per-leaf ladders. |
 | `mbhbatchedmove.py`, `emridirectmove.py`, `sobbhspecialmove.py` | the fast scoring paths (batched windowed MBH, direct-to-WDM EMRI, lookup SOBBH); defaults since 2026-09-30 / 10-03. `docs/emri-direct-wdm.md`, `docs/sobbh-wdm-lookup.md`. |
@@ -214,6 +214,61 @@ parent job is still writing); `sources.py` (MBH / EMRI / SOBBH leaves with paren
 start at the parent's cold chain, `SOURCE_WARM_START_STORE`); `opt_snr.py`,
 `basis.py`. The launcher's `[WARMSTART]` block prints the three by-hand
 commands for a login-node pre-build. Design: `docs/superpowers/specs/2026-09-18-warmstart-observable-basis-design.md`.
+
+**The warm-start SELF refit** (`self_refit.py`, user rulings 2026-10-13: "Starting in
+gb search 2 (and in full pe). Let's rebuild our warm start proposal with the last 50
+samples (x4 walkers)"; "keep the original warm start in the fit"; 25 % original / 75 %
+refit; every 5 rows in gb_search_2, every 250 in full_pe). Why: per-walker GB
+completeness at SNR > 8 was 91 % on the 9mo while the union of the four cold walkers
+was 96.5 %; a mixture fitted to ALL cold walkers proposes to each walker what the
+others hold. Three pieces:
+
+- **build, on the SAVER rank** (`WarmSelfHook`, called by `hdfbackend`'s save loop
+  after a batch that saved a row, after the monitor notice): when the store's active
+  recipe stage (`store_stage`: first step with `status` False, its `start_iteration`)
+  is `gb_search_N` (N >= 2) or `full_pe` and `rows - clock >= cadence`
+  (`warm_self_due`; clock = max(stage start, latest complete epoch's `built_at_row`),
+  both read from disk at every save, so a resume never rebuilds early), it copies the
+  last `GB_WARM_SELF_LAST_K` cold rows of `chain/gb` / `inds/gb` / `log_like` through
+  the saver's own `open("r")` (scoped and closed before anything slow: a held read
+  handle makes the saver's next `open("a")` fail) into `epoch_NNNN/leaf_rows.h5`, then
+  runs fit -> referee -> apply on it exactly as `build.py` does (`_default_runner`, CLI
+  defaults, the run's own Tobs, `--gmm-gpu` = the saver's device, the whole pipeline
+  in that device's context). A queued save always wins (the build waits for a later
+  save); `WarmSelfWatchdog` reports a build that held a save up and switches the
+  builder off if it ever cost stored rows. A failed build leaves an incomplete epoch
+  and retries one cadence later.
+- **epochs**: `<run_dir>/warmstart/self/epoch_NNNN/` = `self_fit.npz`,
+  `self_fit_referee.npz`, `self_refereed.npz` and `DONE.json` written LAST (tmp +
+  fsync + rename: `epoch`, `built_at_row`, `stage`, `stage_start`, `rows [a, b]`,
+  `n_samples`, `n_clusters`, `n_components`, `walls`, `device`). No readable
+  `DONE.json` or no npz = not an epoch; the next build takes `1 + max(every epoch
+  dir)`.
+- **alternation + adoption, in the warm moves** (`WarmSelfMixer` is the
+  `rj_proposal_distribution` of `rj_warm_search` / `rj_warm_pe` when `GB_WARM_SELF=1`;
+  built by `recipe._warm_self_wrap`). At each propose the head polls the epoch root
+  (`GBSpecialBase._warm_self_begin`, once per `propose`), adopts a newer complete
+  epoch, picks the ORIGINAL or the SELF container by a deterministic Bresenham cadence
+  (0.75 = exactly 3 proposes in 4; 100 % original before the first epoch) and ships
+  `{"epoch", "choice"}` in the `gb_run_proposal` payload (`"warm_self"`); every rank
+  loads that epoch from the shared filesystem (`_warm_self_apply`, before its
+  BandSorter is built) with the original's Tobs / floor box / floor_eps / p_floor /
+  circ_images / use_cupy and the seed `_warm_start_seed(gb_info, tag ^ (epoch + 1))`.
+  One container serves the births and every density of a propose. The PE draw-one
+  share of `rj_warm_pe` (`GB_PE_RJ_WARM_FRACTION`) is unchanged: the 75/25 split
+  happens inside the move.
+
+| knob (field on `GBSettings`) | default | meaning |
+|---|---|---|
+| `GB_WARM_SELF` (`warm_self`) | 0 | master switch; 0 = no builder, no mixer, bit-identical; needs `GB_WARM_START_COMPONENTS` |
+| `GB_WARM_SELF_EVERY_SEARCH` (`warm_self_every_search`) | 5 | stored rows between refits in `gb_search_N`, N >= 2 (<= 0 off) |
+| `GB_WARM_SELF_EVERY_PE` (`warm_self_every_pe`) | 250 | stored rows (= iterations) between refits in `full_pe` (<= 0 off) |
+| `GB_WARM_SELF_LAST_K` (`warm_self_last_k`) | 50 | the run's last stored rows fed to a refit, every cold walker of each |
+| `GB_WARM_SELF_FRACTION` (`warm_self_fraction`) | 0.75 | share of warm-move proposes drawing from the self refit once an epoch exists |
+
+The fit / referee options are not knobs here: they are the parent build's (CLI defaults
+of the three modules); the referee's own backend choice (`GB_WARM_START_REFEREE_BACKEND`)
+is read by the referee. Tests: `tests/test_warmstart_self_refit.py`.
 
 ### 2.9 Monitoring: `src/lisatools/globalfit/monitor/` and `scripts/diagnostics/`
 
@@ -288,7 +343,9 @@ sources every cycle, valves reset at the fresh entry, noise at the cycle end.
 `full_pe` = every move every iteration, no maximization anywhere
 (`feedback`: no maximizing over parameters in PE), one draw-one GB RJ move per
 iteration (`GB_PE_RJ_DRAW_ONE`; the three-way draw `GB_PE_RJ_FSTAT_FRACTION`
-0.45 / `GB_PE_RJ_WARM_FRACTION` 0.1 / the prior move the rest). The PE
+0.45 / `GB_PE_RJ_WARM_FRACTION` 0.1 / the prior move the rest; with
+`GB_WARM_SELF=1` the warm move itself then draws from the run's own refit 3
+proposes in 4, section 2.8). The PE
 declarations applied on entry by `PERecipeStep.note_recipe_step`:
 `PE_INMODEL_REPEATS=25` (`apply_inmodel_repeats`; `GB_NUM_REPEAT_PROPOSALS=25`
 is the global export), `GB_PE_RJ_FLIP_FRACTION=0.1` (`apply_rj_flip_fraction`),
@@ -392,6 +449,7 @@ or the nleaves plateau (`GB_PLATEAU_ITERS`), or both; `full_pe` never ends
   *_eigen_tables.pkl                          the eigen-table sidecar
   gb_fstat_fit/shared_search/epoch_NNNN/     DONE.json (wall_seconds, n_peaks, clock) + the grid payload (not in tars unless --add-fstat)
   warmstart/<parent>_refereed.npz            the GB warm-start mixture
+  warmstart/self/epoch_NNNN/                 GB_WARM_SELF=1 only: the run's own refits (self_refereed.npz + DONE.json LAST)
   gb_truth_3to21.npz, kappa_grid.npz         the truth set (built by build_truth.py; frozen denominator)
   gpu_util_<job>.csv                         head-node GPUs only: ts, idx, name, util, util_mem, mem_used MiB, mem_total, power, temp
   slurm_stdout_<job>.log                     the 30-s mirror of the job's stdout (SLURM_LOG); the superset log
@@ -481,6 +539,8 @@ sites in the tree are a fair proxy for importance.
 | `F-stat grid fit epoch N ... done in X s`, `[stageA] comb + peak selection: N peaks in X m`, `[stageB] banded Mc ...`, `[peaks] N peaks`, `[FSTAT_CTR*]` | `sampling/fstat_gridfit.py` (the fit: `run_fstat_grid_fit`, stage A `run_comb_scan`, stage B `run_stacked_stage_b`), `gbspecialstretch.py` (the call site) | the F-stat epochs: stage A comb (nodes x sky; the lever is `FSTAT_COMB_NSKY_MAX`) vs stage B (per-peak grids; `FSTAT_STAGEB_NSKY_MAX`, `FSTAT_STAGEB_GROUP_MAX_GB`), peak counts. A 0-peak epoch SKIPS `rj_fstat_search` and `in_model_fstat` (843b7ec9; the warning says `NOT falling back to the prior`) |
 | `[MAXLOGL] stage=.. iter=.. flat n/m ... converged=k/4` / `done after N iterations` | `globalfitmove.py` | the noise / source plateau searches; only each invocation's FINAL line counts |
 | `[NOISE-PIN]`, `[SOURCE-WARM]`, `[WARMSTART-BUILD]`, `[V9-SEED]` | `warmstart/`, driver | the child-run seeding at launch |
+| `[GB_WARM_SELF] builder armed on the saver ...` / `epoch k built from rows a..b (N samples, K components) in T s` / `epoch k build FAILED` / `THE SELF-REFIT BUILD IS HOLDING THE SAVER RANK UP` / `STOPPING THE SELF REFIT` | `warmstart/self_refit.py` (`WarmSelfHook`, saver: `[r<k>/saver]`) | the self-refit builds (`GB_WARM_SELF=1`), their walls (read / fit / referee / apply) and whether one held a save |
+| `[GB_WARM_SELF] rank r adopted epoch k (rows a..b, N samples, K components) into <move>` / `[GB_WARM_SELF <move>] rN this propose used SELF (epoch k) \| cumulative orig: ... \|\| self: ...` / `[GB_WARM_SELF] <move>: the original warm start (...) plus the self refit` | `self_refit.WarmSelfMixer`, every rank; `recipe._warm_self_wrap` at build | adoption per rank, the per-propose container, births viable / accepted (all and cold) per container |
 | `[eigen_refresh] <branch> leaf k Gram info matrix at walker w in X s` | `addremovemove.py` | Gram table rebuilds (MBH / EMRI / SOBBH; cadence `{BRANCH}_EIGEN_REFRESH`) and their device |
 | `[EMRI] inner-move stack: EigenAxisJumpMixMove 1.000 (jump mix 0.10 x 3.0)` (also `[MBH]`, `[SOBBH]`) | `addremovemove.py` (move construction, every rank) | what each source branch proposes with; the `(jump mix f x k)` suffix proves `{BRANCH}_EIGEN_JUMP_MIX` took effect (2026-10-13; `sampling/moves/eigenjumpmix.py`) |
 | `[EMRI_LADDER] leaf N: re-anchored K rung(s) to the cold state (walker w rungs a-b, X-Y nats below cold; threshold T + expected tempering drop ...)` (also `[MBH_LADDER]`, `[SOBBH_LADDER]`) | `addremovemove.py::_reanchor_lost_rungs`, each rank for its own walkers (global indices) | the lost-rung guard firing (`{BRANCH}_LADDER_REANCHOR_NATS`, default 200, 0 = off); search and PE. A steady stream at the top rung of a make_ladder ladder means the margin is too small for that source |

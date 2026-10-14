@@ -517,6 +517,7 @@ def save_to_backend_asynchronously_and_plot(
     plot_iter=100,
     backup_iter=1,
     coalesce_threshold=3,
+    warm_self_hook=None,
 ):
     """Async writer loop: receive states from ``main_rank`` and persist to HDF5.
 
@@ -572,6 +573,15 @@ def save_to_backend_asynchronously_and_plot(
             torn store to that interval.
         coalesce_threshold: Queue depth above which intermediate states are
             dropped in favour of the newest.
+        warm_self_hook: Optional
+            :class:`~lisatools.globalfit.warmstart.self_refit.WarmSelfHook`
+            (``GB_WARM_SELF=1``): after every batch that saved a row -- once
+            the plots and the monitor notice are done -- it builds a GB
+            warm-start self-refit epoch when the stage's cadence is due,
+            reading the store through THIS backend's ``open("r")`` and
+            closing it before it returns. Watched like the monitor hook
+            (a build that holds a save up is reported); never raises.
+            ``None`` (default) leaves this loop exactly as it was.
     """
     logger.info("results rank: starting async save/plot loop")
     if plot_container is not None:
@@ -638,6 +648,8 @@ def save_to_backend_asynchronously_and_plot(
             # saves is the only honest denominator for "is the page hook
             # expensive", and it has to include the saves it skipped.
             _monitor_watchdog.note_save()
+            if warm_self_hook is not None:
+                warm_self_hook.note_save()
             # None -> every step: general_info.backup_iter defaults to None
             # in the engine settings, and `i % None` is a TypeError, so a
             # run that never set it would have crashed the saver here.
@@ -702,12 +714,19 @@ def save_to_backend_asynchronously_and_plot(
         if _monitor_rank.active():
             if states:
                 _monitor_rank.notify_saved(gb_reader.filename, i, total_dropped)
-            continue
+        else:
+            from .monitor.hooks import after_save as _monitor_after_save
 
-        from .monitor.hooks import after_save as _monitor_after_save
+            _monitor_after_save(gb_reader, comm, main_rank, i,
+                                _monitor_watchdog, dropped_so_far=total_dropped)
 
-        _monitor_after_save(gb_reader, comm, main_rank, i, _monitor_watchdog,
-                            dropped_so_far=total_dropped)
+        # GB WARM-START SELF REFIT (GB_WARM_SELF=1, user rulings 2026-10-13):
+        # LAST in the quiet gap, after the monitor notice went out. The hook
+        # re-checks iprobe itself (a queued save always wins) and reports
+        # through its own watchdog when a build held a save up.
+        if warm_self_hook is not None:
+            warm_self_hook(gb_reader, comm, main_rank, i,
+                           dropped_so_far=total_dropped)
 
     logger.info(
         "results rank: finished (%d states saved, %d dropped)", i, total_dropped

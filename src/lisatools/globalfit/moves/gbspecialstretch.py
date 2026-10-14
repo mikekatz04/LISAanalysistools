@@ -8257,6 +8257,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # multi-rank: the census dies here, before gb_finish can
                     # ship it, so keep a host copy for that command's reply
                     self._rj_split_last = dict(sp)
+                # warm-start self refit: credit this census to the container
+                # this propose drew from ([GB_WARM_SELF <move>] line)
+                self._warm_self_note(sp)
                 self._rj_split = None
             # ---- GB_CAP_DIAG report (read-only) --------------------------
             # THE DECISIVE LINE. into_at_cap > 0 => the birth gate leaked
@@ -26003,6 +26006,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # every walker block except the head's while the log says it ran.
             self._replace_pass_source = (payload or {}).get(
                 "replace_pass_source", None)
+            # Same rule for the warm-start self refit: the HEAD chose this
+            # propose's container (and adopted any newer epoch); every rank
+            # takes that choice and loads that epoch before the sorter is
+            # built, so the births and every logpdf of the propose agree.
+            self._warm_self_apply((payload or {}).get("warm_self"))
             rj_prop = (
                 None if not self.is_rj_prop
                 else self.rj_proposal_distribution[self.branch_name]
@@ -28073,6 +28081,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # only THIS propose's zero-peak skip may ask the leg runner to skip
         # the in-model partner; an earlier one's request is stale
         self.gf_skip_partner_once = False
+        # warm-start self refit: adopt a newer epoch + choose this propose's
+        # container (ONCE per propose, whatever the pass count)
+        self._warm_self_begin()
         passes = self._replace_passes()
         if len(passes) > 1:
             return self._propose_replace_passes(model, state, passes)
@@ -28279,6 +28290,40 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if cont is None:
             return rj_prop
         return cont[self.branch_name] if isinstance(cont, dict) else cont
+
+    # ---- GB warm-start SELF refit (user rulings 2026-10-13) -----------------
+    # The warm moves' birth law is a ``warmstart.self_refit.WarmSelfMixer``
+    # when GB_WARM_SELF=1: the ORIGINAL parent warm start or the run's own
+    # SELF refit, one of the two per propose (3 in 4 self at the default
+    # fraction once an epoch exists). The head / single process chooses at
+    # propose start (``_warm_self_begin``, which also adopts a newer complete
+    # epoch); the choice and the epoch ride to the compute ranks in the
+    # ``gb_run_proposal`` payload (``_warm_self_apply``), the F-stat epoch
+    # directive pattern. No mixer -> every hook below is a no-op.
+    def _warm_self_mixer(self):
+        d = getattr(self, "rj_proposal_distribution", None)
+        cont = d.get(self.branch_name) if isinstance(d, dict) else None
+        return cont if getattr(cont, "is_warm_self_mixer", False) else None
+
+    def _warm_self_rank(self):
+        return 0 if self.gf_rank is None else int(self.gf_rank)
+
+    def _warm_self_begin(self):
+        mixer = self._warm_self_mixer()
+        self._warm_self_directive = (
+            None if mixer is None
+            else mixer.begin_propose(rank=self._warm_self_rank()))
+
+    def _warm_self_apply(self, directive):
+        mixer = self._warm_self_mixer()
+        if mixer is not None:
+            mixer.apply_directive(directive, rank=self._warm_self_rank())
+
+    def _warm_self_note(self, sp):
+        mixer = self._warm_self_mixer()
+        if mixer is not None:
+            mixer.note_census(sp, move_name=self.name,
+                              rank=self._warm_self_rank())
 
     def _propose_replace_passes(self, model, state, passes):
         """Run one complete replace sweep per entry in ``passes``.
@@ -29103,6 +29148,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # single-pass replace, so the payload is unchanged there.
                 "replace_pass_source": getattr(
                     self, "_replace_pass_source", None),
+                # warm-start self refit: the head's epoch + container choice
+                # for THIS propose (None off the warm moves / with it off)
+                "warm_self": getattr(self, "_warm_self_directive", None),
             })
             return payload
 

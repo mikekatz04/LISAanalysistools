@@ -3384,10 +3384,16 @@ class GlobalFit:
             )
             plot_container = self.make_plot_container()
             self._release_rank_gpu_pool()
+            # GB warm-start SELF refit builder (GB_WARM_SELF=1; None = off):
+            # runs on THIS rank after its own saves, on this rank's device
+            from .warmstart.self_refit import make_warm_self_hook
+
             save_to_backend_asynchronously_and_plot(
                 backend, self.comm, self.main_rank,
                 plot_container=plot_container, plot_iter=self._plot_iterations,
                 backup_iter=self.curr.general_info.backup_iter,
+                warm_self_hook=make_warm_self_hook(
+                    self.curr, store_path=backend_path),
             )
         elif self.role == RankRole.COMPUTE:
             self.prepare_compute()
