@@ -170,11 +170,32 @@ Three spellings occur: `env_default("K", ...)` (stock fields),
 | `globalfitmove.py` | `GlobalFitMove`, `Move`, `MoveBuildContext`; `GFCombineMove` (bundles a stage's moves, runs the legs via `_propose_leg`, prints `[GF_TIMING]` and `[LEG]`); the max-lnL plateau wrapper that prints `[MAXLOGL]` (noise searches, `source_search`). |
 | `gbspecialstretch.py` | ALL GB and VGB moves. Classes: `GBSpecialBase` (everything shared), `GBSpecialStretchMove` (`in_model*`), `VGBSpecialStretchMove` (`vgb_pe`), `GBSpecialRJPriorMove` (`rj_prior_removal`, `rj_prior*`), `GBSpecialRJFStatGridMove` (`rj_fstat_search` / `rj_fstat_pe`: owns the F-stat fit call, the per-walker valve judge and the stage-end census), `GBSpecialRJSerialSearchMCMC`, `GBSpecialRJRefitMove`, plus `_ColdBandLnL` (the valve statistic and `judge`), `_InModelGroupState` / `_InModelConvergeState` (levels 2 / 1), `GBRankSession` (the per-rank body under fan-out). The warm-start RJ move (`rj_warm_search` / `rj_warm_pe`) is built around `warmstart/proposal.py`; with `GB_WARM_SELF=1` its birth law is `warmstart/self_refit.WarmSelfMixer` (original vs self refit per propose, section 2.8; hooks `_warm_self_begin` / `_warm_self_apply` / `_warm_self_note`). |
 | `gbbands.py`, `gb_likelihood.py`, `gb_chol_cache.py` | band sorter / scheduler / sub-band buffer; the GB likelihood engine; the host-side in-model proposal factor cache (`GB_CHOL_CACHE`). |
-| `addremovemove.py` | `ResidualAddOneRemoveOneMove`: the per-leaf add/remove scheme for MBH / EMRI / SOBBH, the eigen tables (`_build_eigen_table`, `_gram_info`), the per-leaf ladders. |
+| `addremovemove.py` | `ResidualAddOneRemoveOneMove`: the per-leaf add/remove scheme for MBH / EMRI / SOBBH, the eigen tables (`_build_eigen_table`, `_gram_info`), the per-leaf ladders, the eigen step-scale adaptation (`_eigen_adapt_table` + the per-leaf ring buffer `_note_eigen_adapt_sample`; `{BRANCH}_EIGEN_AXIS_ADAPT`, below). |
 | `mbhbatchedmove.py`, `emridirectmove.py`, `sobbhspecialmove.py` | the fast scoring paths (batched windowed MBH, direct-to-WDM EMRI, lookup SOBBH); defaults since 2026-09-30 / 10-03. `docs/emri-direct-wdm.md`, `docs/sobbh-wdm-lookup.md`. |
 | `psdmove.py` | `PSDMove`: psd / galfor / sgwb (one instance each), `PSD_BATCH`, `forced_noise_step` (ratchet), the noise Fisher. |
-| `eigen_refresh.py`, `eigen_table_persist.py` | eigen tables from an information matrix and their sidecar pkl. Route map: `docs/eigen-info-routes.md`. |
+| `eigen_refresh.py`, `eigen_table_persist.py` | eigen tables from an information matrix and their sidecar pkl (with `{BRANCH}_EIGEN_AXIS_ADAPT` on, the entry also carries `sigmas_fisher`); the step-scale adaptation helpers (`cold_unit_deviations`, `empirical_axis_widths`, `adapt_axis_sigmas`, `axis_caps`, `carried_axis_widths`). Route map: `docs/eigen-info-routes.md`. |
 | `walkerfanout.py`, `multigpumove.py` | the head <-> compute-rank fan-out mixin (`fanout_propose`, live attrs, pooled ladder adaptation). |
+
+**The source eigen step-scale adaptation** (user ruling 2026-10-14;
+`docs/eigen-info-routes.md`, "the adapted step scale"). The MBH / EMRI /
+SOBBH eigen tables take their DIRECTIONS from the information matrix
+(Gram / ll, at one point) and, with the switch on, their per-axis step
+SCALE from the chain. The scale is the robust width (1.4826 x MAD) of the
+leaf's last K end-of-visit rung ensembles, in cold units (deviation from each
+rung's own centre, periodic columns wrapped, x sqrt(beta)), projected
+onto the table's axis basis. The floor is the matrix sigma and the cap is the
+table's own. Each rank adapts from its own walkers' rungs. Why: on the 9mo
+(job 763) the EMRI ridges were 1.4-56x wider than the table sigma along the
+table's own widest axis.
+
+| knob | where | default | meaning |
+|---|---|---|---|
+| `{EMRI,MBH,SOBBH}_EIGEN_AXIS_ADAPT` | Settings field `eigen_axis_adapt` (emri.py / mbh.py / sobbh.py) -> `SingleSourcePEBuilder` -> move kwarg | `False` | master switch; off = every table bit-identical, no buffer, no log line |
+| `{EMRI,MBH,SOBBH}_EIGEN_ADAPT_VISITS` | move `eigen_adapt_visits` | 50 | ring-buffer length in leaf visits (x rungs x the rank's walkers) |
+| `{EMRI,MBH,SOBBH}_EIGEN_ADAPT_MIN_VISITS` | move `eigen_adapt_min_visits` | 10 | buffered visits before a refresh adapts (until then the information-matrix table) |
+
+The scale changes only at a table refresh (`{BRANCH}_EIGEN_REFRESH`), so
+the cadence knob also sets the adaptation cadence.
 
 ### 2.6 State and storage
 
@@ -545,6 +566,7 @@ sites in the tree are a fair proxy for importance.
 | `[GB_WARM_SELF] builder armed on the saver ...` / `epoch k built from rows a..b (N samples, K components) in T s` / `epoch k build FAILED` / `THE SELF-REFIT BUILD IS HOLDING THE SAVER RANK UP` / `STOPPING THE SELF REFIT` | `warmstart/self_refit.py` (`WarmSelfHook`, saver: `[r<k>/saver]`) | the self-refit builds (`GB_WARM_SELF=1`), their walls (read / fit / referee / apply) and whether one held a save |
 | `[GB_WARM_SELF] rank r adopted epoch k (rows a..b, N samples, K components) into <move>` / `[GB_WARM_SELF <move>] rN this propose used SELF (epoch k) \| cumulative orig: ... \|\| self: ...` / `[GB_WARM_SELF] <move>: the original warm start (...) plus the self refit` | `self_refit.WarmSelfMixer`, every rank; `recipe._warm_self_wrap` at build | adoption per rank, the per-propose container, births viable / accepted (all and cold) per container |
 | `[eigen_refresh] <branch> leaf k Gram info matrix at walker w in X s` | `addremovemove.py` | Gram table rebuilds (MBH / EMRI / SOBBH; cadence `{BRANCH}_EIGEN_REFRESH`) and their device |
+| `[EMRI_EIGEN] leaf k: step scale adapted on N of 12 axes, max x12.3 (axis 3, ridge), median x1.8 (50 visits, 8 rungs)` (also `[MBH_EIGEN]`, `[SOBBH_EIGEN]`); `... (carried from the persisted table, buffer n of 10 visits)` after a restart; `step-scale adaptation failed` (WARNING) | `addremovemove.py::_log_eigen_adapt` / `_eigen_adapt_table`, every rank for its own table | `{BRANCH}_EIGEN_AXIS_ADAPT=1` only: a table refresh widened some axis by more than 20 % over the information-matrix sigma (ratio adapted / matrix sigma; median over the adapted axes; `ridge` = the table's widest unrailed axis). Silent when nothing moved by 20 % or the switch is off. A failure runs the information-matrix table |
 | `[EMRI] inner-move stack: EigenAxisJumpMixMove 1.000 (jump mix 0.10 x 3.0)` (also `[MBH]`, `[SOBBH]`) | `addremovemove.py` (move construction, every rank) | what each source branch proposes with; the `(jump mix f x k)` suffix proves `{BRANCH}_EIGEN_JUMP_MIX` took effect (2026-10-13; `sampling/moves/eigenjumpmix.py`) |
 | `[EMRI_LADDER] leaf N: re-anchored K rung(s) to the cold state (walker w rungs a-b, X-Y nats below cold; threshold T + expected tempering drop ...)` (also `[MBH_LADDER]`, `[SOBBH_LADDER]`) | `addremovemove.py::_reanchor_lost_rungs`, each rank for its own walkers (global indices) | the lost-rung guard firing (`{BRANCH}_LADDER_REANCHOR_NATS`, default 200, 0 = off); search and PE. A steady stream at the top rung of a make_ladder ladder means the margin is too small for that source |
 | `[MBH] cold->hot rotate event n (stage kind search, every 200 proposals): offset k over W walkers -- N (walker, leaf) cold points copied into rung h` (also `[EMRI]`, `[SOBBH]`) | `addremovemove.py::_maybe_rotate_cold_into_hot`, on the HEAD before the state is sliced (`WalkerFanoutMixin.fanout_prepare_state`) | the search-stage cross-walker exchange (user ruling 2026-10-14): every `{BRANCH}_COLD_TO_HOT_EVERY` proposals (200 = 8 proposes of 25 repeats; 0 = off) each walker's cold chain is copied into the hottest sampled rung of walker w + k, k = 1 + event mod (nwalkers - 1), never itself; only in search kinds (source_search, gb_search_seed/1/2), never `full_pe`. The copied rung is scored at the next leaf visit; a better point swaps down, a lost one is re-anchored by the guard above. The clock restarts at 0 on a resume |

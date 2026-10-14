@@ -7079,6 +7079,13 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
             "eigen_table_scope",
             getattr(info, "eigen_table_scope", None),
         )
+        # the eigen step-scale adaptation's master switch
+        # ({BRANCH}_EIGEN_AXIS_ADAPT via the settings field; None lets the
+        # move read the env / its default, off)
+        _extra_kwargs.setdefault(
+            "eigen_axis_adapt",
+            getattr(info, "eigen_axis_adapt", None),
+        )
         # the lost-rung guard's threshold ({BRANCH}_LADDER_REANCHOR_NATS via
         # the settings field; None lets the move read the env / its default)
         _extra_kwargs.setdefault(

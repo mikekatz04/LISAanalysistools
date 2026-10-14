@@ -115,6 +115,16 @@ class EMRISettings(Settings):
     eigen_jump_factor: float = dataclasses.field(
         default_factory=env_default("EMRI_EIGEN_JUMP_FACTOR", 3.0, float)
     )
+    # Eigen inner move (user ruling 2026-10-14): adapt each table axis's step
+    # SCALE to the chain's own robust width along it (the information-matrix
+    # directions are kept; floor = the matrix sigma, cap = the table's own
+    # cap). Off = every table bit-identical to the information-matrix one.
+    # The ring-buffer knobs are move-level env knobs
+    # (EMRI_EIGEN_ADAPT_VISITS 50 / EMRI_EIGEN_ADAPT_MIN_VISITS 10). See
+    # ResidualAddOneRemoveOneMove._eigen_adapt_table.
+    eigen_axis_adapt: bool = dataclasses.field(
+        default_factory=env_default("EMRI_EIGEN_AXIS_ADAPT", False, bool)
+    )
 
 
 class EMRISetup(Setup):

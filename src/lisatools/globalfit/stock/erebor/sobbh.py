@@ -90,6 +90,11 @@ class SOBBHSettings(Settings):
     eigen_jump_factor: float = dataclasses.field(
         default_factory=env_default("SOBBH_EIGEN_JUMP_FACTOR", 3.0, float)
     )
+    # Same meaning as EMRISettings.eigen_axis_adapt (SOBBH_EIGEN_AXIS_ADAPT;
+    # SOBBH_EIGEN_ADAPT_VISITS / SOBBH_EIGEN_ADAPT_MIN_VISITS on the move).
+    eigen_axis_adapt: bool = dataclasses.field(
+        default_factory=env_default("SOBBH_EIGEN_AXIS_ADAPT", False, bool)
+    )
 
 
 class SOBBHSetup(Setup):

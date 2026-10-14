@@ -109,7 +109,8 @@ def entry_key(branch, leaf):
 
 
 def make_entry(axes, sigmas, visits, *, scope, ndim, ntemps, nwalkers,
-               x0=None, data_identity=None, store_iteration=None):
+               x0=None, data_identity=None, store_iteration=None,
+               sigmas_fisher=None):
     """One sidecar entry: the table as the move consumes it + guards.
 
     ``axes``/``sigmas`` are stored in the EXACT shape the move holds in
@@ -118,8 +119,16 @@ def make_entry(axes, sigmas, visits, *, scope, ndim, ntemps, nwalkers,
     back in. ``visits`` is the post-increment per-leaf visit counter, so
     the refresh cadence continues where the killed process left off.
     ``x0`` (the expansion point) and the stamps are diagnostics only.
+
+    ``sigmas_fisher`` (``{BRANCH}_EIGEN_AXIS_ADAPT`` on, 2026-10-14): the
+    information-matrix sigmas the adapted ``sigmas`` were widened from --
+    the adaptation's floor. The key is written ONLY when given, so an entry
+    written with the adaptation off is the pre-adaptation entry exactly; an
+    entry without it reads as "the table is the information-matrix one".
+    Adding the key needs no format bump: older readers ignore it (and adopt
+    the adapted sigmas, a stale-but-valid frozen proposal).
     """
-    return {
+    entry = {
         "axes": np.asarray(axes),
         "sigmas": np.asarray(sigmas),
         "visits": int(visits),
@@ -136,6 +145,9 @@ def make_entry(axes, sigmas, visits, *, scope, ndim, ntemps, nwalkers,
         ),
         "written_at": time.time(),
     }
+    if sigmas_fisher is not None:
+        entry["sigmas_fisher"] = np.asarray(sigmas_fisher)
+    return entry
 
 
 def _empty_payload():
@@ -207,6 +219,14 @@ def _guards_ok(entry, key, *, scope, ndim, ntemps, nwalkers,
             "sigmas shape %s does not match axes shape %s",
             sigmas.shape, axes.shape,
         )
+    fisher = entry.get("sigmas_fisher")
+    if fisher is not None and (
+        not isinstance(fisher, np.ndarray) or fisher.shape != sigmas.shape
+    ):
+        return _bad(
+            "sigmas_fisher shape %s does not match sigmas shape %s",
+            getattr(fisher, "shape", type(fisher).__name__), sigmas.shape,
+        )
     if int(entry.get("ndim", -1)) != int(ndim):
         return _bad("stored ndim %r != %d", entry.get("ndim"), int(ndim))
     # The ladder / walker-count guards apply ONLY to a per-(temp, walker)
@@ -252,11 +272,16 @@ def _guards_ok(entry, key, *, scope, ndim, ntemps, nwalkers,
 
 
 def load_entry(path, branch, leaf, *, scope, ndim, ntemps, nwalkers,
-               data_identity=None):
+               data_identity=None, return_fisher=False):
     """``(axes, sigmas, visits)`` for one (branch, leaf), or ``None``.
 
     ``None`` means "build it" — no sidecar, no entry for this leaf, or
     an entry the guards rejected (that one is logged).
+
+    ``return_fisher=True`` appends the entry's ``sigmas_fisher`` (the
+    information-matrix floor of an adapted table; ``None`` for an entry
+    written with the step-scale adaptation off): ``(axes, sigmas, visits,
+    sigmas_fisher)``.
     """
     payload = load_sidecar(path)
     key = entry_key(branch, leaf)
@@ -266,7 +291,10 @@ def load_entry(path, branch, leaf, *, scope, ndim, ntemps, nwalkers,
     if not _guards_ok(entry, key, scope=scope, ndim=ndim, ntemps=ntemps,
                       nwalkers=nwalkers, data_identity=data_identity):
         return None
-    return entry["axes"], entry["sigmas"], int(entry.get("visits", 0))
+    out = (entry["axes"], entry["sigmas"], int(entry.get("visits", 0)))
+    if return_fisher:
+        out = out + (entry.get("sigmas_fisher"),)
+    return out
 
 
 def save_entry(path, branch, leaf, entry):

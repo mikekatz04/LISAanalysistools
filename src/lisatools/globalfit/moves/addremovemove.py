@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import inspect
 import logging
 import os
@@ -240,6 +241,18 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             of each prior-box width. ``None`` reads
             ``{BRANCH}_EIGEN_GRAM_EPS_REL``, then the ll route's
             :meth:`_eigen_eps_rel`.
+        eigen_axis_adapt: widen each eigen table axis's step to the chain's
+            own robust width along it (directions kept; floor = the
+            information-matrix sigma, cap = the table's own cap). ``None``
+            reads ``{BRANCH}_EIGEN_AXIS_ADAPT``, then ``False`` (off: every
+            table bit-identical to the information-matrix one). See
+            :meth:`_eigen_adapt_table`.
+        eigen_adapt_visits: ring-buffer length K of the adaptation, in leaf
+            visits (the end-of-visit rung ensemble of each). ``None`` reads
+            ``{BRANCH}_EIGEN_ADAPT_VISITS``, then 50.
+        eigen_adapt_min_visits: the buffer must hold this many visits before
+            a refresh adapts (until then the table is the information-matrix
+            one). ``None`` reads ``{BRANCH}_EIGEN_ADAPT_MIN_VISITS``, then 10.
         ladder_reanchor_nats: the lost-rung guard's threshold in lnL nats
             (:meth:`_reanchor_lost_rungs`); ``0`` disables the guard.
             ``None`` reads ``{BRANCH}_LADDER_REANCHOR_NATS``, then 200.
@@ -273,6 +286,9 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         eigen_info: str = None,
         eigen_gram_target: float = None,
         eigen_gram_eps_rel: float = None,
+        eigen_axis_adapt: bool = None,
+        eigen_adapt_visits: int = None,
+        eigen_adapt_min_visits: int = None,
         ladder_reanchor_nats: float = None,
         cold_to_hot_every: int = None,
         **kwargs,
@@ -365,6 +381,11 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         self.eigen_info = eigen_info
         self.eigen_gram_target = eigen_gram_target
         self.eigen_gram_eps_rel = eigen_gram_eps_rel
+        # step-scale adaptation from the chain (_eigen_adapt_table): the same
+        # kwarg > env > default at USE time
+        self.eigen_axis_adapt = eigen_axis_adapt
+        self.eigen_adapt_visits = eigen_adapt_visits
+        self.eigen_adapt_min_visits = eigen_adapt_min_visits
         # lost-rung guard threshold (kwarg > env > 200 at USE time, like the
         # eigen knobs above; see _ladder_reanchor_nats)
         self.ladder_reanchor_nats = ladder_reanchor_nats
@@ -453,6 +474,236 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             return "walker_max"
         return val
 
+    # ------------------------------------------------------------------
+    # step-scale adaptation from the chain ({BRANCH}_EIGEN_AXIS_ADAPT)
+    # ------------------------------------------------------------------
+
+    def _eigen_axis_adapt(self):
+        """kwarg > ``{BRANCH}_EIGEN_AXIS_ADAPT`` env > ``False``.
+
+        Strings take 1/0, true/false, yes/no, on/off (case-insensitive);
+        anything else is off.
+        """
+        val = getattr(self, "eigen_axis_adapt", None)
+        if val is None:
+            val = os.environ.get(
+                f"{str(self.branch_name).upper()}_EIGEN_AXIS_ADAPT", None)
+        if val is None:
+            return False
+        if isinstance(val, str):
+            return val.strip().lower() in ("1", "true", "yes", "on")
+        return bool(val)
+
+    def _eigen_adapt_visits(self):
+        """kwarg > ``{BRANCH}_EIGEN_ADAPT_VISITS`` env > 50 (ring length K)."""
+        val = getattr(self, "eigen_adapt_visits", None)
+        if val is None:
+            val = os.environ.get(
+                f"{str(self.branch_name).upper()}_EIGEN_ADAPT_VISITS", None)
+        return max(1, int(val)) if val is not None else 50
+
+    def _eigen_adapt_min_visits(self):
+        """kwarg > ``{BRANCH}_EIGEN_ADAPT_MIN_VISITS`` env > 10."""
+        val = getattr(self, "eigen_adapt_min_visits", None)
+        if val is None:
+            val = os.environ.get(
+                f"{str(self.branch_name).upper()}_EIGEN_ADAPT_MIN_VISITS", None)
+        return max(1, int(val)) if val is not None else 10
+
+    def _eigen_fisher_dict(self):
+        if getattr(self, "_eigen_fisher_sigmas", None) is None:
+            self._eigen_fisher_sigmas = {}
+        return self._eigen_fisher_sigmas
+
+    def _eigen_carried_dict(self):
+        if getattr(self, "_eigen_carried", None) is None:
+            self._eigen_carried = {}
+        return self._eigen_carried
+
+    def _eigen_periodic_columns(self):
+        """``(column indices, periods)`` of this branch's periodic parameters.
+
+        Read off the move's periodic spec (an
+        :class:`eryn.utils.PeriodicContainer`, installed from the sampler's
+        at stage setup), falling back to an inner move's, then to a raw
+        ``{branch: {int column: period}}`` dict. String-keyed raw dicts carry
+        no column order here and resolve to nothing.
+        """
+        cands = [getattr(self, "_periodic", None)]
+        cands += [getattr(m, "periodic", None) for m in getattr(self, "moves", [])]
+        for per in cands:
+            if per is None:
+                continue
+            inds = getattr(per, "inds_periodic", None)
+            periods = getattr(per, "periods", None)
+            if isinstance(inds, dict) and isinstance(periods, dict):
+                if self.branch_name in inds:
+                    return (np.asarray(inds[self.branch_name], dtype=int),
+                            np.asarray(periods[self.branch_name], dtype=float))
+                continue
+            if isinstance(per, dict):
+                spec = per.get(self.branch_name) or {}
+                cols = [(int(k), float(v)) for k, v in spec.items()
+                        if isinstance(k, (int, np.integer))]
+                if cols:
+                    return (np.array([c for c, _ in cols], dtype=int),
+                            np.array([p for _, p in cols], dtype=float))
+        return np.zeros(0, dtype=int), np.zeros(0, dtype=float)
+
+    def _note_eigen_adapt_sample(self, leaf, work, betas):
+        """Push the leaf's END-OF-VISIT rung ensemble into its ring buffer.
+
+        ``work.coords[:ntemps, :, leaf]`` -- every rung of every walker THIS
+        rank's body sampled (one walker per rank in production) -- with the
+        visit's inverse temperatures. Keeps the last
+        :meth:`_eigen_adapt_visits` visits per leaf. No-op unless the
+        adaptation is on and an eigen inner move is in the stack. Never
+        persisted: after a restart it refills (the sidecar carries the
+        adapted scale itself).
+        """
+        if not self._eigen_axis_adapt():
+            return
+        if not any(isinstance(m, EigenAxisMove) for m in self.moves):
+            return
+        try:
+            nt = int(self.ntemps)
+            x = np.array(asnumpy(work.coords[:nt, :, int(leaf)]),
+                         dtype=float, copy=True)
+            b = np.array(asnumpy(betas), dtype=float, copy=True).ravel()[:x.shape[0]]
+            if b.size < x.shape[0]:
+                return
+            K = self._eigen_adapt_visits()
+            buf = getattr(self, "_eigen_adapt_buffer", None)
+            if buf is None:
+                buf = self._eigen_adapt_buffer = {}
+            ring = buf.get(int(leaf))
+            if ring is None or ring.maxlen != K:
+                ring = buf[int(leaf)] = collections.deque(
+                    [] if ring is None else list(ring)[-K:], maxlen=K)
+            ring.append((x, b))
+        except Exception as exc:  # noqa: BLE001 -- telemetry must not crash a propose
+            logger.warning(
+                "[%s_EIGEN] leaf %d: adaptation sample not recorded (%r)",
+                str(self.branch_name).upper(), int(leaf), exc,
+            )
+
+    def _eigen_adapt_rung_samples(self, leaf):
+        """``([(X_k, beta_k), ...], n_visits)`` pooled per rung from the buffer.
+
+        Rung ``k`` pools every buffered visit's rung-``k`` rows over the
+        rank's walkers, each with the beta it was drawn at.
+        """
+        ring = (getattr(self, "_eigen_adapt_buffer", None) or {}).get(int(leaf))
+        if not ring:
+            return [], 0
+        nt = max(x.shape[0] for x, _ in ring)
+        out = []
+        for k in range(nt):
+            xs = [x[k] for x, _ in ring if x.shape[0] > k]
+            bs = [np.full(x.shape[1], b[k]) for x, b in ring if x.shape[0] > k]
+            out.append((np.concatenate(xs, axis=0), np.concatenate(bs)))
+        return out, len(ring)
+
+    def _eigen_adapt_table(self, leaf, table):
+        """Widen ``table``'s step scale per axis to the chain's own width.
+
+        User ruling 2026-10-14 (9mo job 763): every EMRI samples a long
+        degenerate intrinsic ridge whose direction the information-matrix
+        table HAS (its widest intrinsic axis), but the chain's own cold
+        spread along it was 1.4-56x the table sigma, so the eigen move crept
+        along it in steps ``ratio^2`` iterations from crossing.
+
+        * Samples: the leaf's ring buffer (:meth:`_note_eigen_adapt_sample`),
+          the last K visits x every rung x the rank's walkers.
+        * Cold units: each sample's deviation from its rung's own robust
+          centre, periodic columns wrapped to ``[-P/2, P/2)`` first, times
+          ``sqrt(beta)`` (:func:`eigen_refresh.cold_unit_deviations`).
+        * Width: ``1.4826 x MAD`` of the coordinates in the table's axis
+          basis (:func:`eigen_refresh.empirical_axis_widths`).
+        * Adapted sigma: ``max(sigma_fisher, min(width, cap))``, the cap the
+          table is built with (:func:`eigen_refresh.adapt_axis_sigmas`). The
+          axes are returned unchanged.
+
+        Fewer than :meth:`_eigen_adapt_min_visits` buffered visits: the
+        table is the information-matrix one, unless the leaf carries an
+        adapted scale adopted from the sidecar after a restart -- that scale
+        is then mapped onto the new axes
+        (:func:`eigen_refresh.carried_axis_widths`) until the buffer is long
+        enough. The information-matrix sigmas are kept per leaf
+        (``_eigen_fisher_sigmas``) for the sidecar and the telemetry. Any
+        failure warns and returns the information-matrix table.
+        """
+        leaf = int(leaf)
+        axes, sig_f = table
+        floor = np.array(asnumpy(sig_f), dtype=float, copy=True)
+        self._eigen_fisher_dict()[leaf] = floor
+        try:
+            axes_np = np.asarray(asnumpy(axes), dtype=float)
+            rungs, n_vis = self._eigen_adapt_rung_samples(leaf)
+            need = self._eigen_adapt_min_visits()
+            emp, source = None, None
+            if n_vis >= need:
+                inds, periods = self._eigen_periodic_columns()
+                dev = eigen_refresh.cold_unit_deviations(rungs, inds, periods)
+                if dev is not None:
+                    emp = eigen_refresh.empirical_axis_widths(axes_np, dev)
+                    source = (f"{n_vis} visits, "
+                              f"{sum(1 for _, b in rungs if np.any(b > 0))} rungs")
+                self._eigen_carried_dict().pop(leaf, None)
+            elif leaf in self._eigen_carried_dict():
+                a_old, s_old = self._eigen_carried_dict()[leaf]
+                emp = eigen_refresh.carried_axis_widths(axes_np, a_old, s_old)
+                source = (f"carried from the persisted table, buffer "
+                          f"{n_vis} of {need} visits")
+            if emp is None or np.shape(emp) != floor.shape:
+                return table
+            widths = eigen_refresh.prior_box_widths(
+                self.priors[self.branch_name], self.ndim)
+            sig_a = eigen_refresh.adapt_axis_sigmas(axes_np, floor, emp, widths)
+            if not np.all(np.isfinite(sig_a)):
+                raise ValueError("non-finite adapted sigmas")
+            self._log_eigen_adapt(leaf, axes_np, floor, sig_a, widths, source)
+            return (axes, sig_a)
+        except Exception as exc:  # noqa: BLE001 -- never crash the sampler
+            logger.warning(
+                "[%s_EIGEN] leaf %d: step-scale adaptation failed (%r); "
+                "using the information-matrix table",
+                str(self.branch_name).upper(), leaf, exc,
+            )
+            return table
+
+    def _log_eigen_adapt(self, leaf, axes, floor, adapted, widths, source):
+        """One INFO line when any axis moved by more than 20 %.
+
+        ``[EMRI_EIGEN] leaf k: step scale adapted on N of 12 axes, max x12.3
+        (axis 3, ridge), median x1.8 (50 visits, 8 rungs)``. The ratio is
+        adapted / information-matrix sigma (per-walker tables: the largest
+        over the tables, per axis); the median is over the N adapted axes;
+        ``ridge`` marks the table's widest unrailed axis (largest sigma as a
+        fraction of its cap -- the flattest direction the matrix measured).
+        """
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(floor > 0, adapted / floor, 1.0)
+        d = ratio.shape[-1]
+        r = np.nanmax(ratio.reshape(-1, d), axis=0)
+        moved = r > 1.2
+        if not np.any(moved):
+            return
+        cap = eigen_refresh.axis_caps(axes, widths)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            frac = np.nanmax((floor / cap).reshape(-1, d), axis=0)
+        unrailed = frac < 1.0 - 1e-9
+        ridge = (int(np.argmax(np.where(unrailed, frac, -np.inf)))
+                 if np.any(unrailed) else None)
+        j = int(np.argmax(r))
+        logger.info(
+            "[%s_EIGEN] leaf %d: step scale adapted on %d of %d axes, max x%.1f "
+            "(axis %d%s), median x%.1f (%s)",
+            str(self.branch_name).upper(), int(leaf), int(moved.sum()), d,
+            float(r[j]), j, ", ridge" if j == ridge else "",
+            float(np.median(r[moved])), source,
+        )
+
     def refresh_inner_move_tables(self, leaf, work):
         """Feed per-leaf ``(axes, sigmas)`` tables to eigen inner moves.
 
@@ -481,6 +732,13 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         the ``{BRANCH}_EIGEN_INFO`` route, for the same reason: after a
         restart that switches routes, the adopted table serves until the
         leaf's next refresh.)
+
+        With ``{BRANCH}_EIGEN_AXIS_ADAPT`` on, every refresh then widens the
+        built table's step SCALE per axis to the chain's own width
+        (:meth:`_eigen_adapt_table`); the axes are kept. Like the table
+        itself the adapted scale changes only here, at a leaf-visit
+        boundary, so the proposal stays frozen and symmetric inside each
+        repeat sweep.
         """
         eigen_moves = [m for m in self.moves if isinstance(m, EigenAxisMove)]
         if not eigen_moves:
@@ -495,7 +753,13 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         self._eigen_visit_count[leaf] = visits + 1
         if (leaf not in self._eigen_tables
                 or visits % self._eigen_refresh_cadence() == 0):
-            self._eigen_tables[leaf] = self._build_eigen_table(leaf, work)
+            table = self._build_eigen_table(leaf, work)
+            if self._eigen_axis_adapt():
+                table = self._eigen_adapt_table(leaf, table)
+            else:
+                # off: no floor bookkeeping, the table is the built one
+                getattr(self, "_eigen_fisher_sigmas", {}).pop(leaf, None)
+            self._eigen_tables[leaf] = table
             self._persist_eigen_table(leaf)
         axes, sigmas = self._eigen_tables[leaf]
         if getattr(axes, "ndim", 2) == 4:
@@ -571,7 +835,8 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             return False
         try:
             got = eigen_table_persist.load_entry(
-                path, self.branch_name, leaf, **self._eigen_persist_guards()
+                path, self.branch_name, leaf, return_fisher=True,
+                **self._eigen_persist_guards()
             )
         except Exception as exc:  # never fail a run over its own cache
             eigen_refresh.logger.warning(
@@ -581,7 +846,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             return False
         if got is None:
             return False
-        axes, sigmas, visits = got
+        axes, sigmas, visits, fisher = got
         if (getattr(self, "eigen_store_readonly", False)
                 and np.asarray(axes).ndim >= 4):
             # a compute rank reading the head's sidecar: a per-(temp, walker)
@@ -592,13 +857,31 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                 self.branch_name, leaf,
             )
             return False
+        # step-scale adaptation: the entry's ``sigmas`` are the ADAPTED
+        # scale, ``sigmas_fisher`` (if present) the information-matrix floor
+        if self._eigen_axis_adapt():
+            floor = np.array(sigmas if fisher is None else fisher, copy=True)
+            self._eigen_fisher_dict()[leaf] = floor
+            if fisher is not None and not np.array_equal(fisher, sigmas):
+                # carried over the restart: maps onto the next refresh's
+                # axes while the (unpersisted) ring buffer refills
+                self._eigen_carried_dict()[leaf] = (
+                    np.array(axes, copy=True), np.array(sigmas, copy=True))
+        elif fisher is not None:
+            # the adaptation is OFF now: run the information-matrix table,
+            # never a scale adapted by an earlier process
+            sigmas = fisher
         self._eigen_tables[leaf] = (axes, sigmas)
         self._eigen_visit_count[leaf] = int(visits)
         eigen_refresh.logger.info(
             "[eigen_refresh] %s leaf %d: adopted the persisted eigen table "
-            "(shape %s, visits %d) from %s — skipping the information-"
+            "(shape %s, visits %d%s) from %s — skipping the information-"
             "matrix build", self.branch_name, leaf,
-            getattr(axes, "shape", None), int(visits), path,
+            getattr(axes, "shape", None), int(visits),
+            "" if fisher is None else (
+                ", adapted step scale" if self._eigen_axis_adapt()
+                else ", information-matrix sigmas (adaptation off)"),
+            path,
         )
         return True
 
@@ -611,11 +894,16 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             return
         try:
             axes, sigmas = self._eigen_tables[int(leaf)]
+            # the information-matrix floor rides along only while the
+            # step-scale adaptation is on (off: the pre-adaptation entry)
+            fisher = (getattr(self, "_eigen_fisher_sigmas", {}).get(int(leaf))
+                      if self._eigen_axis_adapt() else None)
             entry = eigen_table_persist.make_entry(
                 axes, sigmas,
                 self._eigen_visit_count.get(int(leaf), 0),
                 x0=getattr(self, "_eigen_x0", {}).get(int(leaf)),
                 store_iteration=getattr(self, "_dbg_step", None),
+                sigmas_fisher=fisher,
                 **self._eigen_persist_guards(),
             )
             eigen_table_persist.save_entry(
@@ -2152,6 +2440,10 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                     ki, wi = xp_t.asarray(k_idx), xp_t.asarray(w_idx)
                     axes[ki, wi] = axes[0, wi]
                     sigmas[ki, wi] = sigmas[0, wi]
+                    # the adaptation's information-matrix floor follows
+                    floor = getattr(self, "_eigen_fisher_sigmas", {}).get(leaf)
+                    if floor is not None and np.ndim(floor) == 3:
+                        floor[k_idx, w_idx] = floor[0, w_idx]
                 except Exception as exc:  # noqa: BLE001 -- the next refresh rebuilds it
                     logger.warning(
                         "[%s_LADDER] leaf %d: per-walker eigen table rows not "
@@ -3013,6 +3305,10 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                 work.coords[:, :, leaf] = coords_for_swap[
                     self.branch_name
                 ][:, :, 0]
+
+            # the end-of-visit rung ensemble -> the leaf's ring buffer for the
+            # eigen step-scale adaptation ({BRANCH}_EIGEN_AXIS_ADAPT; no-op off)
+            self._note_eigen_adapt_sample(leaf, work, temperature_control_here.betas)
 
             # ll_tmp1 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
 

@@ -25,6 +25,12 @@ basis with their curvature widths, and cap each width by
 Any failure — a non-finite likelihood, a raising engine, a broken prior —
 degrades to the identity-axes / 1%-of-prior-width fallback with a logged
 warning. A refresh must never crash the sampler.
+
+The step-scale adaptation (``{BRANCH}_EIGEN_AXIS_ADAPT``, user ruling
+2026-10-14) lives here too: :func:`cold_unit_deviations` ->
+:func:`empirical_axis_widths` -> :func:`adapt_axis_sigmas` widen each axis
+of a built table to the chain's own robust width along it (the axes are
+kept); the add/remove move owns the ring buffer that feeds them.
 """
 
 import logging
@@ -48,6 +54,12 @@ __all__ = [
     "eigen_tables_from_ll_batch",
     "eigen_table_from_waveform",
     "temper_sigmas",
+    "axis_caps",
+    "wrap_periodic",
+    "cold_unit_deviations",
+    "empirical_axis_widths",
+    "carried_axis_widths",
+    "adapt_axis_sigmas",
 ]
 
 logger = logging.getLogger(__name__)
@@ -316,11 +328,211 @@ def _tables_from_info_batch(info, widths, sigma_max_frac=1.0):
     norms = np.where(norms > 0, norms, 1.0)
     axes = a_x / norms[:, None, :]
     sigmas = sig_y * norms
-    bounds = axis_prior_bounds(axes, widths)
-    sigmas = np.minimum(sigmas, float(sigma_max_frac) * bounds)
+    sigmas = np.minimum(sigmas, axis_caps(axes, widths, sigma_max_frac))
     if not (np.all(np.isfinite(axes)) and np.all(np.isfinite(sigmas))):
         raise ValueError("non-finite eigen table")
     return axes, sigmas
+
+
+def axis_caps(axes, widths, sigma_max_frac=1.0):
+    """The per-axis sigma cap every table is built with.
+
+    ``sigma_max_frac`` x :func:`eryn.moves.eigenaxis.axis_prior_bounds` (the
+    largest 1-sigma step along a unit axis that stays inside the prior box).
+    ``axes`` is ``(..., ndim, ndim)`` (column ``k`` = axis ``k``); returns
+    ``(..., ndim)``. One function for the table build
+    (:func:`_tables_from_info_batch`) and the step-scale adaptation
+    (:func:`adapt_axis_sigmas`), so an adapted axis is capped exactly as the
+    information-matrix table caps it.
+    """
+    axes = np.asarray(axes, dtype=float)
+    lead = axes.shape[:-2]
+    d = axes.shape[-1]
+    bounds = axis_prior_bounds(
+        axes.reshape((-1, d, d)), np.asarray(widths, dtype=float)
+    )
+    return float(sigma_max_frac) * bounds.reshape(lead + (d,))
+
+
+# ---------------------------------------------------------------------------
+# Step-scale adaptation from the chain ({BRANCH}_EIGEN_AXIS_ADAPT)
+# ---------------------------------------------------------------------------
+#
+# Why (user ruling 2026-10-14; 9mo job 763, rows 453-561, T_max 6 EMRI
+# ladder): every EMRI samples a long degenerate intrinsic ridge (ln M, mu, a,
+# p0, e0). The information-matrix table is the LOCAL curvature at one point,
+# so the eigen move steps one table sigma along the right direction, but the
+# chain's own cold spread along that direction was 1.4-56x the table sigma.
+# A random walk whose step is r times smaller than the ridge needs ~r^2
+# iterations to cross it; the four cold walkers sat at different positions on
+# one connected ridge. The fix keeps the DIRECTIONS (axes) and widens the
+# SCALE per axis to the chain's own robust width along it, never below the
+# information-matrix sigma and never past the table's own cap.
+
+#: 1.4826 x MAD is the standard deviation of a Gaussian.
+MAD_TO_SIGMA = 1.4826
+
+
+def wrap_periodic(dev, periodic_inds=(), periods=()):
+    """``dev`` with its periodic columns wrapped to ``[-P/2, P/2)``.
+
+    ``dev`` is ``(..., ndim)``; ``periodic_inds`` / ``periods`` are the
+    branch's periodic columns and their periods (the move's
+    :class:`eryn.utils.PeriodicContainer`). A copy is returned; non-periodic
+    columns pass through unchanged. A phase on ``[0, 2 pi)`` maps to
+    ``[-pi, pi)``.
+    """
+    out = np.array(dev, dtype=float, copy=True)
+    inds = np.asarray(periodic_inds, dtype=int).ravel()
+    if inds.size == 0:
+        return out
+    per = np.asarray(periods, dtype=float).ravel()
+    out[..., inds] = np.mod(out[..., inds] + 0.5 * per, per) - 0.5 * per
+    return out
+
+
+def cold_unit_deviations(rung_samples, periodic_inds=(), periods=()):
+    """Every buffered sample as a deviation in COLD units, one array per rung.
+
+    ``rung_samples`` is a list over rungs of ``(X_k (m_k, ndim), beta_k
+    (m_k,))``: rung ``k``'s pooled samples (every walker of the rank, every
+    buffered visit) and the inverse temperature each was drawn at. Returns
+    the list of ``(m_k, ndim)`` deviations (rungs with nothing usable
+    dropped), or ``None`` when nothing usable remains;
+    :func:`empirical_axis_widths` re-centres each rung in the axis basis.
+
+    * **Centre: the rung's OWN robust centre**, never the cold rung's. At
+      stationarity both coincide, but a hot rung that sits elsewhere
+      (exploring another part of a ridge or another island, a fresh cold ->
+      hot rotation copy, a re-anchored rung, burn-in) would add its centre
+      OFFSET x sqrt(beta_k) to every one of its deviations -- a between-rung
+      displacement, not a width -- and on a multi-modal leaf it would size
+      the cold step to the distance between modes. With the rung's own
+      centre the mapping is exact for a tempered Gaussian wherever each rung
+      sits. Here the centre is the per-column median (for a periodic column
+      the median of the wrapped offsets from the rung's first sample, so a
+      phase straddling 0 / 2 pi is centred correctly); it only has to be
+      good enough to wrap the periodic columns -- the final centring is the
+      per-rung median of the AXIS-BASIS coordinates
+      (:func:`empirical_axis_widths`), because a column-space centre error
+      set by a wide axis would leak, rung to rung, into a narrow one.
+    * **Wrap before projecting**: periodic deviations go to ``[-P/2, P/2)``
+      (:func:`wrap_periodic`); an unwrapped phase near the period boundary
+      would inflate every axis it feeds.
+    * **Cold units**: x ``sqrt(beta_k)``. The target at inverse temperature
+      ``beta`` is ``exp(beta lnL)``, whose Gaussian width is ``1 /
+      sqrt(beta)`` times the cold one. Rungs with ``beta <= 0`` (no finite
+      width) and non-finite rows are dropped.
+    """
+    devs = []
+    for X, b in rung_samples:
+        X = np.asarray(X, dtype=float)
+        b = np.broadcast_to(np.asarray(b, dtype=float), (X.shape[0],))
+        keep = (b > 0.0) & np.all(np.isfinite(X), axis=1) & np.isfinite(b)
+        if not np.any(keep):
+            continue
+        X, b = X[keep], b[keep]
+        ref = X[0]
+        off = wrap_periodic(X - ref, periodic_inds, periods)
+        centre = ref + np.median(off, axis=0)
+        dev = wrap_periodic(X - centre, periodic_inds, periods)
+        devs.append(dev * np.sqrt(b)[:, None])
+    return devs or None
+
+
+def empirical_axis_widths(axes, deviations):
+    """Robust 1-sigma width of ``deviations`` along each table axis.
+
+    ``axes`` is ``(..., ndim, ndim)`` with column ``k`` = axis ``k`` (the
+    orientation of :func:`_tables_from_info_batch` and of
+    :func:`eryn.moves.eigenaxis.draw_axis_step`, which steps
+    ``sigma_k * axes[:, k]``); ``deviations`` is the per-rung list of
+    cold-unit deviations (:func:`cold_unit_deviations`), or one ``(m,
+    ndim)`` array (a single group). Returns ``(..., ndim)``.
+
+    **Projection = the coordinates in the axis basis**, ``c = A^-1 dev``,
+    not the dot products ``A^T dev``. The table's axes are unit vectors but
+    NOT orthogonal in the sampling basis (they are orthonormal in the
+    prior-box-whitened basis and un-whitened by the box widths). An eigen
+    step ``x -> x + sigma_k z a_k`` changes ``c_k`` by ``sigma_k z`` and
+    leaves every other ``c_j`` unchanged, so ``c_k``'s spread is exactly the
+    scale ``sigma_k`` must be compared with. For orthonormal axes the two
+    projections coincide.
+
+    **Per-rung centre in the axis basis**: each group's ``c`` is re-centred
+    on its own per-axis median before pooling (the column-space centre of
+    :func:`cold_unit_deviations` carries an error set by the WIDE axes, ~
+    ``1.25 sigma_wide / sqrt(m)``, and rung-to-rung differences of it would
+    land on a narrow axis as spurious width -- 70 % too wide on a 1:500
+    axis pair with 1500 samples per rung).
+
+    **Robust width**: ``1.4826 x MAD`` of each pooled ``c_k`` (the Gaussian
+    sigma; 50 % breakdown), not the plain standard deviation -- the buffer
+    carries transient outliers (a hot rung freshly re-anchored or rotated,
+    a temperature swap from far away). A singular axis matrix falls back to
+    the pseudo-inverse.
+    """
+    axes = np.asarray(axes, dtype=float)
+    groups = deviations if isinstance(deviations, (list, tuple)) else [deviations]
+    try:
+        inv = np.linalg.inv(axes)
+    except np.linalg.LinAlgError:
+        inv = np.linalg.pinv(axes)
+    coefs = []
+    for D in groups:
+        c = np.einsum("...ij,mj->...mi", inv, np.asarray(D, dtype=float))  # (..., m, ndim)
+        coefs.append(c - np.median(c, axis=-2, keepdims=True))
+    coef = np.concatenate(coefs, axis=-2)
+    med = np.median(coef, axis=-2, keepdims=True)
+    return MAD_TO_SIGMA * np.median(np.abs(coef - med), axis=-2)
+
+
+def carried_axis_widths(axes, axes_old, sigmas_old):
+    """Widths along ``axes`` implied by an OLDER adapted table.
+
+    Reads the old table as the Gaussian proposal covariance it encodes,
+    ``C = sum_k sigma_k^2 a_k a_k^T``, and returns the 1-sigma spread of the
+    axis-basis coordinates ``A^-1 x`` under it (``sqrt(diag(A^-1 C
+    A^-T))``) -- exactly ``sigmas_old`` when the axes did not change. Used
+    after a restart, while the ring buffer refills: the sidecar carries the
+    adapted scale across the process boundary, and a table refresh that
+    lands before the buffer holds ``{BRANCH}_EIGEN_ADAPT_MIN_VISITS`` visits
+    maps that scale onto the new axes instead of dropping it. Returns
+    ``None`` when the shapes do not line up.
+    """
+    axes = np.asarray(axes, dtype=float)
+    a_old = np.asarray(axes_old, dtype=float)
+    s_old = np.asarray(sigmas_old, dtype=float)
+    C = np.einsum("...ik,...k,...jk->...ij", a_old, s_old ** 2, a_old)
+    try:
+        inv = np.linalg.inv(axes)
+    except np.linalg.LinAlgError:
+        inv = np.linalg.pinv(axes)
+    V = inv @ C @ np.swapaxes(inv, -1, -2)
+    out = np.sqrt(np.clip(np.diagonal(V, axis1=-2, axis2=-1), 0.0, None))
+    if out.shape != axes.shape[:-1]:
+        return None
+    return out
+
+
+def adapt_axis_sigmas(axes, sigmas_fisher, widths_emp, prior_widths,
+                      sigma_max_frac=1.0):
+    """``max(sigma_fisher, min(sigma_empirical, cap))`` per axis.
+
+    The information-matrix sigma is the FLOOR (the adaptation only ever
+    widens a step); the empirical width is capped exactly as the table is
+    (:func:`axis_caps`), so an axis the matrix could not measure -- railed at
+    the cap -- stays at the cap. For every table the builders produce
+    (``sigma_fisher <= cap``) this is ``min(max(sigma_fisher,
+    sigma_empirical), cap)``; a custom table above the cap keeps its own
+    sigma. Non-finite empirical widths count as no information (the Fisher
+    sigma). The axes are not touched.
+    """
+    sf = np.asarray(sigmas_fisher, dtype=float)
+    se = np.asarray(widths_emp, dtype=float)
+    se = np.where(np.isfinite(se), se, 0.0)
+    cap = axis_caps(axes, prior_widths, sigma_max_frac)
+    return np.maximum(sf, np.minimum(se, cap))
 
 
 def _table_from_info(info, widths, sigma_max_frac=1.0):
