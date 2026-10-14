@@ -647,22 +647,24 @@ class GBSettings(Settings):
         default_factory=env_default("GB_WARM_SELF", False, bool)
     )
     # warm_self_every_search: STORED ROWS between self refits in the numbered
-    # search stages from gb_search_2 on (user ruling 2026-10-14, after the
-    # first PE epoch's cross-walker births were seen to carry 84 % of the lnL
-    # gain: "update the warm start refit in gb search 2 to every iteration";
-    # was 5). The clock is stage-relative (the stage's start row, or the
-    # latest complete epoch's built_at row, whichever is later) and read from
-    # disk, so a resume never rebuilds early. <= 0 -> no refit in search.
-    # Env: GB_WARM_SELF_EVERY_SEARCH.
+    # search stages, gb_search_1 on (user rulings 2026-10-14, after the first
+    # PE epoch's cross-walker births were seen to carry 84 % of the lnL gain:
+    # "update the warm start refit in gb search 2 to every iteration" (was 5),
+    # then "gb search 1 and gb search 2 will have warm start refits every
+    # iteration" (gb_search_1 did not build before)). The clock is
+    # stage-relative (the stage's start row, or the latest complete epoch's
+    # built_at row, whichever is later) and read from disk, so a resume never
+    # rebuilds early. <= 0 -> no refit in search. Env: GB_WARM_SELF_EVERY_SEARCH.
     warm_self_every_search: int = dataclasses.field(
         default_factory=env_default("GB_WARM_SELF_EVERY_SEARCH", 1, int)
     )
     # warm_self_every_pe: stored rows (= iterations) between self refits in
-    # full_pe ("full pe adaptivity: just refit every 250 iterations"; a
-    # periodic approximation, like the residual F-stat refit every 150 PE
-    # iterations). <= 0 -> no refit in PE. Env: GB_WARM_SELF_EVERY_PE.
+    # full_pe (2026-10-14: "PE it will happen every 150", the residual F-stat
+    # refit's cadence; was 250: "full pe adaptivity: just refit every 250
+    # iterations"). A periodic approximation. <= 0 -> no refit in PE.
+    # Env: GB_WARM_SELF_EVERY_PE.
     warm_self_every_pe: int = dataclasses.field(
-        default_factory=env_default("GB_WARM_SELF_EVERY_PE", 250, int)
+        default_factory=env_default("GB_WARM_SELF_EVERY_PE", 150, int)
     )
     # warm_self_last_k: how many of the run's latest stored cold rows feed a
     # refit, every walker of each (50 x 4 walkers = 200 posterior samples).

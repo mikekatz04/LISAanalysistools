@@ -4244,6 +4244,24 @@ export PE_INMODEL_REPEATS_BRANCHES=${PE_INMODEL_REPEATS_BRANCHES:-gb,vgb,sobbh,m
 export MBH_PERMUTE_EVERY=10
 export EMRI_PERMUTE_EVERY=10
 export SOBBH_PERMUTE_EVERY=10
+# SEARCH-STAGE COLD -> HOT ROTATION of the source ladders (user ruling
+# 2026-10-14, after the 1yr's EMRI 0 was held by one walker at SNR 28.7 and
+# lost by the other three at SNR 4-8): "during all search parts of the
+# sampler, when source search is run (EMRI, MBHB, SOBHB), we should be
+# copying the cold-chain into the hot chain rotating by walker so it does not
+# pass to itself ... every 200 proposals for a source (which includes the 25
+# repeats so 8 iterations)". Every {BRANCH}_COLD_TO_HOT_EVERY proposals (25
+# repeats x 8 proposes) in a search stage (source_search, gb_search_seed/1/2;
+# never full_pe) each walker's cold point of every leaf is copied into the
+# hottest sampled rung of walker w + k, k = 1 + event mod (nwalkers - 1):
+# never itself, every other walker in turn. Scored at the next leaf visit
+# against the receiving walker's own residual; a better point is swapped
+# down the ladder by the per-repeat temperature swaps, a worse one is
+# re-anchored by the lost-rung guard. Code default 200 (this block is for
+# visibility; 0 disables). Log: "[MBH] cold->hot rotate event ...".
+export MBH_COLD_TO_HOT_EVERY=${MBH_COLD_TO_HOT_EVERY:-200}
+export EMRI_COLD_TO_HOT_EVERY=${EMRI_COLD_TO_HOT_EVERY:-200}
+export SOBBH_COLD_TO_HOT_EVERY=${SOBBH_COLD_TO_HOT_EVERY:-200}
 # EXACT-TRUTH STARTS + NO SOURCE_SEARCH STAGE (user ruling 2026-09-14
 # late): "start all the emri, mbh, vgb, sobhb at the true points exactly
 # ... they switched to the eigen proposal, we do not [need] a spread like

@@ -4508,7 +4508,8 @@ export GB_WARM_START_LAST_K=${GB_WARM_START_LAST_K:-300}   # 9mo/1yr (Mike 2026-
 # mixture from THIS run's own last GB_WARM_SELF_LAST_K stored rows x every
 # cold walker (fit -> referee -> apply, same pipeline as the parent build,
 # into ${STORE_DIR}/warmstart/self/epoch_NNNN/) every GB_WARM_SELF_EVERY_SEARCH
-# rows in gb_search_2 and every GB_WARM_SELF_EVERY_PE rows in full_pe, right
+# rows in gb_search_1 and gb_search_2 and every GB_WARM_SELF_EVERY_PE rows in
+# full_pe, right
 # after its own save (watched: a build that holds a save up is reported);
 # rj_warm_pe then draws GB_WARM_SELF_FRACTION of its proposes from the newest
 # self mixture and the rest from the parent-derived one above, rj_warm_search
@@ -4518,12 +4519,15 @@ export GB_WARM_START_LAST_K=${GB_WARM_START_LAST_K:-300}   # 9mo/1yr (Mike 2026-
 # carried 84 % of the lnL gain in its 7 self draws (cold acceptance 13x the
 # parent mixture's): in gb_search_2 refit EVERY stored row and draw ONLY from
 # the refit ("update the warm start refit in gb search 2 to every iteration
-# using only the refit proposal during gb search 2"); full_pe keeps 250 / 75 %.
+# using only the refit proposal during gb search 2"). Later the same day:
+# "gb search 1 and gb search 2 will have warm start refits every iteration.
+# PE it will happen every 150" -> gb_search_1 refits every stored row too
+# (it never built before) and full_pe every 150 rows (was 250), 75 % self.
 # Code default OFF (stock runs bit-identical); needs GB_WARM_START_COMPONENTS.
 # Log: "[GB_WARM_SELF ...]". Rollback: GB_WARM_SELF=0 on the launch line.
 export GB_WARM_SELF=${GB_WARM_SELF:-1}
 export GB_WARM_SELF_EVERY_SEARCH=${GB_WARM_SELF_EVERY_SEARCH:-1}
-export GB_WARM_SELF_EVERY_PE=${GB_WARM_SELF_EVERY_PE:-250}
+export GB_WARM_SELF_EVERY_PE=${GB_WARM_SELF_EVERY_PE:-150}
 export GB_WARM_SELF_LAST_K=${GB_WARM_SELF_LAST_K:-50}
 export GB_WARM_SELF_FRACTION=${GB_WARM_SELF_FRACTION:-0.75}
 export GB_WARM_SELF_FRACTION_SEARCH=${GB_WARM_SELF_FRACTION_SEARCH:-1.0}
@@ -5057,6 +5061,24 @@ export PE_INMODEL_REPEATS_BRANCHES=${PE_INMODEL_REPEATS_BRANCHES:-gb,vgb,sobbh,m
 export MBH_PERMUTE_EVERY=10
 export EMRI_PERMUTE_EVERY=10
 export SOBBH_PERMUTE_EVERY=10
+# SEARCH-STAGE COLD -> HOT ROTATION of the source ladders (user ruling
+# 2026-10-14, after the 1yr's EMRI 0 was held by one walker at SNR 28.7 and
+# lost by the other three at SNR 4-8): "during all search parts of the
+# sampler, when source search is run (EMRI, MBHB, SOBHB), we should be
+# copying the cold-chain into the hot chain rotating by walker so it does not
+# pass to itself ... every 200 proposals for a source (which includes the 25
+# repeats so 8 iterations)". Every {BRANCH}_COLD_TO_HOT_EVERY proposals (25
+# repeats x 8 proposes) in a search stage (source_search, gb_search_seed/1/2;
+# never full_pe) each walker's cold point of every leaf is copied into the
+# hottest sampled rung of walker w + k, k = 1 + event mod (nwalkers - 1):
+# never itself, every other walker in turn. Scored at the next leaf visit
+# against the receiving walker's own residual; a better point is swapped
+# down the ladder by the per-repeat temperature swaps, a worse one is
+# re-anchored by the lost-rung guard. Code default 200 (this block is for
+# visibility; 0 disables). Log: "[MBH] cold->hot rotate event ...".
+export MBH_COLD_TO_HOT_EVERY=${MBH_COLD_TO_HOT_EVERY:-200}
+export EMRI_COLD_TO_HOT_EVERY=${EMRI_COLD_TO_HOT_EVERY:-200}
+export SOBBH_COLD_TO_HOT_EVERY=${SOBBH_COLD_TO_HOT_EVERY:-200}
 # EXACT-TRUTH STARTS + NO SOURCE_SEARCH STAGE (user ruling 2026-09-14
 # late): "start all the emri, mbh, vgb, sobhb at the true points exactly
 # ... they switched to the eigen proposal, we do not [need] a spread like

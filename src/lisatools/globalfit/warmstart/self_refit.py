@@ -24,7 +24,7 @@ THE PIECES (all in this module, wired from three places):
 
 1. **The build** (:class:`WarmSelfHook`, saver rank, ``hdfbackend``'s save
    loop). Right after one of its own saves, when the run's active recipe
-   stage is ``gb_search_N`` (N >= 2) or ``full_pe`` and the stage's cadence
+   stage is ``gb_search_N`` (N >= 1) or ``full_pe`` and the stage's cadence
    has elapsed (:func:`warm_self_due`), the saver copies the last
    ``GB_WARM_SELF_LAST_K`` cold rows of ``chain/gb`` / ``inds/gb`` /
    ``log_like`` through its OWN backend's ``open("r")`` -- strictly scoped,
@@ -213,12 +213,14 @@ _SEARCH_STAGE_RE = re.compile(r"^gb_search_(\d+)$")
 
 
 def warm_self_stage_kind(stage: typing.Optional[str]) -> typing.Optional[str]:
-    """``"search"`` for ``gb_search_N`` with N >= 2, ``"pe"`` for ``full_pe``, else None.
+    """``"search"`` for ``gb_search_N`` with N >= 1, ``"pe"`` for ``full_pe``, else None.
 
-    "Starting in gb search 2 (and in full pe)": the numbered search stages
-    from 2 on take the search cadence, ``full_pe`` the PE cadence. Every
-    other stage (``gb_search_seed``, ``source_search``, ``noise_search``,
-    ``gb_search_1``, ``replica_pe``) never builds.
+    Every NUMBERED search stage takes the search cadence (user ruling
+    2026-10-14: "gb search 1 and gb search 2 will have warm start refits
+    every iteration"; until then only N >= 2 built), ``full_pe`` the PE
+    cadence. Every other stage (``gb_search_seed``, ``source_search``,
+    ``noise_search``, ``replica_pe``) never builds: the seed stage has no
+    rows of its own worth refitting and the parent mixture carries it.
     """
     if not stage:
         return None
@@ -226,7 +228,7 @@ def warm_self_stage_kind(stage: typing.Optional[str]) -> typing.Optional[str]:
     if s == "full_pe":
         return "pe"
     m = _SEARCH_STAGE_RE.match(s)
-    if m and int(m.group(1)) >= 2:
+    if m and int(m.group(1)) >= 1:
         return "search"
     return None
 

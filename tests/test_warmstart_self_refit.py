@@ -136,7 +136,7 @@ class SettingsKnobTest(unittest.TestCase):
         "warm_self": ("GB_WARM_SELF", False, "1", True),
         # 2026-10-14 ruling: every iteration in gb_search_2 (was 5)
         "warm_self_every_search": ("GB_WARM_SELF_EVERY_SEARCH", 1, "7", 7),
-        "warm_self_every_pe": ("GB_WARM_SELF_EVERY_PE", 250, "100", 100),
+        "warm_self_every_pe": ("GB_WARM_SELF_EVERY_PE", 150, "100", 100),
         "warm_self_last_k": ("GB_WARM_SELF_LAST_K", 50, "30", 30),
         "warm_self_fraction": ("GB_WARM_SELF_FRACTION", 0.75, "0.5", 0.5),
         # 2026-10-14 ruling: only the refit proposal during gb search 2
@@ -253,12 +253,24 @@ class WrapTest(_TmpDir):
 # ---------------------------------------------------------------------------
 class CadenceClockTest(unittest.TestCase):
     def test_stage_kinds(self):
+        # 2026-10-14 (Mike): "gb search 1 and gb search 2 will have warm start
+        # refits every iteration" -- every NUMBERED search stage builds.
+        self.assertEqual(sr.warm_self_stage_kind("gb_search_1"), "search")
         self.assertEqual(sr.warm_self_stage_kind("gb_search_2"), "search")
         self.assertEqual(sr.warm_self_stage_kind("gb_search_3"), "search")
         self.assertEqual(sr.warm_self_stage_kind("full_pe"), "pe")
-        for s in ("gb_search_1", "gb_search_seed", "source_search",
+        for s in ("gb_search_seed", "source_search", "gb_search_0",
                   "noise_search", "replica_pe", None, ""):
             self.assertIsNone(sr.warm_self_stage_kind(s), s)
+
+    def test_gb_search_1_builds_every_row_at_the_default_cadence(self):
+        # stage start row 6 (the end of source_search): the first build at
+        # the first stored row of the stage, then every row
+        for rows, due in ((6, False), (7, True), (8, True)):
+            got, cad, clock = sr.warm_self_due(rows, "gb_search_1", 6, None, 1, 150)
+            self.assertEqual((got, cad, clock), (due, 1, 6), rows)
+        self.assertEqual(sr.warm_self_due(8, "gb_search_1", 6, 7, 1, 150),
+                         (True, 1, 7))
 
     def test_search_cadence_is_stage_relative(self):
         for rows, due in ((10, False), (14, False), (15, True), (16, True)):
@@ -288,7 +300,9 @@ class CadenceClockTest(unittest.TestCase):
                          (True, 5, 10))
 
     def test_other_stages_and_disabled_cadences_never_build(self):
-        self.assertFalse(sr.warm_self_due(999, "gb_search_1", 0, None, 5, 250)[0])
+        self.assertFalse(sr.warm_self_due(999, "gb_search_seed", 0, None, 5, 250)[0])
+        self.assertFalse(sr.warm_self_due(999, "source_search", 0, None, 5, 250)[0])
+        self.assertFalse(sr.warm_self_due(999, "gb_search_1", 0, None, 0, 250)[0])
         self.assertFalse(sr.warm_self_due(999, "gb_search_2", 0, None, 0, 250)[0])
         self.assertFalse(sr.warm_self_due(999, "full_pe", 0, None, 5, -1)[0])
 

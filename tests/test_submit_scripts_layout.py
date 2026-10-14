@@ -96,12 +96,23 @@ EIGEN_JUMP_MIX_KNOBS = tuple(EIGEN_JUMP_MIX_LINE)
 # proposes from it and 25 % from the parent-derived mixture. Code default OFF.
 # 2026-10-14 ruling: in gb_search_2 refit every stored row and draw only from
 # the refit (GB_WARM_SELF_EVERY_SEARCH 5 -> 1, GB_WARM_SELF_FRACTION_SEARCH 1.0).
+# 2026-10-14 (later): gb_search_1 refits every row as well (code: the stage
+# gate), and full_pe every 150 (GB_WARM_SELF_EVERY_PE 250 -> 150).
 WARM_SELF_LINE = {
     "GB_WARM_SELF": "1", "GB_WARM_SELF_EVERY_SEARCH": "1",
-    "GB_WARM_SELF_EVERY_PE": "250", "GB_WARM_SELF_LAST_K": "50",
+    "GB_WARM_SELF_EVERY_PE": "150", "GB_WARM_SELF_LAST_K": "50",
     "GB_WARM_SELF_FRACTION": "0.75", "GB_WARM_SELF_FRACTION_SEARCH": "1.0",
 }
 WARM_SELF_KNOBS = tuple(WARM_SELF_LINE)
+# 2026-10-14 (Mike): the search-stage cold -> hot rotation of the source
+# ladders, every 200 proposals (= 8 proposes of 25 repeats), rotating by
+# walker so no walker receives its own cold chain. Code default 200; the
+# launchers export it for visibility.
+COLD_TO_HOT_LINE = {
+    "MBH_COLD_TO_HOT_EVERY": "200", "EMRI_COLD_TO_HOT_EVERY": "200",
+    "SOBBH_COLD_TO_HOT_EVERY": "200",
+}
+COLD_TO_HOT_KNOBS = tuple(COLD_TO_HOT_LINE)
 
 _STUB_SBATCH = """#!/usr/bin/env bash
 for a in "$@"; do printf '%s\\n' "$a"; done
@@ -860,6 +871,9 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             # code defaults None / 200.
             "EMRI_LADDER_TMAX", "EMRI_LADDER_REANCHOR_NATS",
             "MBH_LADDER_TMAX", "MBH_LADDER_REANCHOR_NATS",
+            # 2026-10-14: the search-stage cold -> hot rotation cadence of the
+            # source ladders (code default 200, exported for visibility).
+            *COLD_TO_HOT_KNOBS,
             # 2026-10-13: the GB warm-start self-refit block (code default
             # OFF); WarmSelfLauncherTest pins it.
             *WARM_SELF_KNOBS,
@@ -1829,6 +1843,9 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             # 2026-10-13: the ladder cap exports, mirrored in the 3mo twin
             "EMRI_LADDER_TMAX", "EMRI_LADDER_REANCHOR_NATS",
             "MBH_LADDER_TMAX", "MBH_LADDER_REANCHOR_NATS",
+            # 2026-10-14: the cold -> hot rotation cadence, mirrored in the
+            # 3mo twin (inert there: no source branch is armed)
+            *COLD_TO_HOT_KNOBS,
             # 2026-10-13: the GB warm-start self-refit block, mirrored in the
             # 3mo twin (inert there: no GB_WARM_START_COMPONENTS)
             *WARM_SELF_KNOBS,

@@ -301,7 +301,22 @@ class WalkerFanoutMixin:
         return int(getattr(layout, "n_blocks", 1)) <= 1
 
     # ---- propose -------------------------------------------------------------
+    def fanout_prepare_state(self, model, state):
+        """Hook: edit the FULL-ensemble state before any slicing (no-op by default).
+
+        Called once per propose at the top of :meth:`propose`, on whichever
+        process owns the whole ensemble: the single-process body, the flat
+        (replica) head, or the block head right before ``fanout_propose``
+        slices the state per rank. It is the one place a cross-walker edit
+        of a tempered sub-state (one walker's rung written from another
+        walker's) can be made without a replay, since every rank only ever
+        sees its own walker block. The source moves' search-stage cold ->
+        hot rotation lives here (``ResidualAddOneRemoveOneMove``).
+        """
+        return None
+
     def propose(self, model, state):
+        self.fanout_prepare_state(model, state)
         if not self.fanout_active:
             return self.propose_local(model, state)
         layout = self.fanout.layout

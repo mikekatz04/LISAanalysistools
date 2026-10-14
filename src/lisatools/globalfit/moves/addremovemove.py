@@ -28,6 +28,89 @@ def _free_pool() -> None:
         xp.get_default_memory_pool().free_all_blocks()
 
 
+# ---- search-stage cold -> hot rotation (user ruling 2026-10-14) -------------
+#: default proposal cadence of the rotation: 200 proposals = 8 proposes of 25
+#: in-model repeats ("every 200 proposals for a source (which includes the 25
+#: repeats so 8 iterations)")
+COLD_TO_HOT_EVERY_DEFAULT = 200
+#: stage kinds the rotation runs in: every search kind, never PE
+COLD_TO_HOT_STAGE_KINDS = ("search", "rj")
+
+
+def cold_to_hot_offset(event: int, nwalkers: int) -> int:
+    """Walker offset of rotation ``event``: ``1 + event mod (nwalkers - 1)``.
+
+    Never 0 (a walker never receives its own cold chain) and, over
+    ``nwalkers - 1`` consecutive events, every other walker once. 0 when
+    there is no partner (fewer than two walkers).
+    """
+    nw = int(nwalkers)
+    if nw < 2:
+        return 0
+    return 1 + int(event) % (nw - 1)
+
+
+def cold_to_hot_due(clock: int, repeats: int, cadence: int):
+    """``(fires, new_clock)`` after a propose of ``repeats`` proposals.
+
+    The clock counts proposals (in-model repeats) since the last event and
+    is advanced BEFORE the test, so the first propose after a (re)start
+    never fires and, at 25 repeats and cadence 200, events land on proposes
+    8, 16, 24, ... A cadence <= 0 disables the rotation (clock held at 0).
+    A cadence shorter than one propose fires every propose and keeps the
+    remainder.
+    """
+    cad = int(cadence)
+    if cad <= 0:
+        return False, 0
+    new = int(clock) + int(repeats)
+    if new >= cad:
+        return True, new % cad
+    return False, new
+
+
+def rotate_cold_into_hot(coords, inds, log_prior, *, hot: int, offset: int) -> int:
+    """Copy every walker's COLD rung into the ``hot`` rung of walker ``w + offset``.
+
+    In place on a per-leaf ladder sub-state's arrays: ``coords``
+    ``(ntemps, nwalkers, nleaves, ndim)``, ``inds`` ``(ntemps, nwalkers,
+    nleaves)`` and, when given, ``log_prior`` ``(nleaves, ntemps,
+    nwalkers)`` (the copied point's prior is the source walker's cold
+    prior: same prior, same point). Only leaves alive on the source
+    walker's cold rung are copied; the destination's ``inds`` follow. The
+    destination's ``log_like`` is NOT touched: every leaf visit rescores
+    all rungs against the walker's own exposed residual (``prev_logl`` in
+    ``propose_local``), which is where the copied point gets its
+    likelihood. Returns the number of (walker, leaf) copies; 0 when ``hot``
+    is the cold rung, the offset is 0, or there is nothing alive.
+    """
+    hot = int(hot)
+    offset = int(offset)
+    nt, nw = int(coords.shape[0]), int(coords.shape[1])
+    if hot <= 0 or hot >= nt or nw < 2 or offset % nw == 0:
+        return 0
+    cold_coords = np.array(coords[0], copy=True)          # (nwalkers, nleaves, ndim)
+    cold_inds = np.array(inds[0], copy=True)              # (nwalkers, nleaves)
+    nl = int(coords.shape[2])
+    if log_prior is not None and (
+        np.ndim(log_prior) != 3 or tuple(np.shape(log_prior)) != (nl, nt, nw)
+    ):
+        log_prior = None                                  # not the per-leaf ladder layout
+    cold_lp = None if log_prior is None else np.array(log_prior[:, 0, :], copy=True)  # (nleaves, nwalkers)
+    n = 0
+    for w in range(nw):
+        dst = (w + offset) % nw
+        alive = np.nonzero(cold_inds[w])[0]
+        if alive.size == 0:
+            continue
+        coords[hot, dst, alive] = cold_coords[w, alive]
+        inds[hot, dst, alive] = True
+        if cold_lp is not None:
+            log_prior[alive, hot, dst] = cold_lp[alive, w]
+        n += int(alive.size)
+    return n
+
+
 from eryn.moves import EigenAxisMove, Move, StretchMove, TemperatureControl
 from eryn.prior import ProbDistContainer
 from eryn.utils.transform import TransformContainer
@@ -191,6 +274,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         eigen_gram_target: float = None,
         eigen_gram_eps_rel: float = None,
         ladder_reanchor_nats: float = None,
+        cold_to_hot_every: int = None,
         **kwargs,
     ):
 
@@ -198,6 +282,12 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         StretchMove.__init__(self, **kwargs)
 
         self.ntemps, self.nwalkers, self.nleaves_max, self.ndim = coords_shape
+        # search-stage cold -> hot rotation (see _maybe_rotate_cold_into_hot);
+        # kwarg > {BRANCH}_COLD_TO_HOT_EVERY env > 200 proposals
+        self.cold_to_hot_every = cold_to_hot_every
+        self._cold_to_hot_clock = 0
+        self.n_cold_to_hot_events = 0
+        self._cold_to_hot_offsets_seen = []
 
         # ONE move structure (2026-07 multi-GPU pass): pass ``dcga=`` to run
         # waveform generation + likelihood scoring on per-device replicas —
@@ -1777,6 +1867,91 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
     def serve_ar_replay(self, payload, clock, model):
         self._apply_cold_chain_replay(payload)
         return None
+
+    # ---- search-stage cold -> hot rotation (user ruling 2026-10-14) ---------
+    def _cold_to_hot_every(self) -> int:
+        """kwarg > ``{BRANCH}_COLD_TO_HOT_EVERY`` env > 200 proposals (<= 0 = off)."""
+        val = getattr(self, "cold_to_hot_every", None)
+        if val is None:
+            val = os.environ.get(
+                f"{str(self.branch_name).upper()}_COLD_TO_HOT_EVERY", None
+            )
+        if val is None or (isinstance(val, str) and not val.strip()):
+            val = COLD_TO_HOT_EVERY_DEFAULT
+        return int(val)
+
+    def fanout_prepare_state(self, model, state):
+        """The mixin seam: runs on the full ensemble before any slicing."""
+        self._maybe_rotate_cold_into_hot(state)
+
+    def _maybe_rotate_cold_into_hot(self, state) -> bool:
+        """Every ``cold_to_hot_every`` proposals in a SEARCH stage, copy each
+        walker's cold chain into the hottest sampled rung of another walker.
+
+        User ruling 2026-10-14 (the 1yr flagship's EMRI 0, held by walker 1
+        at SNR 28.7 and lost by walkers 0, 2 and 3 at SNR 4-8): "during all
+        search parts of the sampler, when source search is run (EMRI, MBHB,
+        SOBHB), we should be copying the cold-chain into the hot chain
+        rotating by walker so it does not pass to itself ... every 200
+        proposals for a source (which includes the 25 repeats so 8
+        iterations)". A cross-walker exchange through the ladder: walker
+        ``w``'s cold point lands in the hottest rung the move samples
+        (``self.ntemps - 1``) of walker ``w + k``, ``k = 1 + event mod
+        (nwalkers - 1)`` (never itself; every other walker in turn), for
+        every alive leaf of the branch at once. At the next leaf visit the
+        copied rung is scored against ITS walker's exposed residual like
+        every other rung: a point that beats the walker's own is swapped
+        down the ladder by the per-repeat temperature swaps; one that sits
+        far below is re-anchored by the lost-rung guard. Nothing else moves
+        (cold rung, residual, ladder), so no replay is needed; the edit is
+        made here, on the full ensemble, before the state is sliced per
+        rank.
+
+        Fires only when ``gf_stage_kind`` is a search kind (``"search"``,
+        ``"rj"``: source_search, gb_search_seed/1/2), never in PE and never
+        when the stage is unknown; needs two or more walkers and two or more
+        sampled rungs. Not reversible (no detailed balance; search only).
+        The clock is in-memory: a resume starts it from 0. Logged once per
+        event (``[<BRANCH>] cold->hot rotate ...``); counted in
+        ``n_cold_to_hot_events``.
+        """
+        # counters live here too (a subclass may bypass __init__)
+        self.n_cold_to_hot_events = int(getattr(self, "n_cold_to_hot_events", 0))
+        cadence = self._cold_to_hot_every()
+        kind = getattr(self, "gf_stage_kind", None)
+        if cadence <= 0 or kind not in COLD_TO_HOT_STAGE_KINDS:
+            return False
+        fires, self._cold_to_hot_clock = cold_to_hot_due(
+            getattr(self, "_cold_to_hot_clock", 0), int(self.num_repeats), cadence
+        )
+        if not fires:
+            return False
+        sub = (getattr(state, "sub_states", None) or {}).get(self.branch_name)
+        if sub is None or not getattr(sub, "tempered_initialized", False):
+            return False
+        coords = sub.coords
+        nw = int(coords.shape[1])
+        hot = min(int(self.ntemps), int(coords.shape[0])) - 1
+        event = int(getattr(self, "n_cold_to_hot_events", 0))
+        offset = cold_to_hot_offset(event, nw)
+        if hot < 1 or offset == 0:
+            return False
+        n = rotate_cold_into_hot(
+            coords, sub.inds, getattr(sub, "log_prior", None), hot=hot, offset=offset
+        )
+        self.n_cold_to_hot_events = event + 1
+        seen = getattr(self, "_cold_to_hot_offsets_seen", None)
+        if seen is None:
+            seen = self._cold_to_hot_offsets_seen = []
+        seen.append(int(offset))
+        logger.info(
+            "[%s] cold->hot rotate event %d (stage kind %s, every %d proposals): "
+            "offset %d over %d walkers -- %d (walker, leaf) cold points copied into "
+            "rung %d (the hottest sampled); scored at the next leaf visit, swapped "
+            "down if better, re-anchored if lost.",
+            str(self.branch_name).upper(), event + 1, kind, cadence, offset, nw, n, hot,
+        )
+        return True
 
     def _fancy_swap_fires(self, repeat):
         """Walker-permuting swap cadence; never with one walker (identity permutation)."""

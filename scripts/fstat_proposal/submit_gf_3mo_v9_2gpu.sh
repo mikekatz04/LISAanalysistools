@@ -3992,7 +3992,7 @@ export GB_WARM_START_COMPONENTS=
 # (the hook logs one warning and builds nothing).
 export GB_WARM_SELF=${GB_WARM_SELF:-1}
 export GB_WARM_SELF_EVERY_SEARCH=${GB_WARM_SELF_EVERY_SEARCH:-1}
-export GB_WARM_SELF_EVERY_PE=${GB_WARM_SELF_EVERY_PE:-250}
+export GB_WARM_SELF_EVERY_PE=${GB_WARM_SELF_EVERY_PE:-150}
 export GB_WARM_SELF_LAST_K=${GB_WARM_SELF_LAST_K:-50}
 export GB_WARM_SELF_FRACTION=${GB_WARM_SELF_FRACTION:-0.75}
 export GB_WARM_SELF_FRACTION_SEARCH=${GB_WARM_SELF_FRACTION_SEARCH:-1.0}
@@ -4445,6 +4445,13 @@ export SOBBH_NUM_PROP_REPEATS=${SOBBH_NUM_PROP_REPEATS:-10}
 export MBH_PERMUTE_EVERY=10
 export EMRI_PERMUTE_EVERY=10
 export SOBBH_PERMUTE_EVERY=10
+# SEARCH-STAGE COLD -> HOT ROTATION of the source ladders (user ruling
+# 2026-10-14; see the 6mo v9 launcher): every {BRANCH}_COLD_TO_HOT_EVERY
+# proposals in a search stage each walker's cold point is copied into the
+# hottest sampled rung of walker w + k (k >= 1, rotating). Code default 200.
+export MBH_COLD_TO_HOT_EVERY=${MBH_COLD_TO_HOT_EVERY:-200}
+export EMRI_COLD_TO_HOT_EVERY=${EMRI_COLD_TO_HOT_EVERY:-200}
+export SOBBH_COLD_TO_HOT_EVERY=${SOBBH_COLD_TO_HOT_EVERY:-200}
 # EXACT-TRUTH STARTS (user ruling 2026-09-14 late): "start all the emri, mbh,
 # vgb, sobhb at the true points exactly ... they switched to the eigen
 # proposal, we do not [need] a spread like with the stretch proposal."

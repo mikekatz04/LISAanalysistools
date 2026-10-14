@@ -274,8 +274,10 @@ Cold lnL per walker per row (`global_fit/log_like[:, 0, 0, :]`), max / mean
 - The warm-start SELF refit (`GB_WARM_SELF=1`, 2026-10-13; navigation 2.8),
   the cross-walker GB exchange: grep `[GB_WARM_SELF]`. Healthy: on the saver
   (`[r<k>/saver]`) one `epoch k built from rows a..b (200 samples, K
-  components) in T s` every stored row of `gb_search_2` (every 5 before
-  2026-10-14) and every 250 of `full_pe`, `built_at_row` advancing by
+  components) in T s` every stored row of `gb_search_1` and `gb_search_2`
+  (every 5 rows of `gb_search_2` alone before 2026-10-14; the first
+  `gb_search_1` epochs fit whatever rows exist, a few dozen samples) and
+  every 150 of `full_pe` (250 before 2026-10-14), `built_at_row` advancing by
   exactly the cadence (a resume
   continues the clock, it does not rebuild at once); on EVERY compute rank
   one `rank r adopted epoch k` per epoch, the same k on all ranks within a
@@ -448,6 +450,22 @@ runs inside `rj_fstat_search`):
   --leaf 3 --src-walker 1 --dst-walker 0` (dry run, then `--apply`; the
   resume rebuilds residuals and recomputes lnL). Nothing in the run itself
   un-sticks it.
+- **The cold -> hot rotation (2026-10-14)**, the cross-walker remedy built
+  into the search stages after the 1yr's EMRI 0 (held by walker 1 at SNR
+  28.7, lost by walkers 0, 2, 3 at SNR 4-8): every 200 proposals of a
+  source move (8 proposes of 25 repeats) in source_search / gb_search_*,
+  each walker's cold chain is copied into the hottest sampled rung of
+  another walker (offset k = 1 + event mod (nwalkers - 1), never itself),
+  for every leaf at once; grep `cold->hot rotate` (one line per event per
+  branch, on the head). What to expect afterwards: a walker holding a
+  worse mode sees the better point swapped down its ladder within a few
+  repeats (its cold SNR jumps to the other walker's), while a walker
+  already on the best mode gets the worse point re-anchored away by the
+  lost-rung guard (an `[EMRI_LADDER] re-anchored` line at the top rung
+  right after an event is the guard doing its job, not a defect). Never in
+  `full_pe`. A stuck walker that survives several events is a different
+  problem (the copied point scored worse on that walker's residual: look
+  at its GB / noise state, not the ladder).
 - `at walker w` in the `[eigen_refresh]` lines and in the Gram non-finite
   errors is the RANK-LOCAL walker index (one walker per rank); map it to the
   global walker through the line's rank prefix (`[r<k>/c<i>]`; the head's
