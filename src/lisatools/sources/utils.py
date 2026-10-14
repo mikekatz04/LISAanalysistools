@@ -721,6 +721,48 @@ def evolve_galactic_binary(
     else:
         raise NotImplementedError("Currently, the galactic binaries can only be evolved using the linear approximation")
 
+def evolve_sobhb(
+        t_start: float, 
+        t_end: float,
+        m1: float,
+        m2: float,
+        s1: float,
+        s2: float,
+        f_start: float,
+    ):
+    """
+    Evolves the starting frequency of a SOBHB to the final frequency at a given end time using the TaylorT3 waveform approximant.
+
+    Args:
+        t_start (float): Start/initial time of the SOBHB before evolving.
+        t_end (float): End/final time of the SOBHB after evolving.
+        m1 (float): Mass of the first black hole in solar masses.
+        m2 (float): Mass of the second black hole in solar masses.
+        s1 (float): Spin of the first black hole (dimensionless).
+        s2 (float): Spin of the second black hole (dimensionless).
+        f_start (float): Start/initial frequency of the SOBHB before evolving.
+    """
+
+    # Convert masses to SI units
+    from lisatools.utils.constants import MTSUN_SI
+    try:
+        from gwtf import models
+    except (ImportError, ModuleNotFoundError):
+        raise ImportError("The gwtf package is required for this function. Please install it via pip or conda.")
+
+    m1_seconds, m2_seconds = m1 * MTSUN_SI, m2 * MTSUN_SI
+    total_mass_seconds = m1_seconds + m2_seconds
+    eta = m1_seconds * m2_seconds / total_mass_seconds**2
+
+    sigma = (m2_seconds * s2 - m1_seconds * s1) / total_mass_seconds
+    s = (m1_seconds**2 * s1 + m2_seconds**2 * s2) / total_mass_seconds**2
+    delta = (m1_seconds - m2_seconds) / total_mass_seconds
+    delta_t = t_end - t_start
+
+    tc = models.taylort3spin.common.time_to_merger((np.pi * total_mass_seconds * f_start)**(2/3), sigma, delta, eta, s) * total_mass_seconds
+    x = models.taylort3spin.common.tau_to_x(eta * (tc - delta_t) / (5 * total_mass_seconds), sigma, delta, eta, s)
+
+    return x**1.5 / (np.pi * total_mass_seconds)
 
 def psi_rotation_icrs_to_ecliptic(lam_ecl, beta_ecl):
     """Polarization-basis rotation ``chi`` such that ``psi_ecl = psi_icrs - chi``.
