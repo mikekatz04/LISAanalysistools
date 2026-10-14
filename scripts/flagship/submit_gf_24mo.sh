@@ -4729,6 +4729,25 @@ export MBH_EIGEN_JUMP_MIX=${MBH_EIGEN_JUMP_MIX:-0.1}
 export MBH_EIGEN_JUMP_FACTOR=${MBH_EIGEN_JUMP_FACTOR:-3.0}
 export SOBBH_EIGEN_JUMP_MIX=${SOBBH_EIGEN_JUMP_MIX:-0.1}
 export SOBBH_EIGEN_JUMP_FACTOR=${SOBBH_EIGEN_JUMP_FACTOR:-3.0}
+# Per-axis STEP-SCALE ADAPTATION of the source eigen tables (user ruling
+# 2026-10-14: "some of the emris are sampling terribly ... look at the eigen
+# proposals"). The information matrix at one point sets the DIRECTIONS but
+# the move steps exactly one LOCAL sigma; along the EMRIs' degenerate
+# intrinsic ridge (ln M, mu, a, p0, e0) the chain's own spread on the 9mo
+# was 1.4-56x that sigma (EMRI 7 56x, 4 13x, 0/6 5.5x), so the four cold
+# walkers sat stranded along ONE ridge at equal SNR (within-island
+# autocorrelation 2-6 iterations, no traversal). With the switch on each
+# rank measures the width per table axis from its OWN rung ensemble (the
+# last {BRANCH}_EIGEN_ADAPT_VISITS=50 visits, each rung's deviations x
+# sqrt(beta) to cold units, robust MAD, periodic columns wrapped), floors
+# it at the Fisher sigma and caps it at the prior box; the axes stay; the
+# adapted sigmas persist in the eigen-table sidecar. Synthetic 20x ridge:
+# autocorrelation along it 917+ -> 48. Log: "[EMRI_EIGEN] leaf k: step
+# scale adapted on N of D axes ...". Code default OFF (stock runs
+# bit-identical); rollback {BRANCH}_EIGEN_AXIS_ADAPT=0 on the launch line.
+export EMRI_EIGEN_AXIS_ADAPT=${EMRI_EIGEN_AXIS_ADAPT:-1}
+export MBH_EIGEN_AXIS_ADAPT=${MBH_EIGEN_AXIS_ADAPT:-1}
+export SOBBH_EIGEN_AXIS_ADAPT=${SOBBH_EIGEN_AXIS_ADAPT:-1}
 # TABLE SCOPE. SOBBH is set ABOVE (SOBBH_EIGEN_SCOPE, walker_max per the
 # 2026-09-16 ruling; the 2026-09-08 per-walker ruling it superseded cost
 # 12 rungs x 10 walkers = 120 points x ~245 rows ~ 29k batched likelihood

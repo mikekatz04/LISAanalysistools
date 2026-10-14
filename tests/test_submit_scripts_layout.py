@@ -90,6 +90,11 @@ EIGEN_JUMP_MIX_LINE = {
     for k, v in (("MIX", "0.1"), ("FACTOR", "3.0"))
 }
 EIGEN_JUMP_MIX_KNOBS = tuple(EIGEN_JUMP_MIX_LINE)
+# 2026-10-14 (Mike, "some of the emris are sampling terribly"): per-axis
+# step-scale adaptation of the source eigen tables ON in the launchers
+# (code default off).
+EIGEN_AXIS_ADAPT_LINE = {f"{b}_EIGEN_AXIS_ADAPT": "1" for b in ("EMRI", "MBH", "SOBBH")}
+EIGEN_AXIS_ADAPT_KNOBS = tuple(EIGEN_AXIS_ADAPT_LINE)
 # 2026-10-13 (Mike): the GB warm-start SELF refit -- the saver rebuilds the
 # mixture from the run's own last 50 rows x every cold walker every 5 rows in
 # gb_search_2 and every 250 in full_pe; the warm moves draw 75 % of their
@@ -865,6 +870,9 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             # this is going to improve sampling in general then lets try it");
             # code default mix 0. EigenJumpMixLauncherTest pins the block.
             *EIGEN_JUMP_MIX_KNOBS,
+            # 2026-10-14: per-axis step-scale adaptation of the source eigen
+            # tables ON (code default off); EigenJumpMixLauncherTest pins it.
+            *EIGEN_AXIS_ADAPT_KNOBS,
             # 2026-10-13: the ladder caps (first ruling: EMRI T_max 100; second
             # ruling the same day: main-mode tempering -- EMRI T_max 6, MBH
             # T_max 10, the MBH lost-rung guard off, the EMRI guard at 50 nats);
@@ -1840,6 +1848,8 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             # 2026-10-13: the eigen jump mixture block of the 6mo / 1yr / 9mo
             # launchers (no source branch is armed in the 3mo v9 twin)
             *EIGEN_JUMP_MIX_KNOBS,
+            # 2026-10-14: the per-axis step-scale adaptation switches, same reason
+            *EIGEN_AXIS_ADAPT_KNOBS,
             # 2026-10-13: the ladder cap exports, mirrored in the 3mo twin
             "EMRI_LADDER_TMAX", "EMRI_LADDER_REANCHOR_NATS",
             "MBH_LADDER_TMAX", "MBH_LADDER_REANCHOR_NATS",
@@ -3164,6 +3174,20 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
                         src, rf"(?m)^export {knob}=\$\{{{knob}:-{val}\}}$", knob)
                 self.assertNotIn("SOBBH_LADDER_TMAX", exports)
                 self.assertNotRegex(src, r"(?m)^export SOBBH_LADDER_TMAX=")
+
+    def test_the_axis_adaptation_is_on_in_every_v9_production_launcher(self):
+        """2026-10-14 (Mike: "some of the emris are sampling terribly"): the
+        per-axis step-scale adaptation of the EMRI / MBH / SOBBH eigen tables
+        is ON in every v9 production launcher ({BRANCH}_EIGEN_AXIS_ADAPT=1,
+        overridable on the line); the code default stays OFF."""
+        for path in V9_PRODUCTION:
+            exports = _exports(path)
+            src = open(path).read()
+            for knob, want in EIGEN_AXIS_ADAPT_LINE.items():
+                with self.subTest(script=os.path.basename(path), knob=knob):
+                    self.assertEqual(exports.get(knob), want)
+                    self.assertRegex(
+                        src, rf"(?m)^export {knob}=\$\{{{knob}:-{want}\}}$")
 
     def test_the_warm_self_refit_block_is_on_in_every_v9_production_launcher(self):
         """2026-10-13 (Mike): the GB warm-start SELF refit -- every v9
