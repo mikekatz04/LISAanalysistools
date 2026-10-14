@@ -201,6 +201,55 @@ class LeafRowsWindowTest(unittest.TestCase):
         self.assertEqual(len(X), 5 * nw * 2)
 
 
+class MergeReportTest(unittest.TestCase):
+    """The MERGE TEST log block is bounded: counts + the top ``n_show`` of
+    each class. Printing every candidate put ~47k lines per self-refit
+    build into the 9mo job log (285k in job 763 by 2026-10-14)."""
+
+    def setUp(self):
+        pairs = np.arange(130).reshape(65, 2)
+        cross = np.concatenate([np.linspace(0.91, 0.99, 30),   # merge
+                                np.linspace(0.51, 0.89, 25),   # middle
+                                np.linspace(0.00, 0.50, 10)])  # distinct
+        perm = np.random.default_rng(1).permutation(65)
+        self.pairs, self.cross = pairs[perm], cross[perm]
+        z = np.zeros(130)
+        self.lines = mr.merge_report_lines(self.pairs, self.cross, f0=z, p=z,
+                                           mult=z, coher=z, n_show=3)
+
+    def _rows(self, tag):
+        import re
+
+        pat = re.compile(tag + r" +(\d+)\+(\d+):.* cross ([0-9.]+)")
+        return [(int(m[1]), int(m[2]), float(m[3]))
+                for m in map(pat.search, self.lines) if m]
+
+    def test_counts_every_class(self):
+        import re
+
+        nums = [list(map(int, re.findall(r": (\d+)", ln)))
+                for ln in self.lines if "(merge candidates):" in ln]
+        self.assertEqual(nums, [[30, 25, 10]])
+
+    def test_shows_only_the_highest_cross_matches_with_their_values(self):
+        # merge rows 29, 28, 27 = pairs (58,59) (56,57) (54,55); middle rows
+        # 54, 53, 52 = (108,109) (106,107) (104,105) -- before the shuffle
+        self.assertEqual([r[:2] for r in self._rows("MERGE")],
+                         [(58, 59), (56, 57), (54, 55)])
+        self.assertEqual([r[:2] for r in self._rows("mid")],
+                         [(108, 109), (106, 107), (104, 105)])
+        np.testing.assert_allclose([r[2] for r in self._rows("MERGE")],
+                                   [0.99, 0.98724, 0.98448], atol=6e-5)
+        np.testing.assert_allclose([r[2] for r in self._rows("mid")],
+                                   [0.89, 0.87417, 0.85833], atol=6e-5)
+
+    def test_says_how_many_were_not_shown(self):
+        more = [ln for ln in self.lines if "more" in ln]
+        self.assertEqual(len(more), 2)
+        self.assertIn("27", more[0])
+        self.assertIn("22", more[1])
+
+
 class ResolveBackendTest(unittest.TestCase):
 
     def _with_cupy(self, module):

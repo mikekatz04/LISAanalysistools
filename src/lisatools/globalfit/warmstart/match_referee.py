@@ -98,6 +98,7 @@ ASSIGN_RADIUS = 6.0        # whitened-sigma junk cut for member assignment
 N_CAP = 16384
 DEFAULT_CHUNK_GB = 1.0     # one template chunk + its overlap scratch
 GEN_SCRATCH = 8            # run_wave working memory per template, x its size
+REPORT_PAIRS = 10          # merge-test pairs printed per class
 
 
 def rss_gb() -> float:
@@ -259,6 +260,42 @@ def batched_overlaps(T, kmin, pairs, max_pairs=None) -> np.ndarray:
             out[sub] = _to_host(
                 xp.where(ok, xp.abs(num) / xp.where(ok, den, 1.0), 0.0))
     return out
+
+
+def merge_report_lines(pairs, cross_match, f0, p, mult, coher,
+                       n_show: int = REPORT_PAIRS) -> list:
+    """The MERGE TEST log block: the class counts, then the ``n_show``
+    highest cross-matches of the merge (> 0.9) and middle (0.5-0.9]
+    classes, each followed by how many were not shown. Every pair and its
+    cross-match is in the output npz (``pairs``, ``cross_match``).
+    Printing every candidate (with a scan of all pairs per printed line)
+    put ~47k lines per self-refit build into the 9mo job log, 285k in job
+    763 by 2026-10-14."""
+    pairs = np.asarray(pairs).reshape(-1, 2)
+    cross_match = np.asarray(cross_match)
+    hi_m = np.flatnonzero(cross_match > 0.9)
+    mid = np.flatnonzero((cross_match > 0.5) & (cross_match <= 0.9))
+    lines = ["\n=== MERGE TEST (centroid cross-matches) ===",
+             f"  >0.9 (merge candidates): {len(hi_m)} | 0.5-0.9: {len(mid)} | "
+             f"<0.5 (distinct): {int(np.sum(cross_match <= 0.5))}"]
+    for tag, sel, what in (("MERGE", hi_m, "merge candidates"),
+                           ("mid  ", mid, "0.5-0.9 pairs")):
+        top = sel[np.argsort(-cross_match[sel], kind="stable")][:n_show]
+        for n in top:
+            i, j = (int(v) for v in pairs[n])
+            ln = (f"   {tag} {i}+{j}: f0 {f0[i]:.5f}/{f0[j]:.5f} "
+                  f"p {p[i]:.2f}/{p[j]:.2f} ")
+            if tag == "MERGE":
+                ln += (f"mult {mult[i]:.1f}/{mult[j]:.1f} "
+                       f"cross {cross_match[n]:.4f} "
+                       f"coher {coher[i]:.3f}/{coher[j]:.3f}")
+            else:
+                ln += f"cross {cross_match[n]:.4f}"
+            lines.append(ln)
+        if len(sel) > len(top):
+            lines.append(f"   ... {len(sel) - len(top)} more {what} (all "
+                         f"pairs + cross_match are in the referee npz)")
+    return lines
 
 
 def pair_chunks(pairs, max_templates) -> list:
@@ -613,22 +650,9 @@ def main(argv=None):
               f"{n_members[k]:6d} {sig[k, 1] / df_seg:8.2f} "
               f"{med_match[k]:7.4f} {min_match[k]:7.4f} {med_ratio[k]:7.3f}")
 
-    print("\n=== MERGE TEST (centroid cross-matches) ===")
-    hi_m = pairs[cross_match > 0.9]
-    mid = pairs[(cross_match > 0.5) & (cross_match <= 0.9)]
-    print(f"  >0.9 (merge candidates): {len(hi_m)} | 0.5-0.9: {len(mid)} | "
-          f"<0.5 (distinct): {np.sum(cross_match <= 0.5)}")
-    for i, j in hi_m:
-        c = cross_match[np.all(pairs == [i, j], axis=1)][0]
-        print(f"   MERGE {i}+{j}: f0 {means_sampling[i, 1]:.5f}/"
-              f"{means_sampling[j, 1]:.5f} "
-              f"p {p[i]:.2f}/{p[j]:.2f} mult {mult[i]:.1f}/{mult[j]:.1f} "
-              f"cross {c:.4f} coher {med_match[i]:.3f}/{med_match[j]:.3f}")
-    for i, j in mid:
-        c = cross_match[np.all(pairs == [i, j], axis=1)][0]
-        print(f"   mid   {i}+{j}: f0 {means_sampling[i, 1]:.5f}/"
-              f"{means_sampling[j, 1]:.5f} "
-              f"p {p[i]:.2f}/{p[j]:.2f} cross {c:.4f}")
+    print("\n".join(merge_report_lines(
+        pairs, cross_match, f0=means_sampling[:, 1], p=p, mult=mult,
+        coher=med_match)))
 
     if flag >= 0:
         print(f"\n=== FLAGSHIP comp {flag} "
