@@ -36,7 +36,37 @@ cold-chain bookkeeping) and swaps the scoring and fill paths, exactly as
 
 A batch the response refuses (``BatchNotLaunchable``) or a domain error in the
 chunk falls back to the per-row container path for that chunk, LOUDLY, and is
-counted in ``n_batch_fallbacks``. ``MBH_BATCHED_FILL=0`` restores the dense
+counted in ``n_batch_fallbacks``. A JAX RUNTIME failure inside the generator
+(phentax's (2,2)-coefficient solve not converging for one row: an optimistix
+bisection hitting ``max_steps``, an equinox ``error_if``) is a different
+animal: it poisons the whole vmapped chunk, and the container path would fail
+on the same row. :meth:`_score_chunk` then re-generates the chunk ROW BY ROW
+and scores each row that fails at the log-likelihood floor (``-1e300``, the
+out-of-domain sentinel the move already uses), logging that row's waveform
+parameters so the region can be found, and counting it in
+``n_generate_failures`` / the ``[MBH_BATCH]`` ``gen_failed`` field. The 1yr
+flagship job 760 (2026-10-14) died on exactly this: one hot-rung row of
+MBHB 10 (merger 9.5 d past the data end, inspiral-only, spins and total
+mass loosely constrained) took rank 1 down with
+``_EquinoxRuntimeError: The maximum number of steps was reached in the
+nonlinear solver`` from ``jit__compute_coeffs_22``. Note the solve in
+question (``phentax.core.phase.get_time_of_frequency``, the t(f) bisection
+for ``f_min`` / ``f_ref``) is one whose RESULT IS DISCARDED here -- lisatools
+always passes ``t_min`` and ``t_ref`` -- but phentax selects between the
+given and the solved value with ``lax.cond`` under ``jax.vmap``, which
+evaluates BOTH branches, so a non-converging solve raises anyway. WHEN it
+fails (reproduced, ``scripts/mbh/phentax_tf_bisection_sliver.py``): the
+bisection's target ``2 pi M f_min`` lands inside the frequency JUMP that
+``time_of_freq`` has at ``t = tEarly`` (phentax shifts ``t -> t - tt0`` below
+the PN / pseudo-PN junction), so the interval collapses onto the jump and
+``|f|`` never reaches ``atol = 1e-12``. For MBHB 10's mass ratio and spins
+that is total mass 4.2224e6..4.2274e6 Msun (a 0.12 % sliver, 1.5x the
+truth), i.e. the masses at which the 7e-5 Hz start frequency is reached
+exactly ``|tEarly| ~ 2.1e5 M`` before merger; every leaf has such a sliver
+at its own ``(eta, s1z, s2z)``. The upstream fix is
+``optx.root_find(..., throw=False)`` (or hoisting the ``isnan`` test out of
+the vmapped function); here the row is simply rejected.
+``MBH_BATCHED_FILL=0`` restores the dense
 per-row expose/fold. The built-in fast-vs-slow check (``_verify_prev_logl``)
 recomputes through the stock generator at matching convention with
 ``MBH_CHECK_LL_TOL`` (default 0.5 nats), gating on the COLD rung only (hot
@@ -72,6 +102,29 @@ _T_PLUNGE_COL = 10
 _ACCEPTED_GEN_KWARGS = ("start_freq", "ref_freq", "T")
 #: clamped geometries already logged by :func:`mbh_window_layers` (log once)
 _CLAMP_LOGGED: set = set()
+#: per leaf, how many generator-failure rows are logged WITH their parameters
+#: before the move falls back to counting them (``gen_failed`` telemetry)
+_GEN_FAIL_LOG_CAP = 10
+
+
+def _is_jax_runtime_failure(exc) -> bool:
+    """``True`` for a JAX / equinox RUNTIME failure raised inside the generator.
+
+    These are the errors a compiled program raises while RUNNING -- an
+    optimistix solver hitting ``max_steps``, an equinox ``error_if`` firing --
+    surfacing as ``jax.errors.JaxRuntimeError`` (``jaxlib`` ``XlaRuntimeError``,
+    "INTERNAL: CpuCallback error ...") from a jitted call, or as equinox's own
+    ``_EquinoxRuntimeError`` when the program ran eagerly. All subclass
+    ``RuntimeError`` and live in the ``jax`` / ``jaxlib`` / ``equinox``
+    packages. The test is deliberately narrow (see ``BatchNotLaunchable``'s
+    docstring on catching bare ``Exception``): a Python-level bug in the
+    generator -- a ``TypeError``, a lisatools ``RuntimeError`` -- still raises.
+    No JAX import: the move must not require JAX to be importable.
+    """
+    if not isinstance(exc, RuntimeError):
+        return False
+    module = (getattr(type(exc), "__module__", None) or "").split(".")[0]
+    return module in ("jax", "jaxlib", "equinox")
 
 
 def mbh_window_layers(
@@ -241,6 +294,11 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
         self.n_batch_fallbacks = 0
         self.last_batch_error = None
         self._warned_fallback_leaf = None
+        #: rows whose waveform generation FAILED at runtime (JAX / equinox) and
+        #: were scored at the floor; the last such error; per-leaf log tally
+        self.n_generate_failures = 0
+        self.last_generate_error = None
+        self._gen_fail_logged = {}
         self.check_ll_tol = float(
             os.environ.get(f"{self._dbg_prefix}_CHECK_LL_TOL", "0.5")
         )
@@ -261,7 +319,7 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
         # numbers with the leaf they belong to.
         return dict(
             leaf=None, rows=0, seconds=0.0, chunks=0, fallbacks=0,
-            gen_s=0.0, score_s=0.0, outside_box=0, outside_data=0,
+            gen_s=0.0, score_s=0.0, outside_box=0, outside_data=0, gen_failed=0,
         )
 
     # ------------------------------------------------------------------
@@ -569,11 +627,117 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
             )).reshape(-1)
             self._stats["score_s"] += time.perf_counter() - t_score
             return ll, np.full(ll.shape, np.nan), np.full(ll.shape, np.nan)
+        except Exception as exc:  # noqa: BLE001 -- narrowed on the next line
+            if not _is_jax_runtime_failure(exc):
+                raise
+            # ONE row the waveform model cannot generate poisons the whole
+            # vmapped chunk (phentax raises for the batch). Find it, score it
+            # at the floor, keep the others. The container path is no fallback
+            # here: it runs the same generator on the same row.
+            self._stats["gen_s"] += time.perf_counter() - t_gen
+            return self._score_rows_isolating_failures(adapter, coords, idx, leaf, exc)
         t_score = time.perf_counter()
         self._stats["gen_s"] += t_score - t_gen
         out = self._score_templates(tmpl, idx)
         self._stats["score_s"] += time.perf_counter() - t_score
         return out
+
+    def _score_rows_isolating_failures(self, adapter, coords, idx, leaf, chunk_exc):
+        """Score a chunk ROW BY ROW after its batched generation failed at runtime.
+
+        Each row is generated alone: a row that fails again is scored at the
+        log-likelihood floor (``-1e300``, the move's out-of-domain sentinel,
+        so the proposal is rejected exactly as a prior violation would be),
+        with ``<d|h>`` / ``<h|h>`` NaN, its WAVEFORM-basis parameters logged
+        (the first :data:`_GEN_FAIL_LOG_CAP` per leaf) and the row counted in
+        ``n_generate_failures`` and the ``[MBH_BATCH]`` ``gen_failed`` field.
+        Rows that generate alone are scored normally. A row refused as a batch
+        of one (``BatchNotLaunchable`` / ``WaveformDomainError``) takes the
+        container path, as a refused chunk does. Any OTHER exception still
+        raises: this isolates runtime failures of the waveform model, not bugs.
+
+        Why the floor and not a retry or a repair: the failure seen in
+        production (job 760, 2026-10-14) is phentax's t(f) bisection not
+        converging for one hot-rung row -- a solve whose result lisatools
+        discards (``t_min`` and ``t_ref`` are always given) but which phentax
+        evaluates anyway under ``vmap``. The row's template is undefined as
+        far as the model is concerned; rejecting it is the same policy the
+        move applies to a ``WaveformDomainError``, and far cheaper than an
+        MPI abort four iterations into a 1-year run.
+        """
+        n = int(coords.shape[0])
+        ll = np.full(n, -1e300, dtype=float)
+        dh = np.full(n, np.nan)
+        hh = np.full(n, np.nan)
+        self.last_generate_error = chunk_exc
+        n_failed_here = 0
+        for i in range(n):
+            row = coords[i: i + 1]
+            row_idx = idx[i: i + 1]
+            t_gen = time.perf_counter()
+            try:
+                tmpl = self._generate(adapter, row)
+            except (BatchNotLaunchable, WaveformDomainError):
+                self._stats["gen_s"] += time.perf_counter() - t_gen
+                t_score = time.perf_counter()
+                ll[i] = float(np.real(np.asarray(
+                    self.compute_acs_like(row, row_idx, **self.waveform_like_kwargs),
+                    dtype=float,
+                )).reshape(-1)[0])
+                self._stats["score_s"] += time.perf_counter() - t_score
+                continue
+            except Exception as row_exc:  # noqa: BLE001 -- narrowed on the next line
+                if not _is_jax_runtime_failure(row_exc):
+                    raise
+                self._stats["gen_s"] += time.perf_counter() - t_gen
+                n_failed_here += 1
+                self._note_generate_failure(leaf, coords[i], int(idx[i]), row_exc)
+                continue
+            t_score = time.perf_counter()
+            self._stats["gen_s"] += t_score - t_gen
+            ll_i, dh_i, hh_i = self._score_templates(tmpl, row_idx)
+            self._stats["score_s"] += time.perf_counter() - t_score
+            ll[i], dh[i], hh[i] = float(ll_i[0]), float(dh_i[0]), float(hh_i[0])
+        if n_failed_here == 0:
+            logger.warning(
+                "[MBH_BATCH] leaf %d: a %d-row batch failed at runtime (%s) but every "
+                "row generated alone; scored row by row. If this repeats, the batch "
+                "itself is the problem, not a row.", leaf, n,
+                str(chunk_exc).strip().splitlines()[0][:200] if str(chunk_exc).strip() else type(chunk_exc).__name__,
+            )
+        return ll, dh, hh
+
+    def _note_generate_failure(self, leaf, row, walker, exc):
+        """Count a row the generator could not produce; log its parameters (capped per leaf)."""
+        self.n_generate_failures += 1
+        self._stats["gen_failed"] += 1
+        self.last_generate_error = exc
+        seen = int(self._gen_fail_logged.get(leaf, 0))
+        self._gen_fail_logged[leaf] = seen + 1
+        text = str(exc).strip()
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        # the informative line of a wrapped equinox error is the LAST one
+        # ("_EquinoxRuntimeError: The maximum number of steps was reached ...")
+        reason = next(
+            (ln.strip() for ln in reversed(lines) if "Error" in ln or "error" in ln),
+            lines[0].strip() if lines else type(exc).__name__,
+        )
+        if seen < _GEN_FAIL_LOG_CAP:
+            logger.warning(
+                "[MBH_BATCH] leaf %d walker %d: waveform generation FAILED at runtime "
+                "for one row; scored at the log-likelihood floor (-1e300, rejected). "
+                "waveform-basis params (m1 m2 s1z s2z dist phi_ref iota psi alpha "
+                "delta t_plunge) = %s. %s", leaf, walker,
+                np.array2string(np.asarray(row, dtype=float), precision=8,
+                                max_line_width=600, separator=", "),
+                reason[:300],
+            )
+        elif seen == _GEN_FAIL_LOG_CAP:
+            logger.warning(
+                "[MBH_BATCH] leaf %d: %d generator failures logged with parameters; "
+                "further ones are counted only (gen_failed in the [MBH_BATCH] line, "
+                "n_generate_failures on the move).", leaf, _GEN_FAIL_LOG_CAP,
+            )
 
     def _score_templates(self, tmpl, idx):
         like_kw = {
@@ -737,9 +901,12 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
                 "generate=%.2f s, score=%.2f s), %d fallbacks, outside_box=%d "
                 "(rows whose in-data merger falls outside the kept box), "
                 "outside_data=%d (rows merging outside the data's active time "
-                "box: expected for a source merging near/after a data edge)",
+                "box: expected for a source merging near/after a data edge)"
+                "%s",
                 st["leaf"], st["rows"], st["chunks"], st["seconds"],
                 st["seconds"] / st["rows"], st["gen_s"], st["score_s"],
                 st["fallbacks"], st["outside_box"], st["outside_data"],
+                (f", gen_failed={st['gen_failed']} (rows the waveform model could not "
+                 "generate at runtime; scored at the floor)") if st["gen_failed"] else "",
             )
         self._stats = self._new_stats()

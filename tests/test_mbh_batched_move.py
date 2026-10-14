@@ -74,15 +74,18 @@ class _FastGen:
     def __init__(self, data_t0=T0, gpu=False):
         self.n_calls = 0
         self.fail_with = None
+        #: ``callable(rows) -> bool``: when set, ``fail_with`` is raised only for
+        #: a launch whose (B, 11) row block satisfies it (a "bad row" trigger)
+        self.fail_if = None
         self.data_t0 = float(data_t0)
         self.waveform_t0 = float(data_t0)   # snapped epoch == data start
         self.gpu = bool(gpu)                # output on the GPU, as the real generator's
 
     def compute_tdi_channels(self, *cols, **kwargs):
         self.n_calls += 1
-        if self.fail_with is not None:
-            raise self.fail_with
         rows = np.stack([np.atleast_1d(np.asarray(c, dtype=float)) for c in cols], axis=1)
+        if self.fail_with is not None and (self.fail_if is None or self.fail_if(rows)):
+            raise self.fail_with
         t = np.arange(N) * DT + self.data_t0
         ch = np.stack([_model_td(r, self.waveform_t0, self.data_t0) for r in rows])
         if np.ndim(cols[0]) == 0:
@@ -670,6 +673,118 @@ class MBHBatchedParityTest(unittest.TestCase):
         np.testing.assert_allclose(out, slow, rtol=0, atol=0)
         self.assertEqual(self.move.n_batch_fallbacks, 2)   # one per chunk of 2
         self.fast.fail_with = None
+
+    # -- JAX runtime failures of the waveform model (job 760, 2026-10-14) ----
+    # phentax raised ``_EquinoxRuntimeError: The maximum number of steps was
+    # reached in the nonlinear solver`` (wrapped as ``jax.errors.JaxRuntimeError:
+    # INTERNAL: CpuCallback error``) for ONE hot-rung row of MBHB 10, which took
+    # the whole vmapped chunk, then rank 1, then the 1-year run down. The move
+    # must isolate the row, score it at the floor and carry on.
+
+    def test_generator_runtime_failure_isolates_the_row(self):
+        rows = self._rows(5)
+        idx = np.array([0, 1, 2, 0, 1])
+        baseline = self.move.compute_like(rows, idx)
+        bad = rows.copy()
+        bad[3, 0] = 7.7e9                                   # the trigger (m1 absurd)
+        self.fast.fail_if = lambda r: bool(np.any(r[:, 0] > 5e9))
+        self.fast.fail_with = _FakeXlaRuntimeError(
+            "INTERNAL: CpuCallback error calling callback: Traceback (most recent call last):\n"
+            "  File \"equinox/_errors.py\", line 88, in raises\n"
+            "_EquinoxRuntimeError: The maximum number of steps was reached in the "
+            "nonlinear solver. The problem may not be solveable."
+        )
+        try:
+            self.move._stats = self.move._new_stats()
+            with self.assertLogs("lisatools.globalfit.moves.mbhbatchedmove", level="WARNING") as cm:
+                out = self.move.compute_like(bad, idx)
+        finally:
+            self.fast.fail_if = None
+            self.fast.fail_with = None
+        keep = [0, 1, 2, 4]
+        self.assertEqual(out[3], -1e300)                    # the bad row: rejected
+        np.testing.assert_allclose(out[keep], baseline[keep], rtol=0, atol=1e-9)
+        self.assertTrue(np.isnan(self.move._last_d_h[3]))
+        self.assertTrue(np.all(np.isfinite(self.move._last_d_h[keep])))
+        self.assertEqual(self.move.n_generate_failures, 1)
+        self.assertEqual(self.move.n_batch_fallbacks, 0)    # not a refusal
+        self.assertEqual(self.move._stats["gen_failed"], 1)
+        self.assertIsInstance(self.move.last_generate_error, _FakeXlaRuntimeError)
+        text = "\n".join(cm.output)
+        self.assertIn("waveform generation FAILED at runtime", text)
+        self.assertIn("7.70000000e+09", text)               # the row's parameters are logged
+        self.assertIn("maximum number of steps", text)      # the model's reason, not the wrapper's
+        with self.assertLogs("lisatools.globalfit.moves.mbhbatchedmove", level="INFO") as cm2:
+            self.move._flush_stats()
+        self.assertIn("gen_failed=1", "\n".join(cm2.output))
+        # the state is clean afterwards: the same rows score as before
+        np.testing.assert_allclose(self.move.compute_like(rows, idx), baseline, rtol=0, atol=1e-9)
+
+    def test_generator_failure_log_is_capped_per_leaf(self):
+        from lisatools.globalfit.moves import mbhbatchedmove as mod
+
+        n = mod._GEN_FAIL_LOG_CAP + 3
+        rows = self._rows(n)
+        rows[:, 0] = 7.7e9                                  # every row is bad
+        idx = np.zeros(n, dtype=int)
+        self.fast.fail_if = lambda r: bool(np.any(r[:, 0] > 5e9))
+        self.fast.fail_with = _FakeXlaRuntimeError("INTERNAL: CpuCallback error: boom")
+        try:
+            with self.assertLogs("lisatools.globalfit.moves.mbhbatchedmove", level="WARNING") as cm:
+                out = self.move.compute_like(rows, idx)
+        finally:
+            self.fast.fail_if = None
+            self.fast.fail_with = None
+        self.assertTrue(np.all(out == -1e300))
+        self.assertEqual(self.move.n_generate_failures, n)
+        with_params = [m for m in cm.output if "waveform-basis params" in m]
+        self.assertEqual(len(with_params), mod._GEN_FAIL_LOG_CAP)
+        self.assertTrue(any("counted only" in m for m in cm.output))
+
+    def test_plain_runtime_error_in_the_generator_still_raises(self):
+        """The isolation is for JAX / equinox RUNTIME failures only: a Python
+        bug in the generator must not be silently scored at the floor."""
+        rows = self._rows(2)
+        self.fast.fail_with = RuntimeError("a lisatools bug, not a solver")
+        try:
+            with self.assertRaises(RuntimeError):
+                self.move.compute_like(rows, np.array([0, 1]))
+        finally:
+            self.fast.fail_with = None
+        self.assertEqual(self.move.n_generate_failures, 0)
+
+    def test_jax_runtime_failure_classification(self):
+        from lisatools.globalfit.moves.mbhbatchedmove import _is_jax_runtime_failure
+
+        self.assertTrue(_is_jax_runtime_failure(_FakeXlaRuntimeError("x")))
+        self.assertTrue(_is_jax_runtime_failure(_FakeEquinoxRuntimeError("x")))
+        self.assertTrue(_is_jax_runtime_failure(_FakeJaxRuntimeError("x")))
+        self.assertFalse(_is_jax_runtime_failure(RuntimeError("x")))
+        self.assertFalse(_is_jax_runtime_failure(_FakeJaxValueError("x")))   # not a RuntimeError
+        self.assertFalse(_is_jax_runtime_failure(TypeError("x")))
+        try:
+            import jax
+            real = jax.errors.JaxRuntimeError("INTERNAL: CpuCallback error calling callback")
+        except Exception as exc:  # noqa: BLE001 -- jax absent or the class not constructible
+            self.skipTest(f"real jax.errors.JaxRuntimeError unavailable: {exc!r}")
+        self.assertTrue(_is_jax_runtime_failure(real))
+
+
+class _FakeXlaRuntimeError(RuntimeError):
+    """Stands in for ``jaxlib.xla_extension.XlaRuntimeError`` (== ``jax.errors.JaxRuntimeError``)."""
+    __module__ = "jaxlib.xla_extension"
+
+
+class _FakeJaxRuntimeError(RuntimeError):
+    __module__ = "jax._src.errors"
+
+
+class _FakeEquinoxRuntimeError(RuntimeError):
+    __module__ = "equinox._errors"
+
+
+class _FakeJaxValueError(ValueError):
+    __module__ = "jax._src.errors"
 
 
 class MBHBatchedSnapParityTest(unittest.TestCase):
