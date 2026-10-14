@@ -595,7 +595,7 @@ def mbh_catalogue_to_sampling_basis(
 
     s1z = float(catalogue_entry["PrimarySpinCompZ"])
     s2z = float(catalogue_entry["SecondarySpinCompZ"])
-    dist = float(catalogue_entry["LuminosityDistance"]) / 1e3  # Mpc -> Gpc
+    dist = float(catalogue_entry["LuminosityDistance"]) * 1e-3  # Mpc -> Gpc
     phi_ref = float(catalogue_entry["PhaseReferenceSourceFrame"]) % (2 * np.pi)
     cos_iota = np.cos(float(catalogue_entry["InclinationAngle"]))
 

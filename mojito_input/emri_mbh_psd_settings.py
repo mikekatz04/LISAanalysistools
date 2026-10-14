@@ -424,6 +424,12 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         """
         return x * 1e3
 
+    def mpc_to_gpc(x):
+        """
+        Transform from Mpc to Gpc, for distance prior.
+        """
+        return x / 1e3
+
     def mT_Q(M, Q):
         """
         Transform from total mass and mass ratio m1/m2 to m1 and m2.
@@ -432,6 +438,15 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         m1 = Q * m2
         assert np.all(m1 >= m2), "m1 should be the larger mass"
         return m1, m2
+
+    def m1_m2(m1, m2):
+        """
+        Transform from m1 and m2 to total mass and mass ratio m1/m2.
+        """
+        M = m1 + m2
+        Q = m1 / m2
+        assert np.all(m1 >= m2), "m1 should be the larger mass"
+        return M, Q
     
     _to_lisa_frame = partial(to_lisa_frame, orbits=general_set.orbits, t_ref=MOJITO_REFERENCE_TIME)
     _from_lisa_frame = partial(from_lisa_frame, orbits=general_set.orbits, t_ref=MOJITO_REFERENCE_TIME)
@@ -447,10 +462,10 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
 
     inverse_mbh_transform_fn_in = {
         r"$m_1$": np.log,
-        r"$d_L$": gpc_to_mpc,
+        r"$d_L$": mpc_to_gpc,
         r"$\iota$": np.cos,
         r"$\delta$": np.sin,
-        (r"$m_1$", r"$m_2$"): mT_Q,
+        (r"$m_1$", r"$m_2$"): m1_m2,
         (r"$t_{\rm plunge}$", r"$\alpha$", r"$\delta$", r"$\psi$"): _to_lisa_frame,
     }
 
