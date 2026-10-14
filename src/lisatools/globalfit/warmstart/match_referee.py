@@ -20,8 +20,20 @@ Match metric: normalized phase-maximized overlap summed over the X/Y/Z
 FD channels with FLAT weighting over the narrow band,
 ``|<a|b>| / sqrt(<a|a><b|b>)`` (fine for a same-band relative match --
 the PSD is constant to <~1% over a <~0.2 uHz-wide template support).
-Templates: ``GBGPU.run_wave`` (CPU backend) on the run's L1 orbits
-(ICRS frame), t0 = data start, Tobs/dt from the run.
+Templates: ``GBGPU.run_wave`` on the run's L1 orbits (ICRS frame), t0 =
+data start, Tobs/dt from the run. The merge test is BATCHED (2026-10-13):
+each component's template is generated once per template length and the
+pair overlaps are computed in vectorized groups (``Matcher.pair_matches``
+/ ``batched_overlaps``), equal to the per-pair ``Matcher.match`` it
+replaced, which regenerated both templates for every pair (463,915 CPU
+waveforms, 2,270 s = 38 of the 45 minutes of the 6mo -> 9mo build). On
+that build's own components the batched CPU path takes 8 s on a laptop
+and reproduces the cluster's 231,737 cross-matches to 3e-15.
+``--backend`` (env ``GB_WARM_START_REFEREE_BACKEND``, default ``cpu``)
+moves the orbits and templates to a GPU (``cuda``, or ``auto`` = CUDA
+when cupy sees a device); the default stays on the CPU until the CUDA path
+has run once on a GPU node. ``--chunk-gb`` (env
+``GB_WARM_START_REFEREE_CHUNK_GB``) bounds the memory of one chunk.
 
 Laptop rules: run with
   OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 OPENBLAS_NUM_THREADS=1
@@ -32,6 +44,7 @@ Usage:
   python warmstart_match_referee.py --npz <components.npz> --store <h5>
       [--members-per-comp 8] [--tail-n 200] [--p-core 0.5]
       [--pair-p-floor 0.2] [--pair-bins 4.0] [--flagship-f0 20.380]
+      [--backend cpu|cuda|auto] [--chunk-gb 1.0]
 """
 from __future__ import annotations
 
@@ -83,6 +96,8 @@ DATA_T0 = 97729089.327664  # mojito data start (gb_mojito_match.py REF)
 CIRC = {3: 2.0 * np.pi, 5: np.pi, 6: 2.0 * np.pi}  # sampled-basis periods
 ASSIGN_RADIUS = 6.0        # whitened-sigma junk cut for member assignment
 N_CAP = 16384
+DEFAULT_CHUNK_GB = 1.0     # one template chunk + its overlap scratch
+GEN_SCRATCH = 8            # run_wave working memory per template, x its size
 
 
 def rss_gb() -> float:
@@ -93,33 +108,62 @@ def circ_diff(x, m, period):
     return (x - m + period / 2.0) % period - period / 2.0
 
 
+def _to_host(a):
+    """cupy-or-numpy -> numpy."""
+    return a.get() if hasattr(a, "get") else np.asarray(a)
+
+
+def _array_module(a):
+    """numpy, or cupy for a cupy array (without importing cupy otherwise)."""
+    if isinstance(a, np.ndarray):
+        return np
+    import cupy as cp
+
+    return cp.get_array_module(a)
+
+
+def resolve_backend(spec) -> str:
+    """``--backend`` string -> the backend name for the orbits and GBGPU.
+
+    ``"auto"`` is ``"cuda"`` when cupy reports a device and ``"cpu"``
+    otherwise, with the reason printed (login node, laptop, no driver) --
+    the same rule as ``fit_from_store.resolve_gmm_gpu``: a referee that
+    runs on the CPU is recoverable, one that does not run blocks a launch.
+    Any other name passes through lower-cased (``cpu``, ``cuda``,
+    ``cuda12x``, ...)."""
+    s = str(spec or "auto").strip().lower()
+    if s != "auto":
+        return s
+    try:
+        import cupy as cp
+
+        if int(cp.cuda.runtime.getDeviceCount()) > 0:
+            return "cuda"
+        print("[warmstart] referee --backend auto: cupy sees no device; "
+              "using CPU")
+    except Exception as exc:  # no cupy, no driver, no visible device
+        print(f"[warmstart] referee --backend auto: GPU unavailable "
+              f"({exc}); using CPU")
+    return "cpu"
+
+
 # ------------------------------------------------------------------
 # member re-extraction: nearest centroid in per-component sigma space
 # ------------------------------------------------------------------
-def load_leaf_rows(store: str, last_k: int, last_safe: int = 471):
-    """Cold-chain GB leaf rows over the last K written iterations.
+def load_leaf_rows(store: str, last_k: int):
+    """Cold-chain GB leaf rows over the last K written iterations: the SAME
+    rows the fit read (``fit_from_store.load_leaf_table``, with its
+    torn-tail and keep-window guards). Returns (X (n, 9), sample_id (n,)).
 
-    Mirrors warmstart_fit_from_store.load_leaf_table (READ-ONLY reuse of
-    its conventions; not imported because that file is being edited in
-    parallel). Returns (X (n, 9), sample_id (n,))."""
-    import h5py
+    This used to be a private copy of that loader that kept the old hard
+    ``last_safe = 471`` clamp, so on a store past row 471 the members were
+    re-extracted from the 300 rows ENDING AT 471 instead of the fit's rows
+    (the 6mo -> 9mo build fitted rows 741-1040 and refereed its members
+    from rows 172-471)."""
+    from .fit_from_store import load_leaf_table
 
-    with h5py.File(store, "r") as f:
-        g = f["global_fit"] if "global_fit" in f else f["mcmc"]
-        chain, inds, ll = g["chain"]["gb"], g["inds"]["gb"], g["log_like"]
-        cold = (0, 0) if chain.ndim == 6 else (0,)
-        nwalkers = chain.shape[-3]
-        llv = ll[(slice(None),) + cold + (slice(None),)]
-        written = np.flatnonzero(np.any(llv != 0.0, axis=-1))
-        written = written[written <= last_safe][-last_k:]
-        rows, sids = [], []
-        for it in written:
-            ind_it = inds[(it,) + cold]
-            c_it = chain[(it,) + cold]
-            w_idx, l_idx = np.nonzero(ind_it)
-            rows.append(c_it[w_idx, l_idx])
-            sids.append(np.int64(it) * nwalkers + w_idx)
-    return np.concatenate(rows, axis=0), np.concatenate(sids, axis=0)
+    X, sample_id, _info = load_leaf_table(store, int(last_k))
+    return X, sample_id
 
 
 def assign_members(X, means, covs, island_id, f0_window_edges):
@@ -158,12 +202,14 @@ def assign_members(X, means, covs, island_id, f0_window_edges):
 # ------------------------------------------------------------------
 # waveforms + matches
 # ------------------------------------------------------------------
-def build_wave_gen(tobs: float):
+def build_wave_gen(tobs: float, backend: str = "cpu"):
+    """GBGPU on the run's L1 orbits, both on ``backend`` (the orbit table
+    is trimmed on the host before ``configure`` uploads it)."""
     from lisatools.detector import L1Orbits
     from gbgpu.gbgpu import GBGPU
 
     orb = L1Orbits(_orbit_source_file(),
-                   force_backend="cpu", frame="icrs")
+                   force_backend=backend, frame="icrs")
     pad = 1.0e5
     lt = np.asarray(orb.ltt_t)
     mk = (lt >= max(DATA_T0 - pad, float(orb.sc_t0))) & \
@@ -172,33 +218,150 @@ def build_wave_gen(tobs: float):
     orb.ltt_t = lt[mk].copy()
     orb.ltt_t0 = float(orb.ltt_t[0])
     orb.configure(linear_interp_setup=True)
-    return GBGPU(force_backend="cpu", orbits=orb, t0=DATA_T0)
+    return GBGPU(force_backend=backend, orbits=orb, t0=DATA_T0)
+
+
+def batched_overlaps(T, kmin, pairs, max_pairs=None) -> np.ndarray:
+    """``Matcher.match`` for every row of ``pairs``, vectorized.
+
+    T: (m, 3, N) complex templates sharing ONE length N (numpy or cupy);
+    kmin: (m,) their first frequency bins; pairs: (P, 2) indices into T.
+    Two templates overlap on bins [max(ka, kb), min(ka, kb) + N), so for a
+    fixed bin shift s = kb - ka both slices are fixed: the pairs are
+    grouped by s and each group is one gathered product + sum (in
+    sub-batches of ``max_pairs`` to bound the scratch). |s| >= N shares no
+    bin -> 0, a zero-norm template -> 0, as in the scalar reference.
+    Returns (P,) numpy float."""
+    pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
+    out = np.zeros(len(pairs))
+    if not len(pairs):
+        return out
+    xp = _array_module(T)
+    N = int(T.shape[-1])
+    k = _to_host(kmin).astype(np.int64)
+    nrm = (xp.abs(T) ** 2).sum(axis=(1, 2))
+    shift = k[pairs[:, 1]] - k[pairs[:, 0]]
+    step = len(pairs) if max_pairs is None else max(1, int(max_pairs))
+    for s in np.unique(shift):
+        s = int(s)
+        if abs(s) >= N:
+            continue
+        a_sl = slice(s, N) if s >= 0 else slice(0, N + s)
+        b_sl = slice(0, N - s) if s >= 0 else slice(-s, N)
+        sel = np.flatnonzero(shift == s)
+        for lo in range(0, len(sel), step):
+            sub = sel[lo:lo + step]
+            ia = xp.asarray(pairs[sub, 0])
+            ib = xp.asarray(pairs[sub, 1])
+            num = (xp.conj(T[ia, :, a_sl]) * T[ib, :, b_sl]).sum(axis=(1, 2))
+            den = xp.sqrt(nrm[ia] * nrm[ib])
+            ok = den > 0
+            out[sub] = _to_host(
+                xp.where(ok, xp.abs(num) / xp.where(ok, den, 1.0), 0.0))
+    return out
+
+
+def pair_chunks(pairs, max_templates) -> list:
+    """Split ``pairs`` (P, 2), in order, into consecutive blocks of pair
+    indices whose unique-template count stays <= ``max_templates`` (at
+    least 2). Greedy; a template shared across a block boundary is
+    generated in both blocks."""
+    cap = max(2, int(max_templates))
+    chunks, cur, seen = [], [], set()
+    for n, (i, j) in enumerate(np.asarray(pairs, dtype=np.int64).tolist()):
+        new = (i not in seen) + (j not in seen and j != i)
+        if cur and len(seen) + new > cap:
+            chunks.append(np.asarray(cur, dtype=np.int64))
+            cur, seen = [], set()
+        cur.append(n)
+        seen.update((i, j))
+    if cur:
+        chunks.append(np.asarray(cur, dtype=np.int64))
+    return chunks
 
 
 class Matcher:
-    """Batch sampled-basis rows -> XYZ FD templates -> matches."""
+    """Sampled-basis rows -> XYZ FD templates -> matches, on the backend of
+    ``gb`` (its arrays are numpy or cupy)."""
 
-    def __init__(self, gb, tobs, dt, oversample):
+    def __init__(self, gb, tobs, dt, oversample,
+                 chunk_bytes=int(DEFAULT_CHUNK_GB * 2 ** 30)):
         from lisatools.globalfit.stock.erebor.transforms import (
             make_gb_transform_container,
         )
 
         self.gb, self.tobs, self.dt, self.oversample = gb, tobs, dt, oversample
+        self.chunk_bytes = int(chunk_bytes)
         self.tc = make_gb_transform_container(
             use_chirp_mass=True, use_fdot_astro=True, use_distance=True)
         self.n_wf = 0
 
-    def waves(self, rows_sampled: np.ndarray):
-        """(m, 9) sampled rows -> (XYZf (m, 3, N) complex, kmin (m,))."""
+    def row_n(self, p: np.ndarray) -> np.ndarray:
+        """Template length per TRANSFORMED row: gbgpu ``get_N`` on (amp, f0),
+        capped at ``N_CAP``. A call on several rows uses their max."""
         from gbgpu.utils.utility import get_N
 
+        n = get_N(p[:, 0], p[:, 1], self.tobs, oversample=self.oversample)
+        return np.minimum(N_CAP, np.asarray(n)).astype(np.int64)
+
+    def waves(self, rows_sampled: np.ndarray):
+        """(m, 9) sampled rows -> host (XYZf (m, 3, N) complex, kmin (m,))."""
         p = self.tc.both_transforms(np.atleast_2d(rows_sampled))
-        N = int(min(N_CAP, np.max(get_N(
-            p[:, 0], p[:, 1], self.tobs, oversample=self.oversample))))
+        N = int(self.row_n(p).max())
         self.gb.run_wave(*[p[:, i] for i in range(9)],
                          N=N, T=self.tobs, dt=self.dt)
         self.n_wf += len(p)
-        return np.asarray(self.gb.XYZf), np.asarray(self.gb.start_inds)
+        return _to_host(self.gb.XYZf), _to_host(self.gb.start_inds)
+
+    def _templates(self, p: np.ndarray, N: int):
+        """Templates of the transformed rows ``p`` at ONE length ``N``, in
+        ``run_wave`` batches sized to the memory budget. Returns
+        (T (m, 3, N) on the backend, kmin (m,) host int)."""
+        m = len(p)
+        per = max(1, self.chunk_bytes // (GEN_SCRATCH * 3 * N * 16))
+        T = None
+        kmin = np.empty(m, dtype=np.int64)
+        for lo in range(0, m, per):
+            q = p[lo:lo + per]
+            self.gb.run_wave(*[q[:, i] for i in range(9)],
+                             N=int(N), T=self.tobs, dt=self.dt)
+            X = self.gb.XYZf
+            if T is None:
+                T = _array_module(X).empty((m,) + tuple(X.shape[1:]),
+                                           dtype=X.dtype)
+            T[lo:lo + len(q)] = X
+            kmin[lo:lo + len(q)] = _to_host(self.gb.start_inds)
+            self.n_wf += len(q)
+        return T, kmin
+
+    def pair_matches(self, rows_sampled: np.ndarray, pairs) -> np.ndarray:
+        """``match`` for every (i, j) row of ``pairs`` over the sampled
+        ``rows_sampled``, each pair at the length ``waves`` gives the two
+        rows together, N = max(N_i, N_j). Per length, the pairs are cut
+        into chunks of at most ~half the budget of templates; each template
+        of a chunk is generated once and the overlaps batched
+        (``batched_overlaps``, the other half). Returns (P,) numpy."""
+        pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
+        out = np.zeros(len(pairs))
+        if not len(pairs):
+            return out
+        p = self.tc.both_transforms(np.atleast_2d(rows_sampled))
+        n_row = self.row_n(p)
+        n_pair = np.maximum(n_row[pairs[:, 0]], n_row[pairs[:, 1]])
+        for N in np.unique(n_pair):
+            N = int(N)
+            tmpl = 3 * N * 16                       # bytes per template
+            cap = self.chunk_bytes // (2 * tmpl)
+            max_pairs = max(1, self.chunk_bytes // (6 * tmpl))
+            sel = np.flatnonzero(n_pair == N)
+            for blk in pair_chunks(pairs[sel], cap):
+                idx = sel[blk]
+                u, inv = np.unique(pairs[idx].ravel(), return_inverse=True)
+                T, kmin = self._templates(p[u], N)
+                out[idx] = batched_overlaps(
+                    T, kmin, inv.reshape(-1, 2), max_pairs=max_pairs)
+                del T
+        return out
 
     @staticmethod
     def match(a, ka, b, kb):
@@ -231,6 +394,17 @@ def main(argv=None):
                     help="mHz; island refereed in detail regardless of p")
     ap.add_argument("--max-wf", type=int, default=20000)
     ap.add_argument("--seed", type=int, default=11)
+    ap.add_argument("--backend",
+                    default=os.environ.get("GB_WARM_START_REFEREE_BACKEND",
+                                           "cpu"),
+                    help="template backend: cpu (default), cuda, cuda12x, "
+                         "... or auto (cuda when cupy sees a device, "
+                         "else cpu)")
+    ap.add_argument("--chunk-gb", type=float,
+                    default=float(os.environ.get(
+                        "GB_WARM_START_REFEREE_CHUNK_GB", DEFAULT_CHUNK_GB)),
+                    help="memory budget of one merge-test template chunk "
+                         "plus its overlap scratch [GB]")
     ap.add_argument("--out", default=None,
                     help="results npz (default <npz>_referee.npz)")
     args = ap.parse_args(argv)
@@ -332,9 +506,19 @@ def main(argv=None):
 
     # ---- waveform machinery --------------------------------------
     t0 = time.perf_counter()
-    gb = build_wave_gen(tobs)
-    mm = Matcher(gb, tobs, args.dt, args.oversample)
-    print(f"wave gen ready [{time.perf_counter() - t0:.1f} s, "
+    backend = resolve_backend(args.backend)
+    try:
+        gb = build_wave_gen(tobs, backend)
+    except Exception as exc:
+        if str(args.backend).strip().lower() != "auto" or backend == "cpu":
+            raise
+        print(f"[warmstart] referee --backend auto: the {backend} wave "
+              f"generator failed ({exc!r}); using CPU")
+        backend = "cpu"
+        gb = build_wave_gen(tobs, backend)
+    mm = Matcher(gb, tobs, args.dt, args.oversample,
+                 chunk_bytes=int(args.chunk_gb * 2 ** 30))
+    print(f"wave gen ready on {backend} [{time.perf_counter() - t0:.1f} s, "
           f"RSS {rss_gb():.2f} GB]")
 
     # ---- within-group coherence ----------------------------------
@@ -384,11 +568,14 @@ def main(argv=None):
 
     # ---- merge test ----------------------------------------------
     t0 = time.perf_counter()
-    cross_match = np.zeros(len(pairs))
-    for n_i, (i, j) in enumerate(pairs):
-        wf, kmin = mm.waves(means_sampling[[i, j]])
-        cross_match[n_i] = mm.match(wf[0], kmin[0], wf[1], kmin[1])
-    print(f"merge test: {len(pairs)} pairs [{time.perf_counter() - t0:.1f} s]")
+    n_wf0 = mm.n_wf
+    cross_match = mm.pair_matches(means_sampling, pairs)
+    print(f"merge test: {len(pairs)} pairs [{time.perf_counter() - t0:.1f} s, "
+          f"{mm.n_wf - n_wf0} templates on {backend}]")
+    if backend != "cpu":
+        import cupy as cp
+
+        cp.get_default_memory_pool().free_all_blocks()
 
     # ---- report ---------------------------------------------------
     def bucket(vals):
@@ -485,6 +672,7 @@ def main(argv=None):
             tail_n=int(len(tail)), p_core=args.p_core,
             pair_p_floor=args.pair_p_floor, pair_bins=args.pair_bins,
             seed=args.seed, n_waveforms=mm.n_wf,
+            backend=backend, chunk_gb=args.chunk_gb,
             weighting="flat-narrowband XYZ, phase-maximized")))
     print(f"\nDONE: {mm.n_wf} waveforms | wall "
           f"{time.perf_counter() - t_start:.1f} s | peak RSS "
