@@ -94,10 +94,12 @@ EIGEN_JUMP_MIX_KNOBS = tuple(EIGEN_JUMP_MIX_LINE)
 # mixture from the run's own last 50 rows x every cold walker every 5 rows in
 # gb_search_2 and every 250 in full_pe; the warm moves draw 75 % of their
 # proposes from it and 25 % from the parent-derived mixture. Code default OFF.
+# 2026-10-14 ruling: in gb_search_2 refit every stored row and draw only from
+# the refit (GB_WARM_SELF_EVERY_SEARCH 5 -> 1, GB_WARM_SELF_FRACTION_SEARCH 1.0).
 WARM_SELF_LINE = {
-    "GB_WARM_SELF": "1", "GB_WARM_SELF_EVERY_SEARCH": "5",
+    "GB_WARM_SELF": "1", "GB_WARM_SELF_EVERY_SEARCH": "1",
     "GB_WARM_SELF_EVERY_PE": "250", "GB_WARM_SELF_LAST_K": "50",
-    "GB_WARM_SELF_FRACTION": "0.75",
+    "GB_WARM_SELF_FRACTION": "0.75", "GB_WARM_SELF_FRACTION_SEARCH": "1.0",
 }
 WARM_SELF_KNOBS = tuple(WARM_SELF_LINE)
 

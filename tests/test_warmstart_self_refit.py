@@ -134,10 +134,13 @@ def _mixer(root, *, build_seed=101, tag=recipe._WARM_SEED_TAG_SEARCH,
 class SettingsKnobTest(unittest.TestCase):
     FIELDS = {
         "warm_self": ("GB_WARM_SELF", False, "1", True),
-        "warm_self_every_search": ("GB_WARM_SELF_EVERY_SEARCH", 5, "7", 7),
+        # 2026-10-14 ruling: every iteration in gb_search_2 (was 5)
+        "warm_self_every_search": ("GB_WARM_SELF_EVERY_SEARCH", 1, "7", 7),
         "warm_self_every_pe": ("GB_WARM_SELF_EVERY_PE", 250, "100", 100),
         "warm_self_last_k": ("GB_WARM_SELF_LAST_K", 50, "30", 30),
         "warm_self_fraction": ("GB_WARM_SELF_FRACTION", 0.75, "0.5", 0.5),
+        # 2026-10-14 ruling: only the refit proposal during gb search 2
+        "warm_self_fraction_search": ("GB_WARM_SELF_FRACTION_SEARCH", 1.0, "0.5", 0.5),
     }
 
     def _fields(self):
@@ -186,6 +189,43 @@ class WrapTest(_TmpDir):
         self.assertEqual(out.load_kwargs["circ_images"], 3)
         self.assertEqual(out.tag, recipe._WARM_SEED_TAG_PE)
         self.assertEqual(str(out.fraction), "3/4")
+
+    def test_the_search_twin_takes_the_search_fraction(self):
+        """User ruling 2026-10-14: "using only the refit proposal during gb
+        search 2" -- rj_warm_search wraps with ``warm_self_fraction_search``
+        (1.0 -> every propose from the self refit once an epoch exists), the
+        PE twin with ``warm_self_fraction`` (0.75); each twin ignores the
+        other's knob."""
+        orig_path = os.path.join(self.tmp, "orig.npz")
+        _write_components(orig_path)
+        orig = WarmStartComponents.from_npz(orig_path, seed=1, **LOAD_KW)
+        store = os.path.join(self.tmp, "run", "gf_testing.h5")
+        gb_info = SimpleNamespace(warm_self=True, warm_self_fraction=0.75,
+                                  warm_self_fraction_search=1.0, build_seed=99)
+        search = recipe._warm_self_wrap(
+            orig, gb_info=gb_info,
+            general_info=SimpleNamespace(main_file_path=store),
+            tag=recipe._WARM_SEED_TAG_SEARCH, name="rj_warm_search",
+            load_kwargs=dict(LOAD_KW))
+        pe = recipe._warm_self_wrap(
+            orig, gb_info=gb_info,
+            general_info=SimpleNamespace(main_file_path=store),
+            tag=recipe._WARM_SEED_TAG_PE, name="rj_warm_pe",
+            load_kwargs=dict(LOAD_KW))
+        self.assertEqual(str(search.fraction), "1")
+        self.assertEqual(str(pe.fraction), "3/4")
+        # the knobs are independent
+        gb_info.warm_self_fraction_search = 0.5
+        search2 = recipe._warm_self_wrap(
+            orig, gb_info=gb_info,
+            general_info=SimpleNamespace(main_file_path=store),
+            tag=recipe._WARM_SEED_TAG_SEARCH, name="rj_warm_search",
+            load_kwargs=dict(LOAD_KW))
+        self.assertEqual(str(search2.fraction), "1/2")
+        # with an epoch present the search twin uses the self refit on EVERY propose
+        _write_epoch(search.epoch_root, 0)
+        choices = [search.begin_propose()["choice"] for _ in range(12)]
+        self.assertEqual(choices, ["self"] * 12)
 
     def test_both_twins_and_the_saver_are_wired(self):
         """``build_gb_moves`` / ``run_global_fit`` are too heavy to construct

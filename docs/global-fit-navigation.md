@@ -218,7 +218,9 @@ commands for a login-node pre-build. Design: `docs/superpowers/specs/2026-09-18-
 **The warm-start SELF refit** (`self_refit.py`, user rulings 2026-10-13: "Starting in
 gb search 2 (and in full pe). Let's rebuild our warm start proposal with the last 50
 samples (x4 walkers)"; "keep the original warm start in the fit"; 25 % original / 75 %
-refit; every 5 rows in gb_search_2, every 250 in full_pe). Why: per-walker GB
+refit in full_pe every 250 rows; 2026-10-14 for gb_search_2: refit EVERY stored row and
+draw ONLY from the refit, after the 9mo's first PE epoch carried 84 % of the lnL gain in
+its seven self draws). Why: per-walker GB
 completeness at SNR > 8 was 91 % on the 9mo while the union of the four cold walkers
 was 96.5 %; a mixture fitted to ALL cold walkers proposes to each walker what the
 others hold. Three pieces:
@@ -261,10 +263,11 @@ others hold. Three pieces:
 | knob (field on `GBSettings`) | default | meaning |
 |---|---|---|
 | `GB_WARM_SELF` (`warm_self`) | 0 | master switch; 0 = no builder, no mixer, bit-identical; needs `GB_WARM_START_COMPONENTS` |
-| `GB_WARM_SELF_EVERY_SEARCH` (`warm_self_every_search`) | 5 | stored rows between refits in `gb_search_N`, N >= 2 (<= 0 off) |
+| `GB_WARM_SELF_EVERY_SEARCH` (`warm_self_every_search`) | 1 | stored rows between refits in `gb_search_N`, N >= 2 (<= 0 off; was 5 until 2026-10-14) |
 | `GB_WARM_SELF_EVERY_PE` (`warm_self_every_pe`) | 250 | stored rows (= iterations) between refits in `full_pe` (<= 0 off) |
 | `GB_WARM_SELF_LAST_K` (`warm_self_last_k`) | 50 | the run's last stored rows fed to a refit, every cold walker of each |
-| `GB_WARM_SELF_FRACTION` (`warm_self_fraction`) | 0.75 | share of warm-move proposes drawing from the self refit once an epoch exists |
+| `GB_WARM_SELF_FRACTION` (`warm_self_fraction`) | 0.75 | share of `rj_warm_pe` proposes drawing from the self refit once an epoch exists |
+| `GB_WARM_SELF_FRACTION_SEARCH` (`warm_self_fraction_search`) | 1.0 | the same for `rj_warm_search` (gb_search_N, N >= 2): only the refit once an epoch exists (2026-10-14) |
 
 The fit / referee options are not knobs here: they are the parent build's (CLI defaults
 of the three modules); the referee's own backend choice (`GB_WARM_START_REFEREE_BACKEND`)

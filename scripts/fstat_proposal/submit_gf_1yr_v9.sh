@@ -4510,17 +4510,23 @@ export GB_WARM_START_LAST_K=${GB_WARM_START_LAST_K:-300}   # 9mo/1yr (Mike 2026-
 # into ${STORE_DIR}/warmstart/self/epoch_NNNN/) every GB_WARM_SELF_EVERY_SEARCH
 # rows in gb_search_2 and every GB_WARM_SELF_EVERY_PE rows in full_pe, right
 # after its own save (watched: a build that holds a save up is reported);
-# rj_warm_search / rj_warm_pe then draw GB_WARM_SELF_FRACTION of their
-# proposes from the newest self mixture and the rest from the parent-derived
-# one above (all from the parent until the first epoch exists) -- a
-# cross-walker GB exchange: each walker is proposed what the others hold.
+# rj_warm_pe then draws GB_WARM_SELF_FRACTION of its proposes from the newest
+# self mixture and the rest from the parent-derived one above, rj_warm_search
+# GB_WARM_SELF_FRACTION_SEARCH of its proposes (all from the parent until the
+# first epoch exists) -- a cross-walker GB exchange: each walker is proposed
+# what the others hold. 2026-10-14 ruling, after the 9mo's first PE epoch
+# carried 84 % of the lnL gain in its 7 self draws (cold acceptance 13x the
+# parent mixture's): in gb_search_2 refit EVERY stored row and draw ONLY from
+# the refit ("update the warm start refit in gb search 2 to every iteration
+# using only the refit proposal during gb search 2"); full_pe keeps 250 / 75 %.
 # Code default OFF (stock runs bit-identical); needs GB_WARM_START_COMPONENTS.
 # Log: "[GB_WARM_SELF ...]". Rollback: GB_WARM_SELF=0 on the launch line.
 export GB_WARM_SELF=${GB_WARM_SELF:-1}
-export GB_WARM_SELF_EVERY_SEARCH=${GB_WARM_SELF_EVERY_SEARCH:-5}
+export GB_WARM_SELF_EVERY_SEARCH=${GB_WARM_SELF_EVERY_SEARCH:-1}
 export GB_WARM_SELF_EVERY_PE=${GB_WARM_SELF_EVERY_PE:-250}
 export GB_WARM_SELF_LAST_K=${GB_WARM_SELF_LAST_K:-50}
 export GB_WARM_SELF_FRACTION=${GB_WARM_SELF_FRACTION:-0.75}
+export GB_WARM_SELF_FRACTION_SEARCH=${GB_WARM_SELF_FRACTION_SEARCH:-1.0}
 if [ -n "${GB_WARM_START_COMPONENTS}" ] && [ ! -f "${GB_WARM_START_COMPONENTS}" ]; then
   if [ -f "${GB_WARM_START_SOURCE_STORE}" ]; then
     echo "[WARMSTART] ${GB_WARM_START_COMPONENTS} missing -- it will be BUILT"

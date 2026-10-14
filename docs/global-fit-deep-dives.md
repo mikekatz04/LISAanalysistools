@@ -274,8 +274,9 @@ Cold lnL per walker per row (`global_fit/log_like[:, 0, 0, :]`), max / mean
 - The warm-start SELF refit (`GB_WARM_SELF=1`, 2026-10-13; navigation 2.8),
   the cross-walker GB exchange: grep `[GB_WARM_SELF]`. Healthy: on the saver
   (`[r<k>/saver]`) one `epoch k built from rows a..b (200 samples, K
-  components) in T s` every 5 rows of `gb_search_2` and every 250 of
-  `full_pe`, `built_at_row` advancing by exactly the cadence (a resume
+  components) in T s` every stored row of `gb_search_2` (every 5 before
+  2026-10-14) and every 250 of `full_pe`, `built_at_row` advancing by
+  exactly the cadence (a resume
   continues the clock, it does not rebuild at once); on EVERY compute rank
   one `rank r adopted epoch k` per epoch, the same k on all ranks within a
   propose or two; `this propose used SELF` on 3 proposes in 4 of each warm
@@ -616,10 +617,13 @@ Point-in-time; use them to recognise an order of magnitude, not as a spec.
   with parent SNR > 10 start from the parent's cold chain (EMRI 3 included,
   plunge or not); below that, truth as at the parent's Tobs. **Self refit**
   (2026-10-13, `GB_WARM_SELF`): from `gb_search_2` on, refit the warm start
-  from the run's own last 50 rows x 4 walkers, every 5 rows in search and
-  every 250 iterations in `full_pe` (a periodic approximation in PE, like the
-  residual F-stat refit every 150), and KEEP the original: the warm moves
-  draw 25 % original / 75 % self refit.
+  from the run's own last 50 rows x 4 walkers, every stored row in search
+  (2026-10-14; was every 5) and every 250 iterations in `full_pe` (a periodic
+  approximation in PE, like the residual F-stat refit every 150), and KEEP
+  the original: `rj_warm_pe` draws 25 % original / 75 % self refit,
+  `rj_warm_search` only the refit once an epoch exists (2026-10-14: "using
+  only the refit proposal during gb search 2"; the 9mo's first PE epoch had
+  carried 84 % of the lnL gain in its seven self draws).
 - **A 9mo instead of a 1yr** (2026-10-07): keep the 1yr settings; change
   only what Tobs forces (`TOBS_TARGET`, `SIGHET_NT_LAYER`, the MBHB set);
   capacity knobs stay at the 1yr values. Memory levers on the F-stat are

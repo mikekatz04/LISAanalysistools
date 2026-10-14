@@ -4775,9 +4775,16 @@ def _warm_self_wrap(container, *, gb_info, general_info, tag, name,
     from .warmstart.self_refit import WarmSelfMixer, self_epoch_root
 
     root = self_epoch_root(general_info.main_file_path)
+    # The SEARCH twin (rj_warm_search) draws ``warm_self_fraction_search`` of
+    # its proposes from the self refit (user ruling 2026-10-14: "using only
+    # the refit proposal during gb search 2" -> 1.0); the PE twin keeps
+    # ``warm_self_fraction`` (0.75).
+    _is_search = str(name).startswith("rj_warm_search")
+    _fraction = (getattr(gb_info, "warm_self_fraction_search", 1.0) if _is_search
+                 else getattr(gb_info, "warm_self_fraction", 0.75))
     mixer = WarmSelfMixer(
         container, epoch_root=root,
-        fraction=float(getattr(gb_info, "warm_self_fraction", 0.75)),
+        fraction=float(_fraction),
         load_kwargs=load_kwargs, build_seed=getattr(gb_info, "build_seed", None),
         tag=int(tag), name=str(name))
     logger.info(

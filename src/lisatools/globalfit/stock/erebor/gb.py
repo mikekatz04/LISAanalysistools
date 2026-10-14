@@ -647,13 +647,15 @@ class GBSettings(Settings):
         default_factory=env_default("GB_WARM_SELF", False, bool)
     )
     # warm_self_every_search: STORED ROWS between self refits in the numbered
-    # search stages from gb_search_2 on ("during gb search 2, the warm start
-    # refit should occur every 5 iterations"). The clock is stage-relative
-    # (the stage's start row, or the latest complete epoch's built_at row,
-    # whichever is later) and read from disk, so a resume never rebuilds
-    # early. <= 0 -> no refit in search. Env: GB_WARM_SELF_EVERY_SEARCH.
+    # search stages from gb_search_2 on (user ruling 2026-10-14, after the
+    # first PE epoch's cross-walker births were seen to carry 84 % of the lnL
+    # gain: "update the warm start refit in gb search 2 to every iteration";
+    # was 5). The clock is stage-relative (the stage's start row, or the
+    # latest complete epoch's built_at row, whichever is later) and read from
+    # disk, so a resume never rebuilds early. <= 0 -> no refit in search.
+    # Env: GB_WARM_SELF_EVERY_SEARCH.
     warm_self_every_search: int = dataclasses.field(
-        default_factory=env_default("GB_WARM_SELF_EVERY_SEARCH", 5, int)
+        default_factory=env_default("GB_WARM_SELF_EVERY_SEARCH", 1, int)
     )
     # warm_self_every_pe: stored rows (= iterations) between self refits in
     # full_pe ("full pe adaptivity: just refit every 250 iterations"; a
@@ -677,6 +679,15 @@ class GBSettings(Settings):
     # Env: GB_WARM_SELF_FRACTION.
     warm_self_fraction: float = dataclasses.field(
         default_factory=env_default("GB_WARM_SELF_FRACTION", 0.75, float)
+    )
+    # warm_self_fraction_search: the same share for the SEARCH twin
+    # (rj_warm_search, the numbered search stages from gb_search_2 on). User
+    # ruling 2026-10-14: "using only the refit proposal during gb search 2"
+    # -> 1.0 (every propose from the self refit once an epoch exists; the
+    # original until then). ``warm_self_fraction`` stays the PE twin's
+    # (rj_warm_pe) share. In [0, 1]. Env: GB_WARM_SELF_FRACTION_SEARCH.
+    warm_self_fraction_search: float = dataclasses.field(
+        default_factory=env_default("GB_WARM_SELF_FRACTION_SEARCH", 1.0, float)
     )
     # PE-stage extrinsic DRAW (user design ruling 2026-08-25). STAGE
     # SPLIT: the SEARCH RJ stages (rj_fstat_search / rj_prior_removal /

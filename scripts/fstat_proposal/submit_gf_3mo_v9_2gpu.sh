@@ -3991,10 +3991,11 @@ export GB_WARM_START_COMPONENTS=
 # (user rulings 2026-10-13); inert here without GB_WARM_START_COMPONENTS
 # (the hook logs one warning and builds nothing).
 export GB_WARM_SELF=${GB_WARM_SELF:-1}
-export GB_WARM_SELF_EVERY_SEARCH=${GB_WARM_SELF_EVERY_SEARCH:-5}
+export GB_WARM_SELF_EVERY_SEARCH=${GB_WARM_SELF_EVERY_SEARCH:-1}
 export GB_WARM_SELF_EVERY_PE=${GB_WARM_SELF_EVERY_PE:-250}
 export GB_WARM_SELF_LAST_K=${GB_WARM_SELF_LAST_K:-50}
 export GB_WARM_SELF_FRACTION=${GB_WARM_SELF_FRACTION:-0.75}
+export GB_WARM_SELF_FRACTION_SEARCH=${GB_WARM_SELF_FRACTION_SEARCH:-1.0}
 
 # ============================================================================
 # 3MO-3 -- THE NOISE EVOLVES THROUGHOUT: A noise_search FIRST STAGE, AND A

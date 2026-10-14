@@ -652,7 +652,8 @@ class EveryOtherKnobIsTheNineMonthsTest(unittest.TestCase):
                  # only exist with GB_WARM_START_COMPONENTS, so a no-parent run
                  # has nothing to refit and does not export the block.
                  "GB_WARM_SELF", "GB_WARM_SELF_EVERY_SEARCH", "GB_WARM_SELF_EVERY_PE",
-                 "GB_WARM_SELF_LAST_K", "GB_WARM_SELF_FRACTION"}
+                 "GB_WARM_SELF_LAST_K", "GB_WARM_SELF_FRACTION",
+                 "GB_WARM_SELF_FRACTION_SEARCH"}
     MUST_DIFFER = {"TOBS_TARGET", "SIGHET_NT_LAYER", "MBHB_IDS", "BASE_FILE_NAME",
                    "GF_SEED_STORE", "GB_WARM_START_SOURCE_TOBS", "GB_WARM_START_COMPONENTS",
                    "MBH_SOURCE_WARM_START_IDS", "GF_MONITOR_ADD_INFO"}
