@@ -645,7 +645,14 @@ class EveryOtherKnobIsTheNineMonthsTest(unittest.TestCase):
                  "GB_REPLACE_WARM_PASS", "SOURCE_SEARCH_POSITION", "PSD_START_PARAMS",
                  "GALFOR_START_PARAMS", "STAGE_FORCE_NOISE_SEARCH", "STAGE_SKIP_NOISE_VGB",
                  "GB_SEARCH_1_NOISE_MODE", "NOISE_SEARCH_CHECKS", "MAXLOGL_PER_WALKER",
-                 "MAXLOGL_FREEZE_CONVERGED"}
+                 "MAXLOGL_FREEZE_CONVERGED",
+                 # 2026-10-13: the GB warm-start SELF refit lives in the parent
+                 # warm-start branch of the template -- it rebuilds the parent-
+                 # derived mixture from the run's own rows and the warm moves
+                 # only exist with GB_WARM_START_COMPONENTS, so a no-parent run
+                 # has nothing to refit and does not export the block.
+                 "GB_WARM_SELF", "GB_WARM_SELF_EVERY_SEARCH", "GB_WARM_SELF_EVERY_PE",
+                 "GB_WARM_SELF_LAST_K", "GB_WARM_SELF_FRACTION"}
     MUST_DIFFER = {"TOBS_TARGET", "SIGHET_NT_LAYER", "MBHB_IDS", "BASE_FILE_NAME",
                    "GF_SEED_STORE", "GB_WARM_START_SOURCE_TOBS", "GB_WARM_START_COMPONENTS",
                    "MBH_SOURCE_WARM_START_IDS", "GF_MONITOR_ADD_INFO"}

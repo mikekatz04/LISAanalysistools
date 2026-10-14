@@ -82,6 +82,11 @@ for d in "${DIRS[@]}"; do
   if [ "${INCLUDE_FSTAT:-0}" != "1" ]; then
     FSTAT_PRUNE=(-not \( -path "*/gb_fstat_fit/*" -a ! -name "DONE.json" \))
   fi
+  # The GB warm-start SELF-refit epochs (GB_WARM_SELF=1, 2026-10-13: one
+  # directory per rebuild under warmstart/self/, three npz each, a new one
+  # every 5 rows in gb_search_2) are the same kind of payload: ship their
+  # DONE.json manifests only, never the mixtures.
+  WARM_SELF_PRUNE=(-not \( -path "*/warmstart/self/*" -a ! -name "DONE.json" \))
   # LOG HANDLING (v8 audit 2026-09-02): the DEBUG run log is the one file
   # that outgrows the budget (~0.5 MB/iteration). Above LOG_CAP_MB, ship
   # (a) a grep-filtered FULL-HISTORY file carrying every line family the
@@ -109,6 +114,7 @@ for d in "${DIRS[@]}"; do
        ! -name "*_midit_checkpoint.pkl" \
        "${LOG_EXCL[@]}" \
        "${FSTAT_PRUNE[@]}" \
+       "${WARM_SELF_PRUNE[@]}" \
        \( ! -name "*.h5" -o -name "*_extract.h5" \) \
        > "$list"
   # newest slurm job logs from the repo root, if any

@@ -90,6 +90,16 @@ EIGEN_JUMP_MIX_LINE = {
     for k, v in (("MIX", "0.1"), ("FACTOR", "3.0"))
 }
 EIGEN_JUMP_MIX_KNOBS = tuple(EIGEN_JUMP_MIX_LINE)
+# 2026-10-13 (Mike): the GB warm-start SELF refit -- the saver rebuilds the
+# mixture from the run's own last 50 rows x every cold walker every 5 rows in
+# gb_search_2 and every 250 in full_pe; the warm moves draw 75 % of their
+# proposes from it and 25 % from the parent-derived mixture. Code default OFF.
+WARM_SELF_LINE = {
+    "GB_WARM_SELF": "1", "GB_WARM_SELF_EVERY_SEARCH": "5",
+    "GB_WARM_SELF_EVERY_PE": "250", "GB_WARM_SELF_LAST_K": "50",
+    "GB_WARM_SELF_FRACTION": "0.75",
+}
+WARM_SELF_KNOBS = tuple(WARM_SELF_LINE)
 
 _STUB_SBATCH = """#!/usr/bin/env bash
 for a in "$@"; do printf '%s\\n' "$a"; done
@@ -848,6 +858,9 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             # code defaults None / 200.
             "EMRI_LADDER_TMAX", "EMRI_LADDER_REANCHOR_NATS",
             "MBH_LADDER_TMAX", "MBH_LADDER_REANCHOR_NATS",
+            # 2026-10-13: the GB warm-start self-refit block (code default
+            # OFF); WarmSelfLauncherTest pins it.
+            *WARM_SELF_KNOBS,
             # V9-26 (2026-10-02): the EMRI direct-to-WDM scoring path's knobs
             # (default full = the v8 path); SixMonthEMRIDirectTest pins the block.
             "EMRI_LIKELIHOOD", "EMRI_BATCH_MAX_SIZE", "EMRI_DIRECT_TABLE",
@@ -1814,6 +1827,9 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             # 2026-10-13: the ladder cap exports, mirrored in the 3mo twin
             "EMRI_LADDER_TMAX", "EMRI_LADDER_REANCHOR_NATS",
             "MBH_LADDER_TMAX", "MBH_LADDER_REANCHOR_NATS",
+            # 2026-10-13: the GB warm-start self-refit block, mirrored in the
+            # 3mo twin (inert there: no GB_WARM_START_COMPONENTS)
+            *WARM_SELF_KNOBS,
             # 3MO-8 (2026-10-02): nor is the 6mo EMRI direct-to-WDM block: no
             # EMRI branch is armed here, and its lookup table is built for the
             # 6-month grid's Nf and dt only.
@@ -3112,6 +3128,21 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
                         src, rf"(?m)^export {knob}=\$\{{{knob}:-{val}\}}$", knob)
                 self.assertNotIn("SOBBH_LADDER_TMAX", exports)
                 self.assertNotRegex(src, r"(?m)^export SOBBH_LADDER_TMAX=")
+
+    def test_the_warm_self_refit_block_is_on_in_every_v9_production_launcher(self):
+        """2026-10-13 (Mike): the GB warm-start SELF refit -- every v9
+        production launcher turns it on with the ruled cadences (5 rows in
+        gb_search_2, 250 in full_pe), the 50-row table and the 75 % self
+        share; each knob overridable on the line (rollback GB_WARM_SELF=0).
+        The code default stays OFF so stock runs are bit-identical."""
+        for path in V9_PRODUCTION:
+            exports = _exports(path)
+            src = open(path).read()
+            for knob, want in WARM_SELF_LINE.items():
+                with self.subTest(script=os.path.basename(path), knob=knob):
+                    self.assertEqual(exports.get(knob), want)
+                    self.assertRegex(
+                        src, rf"(?m)^export {knob}=\$\{{{knob}:-{want}\}}$")
 
     def test_the_launch_line_can_switch_it_off(self):
         lines = [l for l in open(NINE_MO_V9).read().split("\n")

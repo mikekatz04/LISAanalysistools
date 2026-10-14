@@ -3987,6 +3987,14 @@ export GB_ROUTER_THREADED=1
 # inert. This run reads no previous run's store at all.
 # ============================================================================
 export GB_WARM_START_COMPONENTS=
+# GB warm-start SELF refit block, mirrored from the 6mo / 9mo / 1yr scripts
+# (user rulings 2026-10-13); inert here without GB_WARM_START_COMPONENTS
+# (the hook logs one warning and builds nothing).
+export GB_WARM_SELF=${GB_WARM_SELF:-1}
+export GB_WARM_SELF_EVERY_SEARCH=${GB_WARM_SELF_EVERY_SEARCH:-5}
+export GB_WARM_SELF_EVERY_PE=${GB_WARM_SELF_EVERY_PE:-250}
+export GB_WARM_SELF_LAST_K=${GB_WARM_SELF_LAST_K:-50}
+export GB_WARM_SELF_FRACTION=${GB_WARM_SELF_FRACTION:-0.75}
 
 # ============================================================================
 # 3MO-3 -- THE NOISE EVOLVES THROUGHOUT: A noise_search FIRST STAGE, AND A

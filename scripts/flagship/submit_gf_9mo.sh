@@ -3996,6 +3996,28 @@ if [ "${GB_WARM_START_SOURCE_STORE}" != "${GF_SEED_STORE}" ]; then
 fi
 export GB_WARM_START_SOURCE_TOBS=${GB_WARM_START_SOURCE_TOBS:-15552000}   # the 6mo parent (180 d)
 export GB_WARM_START_LAST_K=${GB_WARM_START_LAST_K:-300}   # flagship (Mike 2026-10-08): the last 300 stored cold-chain rows x the parent's walkers (4 -> 1,200 samples) of the 6mo full_pe (~2.9M leaf rows into the fit at 6 mo; build the npz by hand on a login node if the in-job build is slow)
+# GB warm-start SELF REFIT (user rulings 2026-10-13: "rebuild our warm start
+# proposal with the last 50 samples (x4 walkers)" / "keep the original warm
+# start in the fit" / "sample from the previous full warm start 25% of the
+# time and the updated refit warm start 75% of the time" / "during gb search
+# 2, the warm start refit should occur every 5 iterations" / "full pe
+# adaptivity: just refit every 250 iterations"). The SAVER rank rebuilds the
+# mixture from THIS run's own last GB_WARM_SELF_LAST_K stored rows x every
+# cold walker (fit -> referee -> apply, same pipeline as the parent build,
+# into ${STORE_DIR}/warmstart/self/epoch_NNNN/) every GB_WARM_SELF_EVERY_SEARCH
+# rows in gb_search_2 and every GB_WARM_SELF_EVERY_PE rows in full_pe, right
+# after its own save (watched: a build that holds a save up is reported);
+# rj_warm_search / rj_warm_pe then draw GB_WARM_SELF_FRACTION of their
+# proposes from the newest self mixture and the rest from the parent-derived
+# one above (all from the parent until the first epoch exists) -- a
+# cross-walker GB exchange: each walker is proposed what the others hold.
+# Code default OFF (stock runs bit-identical); needs GB_WARM_START_COMPONENTS.
+# Log: "[GB_WARM_SELF ...]". Rollback: GB_WARM_SELF=0 on the launch line.
+export GB_WARM_SELF=${GB_WARM_SELF:-1}
+export GB_WARM_SELF_EVERY_SEARCH=${GB_WARM_SELF_EVERY_SEARCH:-5}
+export GB_WARM_SELF_EVERY_PE=${GB_WARM_SELF_EVERY_PE:-250}
+export GB_WARM_SELF_LAST_K=${GB_WARM_SELF_LAST_K:-50}
+export GB_WARM_SELF_FRACTION=${GB_WARM_SELF_FRACTION:-0.75}
 if [ -n "${GB_WARM_START_COMPONENTS}" ] && [ ! -f "${GB_WARM_START_COMPONENTS}" ]; then
   if [ -f "${GB_WARM_START_SOURCE_STORE}" ]; then
     echo "[WARMSTART] ${GB_WARM_START_COMPONENTS} missing -- it will be BUILT"
