@@ -452,8 +452,9 @@ runs inside `rj_fstat_search`):
   un-sticks it.
 - **The cold -> hot rotation (2026-10-14)**, the cross-walker remedy built
   into the search stages after the 1yr's EMRI 0 (held by walker 1 at SNR
-  28.7, lost by walkers 0, 2, 3 at SNR 4-8): every 200 proposals of a
-  source move (8 proposes of 25 repeats) in source_search / gb_search_*,
+  28.7, lost by walkers 0, 2, 3 at SNR 4-8): every 125 proposals of a
+  source move (5 proposes of 25 repeats; a propose is one round of
+  source_search or one CYCLE of a gb_search stage, so every 5 of those),
   each walker's cold chain is copied into the hottest sampled rung of
   another walker (offset k = 1 + event mod (nwalkers - 1), never itself),
   for every leaf at once; grep `cold->hot rotate` (one line per event per

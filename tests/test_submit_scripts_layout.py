@@ -110,12 +110,13 @@ WARM_SELF_LINE = {
 }
 WARM_SELF_KNOBS = tuple(WARM_SELF_LINE)
 # 2026-10-14 (Mike): the search-stage cold -> hot rotation of the source
-# ladders, every 200 proposals (= 8 proposes of 25 repeats), rotating by
-# walker so no walker receives its own cold chain. Code default 200; the
-# launchers export it for visibility.
+# ladders, rotating by walker so no walker receives its own cold chain;
+# first every 200 proposals (8 proposes of 25 repeats), then "every 5
+# iterations during the search stages rather than 8" = 125. Code default
+# 125; the launchers export it for visibility.
 COLD_TO_HOT_LINE = {
-    "MBH_COLD_TO_HOT_EVERY": "200", "EMRI_COLD_TO_HOT_EVERY": "200",
-    "SOBBH_COLD_TO_HOT_EVERY": "200",
+    "MBH_COLD_TO_HOT_EVERY": "125", "EMRI_COLD_TO_HOT_EVERY": "125",
+    "SOBBH_COLD_TO_HOT_EVERY": "125",
 }
 COLD_TO_HOT_KNOBS = tuple(COLD_TO_HOT_LINE)
 

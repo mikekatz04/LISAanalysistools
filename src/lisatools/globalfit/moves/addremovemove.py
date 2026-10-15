@@ -30,10 +30,11 @@ def _free_pool() -> None:
 
 
 # ---- search-stage cold -> hot rotation (user ruling 2026-10-14) -------------
-#: default proposal cadence of the rotation: 200 proposals = 8 proposes of 25
-#: in-model repeats ("every 200 proposals for a source (which includes the 25
-#: repeats so 8 iterations)")
-COLD_TO_HOT_EVERY_DEFAULT = 200
+#: default proposal cadence of the rotation: 125 proposals = 5 proposes of 25
+#: in-model repeats (first "every 200 proposals for a source (which includes
+#: the 25 repeats so 8 iterations)", then "every 5 iterations during the
+#: search stages rather than 8", both 2026-10-14)
+COLD_TO_HOT_EVERY_DEFAULT = 125
 #: stage kinds the rotation runs in: every search kind, never PE
 COLD_TO_HOT_STAGE_KINDS = ("search", "rj")
 
@@ -56,8 +57,8 @@ def cold_to_hot_due(clock: int, repeats: int, cadence: int):
 
     The clock counts proposals (in-model repeats) since the last event and
     is advanced BEFORE the test, so the first propose after a (re)start
-    never fires and, at 25 repeats and cadence 200, events land on proposes
-    8, 16, 24, ... A cadence <= 0 disables the rotation (clock held at 0).
+    never fires and, at 25 repeats and cadence 125, events land on proposes
+    5, 10, 15, ... A cadence <= 0 disables the rotation (clock held at 0).
     A cadence shorter than one propose fires every propose and keeps the
     remainder.
     """
@@ -299,7 +300,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
 
         self.ntemps, self.nwalkers, self.nleaves_max, self.ndim = coords_shape
         # search-stage cold -> hot rotation (see _maybe_rotate_cold_into_hot);
-        # kwarg > {BRANCH}_COLD_TO_HOT_EVERY env > 200 proposals
+        # kwarg > {BRANCH}_COLD_TO_HOT_EVERY env > 125 proposals
         self.cold_to_hot_every = cold_to_hot_every
         self._cold_to_hot_clock = 0
         self.n_cold_to_hot_events = 0
@@ -2158,7 +2159,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
 
     # ---- search-stage cold -> hot rotation (user ruling 2026-10-14) ---------
     def _cold_to_hot_every(self) -> int:
-        """kwarg > ``{BRANCH}_COLD_TO_HOT_EVERY`` env > 200 proposals (<= 0 = off)."""
+        """kwarg > ``{BRANCH}_COLD_TO_HOT_EVERY`` env > 125 proposals (<= 0 = off)."""
         val = getattr(self, "cold_to_hot_every", None)
         if val is None:
             val = os.environ.get(
@@ -2182,7 +2183,11 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         SOBHB), we should be copying the cold-chain into the hot chain
         rotating by walker so it does not pass to itself ... every 200
         proposals for a source (which includes the 25 repeats so 8
-        iterations)". A cross-walker exchange through the ladder: walker
+        iterations)", then "every 5 iterations during the search stages
+        rather than 8" (default 125 proposals = 5 proposes of 25 repeats;
+        in the gb_search stages the source moves propose once per CYCLE, so
+        that is every 5 cycles there and every 5 rounds in source_search).
+        A cross-walker exchange through the ladder: walker
         ``w``'s cold point lands in the hottest rung the move samples
         (``self.ntemps - 1``) of walker ``w + k``, ``k = 1 + event mod
         (nwalkers - 1)`` (never itself; every other walker in turn), for

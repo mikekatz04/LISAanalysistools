@@ -45,7 +45,7 @@ class _FakeState:
         self.sub_states = {name: sub}
 
 
-def _bare_move(stage="search", repeats=25, every=200, ntemps=NT, name="mbh"):
+def _bare_move(stage="search", repeats=25, every=125, ntemps=NT, name="mbh"):
     m = arm.ResidualAddOneRemoveOneMove.__new__(arm.ResidualAddOneRemoveOneMove)
     m.branch_name = name
     m.num_repeats = repeats
@@ -72,7 +72,15 @@ class OffsetTest(unittest.TestCase):
 
 
 class ClockTest(unittest.TestCase):
-    def test_twenty_five_repeats_fire_every_eighth_propose(self):
+    def test_twenty_five_repeats_fire_every_fifth_propose(self):
+        clock, fired = 0, []
+        for propose in range(1, 25):
+            fires, clock = arm.cold_to_hot_due(clock, 25, 125)
+            if fires:
+                fired.append(propose)
+        self.assertEqual(fired, [5, 10, 15, 20])
+
+    def test_the_original_200_cadence_fires_every_eighth(self):
         clock, fired = 0, []
         for propose in range(1, 25):
             fires, clock = arm.cold_to_hot_due(clock, 25, 200)
@@ -80,9 +88,12 @@ class ClockTest(unittest.TestCase):
                 fired.append(propose)
         self.assertEqual(fired, [8, 16, 24])
 
+    def test_default_is_five_proposes_of_25(self):
+        self.assertEqual(arm.COLD_TO_HOT_EVERY_DEFAULT, 125)
+
     def test_first_propose_never_fires(self):
-        self.assertEqual(arm.cold_to_hot_due(0, 25, 200)[0], False)
-        self.assertEqual(arm.cold_to_hot_due(0, 1, 200)[0], False)
+        self.assertEqual(arm.cold_to_hot_due(0, 25, 125)[0], False)
+        self.assertEqual(arm.cold_to_hot_due(0, 1, 125)[0], False)
 
     def test_disabled_cadence_never_fires(self):
         for cad in (0, -1):
@@ -152,14 +163,14 @@ class MoveHookTest(unittest.TestCase):
             fired.append(bool(move._maybe_rotate_cold_into_hot(state)))
         return fired
 
-    def test_search_stage_fires_on_the_eighth_propose_with_logging(self):
+    def test_search_stage_fires_on_the_fifth_propose_with_logging(self):
         sub = _FakeSub()
         state = _FakeState(sub)
         move = _bare_move("search")
         before = sub.coords.copy()
         with self.assertLogs(arm.logger, level="INFO") as cm:
-            fired = self._run(move, state, 8)
-        self.assertEqual(fired, [False] * 7 + [True])
+            fired = self._run(move, state, 5)
+        self.assertEqual(fired, [False] * 4 + [True])
         self.assertEqual(move.n_cold_to_hot_events, 1)
         # event 0 -> offset 1: walker w's cold sits in the hottest rung of w+1
         for w in range(NW):
@@ -172,8 +183,8 @@ class MoveHookTest(unittest.TestCase):
         sub = _FakeSub()
         state = _FakeState(sub)
         move = _bare_move("rj")
-        fired = self._run(move, state, 24)
-        self.assertEqual([i + 1 for i, f in enumerate(fired) if f], [8, 16, 24])
+        fired = self._run(move, state, 15)
+        self.assertEqual([i + 1 for i, f in enumerate(fired) if f], [5, 10, 15])
         self.assertEqual(move.n_cold_to_hot_events, 3)
         self.assertEqual(move._cold_to_hot_offsets_seen, [1, 2, 3])
 
@@ -202,7 +213,7 @@ class MoveHookTest(unittest.TestCase):
         state = _FakeState(sub)
         before = sub.coords.copy()
         move = _bare_move("search", ntemps=4)
-        self._run(move, state, 8)
+        self._run(move, state, 5)
         for w in range(NW):
             np.testing.assert_array_equal(sub.coords[3, (w + 1) % NW], before[0, w])
         np.testing.assert_array_equal(sub.coords[4:], before[4:])
@@ -210,13 +221,13 @@ class MoveHookTest(unittest.TestCase):
     def test_missing_substate_is_a_noop(self):
         move = _bare_move("search")
         state = _FakeState(None)
-        self.assertFalse(any(self._run(move, state, 16)))
+        self.assertFalse(any(self._run(move, state, 10)))
 
     def test_env_knob_resolution(self):
         move = _bare_move("search", every=None)
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("MBH_COLD_TO_HOT_EVERY", None)
-            self.assertEqual(move._cold_to_hot_every(), 200)
+            self.assertEqual(move._cold_to_hot_every(), 125)
             os.environ["MBH_COLD_TO_HOT_EVERY"] = "50"
             self.assertEqual(move._cold_to_hot_every(), 50)
             move.cold_to_hot_every = 7                      # the kwarg wins
