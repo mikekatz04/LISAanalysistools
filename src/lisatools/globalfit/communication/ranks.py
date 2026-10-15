@@ -525,6 +525,57 @@ def _factorize(nwalkers, n_compute, ranks_per_block, notes, *, gpu_routing=True)
     return int(n_blocks), int(R), int(nwalkers // n_blocks)
 
 
+def devices_beyond_walkers_message(rank, devices, w0, w1, n_compute, nwalkers,
+                                   gpu_routing=False) -> str:
+    """The refusal for a rank that would drive more GPUs than it has walkers.
+
+    Shared by :func:`build_layout` (the layout-time check) and
+    ``GlobalFit.setup_acs`` (the build-time backstop for a path that never
+    resolved a layout), so the two say the same thing.
+    """
+    n_dev, n_w = len(devices), int(w1) - int(w0)
+    routing = ("it is already on, so this is GPUS_PER_RANK>1 on a replicated "
+               "block" if gpu_routing else "it is OFF on this run")
+    return (
+        f"rank {rank} would drive {n_dev} GPUs {list(devices)} but holds only "
+        f"{n_w} walker(s) [{w0}, {w1}) of {nwalkers}. A rank's GPUs shard its "
+        f"WALKER rows -- GPUS_PER_RANK packs walkers onto one rank, it never "
+        f"splits a walker -- so {n_dev - n_w} device(s) would hold no walker "
+        f"and the run would die at the first GB gather ('Per-AC element size "
+        f"mismatch across shards'). Two routes: (1) split every walker's work "
+        f"over several GPUs: ONE GPU per rank plus the replica routing -- "
+        f"unset GPUS_PER_RANK and set {GPU_ROUTING_ENV}=1 ({routing}; "
+        f"n_compute = n_blocks x R, R ranks per walker block, GB/VGB split by "
+        f"band range, MBH/EMRI/SOBBH likelihood rows by walker); or (2) keep "
+        f"{n_dev} GPUs per rank and give every rank at least {n_dev} "
+        f"walkers: NWALKERS a multiple of {max(1, int(n_compute)) * n_dev} "
+        f"(= {n_compute} compute rank(s) x {n_dev} GPUs). A store's walker "
+        f"count is fixed for its life, so (2) needs a fresh or rescaled store."
+    )
+
+
+def _refuse_devices_beyond_walkers(placements, n_compute, nwalkers, gpu_routing):
+    """Raise when any computing rank owns more devices than walker rows.
+
+    Job 764 (9mo, 2026-10-15): ``NGPUS=8 GPUS_PER_RANK=2`` on the 4-walker
+    store gave 4 compute ranks with devices ``[0, 1]`` and ONE walker each.
+    ``AnalysisContainerArray`` shards a rank's rows over its devices by
+    contiguous ``np.array_split``, so the second device got an EMPTY shard
+    and ``recipe.build_gb_moves`` died in ``_gather_per_gpu_to_single``
+    ("Per-AC element size mismatch across shards: [3415857, 0]") two
+    minutes into the build. Every rank computes this from the same
+    allgathered table, so every rank raises together -- before any device is
+    touched -- instead of one of them aborting the world mid-build.
+    """
+    for r, p in sorted(placements.items()):
+        if p.role not in (RankRole.HEAD, RankRole.COMPUTE):
+            continue
+        if len(p.devices) > 1 and len(p.devices) > int(p.w1) - int(p.w0):
+            raise ValueError(devices_beyond_walkers_message(
+                r, p.devices, p.w0, p.w1, n_compute, nwalkers,
+                gpu_routing=gpu_routing))
+
+
 def build_layout(
     comm,
     nwalkers,
@@ -678,6 +729,7 @@ def build_layout(
                 r, role, node, local_index, devices, slot, w0, w1,
                 block_index=bi, replica_index=ri,
             )
+    _refuse_devices_beyond_walkers(placements, len(compute), nwalkers, gpu_routing)
     if k_explicit is not None:
         resolved_k = k_explicit
     elif resolved_ks and len(set(resolved_ks)) == 1:

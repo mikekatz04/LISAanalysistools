@@ -153,13 +153,15 @@ class MultiRankNoiseSmokeTest(unittest.TestCase):
         if not self._stray_existed:
             shutil.rmtree(self._stray, ignore_errors=True)
 
-    def _run_world(self, size=None, nwalkers=None):
+    def _run_world(self, size=None, nwalkers=None, iterations=None):
         """``{rank: probe}`` plus the string key ``"log"`` (every lisatools record).
 
         ``size``/``nwalkers`` default to the class fixture (2 ranks, 4
         walkers), so the historical arm is byte-for-byte the same run it was.
         ``nwalkers=1`` with two COMPUTE ranks (i.e. ``size >= 3``) is replica
-        mode.
+        mode. ``iterations`` (default ``ITERATIONS``) is how many iterations
+        THIS world runs (``run_mcmc``'s count): a second world on the same
+        ``(size, nwalkers)`` store RESUMES it and appends that many rows.
         """
         from lisatools.globalfit.communication.fakecomm import FakeWorld
         from lisatools.globalfit.communication.ranks import RankRole, prepare_rank
@@ -168,6 +170,7 @@ class MultiRankNoiseSmokeTest(unittest.TestCase):
 
         size = self.WORLD_SIZE if size is None else int(size)
         nwalkers = self.NWALKERS if nwalkers is None else int(nwalkers)
+        iterations = self.ITERATIONS if iterations is None else int(iterations)
 
         def fn(rank, comm):
             fit = erebor.noise_only(
@@ -175,7 +178,7 @@ class MultiRankNoiseSmokeTest(unittest.TestCase):
                 file_store_dir=os.path.join(self.tmpdir, f"n{size}w{nwalkers}"),
                 make_diagnostic_plots=False,
             )
-            fit.general.num_iterations = self.ITERATIONS
+            fit.general.num_iterations = iterations
             layout = prepare_rank(fit, comm)
             fit.build()
             gf = GlobalFit(fit, comm)
@@ -184,8 +187,13 @@ class MultiRankNoiseSmokeTest(unittest.TestCase):
             if role is RankRole.SAVER:
                 # a dedicated saver (size >= 3) never builds an ACA: it opens
                 # the HDF backend and parks in the async save loop
-                return {"role": role.value}
-            out = {"role": role.value, "acs_rows": int(gf.acs.acs_total_entries)}
+                return {"role": role.value,
+                        "store": getattr(gf.curr.general_info, "main_file_path", None)}
+            out = {"role": role.value, "acs_rows": int(gf.acs.acs_total_entries),
+                   "layout": layout, "block": layout.block_of(rank),
+                   # every compute rank's own residual + noise model, scored
+                   # (replicas of one block must agree with their lead)
+                   "acs_like": np.asarray(gf.acs.likelihood(), dtype=float).reshape(-1)}
             if hasattr(gf, "compute_service"):
                 out["served"] = gf.compute_service_served
                 return out
@@ -469,6 +477,115 @@ class MultiRankNoiseSmokeTest(unittest.TestCase):
         print(f"{MARKER} infomat PSD-cone projections: {len(infomat_lines)}", flush=True)
         for ln in infomat_lines:
             print(f"{MARKER}   {ln}", flush=True)
+
+    # ---- GF_GPU_ROUTING: 4 walkers x R = 2 (the NGPUS=8 production shape) ----
+    def _routing_world(self, iterations=None, spy=None):
+        """4 walkers on 8 compute ranks + a saver, ``GF_GPU_ROUTING=1``.
+
+        The 9mo production shape on 8 GPUs, at noise-only scale: 4 walker
+        blocks x R = 2. PSD/galfor are NOT flat-capable, so they take the
+        BLOCK path: each block's lead proposes, and the head publishes the
+        merged noise model to the passive replica (``replica_sync``).
+        ``GF_RESIDUAL_SNAPSHOT_EVERY=1`` so the snapshot fan-out runs too.
+        """
+        from unittest import mock
+
+        env = {"GF_GPU_ROUTING": "1", "GF_RESIDUAL_SNAPSHOT_EVERY": "1"}
+        with mock.patch.dict(os.environ, env):
+            return self._run_world(size=9, nwalkers=4, iterations=iterations)
+
+    def _assert_replicas_match_their_leads(self, out):
+        layout = out[0]["layout"]
+        self.assertEqual((layout.n_compute, layout.n_blocks, layout.ranks_per_block),
+                         (8, 4, 2))
+        self.assertTrue(layout.gpu_routing)
+        final_ll = out[0]["final_log_like"]
+        self.assertEqual(final_ll.shape, (4,))
+        self.assertTrue(np.all(np.isfinite(final_ll)), final_ll)
+        for r in range(8):
+            self.assertEqual(out[r]["block"], (r // 2, r // 2 + 1), r)
+            self.assertEqual(out[r]["acs_rows"], 1, r)
+            # every replica -- the passive one included -- holds the noise
+            # model the head stored for its walker: the publish reached it
+            np.testing.assert_allclose(
+                out[r]["acs_like"], final_ll[r // 2: r // 2 + 1], rtol=0.0, atol=1e-8,
+                err_msg=f"rank {r} (block {r // 2}, replica {r % 2}) disagrees "
+                        "with the stored cold lnL of its walker")
+
+    def test_four_walkers_two_replicas_each(self):
+        """4 walkers x R = 2: the block path, the replica publish, the snapshot."""
+        from unittest import mock
+
+        from lisatools.globalfit.moves.psdmove import PSDMove
+
+        synced, proposed = [], []
+        _real_sync = PSDMove.fanout_apply_replica_sync
+        _real_body = PSDMove.propose_local
+
+        def _spy_sync(mv, payload):
+            synced.append((mv.gf_rank, mv.name))
+            return _real_sync(mv, payload)
+
+        def _spy_body(mv, model, state):
+            proposed.append(mv.gf_rank)
+            return _real_body(mv, model, state)
+
+        with mock.patch.object(PSDMove, "fanout_apply_replica_sync", _spy_sync), \
+                mock.patch.object(PSDMove, "propose_local", _spy_body):
+            out = self._routing_world()
+        print(f"{MARKER} 4x2: proposed by ranks {sorted(set(proposed))}, "
+              f"replica syncs by ranks {sorted({r for r, _ in synced})} "
+              f"({len(synced)} total)", flush=True)
+        self.assertEqual(
+            tuple(out[r]["role"] for r in range(9)),
+            ("head",) + ("compute",) * 7 + ("saver",))
+        self._assert_replicas_match_their_leads(out)
+        # ONLY the leads ran the body; ONLY the passives applied a publish
+        self.assertEqual(sorted(set(proposed)), [0, 2, 4, 6])
+        self.assertEqual(sorted({r for r, _ in synced}), [1, 3, 5, 7])
+        # one publish per passive per noise propose (psd_pe + galfor_pe per
+        # iteration)
+        self.assertEqual(len(synced), 4 * MOVES_PER_ITERATION * self.ITERATIONS)
+        self.assertIn("block path with 2 rank(s) per block", out["log"])
+        # the snapshot fan-out: every walker's residual, from the block leads
+        from lisatools.globalfit.residual_snapshot import snapshot_path
+
+        snap = np.load(snapshot_path(out[8]["store"]))
+        self.assertEqual(snap["residuals"].shape[0], 4)
+        np.testing.assert_array_equal(snap["walkers"], np.arange(4))
+
+    def test_four_walkers_two_replicas_save_and_resume(self):
+        """A store written at 4 walkers x R = 2 resumes at the same shape."""
+        import h5py
+
+        first = self._routing_world(iterations=self.ITERATIONS)
+        self._assert_replicas_match_their_leads(first)
+        store = first[8]["store"]
+
+        def _group(fh):
+            return fh["global_fit"] if "global_fit" in fh else fh["mcmc"]
+
+        with h5py.File(store, "r") as fh:
+            n_first = int(_group(fh).attrs["iteration"])
+            rows_first = np.array(_group(fh)["log_like"][:n_first], copy=True)
+        self.assertEqual(n_first, self.ITERATIONS)
+        # every stored row is WHOLE (4 walkers, all finite): the head ships
+        # the merged ensemble to the saver whatever the replica factor
+        self.assertEqual(rows_first.shape[-1], 4)
+        self.assertTrue(np.all(np.isfinite(rows_first)))
+        # ``num_iterations`` is what THIS job runs (``run_mcmc``'s count); a
+        # resume appends that many rows to the stored ones
+        second = self._routing_world(iterations=2)
+        self._assert_replicas_match_their_leads(second)
+        with h5py.File(store, "r") as fh:
+            g = _group(fh)
+            n_total = int(g.attrs["iteration"])
+            # RESUMED, not restarted: the first job's rows are untouched and
+            # the second job's two rows were appended after them
+            self.assertEqual(n_total, n_first + 2)
+            np.testing.assert_array_equal(g["log_like"][:n_first], rows_first)
+            self.assertTrue(np.all(np.isfinite(g["log_like"][:n_total])))
+        print(f"{MARKER} 4x2 resume: {n_first} -> {n_total} stored rows", flush=True)
 
 
 if __name__ == "__main__":

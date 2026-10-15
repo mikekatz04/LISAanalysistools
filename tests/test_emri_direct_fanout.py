@@ -175,14 +175,15 @@ class _Case(unittest.TestCase):
         states, accepted = H._run_proposes(move, model, _state(walkers), self.N_PROPOSES)
         return dict(states=states, accepted=accepted, snap=_snapshot(move, acs, 0))
 
-    def _world(self, n_compute, nwalkers, *, rng, **kw):
+    def _world(self, n_compute, nwalkers, *, rng, gpu_routing=False, **kw):
         from lisatools.globalfit.moves import EMRIDirectLikeMove
         from lisatools.globalfit.recipe import _body_nwalkers
 
         world = FakeWorld(n_compute + 1, timeout=600.0)
 
         def fn(rank, comm):
-            layout = build_layout(comm, nwalkers, [], legacy=False, gpu_routing=False)
+            layout = build_layout(comm, nwalkers, [], legacy=False,
+                                  gpu_routing=gpu_routing)
             fcomm = layout.make_fanout_comm(comm)
             if layout.role_of(rank) == RankRole.SAVER:
                 return dict(role="saver", layout=layout)
@@ -267,6 +268,32 @@ class ReplicaRowFanoutTest(_Case):
         # the cross-check ran every visit, fanned out too
         self.assertEqual(sum(v["snap"]["spy"]["check_rows"] for v in computes.values()),
                          self.N_PROPOSES * H.NLEAVES * H.NTEMPS)
+
+
+class RoutedRowFanoutTest(_Case):
+    """``NGPUS=8 GF_GPU_ROUTING=1`` on the 4-walker store: 4 blocks x R = 2.
+
+    The head runs the 4-walker EMRI direct body; every scoring row is routed
+    to the two ranks holding its walker (block-local row 0), every cold-chain
+    replay is cut to the receiving rank's block, and the merged state and
+    every rank's residual equal the single-process run's."""
+
+    def test_four_blocks_two_replicas_each(self):
+        kw = dict(scope="walker_max", permute_every=1, adaptive=True,
+                  rng=lambda: np.random.RandomState(H.SEED))
+        ref = self._single(4, **kw)
+        out = self._world(8, 4, gpu_routing=True, **kw)
+        layout = out[0]["layout"]
+        self.assertEqual((layout.n_compute, layout.n_blocks,
+                          layout.ranks_per_block, layout.block), (8, 4, 2, 1))
+        computes = self._assert_match(out, ref)
+        self.assertEqual(sorted(computes), list(range(8)))
+        for rank, res in computes.items():
+            snap = res["snap"]
+            with self.subTest(rank=rank):
+                local = set(np.concatenate([i for _, i in snap["spy"]["score_calls"]]).tolist())
+                self.assertEqual(local, {0})
+                self.assertEqual(snap["w0"], rank // 2)
 
 
 class WalkerBlockFanoutTest(_Case):

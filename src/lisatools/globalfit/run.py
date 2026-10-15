@@ -2005,6 +2005,22 @@ class GlobalFit:
             else (int(walker_block[0]), int(walker_block[1]))
         )
         n_local = w1 - w0
+        _gpus0 = general_info.gpus
+        if _gpus0 is not None and len(_gpus0) > 1 and len(_gpus0) > n_local:
+            # More devices than walker rows: a device would get an EMPTY
+            # shard and the first GB gather dies on it (job 764). The layout
+            # refuses this before the build (``build_layout``); this is the
+            # backstop for a path that never resolved one, raised BEFORE any
+            # walker container is built.
+            from .communication.ranks import devices_beyond_walkers_message
+
+            _lay = getattr(self, "layout", None)
+            raise ValueError(devices_beyond_walkers_message(
+                self.rank, list(_gpus0), w0, w1,
+                getattr(_lay, "n_compute", 1) if _lay is not None else 1,
+                self.nwalkers,
+                gpu_routing=bool(getattr(_lay, "gpu_routing", False)),
+            ))
         state_view = _rebuild_state_view(state, walker_block)
         coarse_stats = self._prepare_coarse_wdm_runtime(state)
         pin_main_device(xp, general_info.gpus)

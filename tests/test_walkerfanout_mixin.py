@@ -403,6 +403,150 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class _BlockStub(_StubMove):
+    """A NON-flat family (PSD/galfor's shape) that implements the replica sync."""
+
+    fanout_flat_body = False
+
+    def __init__(self, tag, **kw):
+        super().__init__(tag, **kw)
+        self.synced = []
+
+    def fanout_replica_sync_payload(self, new_state, w0, w1):
+        return {"w": (int(w0), int(w1)),
+                "ll": np.array(new_state.log_like[0, w0:w1], copy=True),
+                "coords": np.array(new_state.branches["mbh"].coords[0, w0:w1], copy=True)}
+
+    def fanout_apply_replica_sync(self, payload):
+        self.synced.append(payload)
+
+
+class _NoSyncBlockStub(_StubMove):
+    """A non-flat family WITHOUT the sync hooks: refused under replicas."""
+
+    fanout_flat_body = False
+
+
+#: ``NGPUS=8 GF_GPU_ROUTING=1`` on 4 walkers: the run world (monitor split off)
+#: over 4 nodes, ``-ppn 1`` round robin -> 8 compute ranks, 4 blocks x R = 2
+NODES_4x2 = [0, 1, 2, 3, 0, 1, 2, 3, 0]
+
+
+class ReplicaBlockPathTest(unittest.TestCase):
+    """The BLOCK path under replicas over several blocks (2026-10-15).
+
+    PSD/galfor are not flat-capable, so at 4 walkers x R = 2 only each
+    block's LEAD proposes. Before 2026-10-15 the family still got a
+    ``RowFanout`` there (``replica_mode`` alone decided it), so its body issued
+    a second fan-out command from INSIDE the propose command -- head-only on a
+    worker lead, nested on the head -- and nothing ever told the passive
+    replicas that their block's noise model had moved. Now the body runs
+    block-local and the head publishes the merged result in a SECOND command.
+    """
+
+    def _run(self, cls=_BlockStub):
+        world = FakeWorld(9, nodes=NODES_4x2)
+        moves = {}
+
+        def fn(rank, comm):
+            layout = build_layout(comm, NWALKERS, [0, 1], legacy=False, gpu_routing=True)
+            fcomm = layout.make_fanout_comm(comm)
+            if layout.role_of(rank) == RankRole.SAVER:
+                return "saver"
+            fo = WalkerFanout(fcomm, layout, rank, model=None)
+            move = cls(10.0 * rank)
+            move.install_walker_fanout(_Curr(fo, rank))
+            moves[rank] = move
+            if layout.role_of(rank) == RankRole.HEAD:
+                fo.enter_stage("pe", "pe")
+                state = make_state(np.random.default_rng(1))
+                ref = GFState(state, copy=True)
+                try:
+                    new, acc = move.propose("head-model", state)
+                finally:
+                    fo.stop()
+                return ref, new, acc, layout
+            return ComputeService(
+                fcomm, layout, rank, registry={("pe", "stub"): move}, model="worker-model"
+            ).serve()
+
+        return world.run(fn), moves
+
+    def test_only_the_leads_propose_and_the_passives_get_their_block(self):
+        out, moves = self._run()
+        ref, new, acc, layout = out[0]
+        self.assertEqual((layout.n_blocks, layout.ranks_per_block), (4, 2))
+        leads, passive = layout.block_leads, (1, 3, 5, 7)
+        self.assertEqual(leads, (0, 2, 4, 6))
+        for r in leads:
+            self.assertEqual(len(moves[r].seen_models), 1, r)       # proposed once
+            self.assertEqual(moves[r].synced, [], r)                 # nothing to apply
+        for r in passive:
+            self.assertEqual(moves[r].seen_models, [], r)            # never proposed
+            self.assertEqual(len(moves[r].synced), 1, r)             # one publish
+            got = moves[r].synced[0]
+            b = r // 2
+            self.assertEqual(got["w"], (b, b + 1))
+            # the payload is the MERGED state's block: the lead's lnL tag
+            np.testing.assert_allclose(got["ll"], [10.0 * (r - 1)])
+            np.testing.assert_allclose(got["coords"], ref.branches["mbh"].coords[0, b:b + 1] + 1)
+        # each walker's lnL is its lead's, in walker order
+        np.testing.assert_allclose(new.log_like[0], [0.0, 20.0, 40.0, 60.0])
+        # passive ranks answered TWO commands: the passive propose + the sync
+        self.assertEqual(out[1], 2)
+        self.assertEqual(out[2], 2)                                  # a lead: propose + no-op sync
+        # the merge extras come from one representative per block
+        self.assertEqual(sorted(moves[0].merged), [0, 2, 4, 6])
+
+    def test_the_block_rules_apply_no_row_scatter_and_ladders_pooled(self):
+        _out, moves = self._run()
+        for r, m in moves.items():
+            self.assertIsNone(m.row_fanout, r)
+            self.assertFalse(m.rows_active(), r)
+            self.assertFalse(m.tc.adaptive, r)            # the head pools ONE step
+            self.assertTrue(m.tc.gf_configured_adaptive, r)
+        self.assertFalse(getattr(moves[0], "eigen_store_readonly", False))
+        self.assertTrue(moves[1].eigen_store_readonly)
+
+    def test_a_family_without_the_sync_is_refused_at_install(self):
+        layout = FakeWorld(9, nodes=NODES_4x2).run(
+            lambda r, c: build_layout(c, NWALKERS, [0, 1], legacy=False,
+                                      gpu_routing=True))[0]
+        fo = WalkerFanout(None, layout, 0)
+        with self.assertRaisesRegex(TypeError, "replica sync"):
+            _NoSyncBlockStub(0.0).install_walker_fanout(_Curr(fo, 0))
+        # a flat family at the same layout is untouched: rows scatter as before
+        flat = _StubMove(0.0)
+        flat.install_walker_fanout(_Curr(fo, 0))
+        self.assertIsNotNone(flat.row_fanout)
+
+    def test_likelihood_fanout_off_is_refused_with_several_blocks(self):
+        """``{BRANCH}_LIKELIHOOD_FANOUT=0`` means "the head scores every row
+        itself", which needs the head to HOLD every walker. With 4 blocks it
+        holds one, so the knob is kept ON with a warning instead of indexing
+        rows that are not there."""
+        import logging
+
+        layout = FakeWorld(9, nodes=NODES_4x2).run(
+            lambda r, c: build_layout(c, NWALKERS, [0, 1], legacy=False,
+                                      gpu_routing=True))[0]
+        fo = WalkerFanout(None, layout, 0)
+        move = _StubMove(0.0)
+        move.branch_name = "mbh"
+        with mock.patch.dict(os.environ, {"MBH_LIKELIHOOD_FANOUT": "0"}), \
+                self.assertLogs("lisatools.globalfit.moves.walkerfanout",
+                                level=logging.WARNING) as cm:
+            move.install_walker_fanout(_Curr(fo, 0))
+        self.assertTrue(move.likelihood_fanout)
+        self.assertTrue(move.rows_active())
+        self.assertIn("MBH_LIKELIHOOD_FANOUT=0 ignored", "\n".join(cm.output))
+
+    def test_the_psd_family_implements_the_sync(self):
+        from lisatools.globalfit.moves.psdmove import PSDMove
+        for name in ("fanout_replica_sync_payload", "fanout_apply_replica_sync"):
+            self.assertIsNot(getattr(PSDMove, name), getattr(WalkerFanoutMixin, name), name)
+
+
 class FlatBodyOptOutTest(unittest.TestCase):
     """``fanout_flat_body`` keeps a family on the BLOCK path under replicas.
 

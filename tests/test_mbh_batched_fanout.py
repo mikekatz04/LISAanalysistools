@@ -595,6 +595,29 @@ class RoutedRowFanoutTest(_FlatCase):
             # the move runs the 2-walker body on every rank's build
             self.assertEqual(snap["move"].nwalkers, 2)
 
+    def test_four_blocks_two_replicas_each(self):
+        """``NGPUS=8 GF_GPU_ROUTING=1`` on the 4-walker store: 4 blocks x R = 2.
+
+        The 9mo production shape on 8 GPUs. The head runs the 4-walker body;
+        every row is routed to the two ranks holding its walker (block-local
+        row 0 on each), so BOTH replicas of EVERY block score rows -- the
+        add/remove family's within-walker split -- and the merged state, every
+        rank's residual and the eigen tables equal the single-process run's
+        (``_check``)."""
+        out, _ref = self._check(8, 4, gpu_routing=True)
+        layout = out[0]["layout"]
+        self.assertEqual((layout.n_compute, layout.n_blocks,
+                          layout.ranks_per_block, layout.block), (8, 4, 2, 1))
+        for b in range(4):
+            for rank in layout.ranks_in_block(b):
+                snap = out[rank]["snap"]
+                self.assertEqual(snap["w0"], b)
+                self.assertEqual(len(snap["residual"]), 1)
+                idx = np.concatenate([i for _, i in snap["spy"]["score_calls"]])
+                self.assertEqual(set(idx.tolist()), {0}, rank)
+                self.assertGreater(snap["spy"]["score_rows"], 0, rank)
+                self.assertEqual(snap["move"].nwalkers, 4)
+
 
 # ---------------------------------------------------------------------------
 # (b) walker-block fan-out: every rank runs the body on its own block

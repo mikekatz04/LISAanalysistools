@@ -221,6 +221,66 @@ class WalkerFanoutMixin:
     def fanout_merge_extra(self, replies, new_state):
         """Head: pooled ladder adaptation etc. ``replies`` = {rank: extra}."""
 
+    # ---- block path under replicas: publish to the passive replicas -----
+    def fanout_replica_sync_payload(self, new_state, w0, w1):
+        """Head: what a PASSIVE replica of block ``[w0, w1)`` needs after a propose.
+
+        Only reached on the BLOCK path with several ranks per block (a
+        family with ``fanout_flat_body = False`` under the ``GF_GPU_ROUTING``
+        layout): the block's lead proposed and changed its own containers,
+        and the group-mates hold the same walkers on containers that still
+        carry the pre-propose state. Host numpy only (it is pickled).
+        ``install_walker_fanout`` refuses that layout for a family that does
+        not implement this and :meth:`fanout_apply_replica_sync`.
+        """
+        raise NotImplementedError
+
+    def fanout_apply_replica_sync(self, payload):
+        """Rank: install :meth:`fanout_replica_sync_payload`'s products locally."""
+        raise NotImplementedError
+
+    def serve_replica_sync(self, payload, clock, model):
+        """Fan-out op ``replica_sync``: a passive replica applies the payload;
+        every other rank (the leads, the head) gets ``None`` and does nothing."""
+        if payload is None:
+            return None
+        self.fanout_apply_replica_sync(payload)
+        return None
+
+    def _fanout_sync_replicas(self, new_state, passive):
+        """Head: one ``replica_sync`` command AFTER the propose merge.
+
+        A SECOND command, never one nested inside the propose command (the
+        2026-09-23 nested-fan-out lesson): every compute rank answers it, the
+        leads with nothing to do. ``passive`` is the list of non-lead ranks.
+        """
+        fanout = self.fanout
+        layout = fanout.layout
+        passive = set(int(r) for r in passive)
+
+        def payload(rank, w0, w1):
+            if int(rank) not in passive:
+                return None
+            return self.fanout_replica_sync_payload(new_state, int(w0), int(w1))
+
+        def body(p, _model):
+            if p is None:
+                return None
+            return self.serve_replica_sync(p, fanout.clock, _model)
+
+        fanout.run(
+            "replica_sync",
+            move=getattr(self, "gf_move_name", None),
+            per_rank_payload=payload,
+            local_body=body,
+            merge=lambda _replies: None,
+        )
+        logger.debug(
+            "[FANOUT] %s: published the merged propose to %d passive "
+            "replica(s) %s (%d rank(s) per block)",
+            getattr(self, "gf_move_name", type(self).__name__), len(passive),
+            sorted(passive), int(getattr(layout, "ranks_per_block", 1)))
+
     # ---- wiring ------------------------------------------------------------
     @property
     def fanout_active(self):
@@ -238,13 +298,51 @@ class WalkerFanoutMixin:
                 f"{type(self).__name__} overrides propose(); under several compute ranks the "
                 "body must live in propose_local() so every rank runs it (the mixin owns propose)"
             )
-        if getattr(self.fanout.layout, "replica_mode", False):
+        layout = self.fanout.layout
+        if getattr(layout, "replica_mode", False) and not self._flat_body_ok(layout):
+            # REPLICAS OVER SEVERAL BLOCKS for a family that is not
+            # flat-capable (PSD/galfor): the BLOCK path, with only each
+            # block's lead proposing. The body then runs block-local with
+            # NO row scatter -- a ``RowFanout`` here would issue a second
+            # fan-out command from inside the propose command (``run`` is
+            # head-only; on a worker lead it raises, on the head it nests)
+            # -- and the head publishes the merged result to the passive
+            # replicas afterwards (:meth:`_fanout_sync_replicas`). Refused
+            # HERE, at build time, when the family cannot do that publish:
+            # a replica left on the pre-propose noise model would score
+            # every later move against a stale likelihood, silently.
+            if (type(self).fanout_apply_replica_sync
+                    is WalkerFanoutMixin.fanout_apply_replica_sync
+                    or type(self).fanout_replica_sync_payload
+                    is WalkerFanoutMixin.fanout_replica_sync_payload):
+                raise TypeError(
+                    f"{type(self).__name__} takes the BLOCK path under "
+                    f"replicas over {int(getattr(layout, 'n_blocks', 1))} "
+                    "walker blocks (fanout_flat_body=False) but implements no "
+                    "replica sync (fanout_replica_sync_payload / "
+                    "fanout_apply_replica_sync), so its passive replicas would "
+                    "keep a stale state. Implement both, or make the family "
+                    "flat-capable."
+                )
+        elif getattr(layout, "replica_mode", False):
             from ..communication.rowfanout import RowFanout
 
             self.row_fanout = RowFanout(self.fanout, self)
             env = os.environ.get(f"{self.fanout_knob_prefix()}_LIKELIHOOD_FANOUT")
             if env is not None:
                 self.likelihood_fanout = env.strip() not in ("0", "false", "False", "")
+            if not self.likelihood_fanout and int(getattr(layout, "n_blocks", 1)) > 1:
+                # "Score every row on the head" is only possible when the
+                # head's container holds every walker (one block). With
+                # several blocks it holds its own block alone, so a full-N
+                # body scoring locally would index rows that do not exist
+                # there: the knob is refused (kept ON), loudly, not obeyed.
+                logger.warning(
+                    "[FANOUT] %s_LIKELIHOOD_FANOUT=0 ignored: with %d walker "
+                    "blocks the head holds only its own block's rows, so every "
+                    "scoring row must go to the ranks that hold its walker.",
+                    self.fanout_knob_prefix(), int(getattr(layout, "n_blocks", 1)))
+                self.likelihood_fanout = True
             if not self.fanout.is_head and hasattr(self, "eigen_store_path"):
                 self.eigen_store_path = None  # single-writer sidecar (head only)
             # the head runs the single-process body: its ladders adapt inside it
@@ -427,13 +525,19 @@ class WalkerFanoutMixin:
                                     new_state)
             return new_state, accepted
 
-        return fanout.run(
+        result = fanout.run(
             PROPOSE_OP,
             move=getattr(self, "gf_move_name", None),
             per_rank_payload=payload,
             local_body=body,
             merge=merge,
         )
+        if _passive:
+            # the passive replicas still hold the pre-propose state on their
+            # containers: publish the merged result to them (a second
+            # command, after the first has fully returned)
+            self._fanout_sync_replicas(result[0], _passive)
+        return result
 
     def gf_serve(self, op, payload, clock, model):
         if op != PROPOSE_OP:
@@ -443,6 +547,14 @@ class WalkerFanoutMixin:
             self.gf_clock = dict(clock or {})
             return handler(payload, clock, model)
         self.gf_clock = dict(clock or {})  # WP8 seeds its synced swap RNG from this
+        if payload.get("passive"):
+            # A block's non-lead replica (``fanout_propose``): its lead
+            # proposes for the block. Honoured HERE as well as in the head's
+            # own local body -- a WORKER replica reaches the body through
+            # this method, and before 2026-10-15 it ran the full body anyway
+            # (its own proposals, its own publish onto its containers, the
+            # merge then discarding the result).
+            return self._passive_propose_reply(payload)
         _extra = dict(payload.get("extra") or {})
         _saved_live = self.fanout_install_live(_extra.pop("_live_attrs", None))
         self.fanout_apply_extra(_extra)

@@ -53,6 +53,81 @@ set -euo pipefail
 # ACTUALLY granted (SLURM_GPUS_ON_NODE), so a manual
 # `sbatch --partition=gpu-80-spot --gres=gpu:2 --nodes=2 <script>` also
 # works.
+#
+# ---- GF_GPU_ROUTING: split EACH WALKER over several GPUs (2026-10-15) -------
+# GPUS_PER_RANK>1 PACKS walkers onto one rank (its GPUs shard the rank's
+# walker rows); it never splits a walker. 9mo job 764 (NGPUS=8
+# GPUS_PER_RANK=2 on the 4-walker store: 1 walker per 2-GPU rank) died at the
+# first GB gather on an EMPTY second shard. What splits a walker is the
+# replica routing, opt-in with GF_GPU_ROUTING=1: N_COMPUTE = n_blocks x R,
+# n_blocks = gcd(NWALKERS, N_COMPUTE), R ranks share a walker block, ONE GPU
+# per rank. Inside a block GB/VGB split by band range and MBH/EMRI/SOBBH by
+# likelihood rows; PSD/galfor propose on the block lead and publish to the
+# other replica(s). The production line on the 4-walker store:
+#     NGPUS=8 GF_GPU_ROUTING=1 ./submit_gf_{{RUN}}.sh  # 8 ranks = 4 blocks x R=2
+# With the knob ON, NWALKERS is NEVER rounded (a resume refuses a changed
+# walker count anyway). With it unset every shape is exactly what it was,
+# except that the GPUS_PER_RANK trap above is refused before sbatch.
+_gf_routing_on() {
+  case "$(printf '%s' "${GF_GPU_ROUTING:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+    1|true|yes|on) return 0 ;;
+  esac
+  return 1
+}
+_gf_gcd() { local a=$1 b=$2 t; while [ "$b" -ne 0 ]; do t=$b; b=$(( a % b )); a=$t; done; echo "$a"; }
+# _gf_gpus_trap NWALKERS_PER_RANK GPUS_PER_RANK NWALKERS N_COMPUTE: refuse
+# (return 2) a rank that would drive more GPUs than it holds walkers.
+_gf_gpus_trap() {
+  local per=$1 k=${2:-1} nw=$3 nc=$4
+  if [ "${k}" -gt 1 ] && [ "${per}" -lt "${k}" ]; then
+    echo "[SUBMIT] REFUSED: GPUS_PER_RANK=${k} but each compute rank holds ${per} walker(s) (NWALKERS=${nw} over N_COMPUTE=${nc})."
+    echo "[SUBMIT]   A rank's GPUs shard its WALKERS (GPUS_PER_RANK packs walkers, it never splits one), so"
+    echo "[SUBMIT]   $(( k - per )) GPU(s) per rank would hold no walker and the build would die at the first GB"
+    echo "[SUBMIT]   gather ('Per-AC element size mismatch across shards', 9mo job 764). Two routes:"
+    echo "[SUBMIT]   (1) split every walker over several GPUs: unset GPUS_PER_RANK and set GF_GPU_ROUTING=1"
+    echo "[SUBMIT]       (one GPU per rank, R ranks per walker block);"
+    echo "[SUBMIT]   (2) keep GPUS_PER_RANK=${k}: NWALKERS a multiple of $(( nc * k )) (a fresh or rescaled store)."
+    return 2
+  fi
+  return 0
+}
+# _gf_routing_layout NWALKERS N_COMPUTE GPUS_PER_RANK [RANKS_PER_BLOCK]: print
+# the replica factorization; refuse (return 2) a shape build_layout refuses.
+_gf_routing_layout() {
+  local nw=$1 nc=$2 k=${3:-1} rpb=${4:-} nb R
+  if [ "${nw}" -lt 1 ] || [ "${nc}" -lt 1 ]; then
+    echo "[SUBMIT] REFUSED: GF_GPU_ROUTING=1 needs NWALKERS >= 1 and N_COMPUTE >= 1 (got ${nw}, ${nc})."
+    return 2
+  fi
+  if [ -n "${rpb}" ]; then
+    R=${rpb}
+    if [ "${R}" -lt 1 ] || [ $(( nc % R )) -ne 0 ]; then
+      echo "[SUBMIT] REFUSED: RANKS_PER_BLOCK=${R} must be >= 1 and divide N_COMPUTE=${nc}."
+      return 2
+    fi
+    nb=$(( nc / R ))
+    if [ $(( nw % nb )) -ne 0 ]; then
+      echo "[SUBMIT] REFUSED: RANKS_PER_BLOCK=${R} gives ${nb} walker block(s), which does not divide NWALKERS=${nw}."
+      return 2
+    fi
+  else
+    nb=$(_gf_gcd "${nw}" "${nc}")
+    R=$(( nc / nb ))
+  fi
+  if [ "${R}" -lt 1 ] || [ $(( nb * R )) -ne "${nc}" ]; then
+    echo "[SUBMIT] REFUSED: N_COMPUTE=${nc} is not n_blocks=${nb} x R=${R}."
+    return 2
+  fi
+  _gf_gpus_trap $(( nw / nb )) "${k}" "${nw}" "${nc}" || return 2
+  echo "[SUBMIT] GF_GPU_ROUTING=1: replica factorization NWALKERS=${nw} on N_COMPUTE=${nc} -> n_blocks=${nb} walker block(s) of $(( nw / nb )) walker(s) x R=${R} replica rank(s) per block, one GPU per rank (n_blocks = gcd(NWALKERS, N_COMPUTE); NWALKERS is NOT rounded)"
+  if [ "${R}" -gt 1 ]; then
+    echo "[SUBMIT]   each walker block is split over its ${R} ranks: GB/VGB by band range, MBH/EMRI/SOBBH likelihood rows by walker; PSD/galfor propose on the block lead and publish to the other replica(s)"
+  fi
+  if [ "${nb}" -eq 1 ] && [ "${nw}" -gt 1 ] && [ "${nc}" -gt 1 ]; then
+    echo "[SUBMIT]   WARNING: gcd(${nw}, ${nc}) = 1 -> ONE block replicated on every rank; no walker parallelism."
+  fi
+  return 0
+}
 if [ -z "${SLURM_JOB_ID:-}" ]; then
   NGPUS=${NGPUS:-{{NGPUS_DEFAULT}}}                # the run's default (runs.py ngpus_default; 4 = the 2-node on-demand shape since 2026-10-07)
   GPUS_PER_RANK=${GPUS_PER_RANK:-}
@@ -70,7 +145,9 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     # on-demand partition -> N_COMPUTE=8 compute ranks, so the walker
     # count must be a multiple of 8 (a 4-walker store cannot resume on it:
     # clone it to 8 or 16 walkers with scripts/fstat_proposal/
-    # rescale_store_walkers.py and launch the clone with NWALKERS=8).
+    # rescale_store_walkers.py and launch the clone with NWALKERS=8) --
+    # OR keep the 4-walker store and add GF_GPU_ROUTING=1 (2026-10-15): 4
+    # walker blocks x R=2 replicas, each walker split over two GPUs.
     8) _NGPU_PART=${PARTITION:-gpu-80-ondemand}; _NODES=4; _GRES=gpu:2 ;;
     *) echo "[SUBMIT] NGPUS=${NGPUS} unsupported (2, 4 or 8)."; exit 2 ;;
   esac
@@ -118,6 +195,26 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     echo "[SUBMIT] GF_LEGACY_RANK_LAYOUT=0: walker-block layout: ${N_COMPUTE}"
     echo "[SUBMIT]   compute ranks + 1 saver."
   fi
+  # GF_GPU_ROUTING report / the GPUS_PER_RANK trap (functions above), BEFORE
+  # sbatch. NWALKERS: the launch line's, else this script's own default.
+  _NW_DEFAULT=$(sed -n 's/^export NWALKERS=\${NWALKERS:-\([0-9][0-9]*\)}.*/\1/p' "$0")
+  _NW_SUBMIT=${NWALKERS:-${_NW_DEFAULT:-4}}
+  _ROUTING_EXPORT=""
+  if _gf_routing_on; then
+    _ROUTING_EXPORT=",GF_GPU_ROUTING=1"
+    if [ "${GF_LEGACY_RANK_LAYOUT}" = "0" ]; then
+      _gf_routing_layout "${_NW_SUBMIT}" "${N_COMPUTE}" "${_k}" "${RANKS_PER_BLOCK:-}" || exit 2
+    fi
+  elif [ "${GF_LEGACY_RANK_LAYOUT}" = "0" ] && [ "${N_COMPUTE}" -gt 0 ]; then
+    # the in-job block rounds NWALKERS UP to a multiple of N_COMPUTE (one-walker
+    # replica mode excepted): this is the per-rank count the job would run
+    if [ "${_NW_SUBMIT}" -eq 1 ] && [ "${N_COMPUTE}" -gt 1 ]; then
+      _NW_PER=1
+    else
+      _NW_PER=$(( (_NW_SUBMIT + N_COMPUTE - 1) / N_COMPUTE ))
+    fi
+    _gf_gpus_trap "${_NW_PER}" "${_k}" "${_NW_SUBMIT}" "${N_COMPUTE}" || exit 2
+  fi
   echo "[SUBMIT] NGPUS=${NGPUS} -> sbatch --partition=${_NGPU_PART} --gres=${_GRES} --nodes=${_NODES} --ntasks=${NTASKS} (N_COMPUTE=${N_COMPUTE} compute ranks + 1 saver + GF_MONITOR_RANK=${GF_MONITOR_RANK} monitor)"
   _DIST_FLAG=""
   if [ "${_NODES}" -gt 1 ]; then
@@ -134,7 +231,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
   echo "[SUBMIT] --cpus-per-task=${_CPT} (EMRI_LIKELIHOOD=${EMRI_LIKELIHOOD:-direct}, EMRI_TRAJ_WORKERS=${EMRI_TRAJ_WORKERS:-8})"
   exec sbatch --partition="${_NGPU_PART}" --gres="${_GRES}" --nodes="${_NODES}" \
        --ntasks="${NTASKS}" --cpus-per-task="${_CPT}" ${_DIST_FLAG} \
-       --export=ALL,NGPUS="${NGPUS}",GPUS_PER_RANK="${GPUS_PER_RANK}",RANKS_PER_GPU="${RANKS_PER_GPU}",GF_LEGACY_RANK_LAYOUT="${GF_LEGACY_RANK_LAYOUT}",GF_MONITOR_RANK="${GF_MONITOR_RANK}" \
+       --export=ALL,NGPUS="${NGPUS}",GPUS_PER_RANK="${GPUS_PER_RANK}",RANKS_PER_GPU="${RANKS_PER_GPU}",GF_LEGACY_RANK_LAYOUT="${GF_LEGACY_RANK_LAYOUT}",GF_MONITOR_RANK="${GF_MONITOR_RANK}"${_ROUTING_EXPORT} \
        "$0" "$@"
 fi
 
@@ -586,10 +683,22 @@ export NWALKERS=${NWALKERS:-4}
                                    # The dispatch's --export=ALL carries the
                                    # shell's value, so `NWALKERS=1 ./submit_gf_{{RUN}}.sh`
                                    # reaches the one-walker branch below.
+# GF_GPU_ROUTING=1 (functions at the top of the script): the replica
+# factorization of the GRANTED allocation -- NWALKERS is never rounded (the
+# rounding branch below is skipped), and a shape build_layout would refuse is
+# refused here, before the preflights and mpiexec.
+_GF_ROUTING=0
+if _gf_routing_on; then
+  _GF_ROUTING=1
+  export GF_GPU_ROUTING=1
+  if [ "${GF_LEGACY_RANK_LAYOUT}" = "0" ]; then
+    _gf_routing_layout "${NWALKERS}" "${N_COMPUTE_EFF}" "${_k}" "${RANKS_PER_BLOCK:-}" || exit 2
+  fi
+fi
 if [ "${GF_LEGACY_RANK_LAYOUT}" = "0" ] && [ "${N_COMPUTE_EFF}" -gt 1 ] && [ "${NWALKERS}" -eq 1 ]; then
   echo "[SUBMIT] NWALKERS=1 on N_COMPUTE=${N_COMPUTE_EFF}: one-walker replica mode (every compute rank holds the walker; GB/VGB by band range, addremove/PSD by likelihood rows)"
-elif [ "${GF_LEGACY_RANK_LAYOUT}" = "0" ] && [ "${N_COMPUTE_EFF}" -gt 0 ] \
-     && [ $(( NWALKERS % N_COMPUTE_EFF )) -ne 0 ]; then
+elif [ "${_GF_ROUTING:-0}" = "0" ] && [ "${GF_LEGACY_RANK_LAYOUT}" = "0" ] \
+     && [ "${N_COMPUTE_EFF}" -gt 0 ] && [ $(( NWALKERS % N_COMPUTE_EFF )) -ne 0 ]; then
   echo "[SUBMIT] NWALKERS=${NWALKERS} is not a multiple of N_COMPUTE=${N_COMPUTE_EFF}; using NWALKERS=$(( (NWALKERS / N_COMPUTE_EFF + 1) * N_COMPUTE_EFF )) (user decision at the first 4-GPU launch)"
   export NWALKERS=$(( (NWALKERS / N_COMPUTE_EFF + 1) * N_COMPUTE_EFF ))
 fi

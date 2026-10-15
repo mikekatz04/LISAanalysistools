@@ -523,8 +523,9 @@ class MultiRankGBSmokeTest(unittest.TestCase):
         # (the GB_DEBUG preset); do not leak them into the next test
         os.environ.clear()
         os.environ.update(self._env0)
-        self.assertLess(_rss_gb(), RSS_BUDGET_GB,
-                        f"GB smoke exceeded the {RSS_BUDGET_GB} GB budget")
+        budget = getattr(self, "rss_budget_gb", RSS_BUDGET_GB)
+        self.assertLess(_rss_gb(), budget,
+                        f"GB smoke exceeded the {budget} GB budget")
 
     def _run_world(self, size, env=None, subdir=None, inject=False, nwalkers=NWALKERS):
         """In-process world. ``{rank: probe dict}`` plus two string keys.
@@ -674,9 +675,10 @@ class MultiRankGBSmokeTest(unittest.TestCase):
         synced = []
         _real_apply_sync = GBSpecialBase._replica_apply_sync
 
-        def _spy(move_self, replies_s, layout, log_like_final, band_counts):
+        def _spy(move_self, replies_s, layout, log_like_final, band_counts, **kw):
+            # ``**kw``: the head passes the per-rank ``neutral`` map (2026-10-15)
             hashes = _real_apply_sync(
-                move_self, replies_s, layout, log_like_final, band_counts)
+                move_self, replies_s, layout, log_like_final, band_counts, **kw)
             synced.append((move_self.name, hashes))
             return hashes
 
@@ -715,6 +717,67 @@ class MultiRankGBSmokeTest(unittest.TestCase):
             np.all(np.isfinite(state.sub_states["gb"].band_info["band_temps"])))
         # the injection survives
         self.assertGreaterEqual(int(state.branches["gb"].inds[0].sum()), 1)
+
+    @unittest.skipUnless(
+        os.environ.get("RUN_GF_GB_SMOKE_BLOCKS", "") not in ("", "0"),
+        "set RUN_GF_GB_SMOKE_BLOCKS=1 (with RUN_GF_GB_SMOKE=1) on a box with "
+        ">= 16 GB: five fits in one process, NOT for the 8 GB laptop")
+    def test_two_blocks_two_replicas_each(self):
+        """2 walkers on 4 compute ranks + saver, ``GF_GPU_ROUTING=1``: BOTH axes.
+
+        The smallest both-axes GB world (2 walker blocks x R = 2), i.e. the
+        ``NGPUS=8`` production shape at half width, end to end through the
+        real GB bodies: the band-range split inside each block, the per-unit
+        ledger on each block's GROUP comm, the head's per-block merge by owned
+        source and the per-block ``gb_sync`` (2026-10-15). Five ~1 GB fits
+        in one process -- run it on a cluster CPU node (no GPU needed):
+
+            RUN_GF_GB_SMOKE=1 RUN_GF_GB_SMOKE_BLOCKS=1 python -m unittest \\
+                tests.test_multirank_gb_smoke.MultiRankGBSmokeTest.test_two_blocks_two_replicas_each
+
+        Claims: the world does not raise; ``gb_sync`` ran and EVERY compute
+        rank answered it; the two replicas of each block rebuilt the same
+        residual (hash, bit-exact on CPU); no ``log_like_final
+        disagrees`` warning; the injected source survives in BOTH walkers.
+        """
+        from unittest import mock
+
+        from lisatools.globalfit.moves.gbspecialstretch import GBSpecialBase
+
+        self.rss_budget_gb = 12.0
+        synced = []
+        _real_apply_sync = GBSpecialBase._replica_apply_sync
+
+        def _spy(move_self, replies_s, layout, log_like_final, band_counts, **kw):
+            hashes = _real_apply_sync(
+                move_self, replies_s, layout, log_like_final, band_counts, **kw)
+            synced.append((move_self.name, hashes))
+            return hashes
+
+        with mock.patch.object(GBSpecialBase, "_replica_apply_sync", _spy):
+            out = self._run_world(5, env={"GF_GPU_ROUTING": "1"}, inject=True,
+                                  nwalkers=2, subdir="blocks2x2")
+        self.assertEqual(
+            tuple(out[r]["role"] for r in range(5)),
+            ("head", "compute", "compute", "compute", "saver"))
+        for r in range(4):
+            self.assertEqual(out[r]["acs_rows"], 1, r)
+        for line in out["log"].splitlines():
+            if "[GB_REPLICA" in line:
+                print(f"{MARKER} {line}", flush=True)
+        print(f"{MARKER} 2x2 gb_sync rounds={len(synced)}", flush=True)
+        self.assertTrue(synced, "gb_sync never ran (every propose had a neutral block)")
+        for name, hashes in synced:
+            self.assertEqual(sorted(hashes), [0, 1, 2, 3], name)
+            self.assertEqual(hashes[0], hashes[1], f"{name}: block 0 replicas differ")
+            self.assertEqual(hashes[2], hashes[3], f"{name}: block 1 replicas differ")
+        self.assertNotIn("log_like_final disagrees", out["log"])
+        state = out["state"]
+        self.assertIsNotNone(state, "the head returned no final state")
+        self.assertTrue(
+            np.all(np.isfinite(state.sub_states["gb"].band_info["band_temps"])))
+        for w in range(2):
+            self.assertGreaterEqual(int(state.branches["gb"].inds[0, w].sum()), 1, w)
 
     def test_orchestrator_at_one_rank_matches_the_legacy_body(self):
         # WITH the injection: every arm is a fresh interpreter, so all three see

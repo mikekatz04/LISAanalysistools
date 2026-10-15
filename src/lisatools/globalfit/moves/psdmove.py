@@ -3686,6 +3686,91 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
             before_vals=before_vals,
         )
 
+    def _publish_noise_rows(self, branches_coords, tm=None):
+        """Install every LOCAL walker's cold-row noise model on its container.
+
+        ``branches_coords`` is engine-shaped (``[0, w, 0]`` is walker ``w``'s
+        cold row). Same per-shard dispatch as the scoring builds: each
+        walker's build runs on its owning device, split groups run
+        concurrently under run_threaded (multi-GPU), serially otherwise.
+        Shared by the end of every propose (:meth:`_finish_propose`) and by
+        a passive replica's :meth:`fanout_apply_replica_sync`, so a replica
+        reproduces its block lead's publish through the very same code.
+        """
+        nwalkers = len(self.acs)
+
+        def _publish_one(w):
+            w = int(w)
+            psd_params = branches_coords["psd"][0, w, 0]
+            if "galfor" in branches_coords:
+                galfor_params = branches_coords["galfor"][0, w, 0]
+            else:
+                galfor_params = None
+            if "sgwb" in branches_coords:
+                sgwb_params = branches_coords["sgwb"][0, w, 0]
+            else:
+                sgwb_params = None
+
+            with _tspan(tm, "sens_refresh"):
+                new_sens = self._build_sensitivity_for_walker(
+                    w, psd_params, galfor_params, sgwb_params
+                )
+            self.acs[w].sens_mat = new_sens
+            if self.debug and w == self.debug_plot_walker:
+                # accepted params of the plotted walker, for the
+                # instrument-only reference curve in the debug overlay.
+                # Non-replica path only: in replica mode the publish runs
+                # through _replay_noise_publish/_apply_psd_replay instead of
+                # _publish_one, so this capture never fires there.
+                self._debug_walker_params = (
+                    w, psd_params, galfor_params, sgwb_params
+                )
+
+        self._run_rows_per_split(
+            _publish_one, np.arange(nwalkers), np.arange(nwalkers)
+        )
+
+        # NOT gated by _skip_linear_psd_repack, deliberately. This is the one
+        # repack that PUBLISHES the accepted noise model to the rest of the
+        # run, and it fires once per propose (~16 ms) rather than once per
+        # scoring batch (~295x per iteration) -- so skipping it would buy
+        # ~0.15% while opening the buffer to staleness across moves. Keeping
+        # it means the only window where linear_psd_arr is stale is INSIDE
+        # compute_log_like's scoring loop, where no other move can observe it.
+        self.acs.reset_linear_psd_arr()
+
+    # ---- the block path under replicas (GF_GPU_ROUTING, several blocks) --
+    def fanout_replica_sync_payload(self, new_state, w0, w1):
+        """Head: the merged cold noise rows of block ``[w0, w1)`` for its
+        PASSIVE replicas, plus which of them this move held FIXED.
+
+        PSD/galfor run the BLOCK path under replicas over several blocks
+        (``fanout_flat_body = False``): only the lead proposes, so only the
+        lead's containers carry the new noise model. The passive replicas
+        rebuild exactly what the lead built -- its propose-begin prep (the
+        non-sampled branches frozen at their cold rows, which this move
+        never changes) and its publish -- from these rows.
+        """
+        bc = new_state.branches_coords
+        model = self._noise_model_branches(new_state)
+        sampled = set(self._resolve_sampled(new_state))
+        rows = {
+            key: np.array(np.asarray(bc[key])[0:1, int(w0):int(w1), 0:1],
+                          dtype=np.float64, copy=True)
+            for key in ("psd", "galfor", "sgwb") if key in bc
+        }
+        fixed = {
+            key: np.array(np.asarray(bc[key])[0, int(w0):int(w1), 0],
+                          dtype=np.float64, copy=True)
+            for key in model if key not in sampled
+        }
+        return {"rows": rows, "fixed_noise_coords": fixed}
+
+    def fanout_apply_replica_sync(self, payload):
+        """Passive replica: the lead's propose-begin prep, then its publish."""
+        self._apply_noise_begin({"fixed_noise_coords": payload["fixed_noise_coords"]})
+        self._publish_noise_rows(payload["rows"], getattr(self, "_prop_timer", None))
+
     def _finish_propose(self, state, ctx, tmp_state, accepted):
         """The finish half of :meth:`propose_local`: write the working state's
         sampled branches back into a copy of ``state`` (full ladder into the
@@ -3731,57 +3816,13 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         new_state.log_like[0] = tmp_state.log_like[0]
         new_state.log_prior[0] = self._cold_noise_log_prior(new_state)
 
-        # Publish the accepted (cold-row) noise model onto every walker's
-        # AnalysisContainer. Same per-shard dispatch as the scoring builds:
-        # each walker's build runs on its owning device, split groups run
-        # concurrently under run_threaded (multi-GPU), serially otherwise.
-        nwalkers = len(self.acs)
-
-        def _publish_one(w):
-            w = int(w)
-            psd_params = new_state.branches_coords["psd"][0, w, 0]
-            if "galfor" in new_state.branches_coords:
-                galfor_params = new_state.branches_coords["galfor"][0, w, 0]
-            else:
-                galfor_params = None
-            if "sgwb" in new_state.branches_coords:
-                sgwb_params = new_state.branches_coords["sgwb"][0, w, 0]
-            else:
-                sgwb_params = None
-
-            with _tspan(_tm, "sens_refresh"):
-                new_sens = self._build_sensitivity_for_walker(
-                    w, psd_params, galfor_params, sgwb_params
-                )
-            self.acs[w].sens_mat = new_sens
-            if self.debug and w == self.debug_plot_walker:
-                # accepted params of the plotted walker, for the
-                # instrument-only reference curve in the debug overlay.
-                # Non-replica path only: in replica mode the publish runs
-                # through _replay_noise_publish/_apply_psd_replay instead of
-                # _publish_one, so this capture never fires there.
-                self._debug_walker_params = (
-                    w, psd_params, galfor_params, sgwb_params
-                )
-
         if self.row_fanout is not None:
             # Gated on replica mode itself, not rows_active()/the knob: the
             # publish must reach every replica's container regardless of
             # {PREFIX}_LIKELIHOOD_FANOUT (see _replay_noise_publish).
             self._replay_noise_publish(new_state)  # walker 0 on every replica, head included
         else:
-            self._run_rows_per_split(
-                _publish_one, np.arange(nwalkers), np.arange(nwalkers)
-            )
-
-            # NOT gated by _skip_linear_psd_repack, deliberately. This is the one
-            # repack that PUBLISHES the accepted noise model to the rest of the
-            # run, and it fires once per propose (~16 ms) rather than once per
-            # scoring batch (~295x per iteration) -- so skipping it would buy
-            # ~0.15% while opening the buffer to staleness across moves. Keeping
-            # it means the only window where linear_psd_arr is stale is INSIDE
-            # compute_log_like's scoring loop, where no other move can observe it.
-            self.acs.reset_linear_psd_arr()
+            self._publish_noise_rows(new_state.branches_coords, _tm)
         after_vals = self.acs.likelihood()
 
         if self.debug:

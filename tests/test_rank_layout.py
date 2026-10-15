@@ -561,7 +561,12 @@ class UnifiedFactorizationTest(unittest.TestCase):
         cases = [
             ((3, 4, [0, 1]), (2, 1, 2)),        # 2 compute ranks, 4 walkers: today
             ((5, 8, [0, 1]), (4, 1, 2)),        # 4 compute ranks, 8 walkers: today
-            ((3, 1, [0, 1]), (1, 2, 1)),        # one-walker replica mode: today
+            # one-walker replica mode: today. Pool [0] -- the 2-node x gpu:1
+            # shape the replica gates run. With [0, 1] and nodes [0, 1, 0]
+            # each node's LONE compute rank takes both devices (AUTO) for its
+            # one walker: the job-764 empty-shard trap, refused since
+            # 2026-10-15 (DevicesBeyondWalkersTest).
+            ((3, 1, [0]), (1, 2, 1)),
             ((5, 1, [0, 1]), (1, 4, 1)),        # one walker, 4 replicas: today
             ((5, 2, [0, 1]), (2, 2, 1)),        # NEW: GPUs > walkers, 2 blocks x 2
             ((5, 4, [0, 1]), (4, 1, 1)),        # 4 walkers on 4 ranks: today
@@ -723,3 +728,106 @@ class FactorizeLayoutPublicApiTest(unittest.TestCase):
             f(4, 16, ranks_per_block=3)    # does not divide n_compute
         with self.assertRaises(ValueError):
             f(3, 16, ranks_per_block=8)    # 2 blocks do not divide 3 walkers
+
+
+class DevicesBeyondWalkersTest(unittest.TestCase):
+    """A rank may never drive more GPUs than it holds walkers (job 764).
+
+    ``NGPUS=8 GPUS_PER_RANK=2`` on the 4-walker 9mo store: 4 compute ranks
+    with devices ``[0, 1]`` and ONE walker each. ``AnalysisContainerArray``
+    shards a rank's walker rows over its devices, so the second device got
+    an EMPTY shard and the build died two minutes in at the first GB gather
+    ("Per-AC element size mismatch across shards: [3415857, 0]"). The layout
+    now refuses it on every rank, before any device is touched, naming both
+    ways out.
+    """
+
+    #: 9mo job 764: 4 nodes x gpu:2, -ppn 1 round robin, 4 compute + saver
+    JOB_764_NODES = [0, 1, 2, 3, 0]
+
+    def test_job_764_shape_is_refused_with_both_routes(self):
+        with self.assertRaises(RuntimeError) as cm:
+            _layouts(FakeWorld(5, nodes=self.JOB_764_NODES), 4, [0, 1],
+                     gpus_per_rank=2, gpu_routing=False)
+        msg = str(cm.exception)
+        self.assertIn("ValueError", msg)
+        self.assertIn("would drive 2 GPUs [0, 1] but holds only 1 walker(s)", msg)
+        self.assertIn("GF_GPU_ROUTING=1", msg)                 # route 1
+        self.assertIn("unset GPUS_PER_RANK", msg)
+        self.assertIn("NWALKERS a multiple of 8", msg)          # route 2: 4 ranks x 2
+        self.assertIn("Per-AC element size mismatch", msg)      # the crash it prevents
+
+    def test_auto_gpus_per_rank_hits_it_too(self):
+        # a lone compute rank per node takes the whole [0, 1] pool (AUTO) --
+        # with ONE walker that is the same empty shard
+        with self.assertRaises(RuntimeError) as cm:
+            _layouts(FakeWorld(3, nodes=[0, 1, 0]), 1, [0, 1])
+        self.assertIn("would drive 2 GPUs", str(cm.exception))
+        with self.assertRaises(RuntimeError):
+            FakeWorld(1).run(lambda r, c: build_layout(c, 1, [0, 1], legacy=False))
+
+    def test_enough_walkers_per_rank_still_resolves(self):
+        # the same allocation with 8 walkers: 2 per rank on 2 GPUs -- legal
+        lay = _layouts(FakeWorld(5, nodes=self.JOB_764_NODES), 8, [0, 1],
+                       gpus_per_rank=2, gpu_routing=False)[0]
+        self.assertEqual(lay.placements[0].devices, (0, 1))
+        self.assertEqual(lay.block_of(0), (0, 2))
+        # one GPU per rank never trips it, whatever the walker count
+        lay = _layouts(FakeWorld(3), 4, [0, 1], gpus_per_rank=1)[0]
+        self.assertEqual(lay.placements[0].devices, (0,))
+
+    def test_setup_acs_refuses_it_too_before_building_anything(self):
+        """The build-time backstop (a path that never resolved a layout):
+        ``GlobalFit.setup_acs`` raises the same message BEFORE it reads the
+        state or builds a single walker container."""
+        from types import SimpleNamespace
+
+        from lisatools.globalfit.run import GlobalFit
+
+        fake = SimpleNamespace(
+            curr=SimpleNamespace(general_info=SimpleNamespace(gpus=[0, 1])),
+            nwalkers=4, rank=3, layout=None)
+        with self.assertRaises(ValueError) as cm:
+            # ``state=None``: the refusal must come before anything touches it
+            GlobalFit.setup_acs(fake, None, walker_block=(3, 4))
+        self.assertIn("rank 3 would drive 2 GPUs [0, 1] but holds only 1 walker(s)",
+                      str(cm.exception))
+        self.assertIn("GF_GPU_ROUTING=1", str(cm.exception))
+
+    def test_the_routing_production_shape(self):
+        """``NGPUS=8 GF_GPU_ROUTING=1`` on the 4-walker store: what the run builds.
+
+        10 tasks over 4 nodes, ``-ppn 1`` round robin; the driver splits the
+        monitor rank (world rank 9) off BEFORE the layout, so the run world
+        is ranks 0..8 on nodes [0, 1, 2, 3, 0, 1, 2, 3, 0]: 8 compute ranks,
+        ONE device each, 4 walker blocks x R = 2, the head = replica 0 of
+        block 0, the saver = rank 8 (node 0, where the head is)."""
+        nodes = [0, 1, 2, 3, 0, 1, 2, 3, 0]
+        outs = _layouts(FakeWorld(9, nodes=nodes), 4, [0, 1], gpu_routing=True)
+        lay = outs[0]
+        for r in range(9):
+            self.assertEqual(outs[r].digest(), lay.digest())
+        self.assertEqual((lay.n_compute, lay.n_blocks, lay.ranks_per_block,
+                          lay.block), (8, 4, 2, 1))
+        self.assertEqual(lay.head_rank, 0)
+        self.assertEqual(lay.saver_rank, 8)
+        self.assertEqual(lay.role_of(8), RankRole.SAVER)
+        self.assertTrue(lay.gpu_routing and lay.replica_mode)
+        for r in range(8):
+            self.assertEqual(len(lay.placements[r].devices), 1, r)
+            self.assertEqual(lay.block_of(r), (r // 2, r // 2 + 1), r)
+            self.assertEqual(lay.replica_index(r), r % 2, r)
+        self.assertEqual(lay.block_leads, (0, 2, 4, 6))
+        self.assertEqual(lay.block_index(0), 0)
+        self.assertTrue(lay.is_block_lead(0))
+        # two compute ranks per 2-GPU node, on different devices
+        for node in range(4):
+            ranks = [r for r in range(8) if nodes[r] == node]
+            self.assertEqual(sorted(lay.placements[r].devices[0] for r in ranks),
+                             [0, 1], node)
+        self.assertIn("gpu_routing=on", lay.describe())
+        self.assertIn("REPLICAS", lay.describe())
+        # the same shape with the knob OFF is the legacy refusal, naming it
+        with self.assertRaises(RuntimeError) as cm:
+            _layouts(FakeWorld(9, nodes=nodes), 4, [0, 1], gpu_routing=False)
+        self.assertIn("GF_GPU_ROUTING=1", str(cm.exception))

@@ -26675,6 +26675,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``apply_inds=True`` (alive leaves only) and ``get_band_info`` counts
         ``inds`` rows only.
         """
+        if (payload or {}).get("neutral"):
+            # A NEUTRAL block (several walker blocks, one of them with
+            # nothing to act on): it ran nothing this propose, so there is no
+            # snapshot to rebuild against and nothing to report. The head
+            # keeps the block's input log_like and skips it in the merge.
+            return {"neutral": True, "log_like_final": None,
+                    "band_counts": None, "residual_hash": None}
         saved = self._enter_rank_block(payload, clock, model)
         sorter = None
         try:
@@ -28459,40 +28466,90 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """A host COPY of a head-owned table, for shipping read-only."""
         return None if arr is None else np.array(_to_numpy(arr), copy=True)
 
-    # ---- one-walker replica mode: the head's finish bookkeeping ---------
+    # ---- replica mode (R > 1): the head's finish bookkeeping -------------
+    @staticmethod
+    def _replica_block_groups(layout):
+        """``[(ranks, w0, w1), ...]``: every walker block's replicas, lead first.
+
+        THE UNIT OF EVERY REPLICA MERGE (2026-10-15). Under the
+        ``GF_GPU_ROUTING`` layout ``n_compute = n_blocks x R``, so the R
+        replicas of a block share ONE block's walkers and different blocks
+        hold different walkers: a merge-by-owned-source, a ``gb_sync``
+        reference and a residual-hash comparison are all PER BLOCK. The
+        pre-2026-10-15 code merged every compute rank as one group, which is
+        right only at ``n_blocks == 1`` (one-walker replica mode) and at 4
+        walkers x R = 2 shape-failed in :func:`merge_owned_sources` and
+        broadcast the head's one walker over all four in the sync.
+
+        ``(w0, w1) = (None, None)`` -- "the whole branch" -- on a layout
+        stand-in without the block axis (the one-walker unit-test stubs),
+        which is exactly the old single-group behaviour.
+        """
+        n_blocks = getattr(layout, "n_blocks", None)
+        if n_blocks is None or not hasattr(layout, "ranks_in_block"):
+            return [(tuple(layout.compute_ranks), None, None)]
+        groups = []
+        for b in range(int(n_blocks)):
+            ranks = tuple(int(r) for r in layout.ranks_in_block(b))
+            w0, w1 = layout.block_of(ranks[0])
+            groups.append((ranks, int(w0), int(w1)))
+        return groups
+
+    @staticmethod
+    def _replica_is_lead(layout, rank):
+        """Replica 0 of its block (the head, on a stub without the block axis)."""
+        if hasattr(layout, "is_block_lead"):
+            return bool(layout.is_block_lead(rank))
+        return int(rank) == int(layout.head_rank)
+
     def _replica_merge_finish(self, work, sub, replies_f, layout, band_ranges):
         """HEAD, replica mode: merge the ``gb_finish`` replies by owned source.
 
         Split out of ``_propose_orchestrated`` so it can be unit-tested with
-        synthetic replies and a stub layout (the orchestrator itself cannot be
-        driven at one walker: the shared test harness builds a 4-walker state,
-        and ``build_layout`` only enters ``replica_mode`` at ``nwalkers == 1``).
+        synthetic replies and a stub layout.
 
         ``band_ranges`` is the head's per-REPLICA list from
         :func:`replica_band_ranges`; the rank -> range mapping goes through
         ``layout.replica_index``. ``d_h``/``h_h`` ride along with the sources
         (cold rung only). See :func:`merge_owned_sources` for the rules.
-        """
-        ranks = tuple(layout.compute_ranks)
-        ranges = {r: band_ranges[layout.replica_index(r)] for r in ranks}
-        f0_col = getattr(self, "_f0_col", None)
-        merge_owned_sources(
-            work.coords, work.inds, replies_f, ranks, ranges,
-            # the sampling-basis frequency column ``_write_back_state`` sorts
-            # on; its own expression is the literal 1 of the legacy layout
-            1 if f0_col is None else int(f0_col),
-            d_h=getattr(sub, "d_h", None),
-            h_h=getattr(sub, "h_h", None),
-            preserve_leaf_identity=bool(
-                getattr(self, "preserve_leaf_identity", False)),
-            source_uid=getattr(sub, "source_uid", None),
-        )
 
-    def _replica_apply_sync(self, replies_s, layout, log_like_final, band_counts):
+        ONE MERGE PER WALKER BLOCK (:meth:`_replica_block_groups`): a block's
+        R replicas are merged into that block's ``[w0, w1)`` columns of the
+        head's branch -- views, so the merge writes in place -- and no rank
+        ever contributes to another block's walkers.
+        """
+        f0_col = getattr(self, "_f0_col", None)
+        # the sampling-basis frequency column ``_write_back_state`` sorts on;
+        # its own expression is the literal 1 of the legacy layout
+        col = 1 if f0_col is None else int(f0_col)
+        d_h = getattr(sub, "d_h", None)
+        h_h = getattr(sub, "h_h", None)
+        uid = getattr(sub, "source_uid", None)
+        for ranks, w0, w1 in self._replica_block_groups(layout):
+            sl = slice(None) if w0 is None else slice(w0, w1)
+            ranges = {r: band_ranges[layout.replica_index(r)] for r in ranks}
+            merge_owned_sources(
+                work.coords[:, sl], work.inds[:, sl], replies_f, ranks, ranges,
+                col,
+                d_h=None if d_h is None else d_h[sl],
+                h_h=None if h_h is None else h_h[sl],
+                preserve_leaf_identity=bool(
+                    getattr(self, "preserve_leaf_identity", False)),
+                source_uid=None if uid is None else uid[:, sl],
+            )
+
+    def _replica_apply_sync(self, replies_s, layout, log_like_final, band_counts,
+                            neutral=None):
         """HEAD, replica mode: take the ``gb_sync`` products and check the ranks agree.
 
-        The HEAD's own reply is the one the state takes -- every rank rebuilt
-        from the SAME merged branch, so they must agree.
+        PER WALKER BLOCK (:meth:`_replica_block_groups`): each block LEAD's
+        reply is the one the state takes for that block's ``[w0, w1)``
+        walkers -- every replica of the block rebuilt from the SAME merged
+        slice, so they must agree -- and each replica is compared with ITS
+        OWN lead (different blocks hold different walkers, so a comparison
+        across blocks would always "disagree"). A block the head marked
+        ``neutral`` ran nothing, kept its input ``log_like`` and ships no
+        products (``neutral`` maps rank -> bool; ``None`` = none neutral).
 
         THE GUARD IS THE PER-RANK ``log_like_final``, NOT THE HASH. Spec
         decision 3: the replicas agree only to ~1e-12 (the GPU fills are
@@ -28504,41 +28561,69 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         when it differs.
         Returns the hash map (for tests and the digest lines).
         """
-        head_rep = replies_s[layout.head_rank]
-        ref = np.asarray(head_rep["log_like_final"])
-        log_like_final[:] = ref
-        band_counts[:] = np.asarray(head_rep["band_counts"])
+        neutral = neutral or {}
+        hashes = {}
+        n_synced, n_rep, max_dev, n_hash_blocks = 0, 0, 0.0, 0
+        for b, (ranks, w0, w1) in enumerate(self._replica_block_groups(layout)):
+            lead = ranks[0]
+            if neutral.get(lead):
+                continue
+            n_synced += 1
+            n_rep = max(n_rep, len(ranks))
+            lead_rep = replies_s[lead]
+            ref = np.asarray(lead_rep["log_like_final"])
+            if w0 is None:
+                log_like_final[:] = ref
+                band_counts[:] = np.asarray(lead_rep["band_counts"])
+            else:
+                log_like_final[w0:w1] = ref
+                band_counts[:, w0:w1] = np.asarray(lead_rep["band_counts"])
 
-        bad = {}
-        for r, rep in replies_s.items():
-            ll = np.asarray(rep["log_like_final"])
-            if not np.allclose(ll, ref, rtol=1e-10, atol=1e-8):
-                bad[r] = ll
-        if bad:
-            logger.warning(
-                "[GB_REPLICA %s] log_like_final disagrees after sync "
-                "(head r%s: %s): %s",
-                self.name,
-                layout.head_rank,
-                np.array2string(ref, precision=6),
-                ", ".join(
-                    f"r{r}:{np.array2string(ll, precision=6)}"
-                    for r, ll in sorted(bad.items())
-                ),
-            )
+            bad = {}
+            for r in ranks:
+                ll = np.asarray(replies_s[r]["log_like_final"])
+                with np.errstate(invalid="ignore"):
+                    _d = np.abs(np.asarray(ll, dtype=float) - np.asarray(ref, dtype=float))
+                if _d.size and np.all(np.isfinite(_d)):
+                    max_dev = max(max_dev, float(_d.max()))
+                if not np.allclose(ll, ref, rtol=1e-10, atol=1e-8):
+                    bad[r] = ll
+            if bad:
+                logger.warning(
+                    "[GB_REPLICA %s] log_like_final disagrees after sync "
+                    "(block %d lead r%s: %s): %s",
+                    self.name,
+                    b,
+                    lead,
+                    np.array2string(ref, precision=6),
+                    ", ".join(
+                        f"r{r}:{np.array2string(ll, precision=6)}"
+                        for r, ll in sorted(bad.items())
+                    ),
+                )
 
-        hashes = {r: rep["residual_hash"] for r, rep in replies_s.items()}
-        if len(set(hashes.values())) != 1:
-            # INFO, not WARNING: bit-exact agreement is expected only on CPU;
-            # on GPU the ~1e-12 atomicAdd spread flips the hash routinely. The
-            # message text is the one ``gf_run_log_digest.py`` greps for.
-            logger.info(
-                "[GB_REPLICA %s] residual hashes disagree after sync: %s "
-                "(expected on GPU at the ~1e-12 atomicAdd level; the guard is "
-                "the per-rank log_like_final agreement above)",
-                self.name,
-                ", ".join(f"r{r}:{h}" for r, h in sorted(hashes.items())),
-            )
+            block_hashes = {r: replies_s[r]["residual_hash"] for r in ranks}
+            hashes.update(block_hashes)
+            if len(set(block_hashes.values())) != 1:
+                n_hash_blocks += 1
+                # INFO, not WARNING: bit-exact agreement is expected only on
+                # CPU; on GPU the ~1e-12 atomicAdd spread flips the hash
+                # routinely. The message text is the one
+                # ``gf_run_log_digest.py`` greps for.
+                logger.info(
+                    "[GB_REPLICA %s] residual hashes disagree after sync: %s "
+                    "(expected on GPU at the ~1e-12 atomicAdd level; the guard "
+                    "is the per-rank log_like_final agreement above)",
+                    self.name,
+                    ", ".join(f"r{r}:{h}" for r, h in sorted(block_hashes.items())),
+                )
+        # ONE positive line per sync, so a run log shows the merge is live
+        # (and how tight the replicas are) without a disagreement to grep for
+        logger.info(
+            "[GB_REPLICA %s] synced %d walker block(s) x %d replica(s): max "
+            "|log_like_final - block lead| = %.3e; residual-hash mismatch in "
+            "%d block(s)", getattr(self, "name", type(self).__name__),
+            n_synced, n_rep, max_dev, n_hash_blocks)
         return hashes
 
     def _propose_orchestrated(self, model, state):
@@ -29074,6 +29159,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _band_ranges = replica_band_ranges(
                 self.num_bands, layout.n_replicas, weights=_weights
             )
+            # The band-range assignment, logged whenever it changes (the
+            # source-weighted cut moves with births and deaths): the line
+            # that shows the within-walker split is live, and the per-range
+            # load it balances -- the G5 imbalance readout.
+            if tuple(_band_ranges) != getattr(self, "_replica_ranges_logged", None):
+                self._replica_ranges_logged = tuple(_band_ranges)
+                _loads = ("" if _weights is None else
+                          "; alive cold sources per range " + " / ".join(
+                              str(int(np.sum(np.asarray(_weights)[a:b])))
+                              for a, b in _band_ranges))
+                logger.info(
+                    "[GB_REPLICA %s] band split over R=%d replica(s) per walker "
+                    "block (%s): %s%s", self.name, int(layout.n_replicas),
+                    "source-weighted" if _weights is not None
+                    else "equal band count",
+                    ", ".join(f"replica {i} -> bands [{a}, {b})"
+                              for i, (a, b) in enumerate(_band_ranges)),
+                    _loads)
 
         def _common(rank, w0, w1):
             """Payload keys EVERY command needs (``_enter_rank_block``)."""
@@ -29451,7 +29554,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # values, which is what the legacy computes for an empty
             # walker), so the walker-axis concatenation is always N rows.
             _stats = rep.get("cap_stats")
-            if _stats is not None and not (_replica and rank != layout.head_rank):
+            # Replica mode: ONE row set per walker BLOCK, from its lead (the
+            # R replicas computed the same statistic for the same walkers).
+            # ``rank == head_rank`` was the same thing at one block and kept
+            # a single block's rows at several -- a (1, nbands) statistic
+            # against the per-walker valve's (N, nbands) census.
+            if _stats is not None and not (
+                    _replica and not self._replica_is_lead(layout, rank)):
                 cap_rows.append(_stats)
             if neutral[rank]:
                 continue
@@ -29518,13 +29627,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # state takes -- every rank computes the same thing from the same
         # branch, and the hashes are the cross-check that says so.
         #
-        # SKIPPED when a block is neutral: a neutral ``gb_run_proposal``
-        # returns before taking the propose's non-GB residual snapshot, so
-        # there is nothing to rebuild against (and nothing ran).
-        if _replica and not any(neutral[r] for r in layout.compute_ranks):
+        # A NEUTRAL block is told so and answers without a rebuild: a neutral
+        # ``gb_run_proposal`` returns before taking the propose's non-GB
+        # residual snapshot, so there is nothing to rebuild against (and
+        # nothing ran). The command still goes to EVERY rank (the fan-out
+        # addresses all of them); it is skipped only when every block is
+        # neutral. Before 2026-10-15 ONE neutral block skipped it for all of
+        # them, which at several blocks left the live blocks' log_like and
+        # band counts unset.
+        if _replica and not all(neutral[r] for r in layout.compute_ranks):
             def _payload_sync(rank, w0, w1):
                 payload = _common(rank, w0, w1)
                 payload.update({
+                    "neutral": bool(neutral[rank]),
                     "merged_state": slice_state(
                         new_state, w0, w1, sub_states=[branch]),
                 })
@@ -29532,7 +29647,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
             replies_s, _ = self._fanout_cmd("gb_sync", _payload_sync, model)
             self._replica_apply_sync(
-                replies_s, layout, log_like_final, band_counts)
+                replies_s, layout, log_like_final, band_counts, neutral=neutral)
 
         # The cap gate's statistic is an N-walker max, so it needs a row per
         # walker: concatenate the blocks on the walker axis.

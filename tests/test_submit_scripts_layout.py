@@ -68,6 +68,10 @@ _DISPATCH_ENV_KEYS = (
     "RANKS_PER_GPU",
     "GF_LEGACY_RANK_LAYOUT",
     "GF_MONITOR_RANK",
+    # 2026-10-15: the replica-routing knobs the v9 dispatch now reads
+    "GF_GPU_ROUTING",
+    "NWALKERS",
+    "RANKS_PER_BLOCK",
 )
 
 # The v9 6mo/1yr/9mo launchers add ONE task for the dedicated monitor rank
@@ -3215,6 +3219,199 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
         got = dict(l.split("=", 1) for l in out.split("\n") if "=" in l)
         self.assertEqual(got["EMRI_EIGEN_JUMP_MIX"], "0")
         self.assertEqual(got["MBH_EIGEN_JUMP_MIX"], "0.1")
+
+
+#: every launcher carrying the GF_GPU_ROUTING wiring (2026-10-15): the v9
+#: production scripts, the hand-mirrored 3mo v9 twin, and the six flagship
+#: scripts built from scripts/flagship/launcher.sh.in
+FLAGSHIP_SCRIPTS = tuple(
+    os.path.join(ROOT, "scripts", "flagship", f"submit_gf_{r}.sh")
+    for r in ("3mo", "6mo", "9mo", "12mo", "18mo", "24mo"))
+ROUTING_SCRIPTS = (*V9_PRODUCTION, THREE_MO_V9) + FLAGSHIP_SCRIPTS
+_MONITOR_OR_FLAGSHIP = set(V9_PRODUCTION) | set(FLAGSHIP_SCRIPTS)
+
+
+def _routing_ntasks(script, run_tasks):
+    return f"--ntasks={run_tasks + (1 if script in _MONITOR_OR_FLAGSHIP else 0)}"
+
+
+def _shell_block(text, start, end_marker):
+    """``text[start : end]`` where ``end`` is the first ``end_marker`` after it."""
+    i = text.index(start)
+    return text[i: text.index(end_marker, i)]
+
+
+class GpuRoutingDispatchTest(unittest.TestCase):
+    """``NGPUS=8 GF_GPU_ROUTING=1`` on the 4-walker store (Mike, 2026-10-15).
+
+    9mo job 764 ran ``NGPUS=8 GPUS_PER_RANK=2``: 4 compute ranks with two
+    GPUs and ONE walker each, and died at the first GB gather on an empty
+    second shard -- GPUS_PER_RANK packs walkers, it never splits one. The
+    within-walker split is the replica routing: 8 compute ranks, one GPU
+    each, 4 walker blocks x R = 2. The launchers now (a) carry the knob
+    through ``--export`` and print the factorization, (b) never round NWALKERS
+    with it on, (c) refuse the job-764 trap before ``sbatch``, and (d) leave
+    every shape bit-identical with it unset.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="submit_routing_stub_")
+        stub = os.path.join(cls._tmp.name, "sbatch")
+        with open(stub, "w") as fh:
+            fh.write(_STUB_SBATCH)
+        os.chmod(stub, 0o755)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _run(self, script, overrides, rc=0):
+        env = {k: v for k, v in os.environ.items() if k not in _DISPATCH_ENV_KEYS}
+        env["PATH"] = self._tmp.name + os.pathsep + env.get("PATH", "")
+        env.update(overrides)
+        r = subprocess.run(["bash", script], env=env, capture_output=True,
+                           text=True, timeout=60)
+        self.assertEqual(r.returncode, rc, f"{script} {overrides}:\n{r.stdout}\n{r.stderr}")
+        return r.stdout.splitlines()
+
+    @staticmethod
+    def _export(lines):
+        return [l for l in lines if l.startswith("--export=")]
+
+    def test_ngpus_8_routing_is_four_blocks_of_two_replicas(self):
+        for script in ROUTING_SCRIPTS:
+            with self.subTest(script=os.path.basename(script)):
+                lines = self._run(script, {"NGPUS": "8", "GF_GPU_ROUTING": "1"})
+                # 8 compute ranks + the saver (+ the monitor rank), 4 nodes
+                self.assertIn(_routing_ntasks(script, 9), lines)
+                self.assertIn("--nodes=4", lines)
+                self.assertIn("--gres=gpu:2", lines)
+                (exp,) = self._export(lines)
+                self.assertTrue(exp.endswith(",GF_GPU_ROUTING=1"), exp)
+                text = "\n".join(lines)
+                self.assertIn(
+                    "replica factorization NWALKERS=4 on N_COMPUTE=8 -> n_blocks=4 "
+                    "walker block(s) of 1 walker(s) x R=2 replica rank(s) per block, "
+                    "one GPU per rank", text)
+                self.assertIn("NWALKERS is NOT rounded", text)
+                self.assertIn("GB/VGB by band range", text)
+
+    def test_every_spelling_python_accepts_and_none_it_rejects(self):
+        script = NINE_MO_V9
+        for on in ("1", "true", "TRUE", "yes", "On", " on "):
+            with self.subTest(value=on):
+                lines = self._run(script, {"NGPUS": "8", "GF_GPU_ROUTING": on})
+                self.assertTrue(self._export(lines)[0].endswith(",GF_GPU_ROUTING=1"))
+        for off in ("0", "no", "off", "false", ""):
+            with self.subTest(value=off):
+                lines = self._run(script, {"NGPUS": "8", "GF_GPU_ROUTING": off})
+                self.assertNotIn("GF_GPU_ROUTING", self._export(lines)[0])
+                self.assertNotIn("replica factorization", "\n".join(lines))
+        from lisatools.globalfit.communication.ranks import gpu_routing_enabled
+        for on in ("1", "true", "TRUE", "yes", "On", " on "):
+            self.assertTrue(gpu_routing_enabled({"GF_GPU_ROUTING": on}), on)
+        for off in ("0", "no", "off", "false", ""):
+            self.assertFalse(gpu_routing_enabled({"GF_GPU_ROUTING": off}), off)
+
+    def test_the_unset_knob_leaves_every_shape_unchanged(self):
+        for script in ROUTING_SCRIPTS:
+            for ngpus, tasks, nodes in (("2", 3, 1), ("4", 5, 2), ("8", 9, 4)):
+                with self.subTest(script=os.path.basename(script), ngpus=ngpus):
+                    lines = self._run(script, {"NGPUS": ngpus})
+                    self.assertIn(_routing_ntasks(script, tasks), lines)
+                    self.assertIn(f"--nodes={nodes}", lines)
+                    (exp,) = self._export(lines)
+                    self.assertNotIn("GF_GPU_ROUTING", exp)
+                    self.assertTrue(
+                        exp.endswith(',GF_LEGACY_RANK_LAYOUT=0,GF_MONITOR_RANK=1')
+                        or exp.endswith(',GF_LEGACY_RANK_LAYOUT=0'), exp)
+                    self.assertNotIn("replica factorization", "\n".join(lines))
+
+    def test_the_job_764_trap_is_refused_before_sbatch(self):
+        for script in ROUTING_SCRIPTS:
+            with self.subTest(script=os.path.basename(script)):
+                lines = self._run(script, {"NGPUS": "8", "GPUS_PER_RANK": "2"}, rc=2)
+                text = "\n".join(lines)
+                self.assertEqual(self._export(lines), [], "sbatch must not run")
+                self.assertIn("REFUSED: GPUS_PER_RANK=2 but each compute rank holds "
+                              "1 walker(s) (NWALKERS=4 over N_COMPUTE=4)", text)
+                self.assertIn("set GF_GPU_ROUTING=1", text)
+                self.assertIn("NWALKERS a multiple of 8", text)
+                # ...and the same with the routing on: still 1 walker per 2 GPUs
+                self._run(script, {"NGPUS": "8", "GPUS_PER_RANK": "2",
+                                   "GF_GPU_ROUTING": "1"}, rc=2)
+        # enough walkers per rank is fine (8 walkers: 2 per 2-GPU rank)
+        lines = self._run(NINE_MO_V9, {"NGPUS": "8", "GPUS_PER_RANK": "2",
+                                       "NWALKERS": "8"})
+        self.assertIn(_routing_ntasks(NINE_MO_V9, 5), lines)
+
+    def test_routing_refuses_what_build_layout_refuses(self):
+        for over in ({"RANKS_PER_BLOCK": "3"},          # does not divide 8
+                     {"RANKS_PER_BLOCK": "8", "NWALKERS": "3"}):  # 1 block ok...
+            with self.subTest(**over):
+                env = {"NGPUS": "8", "GF_GPU_ROUTING": "1", **over}
+                if over.get("NWALKERS") == "3":
+                    # R=8 -> one block of 3 walkers: legal (no rounding)
+                    lines = self._run(NINE_MO_V9, env)
+                    self.assertIn("n_blocks=1 walker block(s) of 3 walker(s) x R=8",
+                                  "\n".join(lines))
+                else:
+                    lines = self._run(NINE_MO_V9, env, rc=2)
+                    self.assertIn("REFUSED: RANKS_PER_BLOCK=3", "\n".join(lines))
+
+    def test_the_shell_factorization_is_pythons(self):
+        from lisatools.globalfit.communication import factorize_layout
+
+        funcs = _shell_block(open(NINE_MO_V9).read(), "_gf_routing_on() {",
+                             'if [ -z "${SLURM_JOB_ID:-}" ]; then')
+        for nw in (1, 2, 3, 4, 6, 8, 10, 24):
+            for nc in (1, 2, 4, 8, 16, 32):
+                r = subprocess.run(
+                    ["bash", "-c", funcs + f"\n_gf_routing_layout {nw} {nc} 1"],
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                m = re.search(r"n_blocks=(\d+) walker block\(s\) of (\d+) walker\(s\) "
+                              r"x R=(\d+)", r.stdout)
+                self.assertIsNotNone(m, r.stdout)
+                nb, per, R = (int(x) for x in m.groups())
+                self.assertEqual((nb, R, per), factorize_layout(nw, nc), (nw, nc))
+
+    def _in_job(self, script, **env):
+        text = open(script).read()
+        funcs = _shell_block(text, "_gf_routing_on() {", 'if [ -z "${SLURM_JOB_ID:-}" ]; then')
+        block = _shell_block(text, "_GF_ROUTING=0\n", "export NUM_ITERATIONS=")
+        full = {"PATH": os.environ.get("PATH", ""), "_k": "1",
+                "GF_LEGACY_RANK_LAYOUT": "0"}
+        full.update({k: str(v) for k, v in env.items()})
+        r = subprocess.run(
+            ["bash", "-c", funcs + "\n" + block
+             + "\necho NW=${NWALKERS} GF=${GF_GPU_ROUTING:-unset}"],
+            env=full, capture_output=True, text=True, timeout=30)
+        return r.returncode, r.stdout
+
+    def test_in_job_the_walker_count_is_never_rounded_with_the_knob_on(self):
+        for script in ROUTING_SCRIPTS:
+            with self.subTest(script=os.path.basename(script)):
+                rc, out = self._in_job(script, N_COMPUTE_EFF=8, NWALKERS=4,
+                                       GF_GPU_ROUTING="1")
+                self.assertEqual(rc, 0, out)
+                self.assertIn("NW=4 GF=1", out.splitlines())
+                self.assertIn("n_blocks=4 walker block(s) of 1 walker(s) x R=2", out)
+                self.assertNotIn("is not a multiple of", out)
+                rc, out = self._in_job(script, N_COMPUTE_EFF=4, NWALKERS=6,
+                                       GF_GPU_ROUTING="1")
+                self.assertIn("NW=6 GF=1", out.splitlines())
+                self.assertIn("n_blocks=2 walker block(s) of 3 walker(s) x R=2", out)
+                # unset: the rounding the existing tests pin, unchanged
+                rc, out = self._in_job(script, N_COMPUTE_EFF=8, NWALKERS=4)
+                self.assertEqual(rc, 0, out)
+                self.assertIn("NW=8 GF=unset", out.splitlines())
+                self.assertIn("is not a multiple of N_COMPUTE=8", out)
+                # an impossible granted shape stops the job before mpiexec
+                rc, out = self._in_job(script, N_COMPUTE_EFF=8, NWALKERS=4,
+                                       GF_GPU_ROUTING="1", RANKS_PER_BLOCK="3")
+                self.assertEqual(rc, 2, out)
 
 
 if __name__ == "__main__":

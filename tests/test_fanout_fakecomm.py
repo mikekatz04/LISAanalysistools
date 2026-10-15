@@ -14,6 +14,7 @@ from lisatools.globalfit.communication.fanout import (
     WalkerFanout,
     concat_blocks,
     fanout_digest_line,
+    replicas_agree,
     residual_hash,
     _array_bytes,
     _sha1_16,
@@ -582,6 +583,28 @@ class ReplicaGathersTest(unittest.TestCase):
         self.assertIn("residual=r0:aa,r1:aa replicas_agree=True", line)
         line = fanout_digest_line(3, _DigestState(), residual_hashes={0: "aa", 1: "bb"})
         self.assertIn("replicas_agree=False", line)
+
+    def test_replicas_agree_is_per_block_at_four_walkers_two_replicas(self):
+        """``[FANOUT_DIGEST] replicas_agree`` under 4 walker blocks x R = 2.
+
+        Different blocks hold different walkers, so their residual hashes
+        differ BY CONSTRUCTION; before 2026-10-15 the whole map was compared
+        and every digest line of a both-axes run read ``replicas_agree=False``
+        -- the G4 parity gate's pass line could never pass."""
+        layout = FakeWorld(9, nodes=[0, 1, 2, 3, 0, 1, 2, 3, 0]).run(
+            lambda r, c: build_layout(c, 4, [0, 1], legacy=False, gpu_routing=True))[0]
+        self.assertEqual((layout.n_blocks, layout.ranks_per_block), (4, 2))
+        per_block = {r: f"b{r // 2}" for r in range(8)}
+        line = fanout_digest_line(3, _DigestState(), residual_hashes=per_block,
+                                  layout=layout)
+        self.assertIn("replicas_agree=True", line)
+        drift = {**per_block, 5: "zz"}            # block 2's second replica drifted
+        line = fanout_digest_line(3, _DigestState(), residual_hashes=drift,
+                                  layout=layout)
+        self.assertIn("replicas_agree=False", line)
+        # no layout: the whole-map rule of one-walker replica mode, unchanged
+        self.assertFalse(replicas_agree(per_block))
+        self.assertTrue(replicas_agree({0: "aa", 1: "aa"}))
 
     def test_residual_hash_covers_data_and_psd_buffers(self):
         """F2: residual_hash must catch a noise-model-only drift too."""

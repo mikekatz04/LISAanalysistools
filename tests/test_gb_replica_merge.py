@@ -423,6 +423,19 @@ class SyncCommandTest(unittest.TestCase):
             move.gf_serve("gb_sync", _sync_payload(coords, inds),
                           {"seq": 4, "call_index": 1}, _FakeModel())
 
+    def test_a_neutral_block_answers_without_a_rebuild(self):
+        # Several walker blocks under replicas (GF_GPU_ROUTING): a block the
+        # head marked neutral ran nothing, took no non-GB snapshot and must
+        # answer gb_sync without one -- the live blocks' sync goes on.
+        move = _sync_move()
+        move.reset_non_gb_linear_data_arr = None
+        coords = np.zeros((2, 1, 4, 3)); inds = np.zeros((2, 1, 4), bool)
+        payload = dict(_sync_payload(coords, inds), neutral=True)
+        rep = move.gf_serve("gb_sync", payload, {"seq": 4, "call_index": 1}, _FakeModel())
+        self.assertTrue(rep["neutral"])
+        self.assertIsNone(rep["log_like_final"])
+        self.assertEqual(_FakeSorter.built, [])        # nothing rebuilt
+
     def test_unknown_op_still_raises(self):
         with self.assertRaises(ValueError):
             _sync_move().gf_serve("nope", {}, {"seq": 1, "call_index": 1}, _FakeModel())

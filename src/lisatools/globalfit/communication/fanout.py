@@ -104,7 +104,29 @@ def residual_hash(acs) -> str:
     return _sha1_16(b"".join(_array_bytes(a) for a in arrs))
 
 
-def fanout_digest_line(iteration, state, residual_hashes=None) -> str:
+def replicas_agree(residual_hashes, layout=None) -> bool:
+    """Do the replicas of every walker block hold the same residual?
+
+    PER BLOCK: under ``n_compute = n_blocks x R`` different blocks hold
+    different walkers, so their hashes differ by construction and a
+    whole-world comparison would read ``False`` on every line. Without a
+    layout (or at one block) every rank holds the same walker and the
+    whole map must agree -- the original one-walker replica rule.
+    """
+    hashes = {int(r): h for r, h in (residual_hashes or {}).items()}
+    if not hashes:
+        return True
+    n_blocks = int(getattr(layout, "n_blocks", 1) or 1) if layout is not None else 1
+    if n_blocks <= 1 or not hasattr(layout, "ranks_in_block"):
+        return len(set(hashes.values())) == 1
+    for b in range(n_blocks):
+        block = {hashes[int(r)] for r in layout.ranks_in_block(b) if int(r) in hashes}
+        if len(block) > 1:
+            return False
+    return True
+
+
+def fanout_digest_line(iteration, state, residual_hashes=None, layout=None) -> str:
     """``[FANOUT_DIGEST] it=<n> log_like=<sha1> coords=<sha1> inds=<sha1>``.
 
     Cluster-gate tool (``docs/multirank-cluster-gates.md`` Step 1): the head
@@ -119,7 +141,10 @@ def fanout_digest_line(iteration, state, residual_hashes=None) -> str:
     ``residual_hashes`` (one-walker replica mode): ``{world_rank: hash}`` from
     :meth:`WalkerFanout.gather_residual_hashes`; when given, the line gains
     `` residual=r<rank>:<hash>,... replicas_agree=<bool>`` so replica drift is
-    visible on the same line as the merged-state digest.
+    visible on the same line as the merged-state digest. ``layout`` (the
+    run's ``WalkerBlockLayout``) makes ``replicas_agree`` a PER-BLOCK
+    comparison (:func:`replicas_agree`); without it the whole map is
+    compared, which is right at one walker block.
     """
     log_like_hash = _sha1_16(_array_bytes(state.log_like))
     coords = state.branches_coords
@@ -132,7 +157,7 @@ def fanout_digest_line(iteration, state, residual_hashes=None) -> str:
     )
     if residual_hashes:
         items = ",".join(f"r{int(r)}:{h}" for r, h in sorted(residual_hashes.items()))
-        agree = len(set(residual_hashes.values())) == 1
+        agree = replicas_agree(residual_hashes, layout)
         line += f" residual={items} replicas_agree={agree}"
     return line
 

@@ -195,5 +195,40 @@ class LayoutReportTest(unittest.TestCase):
             self.assertEqual(nb * r, nc)
 
 
+class ProductionLaunchersAgreeTest(unittest.TestCase):
+    """The v9 production launchers wire the SAME rule this variant reports.
+
+    Since 2026-10-15 ``GF_GPU_ROUTING=1`` is wired into the v9 production
+    launchers themselves (``submit_gf_6mo_v9_4gpu.sh`` and the 9mo / 1yr /
+    flagship scripts derived from it): the knob rides ``--export``, NWALKERS
+    is never rounded, and the factorization is printed by
+    ``_gf_routing_layout``. Two shell copies of one rule must not drift, so
+    the production function is checked against this variant's report block
+    on a sweep (both are already checked against ``factorize_layout``).
+    """
+
+    V9 = os.path.join(SCRIPTS, "submit_gf_9mo_v9.sh")
+
+    def _v9(self, nw, nc):
+        text = _text(self.V9)
+        i = text.index("_gf_routing_on() {")
+        funcs = text[i: text.index('if [ -z "${SLURM_JOB_ID:-}" ]; then', i)]
+        r = subprocess.run(["bash", "-c", funcs + f"\n_gf_routing_layout {nw} {nc} 1"],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        m = re.search(r"n_blocks=(\d+) walker block\(s\) of (\d+) walker\(s\) x R=(\d+)",
+                      r.stdout)
+        return tuple(int(x) for x in m.groups())
+
+    def test_the_two_reports_agree(self):
+        report = LayoutReportTest()
+        for nw, nc in ((4, 8), (4, 4), (4, 16), (24, 8), (24, 32), (1, 4), (6, 4), (3, 2)):
+            out = report._run(GF_LEGACY_RANK_LAYOUT=0, N_COMPUTE_EFF=nc, NWALKERS=nw)
+            m = re.search(r"(\d+) block\(s\) of (\d+) walker\(s\), (\d+) rank", out)
+            self.assertIsNotNone(m, out)
+            self.assertEqual(tuple(int(x) for x in m.groups()), self._v9(nw, nc),
+                             (nw, nc))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -821,7 +821,9 @@ class Recipe:
                 except Exception as exc:  # noqa: BLE001 - a diagnostic hook must never break the run
                     logger.warning("[FANOUT_DIGEST] residual hash gather failed: %r", exc)
                     hashes = None
-            logger.info(fanout_digest_line(iteration, last_sample, residual_hashes=hashes))
+            logger.info(fanout_digest_line(
+                iteration, last_sample, residual_hashes=hashes,
+                layout=getattr(fanout, "layout", None) if fanout is not None else None))
         # GF_RESIDUAL_SNAPSHOT_EVERY: every cold walker's residual + the data
         # beside the store for the monitor page (never raises; see the module).
         _snap = getattr(self, "snapshot_context", None)

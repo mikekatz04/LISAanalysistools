@@ -199,6 +199,23 @@ class FitPlanTest(unittest.TestCase):
         plan = fstat_fit_plan(lay, [3])
         self.assertEqual((plan[0].owner_rank, plan[0].local_index), (1, 1))
 
+    def test_four_walkers_two_replicas_fit_on_all_eight_ranks(self):
+        """``NGPUS=8 GF_GPU_ROUTING=1`` (4 blocks x R = 2, the real layout):
+        the epoch fit's node ranges spread over ALL 8 compute ranks -- twice
+        the 4-GPU run's -- and the reference row comes from its block's LEAD
+        (``owner_of``), local row 0."""
+        from lisatools.globalfit.communication.fakecomm import FakeWorld
+        from lisatools.globalfit.communication.ranks import build_layout
+
+        lay = FakeWorld(9, nodes=[0, 1, 2, 3, 0, 1, 2, 3, 0]).run(
+            lambda r, c: build_layout(c, 4, [0, 1], legacy=False,
+                                      gpu_routing=True))[0]
+        plan = fstat_fit_plan(lay, [2])
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0].group_ranks, tuple(range(8)))
+        self.assertEqual((plan[0].owner_rank, plan[0].local_index), (4, 0))
+        self.assertTrue(fstat_plan_is_collective(plan))
+
     def test_no_layout_is_the_single_process_plan(self):
         plan = fstat_fit_plan(None, [2, 0])
         self.assertEqual([s.walker for s in plan], [2, 0])
