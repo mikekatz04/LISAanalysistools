@@ -12,8 +12,6 @@ from eryn.utils.transform import TransformContainer
 import numpy as np
 import typing
 
-from ..utils.constants import MTSUN_SI
-
 # Type-only imports: ``run`` imports ``recipe`` and pulls in MPI, so importing it at module scope would create an
 # import cycle and make this module unimportable without MPI. ``from __future__ import annotations`` keeps these
 # names out of the runtime.
