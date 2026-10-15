@@ -28316,10 +28316,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return 0 if self.gf_rank is None else int(self.gf_rank)
 
     def _warm_self_begin(self):
+        # The live stage (re-stamped on this move before every propose by
+        # the stage combine): on the head, the registered head builder
+        # builds a due self epoch here, at the warm move's entry (user
+        # ruling 2026-10-15), before the mixer picks this propose's container.
         mixer = self._warm_self_mixer()
         self._warm_self_directive = (
             None if mixer is None
-            else mixer.begin_propose(rank=self._warm_self_rank()))
+            else mixer.begin_propose(rank=self._warm_self_rank(),
+                                     stage=getattr(self, "gf_stage_name", None)))
 
     def _warm_self_apply(self, directive):
         mixer = self._warm_self_mixer()

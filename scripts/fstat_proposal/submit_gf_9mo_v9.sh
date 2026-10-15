@@ -4618,36 +4618,38 @@ export GB_WARM_START_SOURCE_TOBS=${GB_WARM_START_SOURCE_TOBS:-15552000}   # the 
 export GB_WARM_START_LAST_K=${GB_WARM_START_LAST_K:-300}   # 9mo/1yr (Mike 2026-10-08): the last 300 stored cold-chain rows x 4 walkers = 1,200 samples of the 6mo full_pe (~2.9M leaf rows into the fit; build the npz by hand on a login node if the in-job build is slow)
 # GB warm-start SELF REFIT (user rulings 2026-10-13: "rebuild our warm start
 # proposal with the last 50 samples (x4 walkers)" / "keep the original warm
-# start in the fit" / "sample from the previous full warm start 25% of the
-# time and the updated refit warm start 75% of the time" / "during gb search
-# 2, the warm start refit should occur every 5 iterations" / "full pe
-# adaptivity: just refit every 250 iterations"). The SAVER rank rebuilds the
-# mixture from THIS run's own last GB_WARM_SELF_LAST_K stored rows x every
-# cold walker (fit -> referee -> apply, same pipeline as the parent build,
-# into ${STORE_DIR}/warmstart/self/epoch_NNNN/) every GB_WARM_SELF_EVERY_SEARCH
-# rows in gb_search_1 and gb_search_2 and every GB_WARM_SELF_EVERY_PE rows in
-# full_pe, right
-# after its own save (watched: a build that holds a save up is reported);
-# rj_warm_pe then draws GB_WARM_SELF_FRACTION of its proposes from the newest
-# self mixture and the rest from the parent-derived one above, rj_warm_search
-# GB_WARM_SELF_FRACTION_SEARCH of its proposes (all from the parent until the
-# first epoch exists) -- a cross-walker GB exchange: each walker is proposed
-# what the others hold. 2026-10-14 ruling, after the 9mo's first PE epoch
-# carried 84 % of the lnL gain in its 7 self draws (cold acceptance 13x the
-# parent mixture's): in gb_search_2 refit EVERY stored row and draw ONLY from
-# the refit ("update the warm start refit in gb search 2 to every iteration
-# using only the refit proposal during gb search 2"). Later the same day:
-# "gb search 1 and gb search 2 will have warm start refits every iteration.
-# PE it will happen every 150" -> gb_search_1 refits every stored row too
-# (it never built before) and full_pe every 150 rows (was 250), 75 % self.
+# start in the fit"; 2026-10-14: refit every stored row in gb_search_1 and
+# gb_search_2; 2026-10-15: "build everything on the head at entry time for
+# the refit ... Make that the default", "split the refits three ways: old run
+# refit that never changes, new refit with all sources, and new refit removal
+# of sources that are already in all walkers ... each 1/3 of the time",
+# search "100% refit on sources that do not exist in all four (with high
+# confidence)", PE every 25 iterations). The HEAD keeps this run's last
+# GB_WARM_SELF_LAST_K stored cold rows x every walker in memory and, at a
+# warm move's entry once GB_WARM_SELF_EVERY_SEARCH rows (gb_search_1/2: every
+# cycle) or GB_WARM_SELF_EVERY_PE rows (full_pe) were stored since the last
+# build, refits the mixture (fit -> referee -> apply, the parent build's
+# pipeline, then the consensus filter) into
+# ${STORE_DIR}/warmstart/self/epoch_NNNN/: ONE build gives the FULL refit and
+# the FILTERED one (minus the clusters every walker holds in >=
+# GB_WARM_SELF_CONSENSUS of its rows with the same leaf count); every rank
+# waits for it (~75 s on the 9mo). The warm moves draw "original, full,
+# filtered" by GB_WARM_SELF_SPLIT_SEARCH (rj_warm_search) and
+# GB_WARM_SELF_SPLIT_PE (rj_warm_pe), all from the parent until the first
+# epoch exists -- a cross-walker GB exchange: each walker is proposed what
+# the others hold. GB_WARM_SELF_AT_ENTRY=0 returns to the saver-side build
+# after each due save. GB_WARM_SELF_FRACTION / _FRACTION_SEARCH are no longer
+# read (the recipe warns if they are set).
 # Code default OFF (stock runs bit-identical); needs GB_WARM_START_COMPONENTS.
 # Log: "[GB_WARM_SELF ...]". Rollback: GB_WARM_SELF=0 on the launch line.
 export GB_WARM_SELF=${GB_WARM_SELF:-1}
+export GB_WARM_SELF_AT_ENTRY=${GB_WARM_SELF_AT_ENTRY:-1}
 export GB_WARM_SELF_EVERY_SEARCH=${GB_WARM_SELF_EVERY_SEARCH:-1}
-export GB_WARM_SELF_EVERY_PE=${GB_WARM_SELF_EVERY_PE:-150}
+export GB_WARM_SELF_EVERY_PE=${GB_WARM_SELF_EVERY_PE:-25}
 export GB_WARM_SELF_LAST_K=${GB_WARM_SELF_LAST_K:-50}
-export GB_WARM_SELF_FRACTION=${GB_WARM_SELF_FRACTION:-0.75}
-export GB_WARM_SELF_FRACTION_SEARCH=${GB_WARM_SELF_FRACTION_SEARCH:-1.0}
+export GB_WARM_SELF_SPLIT_SEARCH=${GB_WARM_SELF_SPLIT_SEARCH:-0,0,1}
+export GB_WARM_SELF_SPLIT_PE=${GB_WARM_SELF_SPLIT_PE:-1,1,1}
+export GB_WARM_SELF_CONSENSUS=${GB_WARM_SELF_CONSENSUS:-0.95}
 if [ -n "${GB_WARM_START_COMPONENTS}" ] && [ ! -f "${GB_WARM_START_COMPONENTS}" ]; then
   if [ -f "${GB_WARM_START_SOURCE_STORE}" ]; then
     echo "[WARMSTART] ${GB_WARM_START_COMPONENTS} missing -- it will be BUILT"

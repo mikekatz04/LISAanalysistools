@@ -107,10 +107,15 @@ EIGEN_AXIS_ADAPT_KNOBS = tuple(EIGEN_AXIS_ADAPT_LINE)
 # the refit (GB_WARM_SELF_EVERY_SEARCH 5 -> 1, GB_WARM_SELF_FRACTION_SEARCH 1.0).
 # 2026-10-14 (later): gb_search_1 refits every row as well (code: the stage
 # gate), and full_pe every 150 (GB_WARM_SELF_EVERY_PE 250 -> 150).
+# 2026-10-15: built ON THE HEAD at the warm moves' entry (AT_ENTRY 1), PE every
+# 25, three containers "original,full,filtered": search 0,0,1, PE 1,1,1, the
+# consensus threshold 0.95; the two FRACTION knobs are gone.
 WARM_SELF_LINE = {
-    "GB_WARM_SELF": "1", "GB_WARM_SELF_EVERY_SEARCH": "1",
-    "GB_WARM_SELF_EVERY_PE": "150", "GB_WARM_SELF_LAST_K": "50",
-    "GB_WARM_SELF_FRACTION": "0.75", "GB_WARM_SELF_FRACTION_SEARCH": "1.0",
+    "GB_WARM_SELF": "1", "GB_WARM_SELF_AT_ENTRY": "1",
+    "GB_WARM_SELF_EVERY_SEARCH": "1",
+    "GB_WARM_SELF_EVERY_PE": "25", "GB_WARM_SELF_LAST_K": "50",
+    "GB_WARM_SELF_SPLIT_SEARCH": "0,0,1", "GB_WARM_SELF_SPLIT_PE": "1,1,1",
+    "GB_WARM_SELF_CONSENSUS": "0.95",
 }
 WARM_SELF_KNOBS = tuple(WARM_SELF_LINE)
 # 2026-10-14 (Mike): the search-stage cold -> hot rotation of the source
@@ -3196,9 +3201,10 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
 
     def test_the_warm_self_refit_block_is_on_in_every_v9_production_launcher(self):
         """2026-10-13 (Mike): the GB warm-start SELF refit -- every v9
-        production launcher turns it on with the ruled cadences (5 rows in
-        gb_search_2, 250 in full_pe), the 50-row table and the 75 % self
-        share; each knob overridable on the line (rollback GB_WARM_SELF=0).
+        production launcher turns it on with the ruled settings (2026-10-15:
+        built on the head at the warm moves' entry, every row in search and
+        25 in full_pe, the 50-row table, splits 0,0,1 / 1,1,1, consensus
+        0.95); each knob overridable on the line (rollback GB_WARM_SELF=0).
         The code default stays OFF so stock runs are bit-identical."""
         for path in V9_PRODUCTION:
             exports = _exports(path)

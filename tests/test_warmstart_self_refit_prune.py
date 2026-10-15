@@ -89,7 +89,7 @@ class PrunedEpochAdoptionTest(_TmpDir):
         empty = _mixer(root)
         sr.prune_epochs(root, keep_last=3, keep_every=10)   # strips epoch 1
         self.assertIsNone(sr.read_manifest(root, 1))
-        for m, want in ((held, (0, "self")), (empty, (None, "orig"))):
+        for m, want in ((held, (0, "full")), (empty, (None, "orig"))):
             with self.assertLogs(sr.logger, level=logging.WARNING):
                 m.apply_directive({"epoch": 1, "choice": "self"}, rank=3)
             self.assertEqual((m.epoch, m.choice), want)

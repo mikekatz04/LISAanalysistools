@@ -117,13 +117,13 @@ class _TmpDir(unittest.TestCase):
 
 
 def _mixer(root, *, build_seed=101, tag=recipe._WARM_SEED_TAG_SEARCH,
-           fraction=0.75, name="rj_warm_search", orig_path=None):
+           split=(1.0, 1.0, 1.0), name="rj_warm_search", orig_path=None):
     if orig_path is None:
         orig_path = os.path.join(root, "..", "orig.npz")
         if not os.path.exists(orig_path):
             _write_components(orig_path)
     orig = WarmStartComponents.from_npz(orig_path, seed=7, **LOAD_KW)
-    return sr.WarmSelfMixer(orig, epoch_root=root, fraction=fraction,
+    return sr.WarmSelfMixer(orig, epoch_root=root, split=split,
                             load_kwargs=LOAD_KW, build_seed=build_seed,
                             tag=tag, name=name)
 
@@ -136,11 +136,11 @@ class SettingsKnobTest(unittest.TestCase):
         "warm_self": ("GB_WARM_SELF", False, "1", True),
         # 2026-10-14 ruling: every iteration in gb_search_2 (was 5)
         "warm_self_every_search": ("GB_WARM_SELF_EVERY_SEARCH", 1, "7", 7),
-        "warm_self_every_pe": ("GB_WARM_SELF_EVERY_PE", 150, "100", 100),
+        # 2026-10-15 ruling: PE every 25 iterations (was 150)
+        "warm_self_every_pe": ("GB_WARM_SELF_EVERY_PE", 25, "100", 100),
         "warm_self_last_k": ("GB_WARM_SELF_LAST_K", 50, "30", 30),
-        "warm_self_fraction": ("GB_WARM_SELF_FRACTION", 0.75, "0.5", 0.5),
-        # 2026-10-14 ruling: only the refit proposal during gb search 2
-        "warm_self_fraction_search": ("GB_WARM_SELF_FRACTION_SEARCH", 1.0, "0.5", 0.5),
+        # the 2026-10-15 splits replaced warm_self_fraction(_search); the
+        # rest of the new fields are pinned in test_warmstart_self_refit_entry
     }
 
     def _fields(self):
@@ -174,7 +174,7 @@ class WrapTest(_TmpDir):
         _write_components(orig_path)
         orig = WarmStartComponents.from_npz(orig_path, seed=1, **LOAD_KW)
         store = os.path.join(self.tmp, "run", "gf_testing.h5")
-        gb_info = SimpleNamespace(warm_self=True, warm_self_fraction=0.75,
+        gb_info = SimpleNamespace(warm_self=True, warm_self_split_pe="1,1,1",
                                   build_seed=99)
         out = recipe._warm_self_wrap(
             orig, gb_info=gb_info,
@@ -188,20 +188,19 @@ class WrapTest(_TmpDir):
         self.assertEqual(out.epoch_root, sr.self_epoch_root(store))
         self.assertEqual(out.load_kwargs["circ_images"], 3)
         self.assertEqual(out.tag, recipe._WARM_SEED_TAG_PE)
-        self.assertEqual(str(out.fraction), "3/4")
+        self.assertEqual(out.split, (1.0, 1.0, 1.0))
 
-    def test_the_search_twin_takes_the_search_fraction(self):
-        """User ruling 2026-10-14: "using only the refit proposal during gb
-        search 2" -- rj_warm_search wraps with ``warm_self_fraction_search``
-        (1.0 -> every propose from the self refit once an epoch exists), the
-        PE twin with ``warm_self_fraction`` (0.75); each twin ignores the
-        other's knob."""
+    def test_the_search_twin_takes_the_search_split(self):
+        """User rulings 2026-10-15: search "100% refit on sources that do not
+        exist in all four" -- rj_warm_search wraps with
+        ``warm_self_split_search`` ("0,0,1"), the PE twin with
+        ``warm_self_split_pe`` ("1,1,1"); each twin ignores the other's knob."""
         orig_path = os.path.join(self.tmp, "orig.npz")
         _write_components(orig_path)
         orig = WarmStartComponents.from_npz(orig_path, seed=1, **LOAD_KW)
         store = os.path.join(self.tmp, "run", "gf_testing.h5")
-        gb_info = SimpleNamespace(warm_self=True, warm_self_fraction=0.75,
-                                  warm_self_fraction_search=1.0, build_seed=99)
+        gb_info = SimpleNamespace(warm_self=True, warm_self_split_pe="1,1,1",
+                                  warm_self_split_search="0,0,1", build_seed=99)
         search = recipe._warm_self_wrap(
             orig, gb_info=gb_info,
             general_info=SimpleNamespace(main_file_path=store),
@@ -212,20 +211,22 @@ class WrapTest(_TmpDir):
             general_info=SimpleNamespace(main_file_path=store),
             tag=recipe._WARM_SEED_TAG_PE, name="rj_warm_pe",
             load_kwargs=dict(LOAD_KW))
-        self.assertEqual(str(search.fraction), "1")
-        self.assertEqual(str(pe.fraction), "3/4")
+        self.assertEqual(search.split, (0.0, 0.0, 1.0))
+        self.assertEqual(pe.split, (1.0, 1.0, 1.0))
         # the knobs are independent
-        gb_info.warm_self_fraction_search = 0.5
+        gb_info.warm_self_split_search = "1,0,1"
         search2 = recipe._warm_self_wrap(
             orig, gb_info=gb_info,
             general_info=SimpleNamespace(main_file_path=store),
             tag=recipe._WARM_SEED_TAG_SEARCH, name="rj_warm_search",
             load_kwargs=dict(LOAD_KW))
-        self.assertEqual(str(search2.fraction), "1/2")
-        # with an epoch present the search twin uses the self refit on EVERY propose
+        self.assertEqual(search2.split, (1.0, 0.0, 1.0))
+        # with an epoch present the search twin uses the filtered refit on
+        # EVERY propose (this epoch has no filtered npz: it serves the full)
         _write_epoch(search.epoch_root, 0)
         choices = [search.begin_propose()["choice"] for _ in range(12)]
-        self.assertEqual(choices, ["self"] * 12)
+        self.assertEqual(choices, ["filtered"] * 12)
+        self.assertIs(search.active, search.self_full)
 
     def test_both_twins_and_the_saver_are_wired(self):
         """``build_gb_moves`` / ``run_global_fit`` are too heavy to construct
@@ -401,32 +402,39 @@ class AlternationTest(_TmpDir):
             np.testing.assert_array_equal(m.logpdf(x), m.original.logpdf(x))
         self.assertEqual(m.n_self_window, 0)
 
-    def test_exactly_three_of_four_at_075(self):
+    def test_about_one_third_each_at_the_default_split(self):
         m = _mixer(self.root)
         _write_epoch(self.root, 0)
-        choices = [m.begin_propose(rank=0)["choice"] for _ in range(400)]
+        choices = [m.begin_propose(rank=0)["choice"] for _ in range(3000)]
         self.assertEqual(m.epoch, 0)
-        self.assertEqual(choices[:8], ["orig", "self", "self", "self"] * 2)
-        self.assertEqual(choices.count("self"), 300)
-        for i in range(0, 400, 4):              # every window of 4: exactly 3
-            self.assertEqual(choices[i:i + 4].count("self"), 3)
+        for c in ("orig", "full", "filtered"):  # binomial sd 25.8; 5 sd
+            self.assertLess(abs(choices.count(c) - 1000), 130, c)
 
-    def test_other_fractions(self):
-        for frac, want in ((0.0, 0), (1.0, 40), (0.5, 20), (0.25, 10)):
-            m = _mixer(self.root, fraction=frac)
+    def test_other_splits(self):
+        # probabilities ~ the weights; a zero weight is never drawn
+        for split, want in (((0, 0, 1), {"filtered": 1.0}),
+                            ((1, 0, 0), {"orig": 1.0}),
+                            ((1, 1, 0), {"orig": 0.5, "full": 0.5}),
+                            ((1, 3, 0), {"orig": 0.25, "full": 0.75})):
+            m = _mixer(self.root, split=split)
             _write_epoch(self.root, 0)
-            got = [m.begin_propose()["choice"] for _ in range(40)]
-            self.assertEqual(got.count("self"), want, frac)
-        with self.assertRaises(ValueError):
-            _mixer(self.root, fraction=1.5)
+            got = [m.begin_propose()["choice"] for _ in range(2000)]
+            self.assertEqual(set(got), set(want), split)
+            for c, f in want.items():           # 5 sd at n = 2000
+                sd = np.sqrt(2000 * f * (1 - f))
+                self.assertLessEqual(abs(got.count(c) - 2000 * f), 5 * sd + 1e-9,
+                                     (split, c))
+        for bad in ((0, 0, 0), (1, -1, 1), (1, 1)):
+            with self.assertRaises(ValueError):
+                _mixer(self.root, split=bad)
 
     def test_one_container_serves_births_and_every_density_of_a_propose(self):
-        m = _mixer(self.root)
+        m = _mixer(self.root, split=(1, 1, 0))
         _write_epoch(self.root, 0, shift=0.5)       # a clearly different law
         for _ in range(12):
             c = m.begin_propose()["choice"]
-            held = m.self_container if c == "self" else m.original
-            other = m.original if c == "self" else m.self_container
+            held = m.self_full if c == "full" else m.original
+            other = m.original if c == "full" else m.self_full
             self.assertIs(m.active, held)
             x = m.rvs(size=64)                       # the forward draws ...
             lp_fwd = m.logpdf(x)
@@ -457,13 +465,15 @@ class AlternationTest(_TmpDir):
         self.assertIn("[GB_WARM_SELF rj_warm_search] r2 this propose used ORIG",
                       "\n".join(cm.output))
         _write_epoch(self.root, 0)
-        for _ in range(4):
-            m.begin_propose()
+        used = ["orig"]                          # the propose above
+        for _ in range(30):
+            used.append(m.begin_propose()["choice"])
             m.note_census(sp)
-        self.assertEqual(m.tallies["orig"]["proposes"], 2)
-        self.assertEqual(m.tallies["self"]["proposes"], 3)
-        self.assertEqual(m.tallies["self"]["birth_acc_cold"], 3)
-        self.assertEqual(m.tallies["orig"]["viable"], 16)
+        for c in ("orig", "full", "filtered"):
+            n = used.count(c)
+            self.assertEqual(m.tallies[c]["proposes"], n, c)
+            self.assertEqual(m.tallies[c]["birth_acc_cold"], n, c)
+            self.assertEqual(m.tallies[c]["viable"], 8 * n, c)
 
 
 class SeedTest(_TmpDir):

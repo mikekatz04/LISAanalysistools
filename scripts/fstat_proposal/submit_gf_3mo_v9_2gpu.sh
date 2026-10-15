@@ -4094,14 +4094,16 @@ export GB_ROUTER_THREADED=1
 # ============================================================================
 export GB_WARM_START_COMPONENTS=
 # GB warm-start SELF refit block, mirrored from the 6mo / 9mo / 1yr scripts
-# (user rulings 2026-10-13); inert here without GB_WARM_START_COMPONENTS
+# (user rulings 2026-10-13 .. 15); inert here without GB_WARM_START_COMPONENTS
 # (the hook logs one warning and builds nothing).
 export GB_WARM_SELF=${GB_WARM_SELF:-1}
+export GB_WARM_SELF_AT_ENTRY=${GB_WARM_SELF_AT_ENTRY:-1}
 export GB_WARM_SELF_EVERY_SEARCH=${GB_WARM_SELF_EVERY_SEARCH:-1}
-export GB_WARM_SELF_EVERY_PE=${GB_WARM_SELF_EVERY_PE:-150}
+export GB_WARM_SELF_EVERY_PE=${GB_WARM_SELF_EVERY_PE:-25}
 export GB_WARM_SELF_LAST_K=${GB_WARM_SELF_LAST_K:-50}
-export GB_WARM_SELF_FRACTION=${GB_WARM_SELF_FRACTION:-0.75}
-export GB_WARM_SELF_FRACTION_SEARCH=${GB_WARM_SELF_FRACTION_SEARCH:-1.0}
+export GB_WARM_SELF_SPLIT_SEARCH=${GB_WARM_SELF_SPLIT_SEARCH:-0,0,1}
+export GB_WARM_SELF_SPLIT_PE=${GB_WARM_SELF_SPLIT_PE:-1,1,1}
+export GB_WARM_SELF_CONSENSUS=${GB_WARM_SELF_CONSENSUS:-0.95}
 
 # ============================================================================
 # 3MO-3 -- THE NOISE EVOLVES THROUGHOUT: A noise_search FIRST STAGE, AND A

@@ -242,58 +242,94 @@ gb search 2 (and in full pe). Let's rebuild our warm start proposal with the las
 samples (x4 walkers)"; "keep the original warm start in the fit"; 25 % original / 75 %
 refit in full_pe every 250 rows; 2026-10-14 for gb_search_2: refit EVERY stored row and
 draw ONLY from the refit, after the 9mo's first PE epoch carried 84 % of the lnL gain in
-its seven self draws). Why: per-walker GB
+its seven self draws; 2026-10-15: build on the head at the warm moves' entry, one build
+gives a FULL and a FILTERED refit, search draws only the filtered one, PE one third each
+of original / full / filtered, PE every 25 rows). Why: per-walker GB
 completeness at SNR > 8 was 91 % on the 9mo while the union of the four cold walkers
 was 96.5 %; a mixture fitted to ALL cold walkers proposes to each walker what the
-others hold. Three pieces:
+others hold. The pieces:
 
-- **build, on the SAVER rank** (`WarmSelfHook`, called by `hdfbackend`'s save loop
-  after a batch that saved a row, after the monitor notice): when the store's active
-  recipe stage (`store_stage`: first step with `status` False, its `start_iteration`)
-  is `gb_search_N` (N >= 2) or `full_pe` and `rows - clock >= cadence`
-  (`warm_self_due`; clock = max(stage start, latest complete epoch's `built_at_row`),
-  both read from disk at every save, so a resume never rebuilds early), it copies the
-  last `GB_WARM_SELF_LAST_K` cold rows of `chain/gb` / `inds/gb` / `log_like` through
-  the saver's own `open("r")` (scoped and closed before anything slow: a held read
-  handle makes the saver's next `open("a")` fail) into `epoch_NNNN/leaf_rows.h5`, then
-  runs fit -> referee -> apply on it exactly as `build.py` does (`_default_runner`, CLI
-  defaults, the run's own Tobs, `--gmm-gpu` = the saver's device, the whole pipeline
-  in that device's context). A queued save always wins (the build waits for a later
-  save); `WarmSelfWatchdog` reports a build that held a save up and switches the
-  builder off if it ever cost stored rows. A failed build leaves an incomplete epoch
-  and retries one cadence later.
+- **build, ON THE HEAD at the warm move's entry** (default since 2026-10-15,
+  `GB_WARM_SELF_AT_ENTRY=1`: `WarmSelfBuffer` + `WarmSelfHeadBuilder`, armed by
+  `run.prepare_main` -> `make_head_builder` before the engine is built). The head may not
+  read the store the saver writes, so it keeps its own copy of the last
+  `GB_WARM_SELF_LAST_K` stored cold rows (all walkers): filled from the store at set-up
+  (before the first save; also the active stage and its start row for the clock) and
+  appended by the head's `GFHDFBackend.save_step` with every state it saves. When a warm
+  move starts a propose (`GBSpecialBase._warm_self_begin` -> `WarmSelfMixer.begin_propose`
+  with the live `gf_stage_name`), the registered head builder checks `warm_self_due`
+  (stage `gb_search_N` with N >= 1 or `full_pe`; clock = max(stage start, latest complete
+  epoch's `built_at_row`); the stage start is the store's on a resume, else the stored row
+  count when the head first sees the stage at a warm entry; a stage's FIRST warm entry with no
+  refit built in it yet builds at once from the rows already stored). If due it writes the buffer to
+  `epoch_NNNN/leaf_rows.h5` (the same layout `copy_leaf_rows` makes from the store), runs
+  fit -> referee -> apply exactly as `build.py` does (`_default_runner`, CLI defaults, the
+  run's Tobs, `--gmm-gpu` = the head's device), then `consensus_filter`, writes the
+  manifest LAST, prunes, and the propose that triggered it draws from the new epoch.
+  Every rank waits (the compute ranks are parked on the propose; ~75 s on the 9mo), so the
+  `[GF_TIMING]` wall of `rj_warm_search` / `rj_warm_pe` now INCLUDES the build on a build
+  propose: not a regression. Only the head rank builds. Rows are counted as the states the
+  head handed to the saver (`row_count: head states` in the manifest). A failure logs,
+  leaves an incomplete epoch and retries a cadence later; it never raises.
+- **the FILTERED container** (`consensus_filter`): every leaf row of the refit is
+  assigned to its component with the referee's `assign_members`; a cluster is CONSENSUS
+  when EVERY walker holds it in >= `GB_WARM_SELF_CONSENSUS` (0.95) of its rows AND >= that
+  share of all samples hold the same number of its leaves (>= 1). The filtered npz is the
+  refit minus the consensus clusters (same schema). Measured on the 9mo (rows 82-89 and
+  103-110): ~2,160 of ~3,230 source groups are consensus and took 83 % of the full
+  mixture's draws; draws landing on a source the walker already holds 93 % -> 57 %
+  (useful draws ~7 % -> ~42 %); ~60 blends (all walkers, differing counts) are kept.
+- **build, on the SAVER rank** (`GB_WARM_SELF_AT_ENTRY=0` only; `WarmSelfHook`, called by
+  `hdfbackend`'s save loop after a batch that saved a row): when the store's active recipe
+  stage (`store_stage`) is `gb_search_N` (N >= 1) or `full_pe` and `rows - clock >=
+  cadence`, it copies the last `GB_WARM_SELF_LAST_K` cold rows through the saver's own
+  `open("r")` (scoped and closed before anything slow: a held read handle makes the
+  saver's next `open("a")` fail) into `epoch_NNNN/leaf_rows.h5` and runs fit -> referee
+  -> apply on it (no filtered container: the filtered choice serves the full refit). A
+  queued save always wins; `WarmSelfWatchdog` reports a build that held a save up and
+  switches the builder off if it ever cost stored rows.
 - **epochs**: `<run_dir>/warmstart/self/epoch_NNNN/` = `self_fit.npz`,
-  `self_fit_referee.npz`, `self_refereed.npz` and `DONE.json` written LAST (tmp +
-  fsync + rename: `epoch`, `built_at_row`, `stage`, `stage_start`, `rows [a, b]`,
-  `n_samples`, `n_clusters`, `n_components`, `walls`, `device`). No readable
-  `DONE.json` or no npz = not an epoch; the next build takes `1 + max(every epoch
-  dir)`.
-- **alternation + adoption, in the warm moves** (`WarmSelfMixer` is the
+  `self_fit_referee.npz`, `self_refereed.npz`, `self_refereed_filtered.npz` (head builds)
+  and `DONE.json` written LAST (tmp + fsync + rename: `epoch`, `built_at_row`, `stage`,
+  `stage_start`, `rows [a, b]`, `n_samples`, `n_clusters`, `n_components`, `npz_filtered`,
+  `n_clusters_filtered`, `consensus`, `built_on`, `walls`, `device`). No readable
+  `DONE.json` or no npz = not an epoch; the next build takes `1 + max(every epoch dir)`.
+  After each successful build `prune_epochs` strips every older epoch to its `DONE.json`
+  except the newest 3 complete ones and every 10th.
+- **split + adoption, in the warm moves** (`WarmSelfMixer` is the
   `rj_proposal_distribution` of `rj_warm_search` / `rj_warm_pe` when `GB_WARM_SELF=1`;
-  built by `recipe._warm_self_wrap`). At each propose the head polls the epoch root
-  (`GBSpecialBase._warm_self_begin`, once per `propose`), adopts a newer complete
-  epoch, picks the ORIGINAL or the SELF container by a deterministic Bresenham cadence
-  (0.75 = exactly 3 proposes in 4; 100 % original before the first epoch) and ships
-  `{"epoch", "choice"}` in the `gb_run_proposal` payload (`"warm_self"`); every rank
-  loads that epoch from the shared filesystem (`_warm_self_apply`, before its
-  BandSorter is built) with the original's Tobs / floor box / floor_eps / p_floor /
-  circ_images / use_cupy and the seed `_warm_start_seed(gb_info, tag ^ (epoch + 1))`.
-  One container serves the births and every density of a propose. The PE draw-one
-  share of `rj_warm_pe` (`GB_PE_RJ_WARM_FRACTION`) is unchanged: the 75/25 split
-  happens inside the move.
+  built by `recipe._warm_self_wrap`). At each propose the head polls the epoch root,
+  adopts a newer complete epoch, DRAWS ORIGINAL / FULL / FILTERED at random with
+  probabilities ~ the twin's split (`0,0,1` search = always the filtered refit; `1,1,1`
+  PE = one third each, drawn per propose; 100 % original before the first epoch and in
+  every stage that never refits -- `gb_search_seed`, `source_search` -- even with epochs
+  on disk; an epoch
+  without a filtered npz serves its full refit where the filtered one is chosen) and
+  ships `{"epoch", "choice"}` in the `gb_run_proposal` payload (`"warm_self"`); every
+  rank loads that epoch's two npz files from the shared filesystem (`_warm_self_apply`,
+  before its BandSorter is built) with the original's Tobs / floor box / floor_eps /
+  p_floor / circ_images / use_cupy and the seeds `_warm_start_seed(gb_info, tag ^ (epoch
+  + 1))` (full) and that tag `^ _FILTERED_SEED_XOR` (filtered). One container serves the
+  births and every density of a propose. The PE draw-one share of `rj_warm_pe`
+  (`GB_PE_RJ_WARM_FRACTION`) is unchanged: the split happens inside the move.
 
 | knob (field on `GBSettings`) | default | meaning |
 |---|---|---|
 | `GB_WARM_SELF` (`warm_self`) | 0 | master switch; 0 = no builder, no mixer, bit-identical; needs `GB_WARM_START_COMPONENTS` |
-| `GB_WARM_SELF_EVERY_SEARCH` (`warm_self_every_search`) | 1 | stored rows between refits in `gb_search_N`, N >= 1 (<= 0 off; was 5 and N >= 2 until 2026-10-14) |
-| `GB_WARM_SELF_EVERY_PE` (`warm_self_every_pe`) | 150 | stored rows (= iterations) between refits in `full_pe` (<= 0 off; was 250 until 2026-10-14) |
+| `GB_WARM_SELF_AT_ENTRY` (`warm_self_at_entry`) | 1 | build on the head at the warm moves' entry; 0 = the saver builds after its saves (2026-10-13 design) |
+| `GB_WARM_SELF_EVERY_SEARCH` (`warm_self_every_search`) | 1 | stored rows between refits in `gb_search_N`, N >= 1 (= every cycle at the entry; <= 0 off) |
+| `GB_WARM_SELF_EVERY_PE` (`warm_self_every_pe`) | 25 | stored rows (= iterations) between refits in `full_pe`, checked when `rj_warm_pe` is drawn (<= 0 off; 150 before 2026-10-15, 250 before 2026-10-14) |
 | `GB_WARM_SELF_LAST_K` (`warm_self_last_k`) | 50 | the run's last stored rows fed to a refit, every cold walker of each |
-| `GB_WARM_SELF_FRACTION` (`warm_self_fraction`) | 0.75 | share of `rj_warm_pe` proposes drawing from the self refit once an epoch exists |
-| `GB_WARM_SELF_FRACTION_SEARCH` (`warm_self_fraction_search`) | 1.0 | the same for `rj_warm_search` (gb_search_N, N >= 2): only the refit once an epoch exists (2026-10-14) |
+| `GB_WARM_SELF_SPLIT_SEARCH` (`warm_self_split_search`) | `0,0,1` | `rj_warm_search` weights original / full / filtered once an epoch exists |
+| `GB_WARM_SELF_SPLIT_PE` (`warm_self_split_pe`) | `1,1,1` | `rj_warm_pe` weights original / full / filtered |
+| `GB_WARM_SELF_CONSENSUS` (`warm_self_consensus`) | 0.95 | per-walker row share and same-count share above which a cluster counts as held by every walker (dropped from the filtered refit) |
 
-The fit / referee options are not knobs here: they are the parent build's (CLI defaults
-of the three modules); the referee's own backend choice (`GB_WARM_START_REFEREE_BACKEND`)
-is read by the referee. Tests: `tests/test_warmstart_self_refit.py`.
+`GB_WARM_SELF_FRACTION` / `GB_WARM_SELF_FRACTION_SEARCH` (0.75 / 1.0, two containers) are
+no longer read (2026-10-15); `recipe._warm_self_wrap` warns if either is set. The fit /
+referee options are not knobs here: they are the parent build's (CLI defaults of the
+three modules); the referee's own backend choice (`GB_WARM_START_REFEREE_BACKEND`) is
+read by the referee. Tests: `tests/test_warmstart_self_refit.py`,
+`tests/test_warmstart_self_refit_entry.py`, `tests/test_warmstart_self_refit_prune.py`.
 
 ### 2.9 Monitoring: `src/lisatools/globalfit/monitor/` and `scripts/diagnostics/`
 
@@ -369,8 +405,8 @@ sources every cycle, valves reset at the fresh entry, noise at the cycle end.
 (`feedback`: no maximizing over parameters in PE), one draw-one GB RJ move per
 iteration (`GB_PE_RJ_DRAW_ONE`; the three-way draw `GB_PE_RJ_FSTAT_FRACTION`
 0.45 / `GB_PE_RJ_WARM_FRACTION` 0.1 / the prior move the rest; with
-`GB_WARM_SELF=1` the warm move itself then draws from the run's own refit 3
-proposes in 4, section 2.8). The PE
+`GB_WARM_SELF=1` the warm move itself then draws one third each from the
+original warm start, the run's full refit and its filtered refit, section 2.8). The PE
 declarations applied on entry by `PERecipeStep.note_recipe_step`:
 `PE_INMODEL_REPEATS=25` (`apply_inmodel_repeats`; `GB_NUM_REPEAT_PROPOSALS=25`
 is the global export), `GB_PE_RJ_FLIP_FRACTION=0.1` (`apply_rj_flip_fraction`),
@@ -474,7 +510,7 @@ or the nleaves plateau (`GB_PLATEAU_ITERS`), or both; `full_pe` never ends
   *_eigen_tables.pkl                          the eigen-table sidecar
   gb_fstat_fit/shared_search/epoch_NNNN/     DONE.json (wall_seconds, n_peaks, clock) + the grid payload (not in tars unless --add-fstat)
   warmstart/<parent>_refereed.npz            the GB warm-start mixture
-  warmstart/self/epoch_NNNN/                 GB_WARM_SELF=1 only: the run's own refits (self_refereed.npz + DONE.json LAST)
+  warmstart/self/epoch_NNNN/                 GB_WARM_SELF=1 only: the run's own refits (self_refereed.npz + self_refereed_filtered.npz + DONE.json LAST)
   warmstart/self/epoch_NNNN/: older epochs hold DONE.json only (build history); the newest 3 complete epochs and every 10th keep their npz files (prune_epochs, after each successful build)
   gb_truth_3to21.npz, kappa_grid.npz         the truth set (built by build_truth.py; frozen denominator)
   gpu_util_<job>.csv                         head-node GPUs only: ts, idx, name, util, util_mem, mem_used MiB, mem_total, power, temp
@@ -565,8 +601,9 @@ sites in the tree are a fair proxy for importance.
 | `F-stat grid fit epoch N ... done in X s`, `[stageA] comb + peak selection: N peaks in X m`, `[stageB] banded Mc ...`, `[peaks] N peaks`, `[FSTAT_CTR*]` | `sampling/fstat_gridfit.py` (the fit: `run_fstat_grid_fit`, stage A `run_comb_scan`, stage B `run_stacked_stage_b`), `gbspecialstretch.py` (the call site) | the F-stat epochs: stage A comb (nodes x sky; the lever is `FSTAT_COMB_NSKY_MAX`) vs stage B (per-peak grids; `FSTAT_STAGEB_NSKY_MAX`, `FSTAT_STAGEB_GROUP_MAX_GB`), peak counts. A 0-peak epoch SKIPS `rj_fstat_search` and `in_model_fstat` (843b7ec9; the warning says `NOT falling back to the prior`) |
 | `[MAXLOGL] stage=.. iter=.. flat n/m ... converged=k/4` / `done after N iterations` | `globalfitmove.py` | the noise / source plateau searches; only each invocation's FINAL line counts |
 | `[NOISE-PIN]`, `[SOURCE-WARM]`, `[WARMSTART-BUILD]`, `[V9-SEED]` | `warmstart/`, driver | the child-run seeding at launch |
-| `[GB_WARM_SELF] builder armed on the saver ...` / `epoch k built from rows a..b (N samples, K components) in T s` / `epoch k build FAILED` / `THE SELF-REFIT BUILD IS HOLDING THE SAVER RANK UP` / `STOPPING THE SELF REFIT` | `warmstart/self_refit.py` (`WarmSelfHook`, saver: `[r<k>/saver]`) | the self-refit builds (`GB_WARM_SELF=1`), their walls (read / fit / referee / apply) and whether one held a save |
-| `[GB_WARM_SELF] rank r adopted epoch k (rows a..b, N samples, K components) into <move>` / `[GB_WARM_SELF <move>] rN this propose used SELF (epoch k) \| cumulative orig: ... \|\| self: ...` / `[GB_WARM_SELF] <move>: the original warm start (...) plus the self refit` | `self_refit.WarmSelfMixer`, every rank; `recipe._warm_self_wrap` at build | adoption per rank, the per-propose container, births viable / accepted (all and cold) per container |
+| `[GB_WARM_SELF] head builder armed: the buffer holds n of the last K stored rows ...` / `epoch k built ON THE HEAD at the <stage> warm entry from rows a..b (N samples): K components; filtered: kept m of c clusters (... dropped) in T s (read, fit, referee, apply, filter); every rank waited for it` / `head epoch k build FAILED` / `pruned n older epoch(s)` | `warmstart/self_refit.py` (`WarmSelfHeadBuilder`, head) | the head-side self-refit builds (default), their walls (the time every rank waited) and the filtered container's size |
+| `[GB_WARM_SELF] builder armed on the saver ...` / `epoch k built from rows a..b (N samples, K components) in T s` / `epoch k build FAILED` / `THE SELF-REFIT BUILD IS HOLDING THE SAVER RANK UP` / `STOPPING THE SELF REFIT` | `warmstart/self_refit.py` (`WarmSelfHook`, saver: `[r<k>/saver]`) | the saver-side builds (`GB_WARM_SELF_AT_ENTRY=0` only) and whether one held a save |
+| `[GB_WARM_SELF] rank r adopted epoch k (rows a..b, N samples, K components) into <move>; filtered: m components; split original/full/filtered x/y/z` / `[GB_WARM_SELF <move>] rN this propose used ORIG \| FULL (epoch k) \| FILTERED (epoch k) \| cumulative orig: ... \|\| full: ... \|\| filtered: ...` / `[GB_WARM_SELF] <move>: the original warm start (...), the full self refit and the filtered self refit` | `self_refit.WarmSelfMixer`, every rank; `recipe._warm_self_wrap` at build | adoption per rank, the per-propose container, births viable / accepted (all and cold) per container |
 | `[eigen_refresh] <branch> leaf k Gram info matrix at walker w in X s` | `addremovemove.py` | Gram table rebuilds (MBH / EMRI / SOBBH; cadence `{BRANCH}_EIGEN_REFRESH`) and their device |
 | `[EMRI_EIGEN] leaf k: step scale adapted on N of 12 axes, max x12.3 (axis 3, ridge), median x1.8 (50 visits, 8 rungs)` (also `[MBH_EIGEN]`, `[SOBBH_EIGEN]`); `... (carried from the persisted table, buffer n of 10 visits)` after a restart; `step-scale adaptation failed` (WARNING) | `addremovemove.py::_log_eigen_adapt` / `_eigen_adapt_table`, every rank for its own table | `{BRANCH}_EIGEN_AXIS_ADAPT=1` only: a table refresh widened some axis by more than 20 % over the information-matrix sigma (ratio adapted / matrix sigma; median over the adapted axes; `ridge` = the table's widest unrailed axis). Silent when nothing moved by 20 % or the switch is off. A failure runs the information-matrix table |
 | `[EMRI] inner-move stack: EigenAxisJumpMixMove 1.000 (jump mix 0.10 x 3.0)` (also `[MBH]`, `[SOBBH]`) | `addremovemove.py` (move construction, every rank) | what each source branch proposes with; the `(jump mix f x k)` suffix proves `{BRANCH}_EIGEN_JUMP_MIX` took effect (2026-10-13; `sampling/moves/eigenjumpmix.py`) |

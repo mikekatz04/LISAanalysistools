@@ -1104,6 +1104,18 @@ class GFHDFBackend(eryn_HDFBackend):
             state = args[0]
             self.comm.send({"save_args": args, "save_kwargs": kwargs}, dest=self.save_plot_rank)
             mode = f"handoff to rank {self.save_plot_rank}"
+        # GB warm-start SELF refit built on the head (warmstart/self_refit.py,
+        # 2026-10-15): the head keeps its own copy of the last stored cold
+        # rows, because it may not read the store the saver is writing.
+        _warm_buf = getattr(self, "warm_self_buffer", None)
+        if _warm_buf is not None and args:
+            try:
+                _warm_buf.append_state(args[0])
+            except Exception as _warm_err:      # a save must never fail on it
+                logger.warning(
+                    "[GB_WARM_SELF] the head's buffer could not take the saved "
+                    "state (%s: %s); the next head refit uses older rows.",
+                    type(_warm_err).__name__, _warm_err)
         try:
             mb = os.path.getsize(self.filename) / 1e6
         except OSError:

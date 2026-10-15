@@ -271,30 +271,40 @@ Cold lnL per walker per row (`global_fit/log_like[:, 0, 0, :]`), max / mean
   SNR 5-8 tail ("scored-dropped: snr 74k"). Since 73bb198b the candidate
   sequence differs per rank; identical `viable / prior-gated / SNR-dropped`
   tallies on every rank meant one shared seed (defect, fixed).
-- The warm-start SELF refit (`GB_WARM_SELF=1`, 2026-10-13; navigation 2.8),
-  the cross-walker GB exchange: grep `[GB_WARM_SELF]`. Healthy: on the saver
-  (`[r<k>/saver]`) one `epoch k built from rows a..b (200 samples, K
-  components) in T s` every stored row of `gb_search_1` and `gb_search_2`
-  (every 5 rows of `gb_search_2` alone before 2026-10-14; the first
-  `gb_search_1` epochs fit whatever rows exist, a few dozen samples) and
-  every 150 of `full_pe` (250 before 2026-10-14), `built_at_row` advancing by
-  exactly the cadence (a resume
-  continues the clock, it does not rebuild at once); on EVERY compute rank
-  one `rank r adopted epoch k` per epoch, the same k on all ranks within a
-  propose or two; `this propose used SELF` on 3 proposes in 4 of each warm
-  move once an epoch exists (ORIG on every propose before). The point of the
-  feature is the `cold` birth acceptance of the `self` tally against the
-  `orig` one on the same line: the self mixture should land cold births the
-  original no longer does (walker-held SNR 6-12 leaves). Sick: `build
-  FAILED` (read its traceback; the epoch dir stays incomplete and is
-  ignored; it retries a cadence later), `HOLDING THE SAVER RANK UP` (the
-  build wall exceeds the time to the next save: every such build shows as a
-  slow leg on the head; quote the read / fit / referee / apply walls),
-  `STOPPING THE SELF REFIT` (stored rows were dropped; no more epochs this
-  run), an adoption on some ranks only (`epoch k is not complete` / `failed
-  to load`: a shared-filesystem lag or a corrupt npz; the rank keeps its
-  previous epoch). `warmstart/self/epoch_NNNN/DONE.json` carries the rows,
-  counts and walls of every build.
+- The warm-start SELF refit (`GB_WARM_SELF=1`, 2026-10-13; built on the head
+  at the warm moves' entry with three containers since 2026-10-15; navigation
+  2.8), the cross-walker GB exchange: grep `[GB_WARM_SELF]`. Healthy on the
+  head: `head builder armed` once per job (the buffer holds min(50, stored
+  rows) rows); one `epoch k built ON THE HEAD at the <stage> warm entry ...
+  kept m of c clusters` at each stage's first warm entry and then once per
+  search cycle in `gb_search_1` / `gb_search_2` (the first `gb_search_1`
+  epochs fit the seed / source_search rows; with fewer rows than 1 / (1 -
+  0.95) every row counts, so almost nothing is consensus there and filtered
+  ~= full: expected) and one every >= 25 rows of `full_pe`, at the first
+  `rj_warm_pe` draw once the cadence has elapsed; its wall (read / fit /
+  referee / apply / filter) is time every rank waited (~75 s on the 9mo;
+  quote it next to the iteration wall; it is inside the warm move's
+  `[GF_TIMING]` wall on a build propose). The
+  filtered container should keep the contested clusters, typically several
+  hundred to ~1,000 of ~3,000 on the 9mo (a handful = the consensus
+  threshold is too loose or the walkers have collapsed onto one solution;
+  nearly all = the walkers disagree wholesale). On EVERY compute rank one
+  `rank r adopted epoch k ... filtered: m components` per epoch, the same k on
+  all ranks within a propose. `this propose used` reads FILTERED on every
+  `rj_warm_search` propose once an epoch exists and is ORIG / FULL /
+  FILTERED about one third each (a random draw per propose) on `rj_warm_pe`
+  (ORIG on every propose before the first epoch).
+  The point of the feature is the `cold` birth acceptance of the `filtered`
+  and `full` tallies against `orig` on the same line. Sick: `head epoch k
+  build FAILED` (read its traceback; the epoch dir stays incomplete and is
+  ignored; it retries a cadence later), a build wall that grows run over run
+  (the refit is on every rank's critical path), an adoption on some ranks
+  only (`epoch k is not complete` / `failed to load`: a shared-filesystem lag
+  or a corrupt npz; the rank keeps its previous epoch). With
+  `GB_WARM_SELF_AT_ENTRY=0` the saver builds instead (`[r<k>/saver] epoch k
+  built from rows a..b`, the watchdog lines `HOLDING THE SAVER RANK UP` /
+  `STOPPING THE SELF REFIT`). `warmstart/self/epoch_NNNN/DONE.json` carries
+  the rows, counts and walls of every build (older epochs keep only it).
 
 ### 3.5 Gating: how to read the valves
 
@@ -635,14 +645,18 @@ Point-in-time; use them to recognise an order of magnitude, not as a spec.
 - **Warm start**: the last 300 cold rows x 4 walkers of the parent; sources
   with parent SNR > 10 start from the parent's cold chain (EMRI 3 included,
   plunge or not); below that, truth as at the parent's Tobs. **Self refit**
-  (2026-10-13, `GB_WARM_SELF`): from `gb_search_2` on, refit the warm start
-  from the run's own last 50 rows x 4 walkers, every stored row in search
-  (2026-10-14; was every 5) and every 250 iterations in `full_pe` (a periodic
-  approximation in PE, like the residual F-stat refit every 150), and KEEP
-  the original: `rj_warm_pe` draws 25 % original / 75 % self refit,
-  `rj_warm_search` only the refit once an epoch exists (2026-10-14: "using
-  only the refit proposal during gb search 2"; the 9mo's first PE epoch had
-  carried 84 % of the lnL gain in its seven self draws).
+  (2026-10-13, `GB_WARM_SELF`): from `gb_search_1` on, refit the warm start
+  from the run's own last 50 rows x 4 walkers, once per search cycle and
+  every 25 iterations in `full_pe` (a periodic approximation in PE, like the
+  residual F-stat refit every 150), and KEEP the original. 2026-10-15: "build
+  everything on the head at entry time for the refit"; one build gives the
+  FULL refit and the FILTERED one ("removal of sources that are already in
+  all walkers"); `rj_warm_search` draws only the filtered refit ("100% refit
+  on sources that do not exist in all four (with high confidence)"),
+  `rj_warm_pe` one third each of original / full / filtered. Before
+  building, the filter was checked on the 9mo: the consensus clusters took
+  83 % of the full mixture's draws, and the filter takes the share of draws
+  landing on a source the walker already holds from 93 % to 57 %.
 - **A 9mo instead of a 1yr** (2026-10-07): keep the 1yr settings; change
   only what Tobs forces (`TOBS_TARGET`, `SIGHET_NT_LAYER`, the MBHB set);
   capacity knobs stay at the 1yr values. Memory levers on the F-stat are

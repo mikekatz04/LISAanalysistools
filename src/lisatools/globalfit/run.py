@@ -3026,6 +3026,16 @@ class GlobalFit:
 
         backend = self.run_backend
 
+        # GB warm-start SELF refit built ON THE HEAD at the warm moves' entry
+        # (GB_WARM_SELF_AT_ENTRY, the default since 2026-10-15): the head
+        # fills its buffer of the last stored cold rows from the store NOW --
+        # before the first save, so the read races no write -- and its
+        # save_step keeps it current. None when the refit is off or the saver
+        # builds instead (warmstart/self_refit.py).
+        from .warmstart.self_refit import make_head_builder
+
+        self.warm_self_head_builder = make_head_builder(self.curr, backend)
+
         logger.debug("need to setup moves that use parallel resources")
 
         # backend.grow(1, None)

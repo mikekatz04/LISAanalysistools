@@ -13,6 +13,28 @@ USER RULINGS (Mike, 2026-10-13):
   (accepted as a periodic approximation in PE, like the residual F-stat
   refit every 150 PE iterations).
 
+USER RULINGS (Mike, 2026-10-14/15) -- the current design:
+
+* "Let's just build everything on the head at entry time for the refit ...
+  Make that the default."  (:class:`WarmSelfHeadBuilder`; the saver hook is
+  kept behind ``GB_WARM_SELF_AT_ENTRY=0``.)
+* "split the refits three ways: old run refit that never changes, new refit
+  with all sources, and new refit removal of sources that are already in all
+  walkers ... each 1/3 of the time ... 1 refit to spread its information
+  across the two self-refitting proposals" -> one build makes the FULL and
+  the FILTERED (:func:`consensus_filter`) containers; PE split ``1,1,1``.
+* "search split should be 100% refit on sources that do not exist in all
+  four (with high confidence)" -> search split ``0,0,1``.
+* "Use the same refitting cadence as we do now" (search every stored row =
+  every cycle at the entry), "the default refitting duration for full pe
+  ... 25 iterations".
+* Checked before building (9mo extracts, rows 82-89 and 103-110): ~2,160 of
+  ~3,230 source groups are held by all four walkers with the same count in
+  >= 95 % of rows and took 83 % of the full mixture's draws; the filtered
+  mixture cuts the draws landing on a source the walker already holds from
+  93 % to 57 % (useful draws ~7 % -> ~42 %); ~60 blends (held by every
+  walker with differing counts) are kept by the count condition.
+
 WHY. Per-walker GB completeness at SNR > 8 was 91 % on the 9mo run while
 the UNION of the four cold walkers was 96.5 %: each walker lacked ~180-220
 SNR 6-12 leaves another walker held, and the PE cold RJ acceptance
@@ -20,9 +42,20 @@ SNR 6-12 leaves another walker held, and the PE cold RJ acceptance
 cold walkers proposes to each walker what the others hold: a cross-walker
 GB exchange through the existing warm-start machinery.
 
-THE PIECES (all in this module, wired from three places):
+THE PIECES (all in this module, wired from four places):
 
-1. **The build** (:class:`WarmSelfHook`, saver rank, ``hdfbackend``'s save
+0. **The head build** (default; :class:`WarmSelfBuffer`,
+   :class:`WarmSelfHeadBuilder`, :func:`make_head_builder` from
+   ``run.prepare_main``). The head keeps the last ``GB_WARM_SELF_LAST_K``
+   stored cold rows in memory (filled from the store at set-up, appended by
+   the head's ``GFHDFBackend.save_step``); at a warm move's entry
+   (:meth:`WarmSelfMixer.begin_propose`, called once per propose with the
+   live stage) it builds when :func:`warm_self_due` says so, through the
+   same pipeline as 1. below plus :func:`consensus_filter`, and the
+   propose that triggered it already draws from the new epoch. Every rank
+   waits for it (~75 s on the 9mo).
+1. **The saver build** (``GB_WARM_SELF_AT_ENTRY=0``; :class:`WarmSelfHook`,
+   saver rank, ``hdfbackend``'s save
    loop). Right after one of its own saves, when the run's active recipe
    stage is ``gb_search_N`` (N >= 1) or ``full_pe`` and the stage's cadence
    has elapsed (:func:`warm_self_due`), the saver copies the last
@@ -49,28 +82,32 @@ THE PIECES (all in this module, wired from three places):
    an epoch without a readable ``DONE.json`` (or whose npz is missing) is
    ignored forever, and the next build takes ``1 + max(every epoch dir)``
    so a crashed build's leftovers are never mixed into a new one.
-3. **The alternation** (:class:`WarmSelfMixer`, the warm moves'
+3. **The split** (:class:`WarmSelfMixer`, the warm moves'
    ``rj_proposal_distribution``). It holds the ORIGINAL parent-derived
-   container and the SELF one (``None`` until an epoch exists). Each
-   propose picks one container by a deterministic Bresenham cadence at
-   ``GB_WARM_SELF_FRACTION`` (0.75 -> exactly 3 proposes in 4 use the self
-   mixture; 100 % original while no self epoch exists) and that container
-   serves the birth draws AND every logpdf of the propose (the BandSorter's
-   death factors are computed from the same object), so forward and
-   reverse densities always agree within a propose. A deterministic
-   schedule of exact MH kernels is a valid (time-inhomogeneous) mixture.
+   container, the FULL self refit and the FILTERED one (``None`` until an
+   epoch exists). Each propose DRAWS one at random with probabilities ~
+   ``GB_WARM_SELF_SPLIT_SEARCH`` / ``_PE`` (``0,0,1`` / ``1,1,1`` = one third
+   each; 100 % original while no self epoch exists; Mike 2026-10-15: "just
+   draw each of these with 1/3 probability each") and that container serves
+   the birth draws AND every logpdf of the propose (the BandSorter's death
+   factors are computed from the same object), so forward and reverse
+   densities always agree within a propose. A fixed-probability mixture of
+   exact MH kernels is itself a valid kernel.
 4. **Adoption** (the head polls, every rank loads): at each propose the
    head's mixer stats the epoch root for a newer COMPLETE epoch and ships
    ``{"epoch", "choice"}`` to the compute ranks with the propose (the
-   F-stat epoch directive pattern); each rank loads the epoch's npz from
-   the shared filesystem into its own self container with the original's
-   Tobs / floor box / floor_eps / p_floor / circ_images / use_cupy and the
-   per-rank seed ``_warm_start_seed(gb_info, tag ^ (epoch + 1))``, so the
-   candidate streams change per epoch and differ per rank.
+   F-stat epoch directive pattern); each rank loads the epoch's two npz
+   files from the shared filesystem with the original's Tobs / floor box /
+   floor_eps / p_floor / circ_images / use_cupy and the per-rank seeds
+   ``_warm_start_seed(gb_info, tag ^ (epoch + 1))`` (full) and the same
+   XOR ``_FILTERED_SEED_XOR`` (filtered), so the candidate streams change
+   per epoch and differ per rank and per container.
 5. **Resume**: nothing is held in memory that the disk does not also
-   hold. The builder recomputes its clock from the store's recipe group
-   and the latest complete epoch's ``built_at_row`` at every save; the
-   moves adopt the latest complete epoch at their first propose.
+   hold. The head refills its buffer and the active stage's start from the
+   store at set-up; both builders take the latest complete epoch's
+   ``built_at_row`` from disk at every check (the saver also re-reads the
+   store's recipe group at every save); the moves adopt the latest complete
+   epoch at their first propose.
 
 Log tag: ``[GB_WARM_SELF]`` (build, adoption, the per-propose container
 choice and the per-container birth tallies, the watchdog).
@@ -78,7 +115,6 @@ choice and the per-container birth tallies, the watchdog).
 
 from __future__ import annotations
 
-import fractions
 import json
 import logging
 import os
@@ -92,17 +128,27 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "CHOICES",
+    "FILTERED_NPZ",
     "MANIFEST",
     "REFEREED_NPZ",
+    "WarmSelfBuffer",
+    "WarmSelfHeadBuilder",
     "WarmSelfHook",
     "WarmSelfMixer",
     "WarmSelfWatchdog",
     "build_self_epoch",
+    "consensus_filter",
     "copy_leaf_rows",
+    "head_builder_for",
     "latest_complete_epoch",
+    "make_head_builder",
     "make_warm_self_hook",
     "next_epoch_index",
+    "parse_split",
     "prune_epochs",
+    "register_head_builder",
+    "unregister_head_builder",
     "self_epoch_root",
     "store_stage",
     "warm_seed",
@@ -118,6 +164,12 @@ REFEREED_NPZ = "self_refereed.npz"
 LEAF_ROWS_H5 = "leaf_rows.h5"
 #: the fitter npz (kept: small, and the referee's input)
 FIT_NPZ = "self_fit.npz"
+#: the FILTERED refit: the refereed npz minus the consensus clusters
+FILTERED_NPZ = "self_refereed_filtered.npz"
+#: XORed into the per-epoch seed tag of the FILTERED container
+_FILTERED_SEED_XOR = 0x5F1E
+#: XORed into the twin's tag for the head's per-propose container draw
+_CHOICE_SEED_XOR = 0x2C01
 _EPOCH_RE = re.compile(r"^epoch_(\d{4,})$")
 #: pruning (Mike, 2026-10-14: "remove like all except the last few ... or keep
 #: every 10 refits ... so we can see the difference over time"): the newest
@@ -176,6 +228,12 @@ def read_manifest(root: str, k: int) -> typing.Optional[dict]:
     if not os.path.exists(npz):
         return None
     man["npz_path"] = npz
+    # the FILTERED container (head builds since 2026-10-15); optional: an
+    # epoch without it serves the full refit where the filtered is chosen
+    filt = man.get("npz_filtered")
+    filt_path = os.path.join(d, str(filt)) if filt else None
+    man["npz_filtered_path"] = (filt_path if filt_path is not None
+                                and os.path.exists(filt_path) else None)
     return man
 
 
@@ -378,8 +436,19 @@ def copy_leaf_rows(g, out_path: str, last_k: int, rows: int,
     slot identity carries nothing they use. One row is read at a time.
     Returns the provenance (source rows ``a..b`` inclusive, counts).
     """
-    import h5py
+    a, packed, lls, ntail = _read_packed_rows(g, last_k, rows, branch)
+    return _write_packed_rows(out_path, packed, lls, a, ntail, branch)
 
+
+def _read_packed_rows(g, last_k: int, rows: int, branch: str = "gb"):
+    """The last ``last_k`` stored COLD rows of ``branch``, one row at a time.
+
+    Returns ``(first_row, packed, log_likes, n_tail_axes)``: ``packed`` is a
+    list (rows) of lists (walkers) of the walker's ALIVE leaf coordinates
+    ``(n_alive, ndim)``; ``log_likes`` a list of ``(nw,)`` cold rows;
+    ``n_tail_axes`` the store's axes between the row and walker axes
+    (``(nsamplers, ntemps)`` -> 2).
+    """
     chain = g["chain"][branch]
     inds = g["inds"][branch]
     ll = g["log_like"]
@@ -387,47 +456,136 @@ def copy_leaf_rows(g, out_path: str, last_k: int, rows: int,
     if rows <= 0:
         raise ValueError("the store holds no rows yet")
     a = max(0, rows - int(last_k))
-    idx = list(range(a, rows))
     tail = tuple(chain.shape[1:-3])            # (nsamplers, ntemps) or (ntemps,)
     cold = (0,) * len(tail)
-    nw, ndim = int(chain.shape[-3]), int(chain.shape[-1])
-    packed, n_alive = [], 0
-    for it in idx:
+    nw = int(chain.shape[-3])
+    packed = []
+    for it in range(a, rows):
         c_it = np.asarray(chain[(it,) + cold])         # (nw, nleaves, ndim)
         i_it = np.asarray(inds[(it,) + cold], dtype=bool)
-        per_w = []
-        for w in range(nw):
-            sel = np.flatnonzero(i_it[w])
-            per_w.append(np.asarray(c_it[w, sel], dtype=np.float64))
-            n_alive = max(n_alive, len(sel))
-        packed.append(per_w)
-    M = max(int(n_alive), 1)
-    K = len(idx)
-    ch = np.zeros((K,) + (1,) * len(tail) + (nw, M, ndim), dtype=np.float64)
-    ind = np.zeros((K,) + (1,) * len(tail) + (nw, M), dtype=bool)
+        packed.append([np.asarray(c_it[w, np.flatnonzero(i_it[w])],
+                                  dtype=np.float64) for w in range(nw)])
+    llv = np.asarray(ll[a:rows])[(slice(None),) + cold + (slice(None),)]
+    lls = [np.asarray(r, dtype=np.float64).reshape(nw) for r in llv]
+    return a, packed, lls, len(tail)
+
+
+def _write_packed_rows(out_path: str, packed, lls, first_row: int,
+                       ntail: int = 2, branch: str = "gb") -> dict:
+    """Write rows of per-walker alive leaves in the layout the pipeline reads.
+
+    ``global_fit/chain/<br>`` ``(K, 1.., nw, M, ndim)`` with each (row,
+    walker)'s alive leaves packed into the first slots and the leaf axis
+    trimmed to the largest alive count, ``inds/<br>``, ``log_like``
+    ``(K, 1.., nw)``, attrs ``iteration = K`` and ``source_rows``. Written to
+    a temporary name and moved into place. Returns the provenance.
+    """
+    import h5py
+
+    K = len(packed)
+    if K == 0:
+        raise ValueError("no rows to write")
+    nw = len(packed[0])
+    ndim = next((int(x.shape[-1]) for row in packed for x in row
+                 if np.ndim(x) == 2 and x.shape[-1]), 9)
+    M = max([1] + [len(x) for row in packed for x in row])
+    ones = (1,) * int(ntail)
+    cold = (0,) * int(ntail)
+    ch = np.zeros((K,) + ones + (nw, M, ndim), dtype=np.float64)
+    ind = np.zeros((K,) + ones + (nw, M), dtype=bool)
     n_leaf_rows = 0
     for r, per_w in enumerate(packed):
         for w, x in enumerate(per_w):
             n = len(x)
-            ch[(r,) + cold + (w, slice(0, n))] = x
-            ind[(r,) + cold + (w, slice(0, n))] = True
+            if n:
+                ch[(r,) + cold + (w, slice(0, n))] = x
+                ind[(r,) + cold + (w, slice(0, n))] = True
             n_leaf_rows += n
-    llv = np.asarray(ll[a:rows])[(slice(None),) + cold + (slice(None),)]
-    llv = llv.reshape((K,) + (1,) * len(tail) + (nw,))
+    llv = np.stack([np.asarray(v, dtype=np.float64) for v in lls]).reshape(
+        (K,) + ones + (nw,))
+    last = int(first_row) + K - 1
     tmp = out_path + ".tmp"
     with h5py.File(tmp, "w") as f:
         gg = f.create_group("global_fit")
         gg.attrs["iteration"] = K
-        gg.attrs["source_rows"] = [int(a), int(rows - 1)]
+        gg.attrs["source_rows"] = [int(first_row), last]
         gg.create_group("chain").create_dataset(branch, data=ch,
                                                 compression="gzip")
         gg.create_group("inds").create_dataset(branch, data=ind,
                                                compression="gzip")
         gg.create_dataset("log_like", data=llv)
     os.replace(tmp, out_path)
-    return dict(rows=[int(a), int(rows - 1)], n_rows=K, n_walkers=nw,
+    return dict(rows=[int(first_row), last], n_rows=K, n_walkers=nw,
                 n_samples=K * nw, n_leaf_rows=int(n_leaf_rows),
                 max_alive=int(M))
+
+
+def _to_host(a):
+    """cupy-or-numpy -> numpy."""
+    return a.get() if hasattr(a, "get") else np.asarray(a)
+
+
+class WarmSelfBuffer:
+    """The HEAD's copy of the last ``last_k`` stored cold GB rows (all walkers).
+
+    The head cannot read the store while the run is going (the saver is the
+    only writer and its writes are asynchronous), so it keeps its own copy:
+    :meth:`fill_from_store` at start-up (before the first save, so the read
+    races nothing) and :meth:`append_state` with every state it hands to the
+    saver. :meth:`write` produces exactly the file :func:`copy_leaf_rows`
+    makes from the store. ``stage_name`` / ``stage_start`` are the store's
+    active stage at the fill (the head builder's resume clock).
+    """
+
+    def __init__(self, last_k: int, branch: str = "gb", ntail: int = 2):
+        import collections
+
+        self.last_k = int(last_k)
+        if self.last_k < 1:
+            raise ValueError(f"last_k must be >= 1, got {last_k}")
+        self.branch = str(branch)
+        self.ntail = int(ntail)
+        self._rows = collections.deque(maxlen=self.last_k)
+        self.n_stored = 0
+        self.stage_name: typing.Optional[str] = None
+        self.stage_start = 0
+
+    def __len__(self) -> int:
+        return len(self._rows)
+
+    def fill_from_store(self, g) -> None:
+        """Load the last ``last_k`` rows of the open run group ``g``."""
+        rows = int(g.attrs.get("iteration", 0))
+        self._rows.clear()
+        self.n_stored = rows
+        self.stage_name, self.stage_start = store_stage(g)
+        if rows <= 0 or "chain" not in g or self.branch not in g["chain"]:
+            return
+        a, packed, lls, ntail = _read_packed_rows(g, self.last_k, rows,
+                                                  self.branch)
+        self.ntail = ntail
+        for k, (per_w, ll) in enumerate(zip(packed, lls)):
+            self._rows.append((per_w, ll, a + k))
+
+    def append_state(self, state) -> None:
+        """Append the COLD rung of ``state`` (the state the head saves)."""
+        br = state.branches[self.branch]
+        coords = _to_host(br.coords)[0]
+        inds = _to_host(br.inds)[0].astype(bool)
+        per_w = [np.array(coords[w, inds[w]], dtype=np.float64)
+                 for w in range(coords.shape[0])]
+        ll = np.array(_to_host(state.log_like)[0], dtype=np.float64)
+        self._rows.append((per_w, ll, self.n_stored))
+        self.n_stored += 1
+
+    def write(self, out_path: str) -> dict:
+        """The held rows in :func:`copy_leaf_rows`' layout; its provenance."""
+        if not self._rows:
+            raise ValueError("the head's warm-self buffer holds no rows")
+        rows = list(self._rows)
+        return _write_packed_rows(out_path, [r[0] for r in rows],
+                                  [r[1] for r in rows], rows[0][2],
+                                  self.ntail, self.branch)
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +652,114 @@ def build_self_epoch(leaf_store: str, out_dir: str, *, tobs: float,
     n_clusters, n_comp = _npz_counts(out_npz)
     return dict(npz=REFEREED_NPZ, n_clusters=n_clusters,
                 n_components=n_comp, walls=walls)
+
+
+# ---------------------------------------------------------------------------
+# the FILTERED container: the refit minus what every walker already holds
+# ---------------------------------------------------------------------------
+def _subset_clusters(data: dict, keep: np.ndarray, ncomp: np.ndarray) -> dict:
+    """The refereed npz's arrays restricted to the clusters in ``keep``.
+
+    Per-cluster arrays (first axis = clusters) and per-component GMM arrays
+    (``gmm_*`` but ``gmm_ncomp``, first axis = components) are masked;
+    ``meta`` and the per-island ``f0_window_edges`` are kept whole (the
+    surviving clusters still index their own islands). Any other layout is
+    refused rather than guessed.
+    """
+    C = len(keep)
+    comp_keep = np.repeat(keep, ncomp)
+    n_comp = int(np.sum(ncomp))
+    out = {}
+    for k, a in data.items():
+        a = np.asarray(a)
+        if k in ("meta", "f0_window_edges") or a.ndim == 0:
+            out[k] = a
+        elif k.startswith("gmm_") and k != "gmm_ncomp" and a.shape[0] == n_comp:
+            out[k] = a[comp_keep]
+        elif a.shape[0] == C:
+            out[k] = a[keep]
+        else:
+            raise ValueError(
+                f"consensus filter: npz key {k!r} with shape {a.shape} is "
+                f"neither per cluster ({C}) nor per component ({n_comp})")
+    return out
+
+
+def consensus_filter(refereed_npz: str, leaf_store: str, out_npz: str, *,
+                     threshold: float = 0.95) -> dict:
+    """Write the FILTERED refit: ``refereed_npz`` minus the consensus clusters.
+
+    User ruling 2026-10-15: "new refit removal of sources that are already
+    in all walkers", "sources that do not exist in all four (with high
+    confidence)". Every leaf row of ``leaf_store`` (the rows the refit was
+    fitted from) is assigned to its nearest component with the referee's
+    own member re-extraction (:func:`.match_referee.assign_members`); per
+    cluster and sample (row x walker) the leaves are counted. A cluster is
+    CONSENSUS -- every walker holds it, with high confidence -- when EVERY
+    walker holds it in >= ``threshold`` of its rows AND >= ``threshold`` of
+    all samples hold the same number of its leaves (>= 1). A blend one
+    walker resolves into two sources and another does not is therefore
+    kept, as is anything a walker lacks in more than ``1 - threshold`` of
+    its rows. Writes the kept clusters in the same schema (so
+    :meth:`.proposal.WarmStartComponents.from_npz` loads it unchanged);
+    writes nothing when no cluster survives. Returns the counts and the
+    ``consensus`` mask.
+    """
+    from . import match_referee as mr
+    from .fit_from_store import load_leaf_table, to_observable
+
+    thr = float(threshold)
+    with np.load(refereed_npz, allow_pickle=True) as z:
+        data = {k: z[k] for k in z.files}
+    meta = json.loads(str(data["meta"]))
+    p = np.asarray(data["p"])
+    C = len(p)
+    if str(meta.get("basis", "sampling")) == "observable":
+        from . import basis as wb
+
+        obs_map = wb.build_map_from_stored_params(meta["map_params"])
+        ncomp = np.asarray(data["gmm_ncomp"]).astype(int)
+        means = np.asarray(data["gmm_means"])
+        covs = np.asarray(data["gmm_covs"])
+    else:
+        obs_map = None
+        ncomp = np.ones(C, dtype=int)
+        means, covs = np.asarray(data["means"]), np.asarray(data["covs"])
+    comp_cluster = np.repeat(np.arange(C), ncomp)
+    island = np.repeat(np.asarray(data["island_id"]), ncomp)
+    X, sid, info = load_leaf_table(leaf_store, None)
+    nw = int(info["nwalkers"])
+    G = to_observable(X, obs_map) if obs_map is not None else X
+    assign, _ = mr.assign_members(G, means, covs, island,
+                                  np.asarray(data["f0_window_edges"]))
+    ok = assign >= 0
+    rows = np.unique(sid // nw)
+    R = len(rows)
+    samp = np.searchsorted(rows, sid // nw) * nw + (sid % nw)
+    counts = np.zeros((C, R * nw), dtype=np.int32)
+    np.add.at(counts, (comp_cluster[assign[ok]], samp[ok]), 1)
+    presence = (counts > 0).reshape(C, R, nw).mean(axis=1)        # (C, nw)
+    freq = np.stack([(counts == v).sum(axis=1)
+                     for v in range(int(counts.max()) + 1)], axis=1)
+    mode = freq.argmax(axis=1)
+    mode_frac = freq[np.arange(C), mode] / float(R * nw)
+    consensus = ((presence.min(axis=1) >= thr) & (mode_frac >= thr)
+                 & (mode >= 1))
+    keep = ~consensus
+    res = dict(n_clusters=int(C), n_kept=int(keep.sum()),
+               n_components_kept=int(ncomp[keep].sum()),
+               consensus=consensus, npz=None)
+    if keep.any():
+        out = _subset_clusters(data, keep, ncomp)
+        meta["consensus_filter"] = dict(
+            threshold=thr, n_clusters=int(C), n_kept=int(keep.sum()),
+            n_rows=int(R), n_walkers=nw, source=os.path.basename(refereed_npz))
+        out["meta"] = np.asarray(json.dumps(meta))
+        tmp = out_npz + ".tmp.npz"
+        np.savez_compressed(tmp, **out)
+        os.replace(tmp, out_npz)
+        res["npz"] = os.path.basename(out_npz)
+    return res
 
 
 class WarmSelfWatchdog:
@@ -758,20 +1024,28 @@ class WarmSelfHook:
                 MANIFEST, self.keep_last, self.keep_every, freed / 1e6)
 
 
+def _parent_warm_start(gb) -> str:
+    """The run's parent warm-start npz path ('' when it has none)."""
+    return str(getattr(gb, "warm_start_components", "")
+               or os.environ.get("GB_WARM_START_COMPONENTS", "") or "").strip()
+
+
 def make_warm_self_hook(curr, *, store_path: typing.Optional[str] = None):
-    """The saver's :class:`WarmSelfHook`, or ``None`` when the refit is off.
+    """The saver's :class:`WarmSelfHook`, or ``None`` when the saver does not build.
 
     Off unless ``GBSettings.warm_self`` (``GB_WARM_SELF=1``) AND the run has
     a parent warm start (``warm_start_components`` /
     ``GB_WARM_START_COMPONENTS``): the self epochs only feed the warm moves,
-    which exist only with one.
+    which exist only with one. Also off when ``warm_self_at_entry``
+    (``GB_WARM_SELF_AT_ENTRY=1``, the default since 2026-10-15): the HEAD
+    builds then (:func:`make_head_builder`); never both.
     """
     gb = (getattr(curr, "source_info", None) or {}).get("gb")
     if gb is None or not bool(getattr(gb, "warm_self", False)):
         return None
-    warm = str(getattr(gb, "warm_start_components", "")
-               or os.environ.get("GB_WARM_START_COMPONENTS", "") or "").strip()
-    if not warm:
+    if bool(getattr(gb, "warm_self_at_entry", False)):
+        return None
+    if not _parent_warm_start(gb):
         logger.warning(
             "[GB_WARM_SELF] GB_WARM_SELF=1 but the run has no parent warm "
             "start (GB_WARM_START_COMPONENTS unset): there is no warm move to "
@@ -792,7 +1066,270 @@ def make_warm_self_hook(curr, *, store_path: typing.Optional[str] = None):
 
 
 # ---------------------------------------------------------------------------
-# the move side: two containers, one per propose
+# the head-side build at the warm move's entry (user ruling 2026-10-15)
+# ---------------------------------------------------------------------------
+#: the head builder of each epoch root in THIS process (only the head
+#: registers one; a compute rank's mixer finds none and never builds)
+_HEAD_BUILDERS: dict = {}
+
+
+def register_head_builder(builder) -> None:
+    """Make ``builder`` the head builder of its ``epoch_root`` in this process."""
+    _HEAD_BUILDERS[os.path.abspath(str(builder.epoch_root))] = builder
+
+
+def unregister_head_builder(epoch_root: str) -> None:
+    _HEAD_BUILDERS.pop(os.path.abspath(str(epoch_root)), None)
+
+
+def head_builder_for(epoch_root: str):
+    """The head builder registered for ``epoch_root`` here, or ``None``."""
+    return _HEAD_BUILDERS.get(os.path.abspath(str(epoch_root)))
+
+
+class WarmSelfHeadBuilder:
+    """Build a self epoch ON THE HEAD when a warm move starts and the cadence is due.
+
+    User ruling 2026-10-15: "Let's just build everything on the head at entry
+    time for the refit ... Make that the default." Called by
+    :meth:`WarmSelfMixer.begin_propose` on the head with the stage the
+    propose runs in (re-stamped per propose by the stage combine). The
+    clock is :func:`warm_self_due`'s: a numbered search stage builds once at
+    least ``every_search`` rows were stored since the stage start or the
+    last build (every search CYCLE at the default 1), ``full_pe`` every
+    ``every_pe`` rows (25), nothing else ever builds; and a stage's FIRST
+    warm entry with no refit built in it yet builds at once from the rows
+    already stored (review 2026-10-15: gb_search_1's first cycle then draws
+    from a refit of the seed population instead of the parent mixture). The
+    stage start is the store's (the buffer's fill) on a resume, else the
+    stored row count when the head first sees the stage at a warm entry; the
+    last build is read from disk. Rows are the states the head handed to the
+    saver (``row_count: head states``): an epoch numbered past the stored
+    rows after a resume (states the saver dropped) is ignored by the clock.
+    Only the head rank builds (``begin_propose`` passes its rank). A build writes the buffer to ``leaf_rows.h5``, runs the
+    parent pipeline (:func:`build_self_epoch`), then
+    :func:`consensus_filter`, then the manifest LAST, then prunes; every
+    rank waits for it (the compute ranks are parked on the propose). It
+    never raises: a failure logs, retries after another cadence, and the
+    propose goes on with the epoch it has.
+    """
+
+    def __init__(self, *, epoch_root: str, buffer: WarmSelfBuffer,
+                 tobs: float, last_k: int, every_search: int, every_pe: int,
+                 device: typing.Optional[int] = None, consensus: float = 0.95,
+                 branch: str = "gb", builder=None, runner=None,
+                 filter_fn=None, keep_last: int = KEEP_LAST_EPOCHS,
+                 keep_every: int = KEEP_EVERY_EPOCH):
+        self.epoch_root = str(epoch_root)
+        self.buffer = buffer
+        self.tobs = float(tobs)
+        self.last_k = int(last_k)
+        self.every_search = int(every_search)
+        self.every_pe = int(every_pe)
+        self.device = None if device is None else int(device)
+        self.consensus = float(consensus)
+        self.branch = str(branch)
+        self.keep_last = int(keep_last)
+        self.keep_every = int(keep_every)
+        self._builder = builder or build_self_epoch
+        self._runner = runner
+        self._filter = filter_fn or consensus_filter
+        self._stage: typing.Optional[str] = None
+        self._stage_start = 0
+        self._failed_at: typing.Optional[int] = None
+        self.n_built = 0
+
+    def _stage_clock_start(self, stage: str, rows: int) -> int:
+        if stage != self._stage:
+            self._stage = stage
+            if stage == self.buffer.stage_name:
+                self._stage_start = int(self.buffer.stage_start)
+            else:
+                self._stage_start = int(rows)
+        return self._stage_start
+
+    def maybe_build(self, stage) -> bool:
+        """Build an epoch now if one is due in ``stage``; True when one was built."""
+        try:
+            return self._maybe_build(stage)
+        except Exception as exc:                  # noqa: BLE001
+            logger.warning(
+                "[GB_WARM_SELF] head build check failed (%s: %s); the "
+                "propose goes on with the epoch it holds.\n%s",
+                type(exc).__name__, exc, traceback.format_exc())
+            return False
+
+    def _maybe_build(self, stage) -> bool:
+        if not stage:
+            return False
+        stage = str(stage)
+        rows = int(self.buffer.n_stored)
+        first_entry = stage != self._stage
+        start = self._stage_clock_start(stage, rows)
+        latest = latest_complete_epoch(self.epoch_root)
+        last_built = None if latest is None else latest[1].get("built_at_row")
+        due, cadence, clock = warm_self_due(
+            rows, stage, start, last_built, self.every_search, self.every_pe)
+        # A stage's FIRST warm entry with no refit built in it yet builds at
+        # once, from the rows already stored (gb_search_1's first cycle then
+        # draws from a refit of the seed / source_search population, full_pe's
+        # first warm draw from the end of the search). A resume inside a stage
+        # that already refitted keeps the clock (last_built >= its start).
+        if (not due and first_entry and cadence is not None
+                and (last_built is None or int(last_built) < start)):
+            due = True
+        if not due or len(self.buffer) == 0:
+            return False
+        if self._failed_at is not None and cadence is not None and (
+                rows - self._failed_at) < cadence:
+            return False
+        k = next_epoch_index(self.epoch_root)
+        d = epoch_dir(self.epoch_root, k)
+        os.makedirs(d, exist_ok=False)
+        leaf = os.path.join(d, LEAF_ROWS_H5)
+        t_all = time.perf_counter()
+        walls: dict = {}
+        try:
+            t0 = time.perf_counter()
+            prov = self.buffer.write(leaf)
+            walls["read"] = time.perf_counter() - t0
+            kw = dict(tobs=self.tobs, last_k=prov["n_rows"], device=self.device)
+            if self._runner is not None:
+                kw["runner"] = self._runner
+            res = self._builder(leaf, d, **kw)
+            walls.update(dict(res.get("walls", {})))
+            npz = str(res.get("npz", REFEREED_NPZ))
+            t0 = time.perf_counter()
+            filt = self._filter(os.path.join(d, npz), leaf,
+                                os.path.join(d, FILTERED_NPZ),
+                                threshold=self.consensus)
+            walls["filter"] = time.perf_counter() - t0
+            walls["total"] = time.perf_counter() - t_all
+            has_filtered = os.path.exists(os.path.join(d, FILTERED_NPZ))
+            n_clusters = int(res.get("n_clusters", filt.get("n_clusters", 0)))
+            n_kept = int(filt.get("n_kept", 0))
+            manifest = dict(
+                epoch=int(k), built_at_row=int(rows), stage=stage,
+                stage_start=int(start), clock=int(clock), cadence=cadence,
+                rows=prov["rows"], n_rows=prov["n_rows"],
+                n_walkers=prov["n_walkers"], n_samples=prov["n_samples"],
+                n_leaf_rows=prov["n_leaf_rows"], n_clusters=n_clusters,
+                n_components=int(res["n_components"]), npz=npz,
+                npz_filtered=FILTERED_NPZ if has_filtered else None,
+                n_clusters_filtered=n_kept if has_filtered else 0,
+                n_components_filtered=int(filt.get("n_components_kept", 0)),
+                consensus=self.consensus, built_on="head",
+                # rows / built_at_row count the states the head handed to the
+                # saver; the store holds fewer if the saver ever dropped one
+                # while behind (warm_self_due ignores an epoch past the rows)
+                row_count="head states", tobs=self.tobs,
+                device=self.device,
+                walls={kk: round(float(v), 3) for kk, v in walls.items()},
+                created_unix=time.time(),
+            )
+            _write_manifest(d, manifest)
+        except Exception:
+            self._failed_at = rows
+            logger.warning(
+                "[GB_WARM_SELF] head epoch %d build FAILED at row %d (stage "
+                "%s); the epoch directory %s stays incomplete and is ignored; "
+                "retry after another %s row(s).\n%s", k, rows, stage, d,
+                cadence, traceback.format_exc())
+            return False
+        finally:
+            try:
+                os.remove(leaf)
+            except OSError:
+                pass
+        self._failed_at = None
+        self.n_built += 1
+        a, b = prov["rows"]
+        logger.info(
+            "[GB_WARM_SELF] epoch %d built ON THE HEAD at the %s warm entry "
+            "from head states %d..%d (%d samples): %d components; filtered: kept %d "
+            "of %d clusters (%d held by every walker dropped) in %.1f s "
+            "(read %.1f, fit %.1f, referee %.1f, apply %.1f, filter %.1f); "
+            "every rank waited for it.", k, stage, a, b, prov["n_samples"],
+            int(res["n_components"]), n_kept, n_clusters, n_clusters - n_kept,
+            walls["total"], walls.get("read", 0.0), walls.get("fit", 0.0),
+            walls.get("referee", 0.0), walls.get("apply", 0.0),
+            walls.get("filter", 0.0))
+        try:
+            n, freed = prune_epochs(self.epoch_root, self.keep_last,
+                                    self.keep_every)
+            if n:
+                logger.info(
+                    "[GB_WARM_SELF] pruned %d older epoch(s) to their %s "
+                    "(kept whole: the newest %d and every %d-th); freed "
+                    "%.1f MB.", n, MANIFEST, self.keep_last, self.keep_every,
+                    freed / 1e6)
+        except Exception as exc:                  # noqa: BLE001
+            logger.warning("[GB_WARM_SELF] pruning older epochs failed "
+                           "(%s: %s); the build is unaffected.",
+                           type(exc).__name__, exc)
+        return True
+
+
+def make_head_builder(curr, backend=None, *,
+                      store_path: typing.Optional[str] = None):
+    """The head's :class:`WarmSelfHeadBuilder` (registered), or ``None``.
+
+    On when ``warm_self`` AND ``warm_self_at_entry`` AND the run has a
+    parent warm start. Fills the buffer from the store through
+    ``backend.open("r")`` NOW -- at the head's set-up, before the first save,
+    so the read races no write -- attaches it as ``backend.warm_self_buffer``
+    (the head's ``save_step`` appends every state it saves) and registers
+    the builder for the run's epoch root.
+    """
+    gb = (getattr(curr, "source_info", None) or {}).get("gb")
+    if gb is None or not bool(getattr(gb, "warm_self", False)):
+        return None
+    if not bool(getattr(gb, "warm_self_at_entry", False)):
+        return None
+    if not _parent_warm_start(gb):
+        logger.warning(
+            "[GB_WARM_SELF] GB_WARM_SELF=1 but the run has no parent warm "
+            "start (GB_WARM_START_COMPONENTS unset): there is no warm move to "
+            "feed, so the head builds no self epochs.")
+        return None
+    gi = curr.general_info
+    path = store_path or gi.main_file_path
+    last_k = int(gb.warm_self_last_k)
+    buf = WarmSelfBuffer(last_k=last_k)
+    if backend is not None and os.path.exists(str(path)):
+        try:
+            with backend.open("r") as f:
+                name = getattr(backend, "name", "global_fit")
+                if name in f:
+                    buf.fill_from_store(f[name])
+        except Exception as exc:                  # noqa: BLE001
+            logger.warning(
+                "[GB_WARM_SELF] the head could not read the last %d rows from "
+                "%s (%s: %s); its buffer starts empty and fills as it saves.",
+                last_k, path, type(exc).__name__, exc)
+    if backend is not None:
+        backend.warm_self_buffer = buf
+    gpus = list(getattr(gi, "gpus", None) or [])
+    builder = WarmSelfHeadBuilder(
+        epoch_root=self_epoch_root(path), buffer=buf, tobs=float(gi.Tobs),
+        last_k=last_k, every_search=int(gb.warm_self_every_search),
+        every_pe=int(gb.warm_self_every_pe),
+        device=(int(gpus[0]) if gpus else None),
+        consensus=float(getattr(gb, "warm_self_consensus", 0.95)))
+    register_head_builder(builder)
+    logger.info(
+        "[GB_WARM_SELF] head builder armed: the buffer holds %d of the last %d "
+        "stored rows (store rows %d, stage %s from row %d); builds at the warm "
+        "move's entry every %d search / %d PE rows, consensus %.2f, device "
+        "%s, epochs under %s.", len(buf), last_k, buf.n_stored,
+        buf.stage_name, buf.stage_start, builder.every_search,
+        builder.every_pe, builder.consensus, builder.device,
+        builder.epoch_root)
+    return builder
+
+
+# ---------------------------------------------------------------------------
+# the move side: three containers, one per propose
 # ---------------------------------------------------------------------------
 def warm_seed(build_seed, tag) -> typing.Optional[int]:
     """``recipe._warm_start_seed`` on a bare build seed (same formula, pinned by test)."""
@@ -802,18 +1339,27 @@ def warm_seed(build_seed, tag) -> typing.Optional[int]:
                .generate_state(1, dtype=np.uint32)[0])
 
 
-def _bresenham_self(n: int, frac: fractions.Fraction) -> bool:
-    """Propose ``n`` (1-based) uses the self container: ``floor(n f) > floor((n-1) f)``.
+#: the three containers a warm move draws from, in split order
+CHOICES = ("orig", "full", "filtered")
 
-    Exactly ``round-down(N f)`` of any N consecutive proposes from the
-    first; 3/4 -> orig, self, self, self, orig, ...
-    """
-    p, q = frac.numerator, frac.denominator
-    return (n * p) // q > ((n - 1) * p) // q
+
+def parse_split(spec) -> typing.Tuple[float, float, float]:
+    """``"orig,full,filtered"`` weights -> three floats (>= 0, not all 0)."""
+    parts = list(spec) if isinstance(spec, (tuple, list)) else str(spec).split(",")
+    try:
+        w = tuple(float(x) for x in parts)
+    except (TypeError, ValueError):
+        raise ValueError(f"warm-self split {spec!r}: three numbers "
+                         "'original,full,filtered' expected") from None
+    if (len(w) != 3 or not all(np.isfinite(x) and x >= 0.0 for x in w)
+            or sum(w) <= 0.0):
+        raise ValueError(f"warm-self split {spec!r}: three non-negative "
+                         "weights 'original,full,filtered', not all zero")
+    return w
 
 
 class WarmSelfMixer:
-    """The warm moves' RJ birth law: the ORIGINAL warm start or the SELF refit, per propose.
+    """The warm moves' RJ birth law: ORIGINAL, FULL self refit or FILTERED self refit, per propose.
 
     Duck-typed like :class:`.proposal.WarmStartComponents` (``rvs`` /
     ``logpdf``), delegating to the container chosen for the CURRENT
@@ -821,43 +1367,61 @@ class WarmSelfMixer:
     single process) or :meth:`apply_directive` (a compute rank, from the
     head's directive), so every density of one propose -- the birth draws,
     the birth factors and the BandSorter's death factors -- comes from one
-    container. Pickle/deepcopy safe: numpy containers, plain scalars, a
-    ``Fraction``.
+    container. Before any self epoch exists every propose uses the
+    original; then each propose DRAWS its container at random with
+    probabilities ~ ``split`` (original, full, filtered): ``1,1,1`` one third
+    each, ``0,0,1`` always the filtered one. An epoch without a filtered npz
+    serves its full refit where the filtered one is chosen. On the head,
+    :meth:`begin_propose` first lets the registered head builder build a
+    due epoch, so the propose that triggered it already draws from it.
+    Pickle/deepcopy safe: numpy containers and plain scalars only.
     """
 
     is_warm_self_mixer = True
     ndim = 9
 
-    def __init__(self, original, *, epoch_root: str, fraction: float,
-                 load_kwargs: dict, build_seed=None, tag: int = 0,
+    def __init__(self, original, *, epoch_root: str, load_kwargs: dict,
+                 split=(1.0, 1.0, 1.0), build_seed=None, tag: int = 0,
                  name: str = "warm"):
-        f = float(fraction)
-        if not (0.0 <= f <= 1.0):
-            raise ValueError(
-                f"GB_WARM_SELF_FRACTION must lie in [0, 1], got {fraction!r}")
+        self.split = parse_split(split)
         self.original = original
-        self.self_container = None
+        self.self_full = None
+        self.self_filtered = None
         self.epoch: typing.Optional[int] = None
         self.epoch_info: dict = {}
         self.epoch_root = str(epoch_root)
-        self.fraction = fractions.Fraction(f).limit_denominator(1000)
         self.load_kwargs = dict(load_kwargs)
         self.build_seed = build_seed
         self.tag = int(tag)
         self.name = str(name)
         self.choice = "orig"
-        #: proposes since a self container first existed (the cadence index)
+        #: proposes since a self container first existed
         self.n_self_window = 0
+        #: the per-propose container draw (only the head draws; the ranks
+        #: take its directive): probabilities ~ split, seeded per run + twin
+        self._probs = np.asarray(self.split, dtype=float) / float(sum(self.split))
+        self._choice_rng = np.random.default_rng(
+            warm_seed(build_seed, int(tag) ^ _CHOICE_SEED_XOR))
         self._bad_epochs: set = set()
         self.tallies = {c: dict(proposes=0, births=0, viable=0, birth_acc=0,
                                 viable_cold=0, birth_acc_cold=0, deaths=0,
-                                death_acc=0) for c in ("orig", "self")}
+                                death_acc=0) for c in CHOICES}
 
     # -- the active container ----------------------------------------------
     @property
+    def self_container(self):
+        """The FULL self refit (the pre-2026-10-15 name of the self container)."""
+        return self.self_full
+
+    @property
     def active(self):
-        if self.choice == "self" and self.self_container is not None:
-            return self.self_container
+        if self.choice == "filtered":
+            if self.self_filtered is not None:
+                return self.self_filtered
+            if self.self_full is not None:
+                return self.self_full
+        elif self.choice == "full" and self.self_full is not None:
+            return self.self_full
         return self.original
 
     @property
@@ -879,8 +1443,13 @@ class WarmSelfMixer:
         """``_warm_start_seed(gb_info, tag ^ (k + 1))``: per rank AND per epoch."""
         return warm_seed(self.build_seed, self.tag ^ (int(k) + 1))
 
+    def filtered_seed(self, k: int) -> typing.Optional[int]:
+        """The FILTERED container's seed: its own stream, per rank and epoch."""
+        return warm_seed(self.build_seed,
+                         self.tag ^ (int(k) + 1) ^ _FILTERED_SEED_XOR)
+
     def _adopt(self, k: int, manifest: typing.Optional[dict], rank) -> bool:
-        """Load epoch ``k`` into the self container; False (and a warning) on failure."""
+        """Load epoch ``k`` (both containers); False (and a warning) on failure."""
         from .proposal import WarmStartComponents
 
         if manifest is None:
@@ -894,9 +1463,12 @@ class WarmSelfMixer:
                     epoch_dir(self.epoch_root, k), self.epoch)
             return False
         try:
-            cont = WarmStartComponents.from_npz(
+            full = WarmStartComponents.from_npz(
                 manifest["npz_path"], seed=self.epoch_seed(k),
                 **self.load_kwargs)
+            fpath = manifest.get("npz_filtered_path")
+            filt = (None if not fpath else WarmStartComponents.from_npz(
+                fpath, seed=self.filtered_seed(k), **self.load_kwargs))
         except Exception as exc:                  # noqa: BLE001
             if k not in self._bad_epochs:
                 self._bad_epochs.add(k)
@@ -905,17 +1477,21 @@ class WarmSelfMixer:
                     "(%s: %s); keeping epoch %s.", rank, self.name, k,
                     type(exc).__name__, exc, self.epoch)
             return False
-        self.self_container = cont
+        self.self_full = full
+        self.self_filtered = filt
         self.epoch = int(k)
         self.epoch_info = {kk: manifest.get(kk) for kk in (
-            "rows", "n_samples", "n_components", "built_at_row", "stage")}
+            "rows", "n_samples", "n_components", "built_at_row", "stage",
+            "n_clusters", "n_clusters_filtered", "built_on")}
         rws = manifest.get("rows") or [None, None]
         logger.info(
             "[GB_WARM_SELF] rank %s adopted epoch %d (rows %s..%s, %s "
-            "samples, %d components) into %s; proposes use it %s of the "
-            "time, the original warm start the rest.", rank, k, rws[0],
-            rws[-1], manifest.get("n_samples"), cont.n_components, self.name,
-            self.fraction)
+            "samples, %d components) into %s; filtered: %s; split "
+            "original/full/filtered %s.", rank, k, rws[0], rws[-1],
+            manifest.get("n_samples"), full.n_components, self.name,
+            "none (serves the full refit)" if filt is None
+            else f"{filt.n_components} components",
+            "/".join(f"{w:g}" for w in self.split))
         return True
 
     def poll(self, rank=None) -> None:
@@ -928,24 +1504,42 @@ class WarmSelfMixer:
             return
         self._adopt(k, man, rank)
 
-    def begin_propose(self, rank=None) -> dict:
-        """HEAD / single process: poll, choose this propose's container, return the directive."""
+    def _next_choice(self) -> str:
+        """Draw this propose's container with probabilities ~ ``split``.
+
+        Mike, 2026-10-15: "just draw each of these with 1/3 probability
+        each". A fixed-probability mixture of exact MH kernels is itself a
+        valid kernel; a zero weight is never drawn.
+        """
+        return CHOICES[int(self._choice_rng.choice(len(CHOICES), p=self._probs))]
+
+    def begin_propose(self, rank=None, stage=None) -> dict:
+        """HEAD / single process: build if due, poll, choose; the directive."""
+        builder = head_builder_for(self.epoch_root)
+        if builder is not None and stage is not None and rank in (None, 0):
+            builder.maybe_build(stage)
         self.poll(rank)
-        if self.self_container is None:
+        # A stage that never refits (gb_search_seed, source_search, ...)
+        # draws only from the ORIGINAL parent warm start, even when a self
+        # epoch exists on disk (Mike, 2026-10-15: "making sure gb search seed
+        # is fixed to the old fit"). ``stage=None`` (no stage stamp) keeps
+        # the epoch-based choice.
+        if stage is not None and warm_self_stage_kind(stage) is None:
+            self.choice = "orig"
+        elif self.self_full is None:
             self.choice = "orig"
         else:
             self.n_self_window += 1
-            self.choice = ("self" if _bresenham_self(self.n_self_window,
-                                                     self.fraction)
-                           else "orig")
+            self.choice = self._next_choice()
         return {"epoch": self.epoch, "choice": self.choice}
 
     def apply_directive(self, directive, rank=None) -> None:
         """COMPUTE RANK: adopt the head's epoch and take the head's choice.
 
-        Idempotent on the head (its own directive). ``None`` -> original.
-        A rank that cannot load the head's epoch keeps what it holds and
-        says so; its propose stays internally consistent either way.
+        Idempotent on the head (its own directive). ``None`` -> original. A
+        pre-2026-10-15 directive's ``"self"`` is the full refit. A rank that
+        cannot load the head's epoch keeps what it holds and says so; its
+        propose stays internally consistent either way.
         """
         if not directive:
             self.choice = "orig"
@@ -954,7 +1548,10 @@ class WarmSelfMixer:
         if k is not None and k != self.epoch and int(k) not in self._bad_epochs:
             self._adopt(int(k), None, rank)
         c = str(directive.get("choice") or "orig")
-        self.choice = c if (c == "orig" or self.self_container is not None) \
+        c = "full" if c == "self" else c
+        if c not in CHOICES:
+            c = "orig"
+        self.choice = c if (c == "orig" or self.self_full is not None) \
             else "orig"
 
     # -- tallies ----------------------------------------------------------------
@@ -977,9 +1574,9 @@ class WarmSelfMixer:
                     f" deaths acc {r['death_acc']}/{r['deaths']}")
 
         logger.info(
-            "[GB_WARM_SELF %s] %sthis propose used %s%s | cumulative %s || %s",
+            "[GB_WARM_SELF %s] %sthis propose used %s%s | cumulative %s",
             move_name or self.name,
             "" if rank is None else f"r{rank} ",
             self.choice.upper(),
-            f" (epoch {self.epoch})" if self.choice == "self" else "",
-            _fmt("orig"), _fmt("self"))
+            f" (epoch {self.epoch})" if self.choice != "orig" else "",
+            " || ".join(_fmt(c) for c in CHOICES))

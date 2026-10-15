@@ -630,14 +630,16 @@ class GBSettings(Settings):
     # -- warm-start SELF refit (user rulings 2026-10-13;
     # lisatools.globalfit.warmstart.self_refit) --------------------------
     # "Starting in gb search 2 (and in full pe). Let's rebuild our warm
-    # start proposal with the last 50 samples (x4 walkers)." The SAVER rank,
-    # right after its own save, refits the warm-start mixture from the run's
-    # OWN last ``warm_self_last_k`` cold rows x every walker (the parent
-    # build's fit -> referee -> apply, at the run's Tobs) into
-    # ``<run_dir>/warmstart/self/epoch_NNNN/``; every rank adopts the newest
-    # complete epoch, and rj_warm_search / rj_warm_pe then draw from it
-    # ``warm_self_fraction`` of their proposes and from the ORIGINAL parent
-    # warm start the rest ("We should keep the original warm start in the
+    # start proposal with the last 50 samples (x4 walkers)." The HEAD, at a
+    # warm move's entry once the cadence has elapsed (warm_self_at_entry;
+    # the saver after its saves when off), refits the warm-start mixture
+    # from the run's OWN last ``warm_self_last_k`` cold rows x every walker
+    # (the parent build's fit -> referee -> apply, at the run's Tobs, then
+    # the consensus filter) into ``<run_dir>/warmstart/self/epoch_NNNN/``;
+    # every rank adopts the newest complete epoch, and rj_warm_search /
+    # rj_warm_pe then draw from the ORIGINAL parent warm start, the FULL self
+    # refit and the FILTERED one by ``warm_self_split_search`` /
+    # ``warm_self_split_pe`` ("We should keep the original warm start in the
     # fit"). Needs ``warm_start_components`` (no warm move otherwise).
     #
     # warm_self: master switch. False (default) -> no builder, no mixer, the
@@ -659,12 +661,26 @@ class GBSettings(Settings):
         default_factory=env_default("GB_WARM_SELF_EVERY_SEARCH", 1, int)
     )
     # warm_self_every_pe: stored rows (= iterations) between self refits in
-    # full_pe (2026-10-14: "PE it will happen every 150", the residual F-stat
-    # refit's cadence; was 250: "full pe adaptivity: just refit every 250
-    # iterations"). A periodic approximation. <= 0 -> no refit in PE.
+    # full_pe (2026-10-15: "Set the default refitting duration for full pe
+    # ... to be 25 iterations ... both the relaunch of 9mo and full year";
+    # was 150, before that 250). With the head build (warm_self_at_entry)
+    # it is the minimum number of rows since the last build, checked when
+    # rj_warm_pe is drawn. A periodic approximation. <= 0 -> no refit in PE.
     # Env: GB_WARM_SELF_EVERY_PE.
     warm_self_every_pe: int = dataclasses.field(
-        default_factory=env_default("GB_WARM_SELF_EVERY_PE", 150, int)
+        default_factory=env_default("GB_WARM_SELF_EVERY_PE", 25, int)
+    )
+    # warm_self_at_entry: build every refit ON THE HEAD at the warm move's
+    # entry (user ruling 2026-10-15: "Let's just build everything on the
+    # head at entry time for the refit ... Make that the default."). The
+    # head keeps the last ``warm_self_last_k`` stored cold rows in memory
+    # (filled from the store at start-up, appended at each save) and, when
+    # the cadence above has elapsed, runs fit -> referee -> apply -> the
+    # consensus filter before the propose that draws from it; every rank
+    # waits (~75 s on the 9mo). False -> the saver rank builds after its
+    # saves instead (the 2026-10-13 design). Env: GB_WARM_SELF_AT_ENTRY.
+    warm_self_at_entry: bool = dataclasses.field(
+        default_factory=env_default("GB_WARM_SELF_AT_ENTRY", True, bool)
     )
     # warm_self_last_k: how many of the run's latest stored cold rows feed a
     # refit, every walker of each (50 x 4 walkers = 200 posterior samples).
@@ -672,24 +688,36 @@ class GBSettings(Settings):
     warm_self_last_k: int = dataclasses.field(
         default_factory=env_default("GB_WARM_SELF_LAST_K", 50, int)
     )
-    # warm_self_fraction: the share of warm-move proposes that draw from the
-    # self refit once an epoch exists, by a deterministic cadence (0.75 ->
-    # exactly 3 proposes in 4; "sample from the previous full warm start 25%
-    # of the time and the updated refit warm start 75% of the time"). The
-    # chosen container serves the births AND every density of that propose.
-    # 100 % original until the first epoch. In [0, 1].
-    # Env: GB_WARM_SELF_FRACTION.
-    warm_self_fraction: float = dataclasses.field(
-        default_factory=env_default("GB_WARM_SELF_FRACTION", 0.75, float)
+    # warm_self_split_search / warm_self_split_pe: weights "original, full,
+    # filtered" over the three containers a warm move draws from once a self
+    # epoch exists (100 % original before): the ORIGINAL parent warm start
+    # (never changes), the FULL self refit, and the FILTERED self refit
+    # (the full one minus the clusters every walker already holds, see
+    # warm_self_consensus). One build makes both self containers. Each
+    # propose draws one at random, probability ~ weight (1,1,1 = one third
+    # each); it serves the births AND every density of the propose. User
+    # rulings 2026-10-15: search "100% refit on sources that do not exist in
+    # all four (with high confidence)" -> "0,0,1"; PE "split the refits three
+    # ways ... each 1/3 of the time" -> "1,1,1". These replace
+    # GB_WARM_SELF_FRACTION / _FRACTION_SEARCH (0.75 / 1.0, two containers).
+    # Env: GB_WARM_SELF_SPLIT_SEARCH, GB_WARM_SELF_SPLIT_PE.
+    warm_self_split_search: str = dataclasses.field(
+        default_factory=env_default("GB_WARM_SELF_SPLIT_SEARCH", "0,0,1", str)
     )
-    # warm_self_fraction_search: the same share for the SEARCH twin
-    # (rj_warm_search, the numbered search stages from gb_search_2 on). User
-    # ruling 2026-10-14: "using only the refit proposal during gb search 2"
-    # -> 1.0 (every propose from the self refit once an epoch exists; the
-    # original until then). ``warm_self_fraction`` stays the PE twin's
-    # (rj_warm_pe) share. In [0, 1]. Env: GB_WARM_SELF_FRACTION_SEARCH.
-    warm_self_fraction_search: float = dataclasses.field(
-        default_factory=env_default("GB_WARM_SELF_FRACTION_SEARCH", 1.0, float)
+    warm_self_split_pe: str = dataclasses.field(
+        default_factory=env_default("GB_WARM_SELF_SPLIT_PE", "1,1,1", str)
+    )
+    # warm_self_consensus: a refit cluster is "in all walkers with high
+    # confidence" -- and dropped from the FILTERED container -- when EVERY
+    # walker holds it in >= this fraction of its refit rows AND >= this
+    # fraction of the samples hold the same number of its leaves (a blend
+    # one walker resolves and another does not is kept). Measured on the
+    # 9mo (rows 82-89 and 103-110): ~2,160 of ~3,230 source groups are
+    # consensus and took 83 % of the full mixture's draws; the filter takes
+    # the share of draws landing on a source the walker already holds from
+    # 93 % to 57 %. Env: GB_WARM_SELF_CONSENSUS.
+    warm_self_consensus: float = dataclasses.field(
+        default_factory=env_default("GB_WARM_SELF_CONSENSUS", 0.95, float)
     )
     # PE-stage extrinsic DRAW (user design ruling 2026-08-25). STAGE
     # SPLIT: the SEARCH RJ stages (rj_fstat_search / rj_prior_removal /

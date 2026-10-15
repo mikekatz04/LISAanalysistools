@@ -4777,22 +4777,31 @@ def _warm_self_wrap(container, *, gb_info, general_info, tag, name,
     from .warmstart.self_refit import WarmSelfMixer, self_epoch_root
 
     root = self_epoch_root(general_info.main_file_path)
-    # The SEARCH twin (rj_warm_search) draws ``warm_self_fraction_search`` of
-    # its proposes from the self refit (user ruling 2026-10-14: "using only
-    # the refit proposal during gb search 2" -> 1.0); the PE twin keeps
-    # ``warm_self_fraction`` (0.75).
+    # Three containers (user rulings 2026-10-15): the ORIGINAL parent warm
+    # start, the FULL self refit and the FILTERED one (minus the clusters
+    # every walker holds), weighted "original,full,filtered". The SEARCH
+    # twin (rj_warm_search) takes ``warm_self_split_search`` ("0,0,1":
+    # "100% refit on sources that do not exist in all four"), the PE twin
+    # ``warm_self_split_pe`` ("1,1,1": "each 1/3 of the time").
     _is_search = str(name).startswith("rj_warm_search")
-    _fraction = (getattr(gb_info, "warm_self_fraction_search", 1.0) if _is_search
-                 else getattr(gb_info, "warm_self_fraction", 0.75))
+    _split = (getattr(gb_info, "warm_self_split_search", "0,0,1") if _is_search
+              else getattr(gb_info, "warm_self_split_pe", "1,1,1"))
+    for _old in ("GB_WARM_SELF_FRACTION", "GB_WARM_SELF_FRACTION_SEARCH"):
+        if os.environ.get(_old) is not None:
+            logger.warning(
+                "[GB_WARM_SELF] %s is set but no longer read (2026-10-15): the "
+                "warm moves use GB_WARM_SELF_SPLIT_SEARCH / "
+                "GB_WARM_SELF_SPLIT_PE ('original,full,filtered').", _old)
     mixer = WarmSelfMixer(
-        container, epoch_root=root,
-        fraction=float(_fraction),
+        container, epoch_root=root, split=_split,
         load_kwargs=load_kwargs, build_seed=getattr(gb_info, "build_seed", None),
         tag=int(tag), name=str(name))
     logger.info(
-        "[GB_WARM_SELF] %s: the original warm start (%d components) plus the "
-        "self refit from %s, %s of the proposes once an epoch exists.",
-        name, int(container.n_components), root, mixer.fraction)
+        "[GB_WARM_SELF] %s: the original warm start (%d components), the full "
+        "self refit and the filtered self refit from %s, split original/full/"
+        "filtered %s once an epoch exists (the original until then).",
+        name, int(container.n_components), root,
+        "/".join(f"{w:g}" for w in mixer.split))
     return mixer
 
 
