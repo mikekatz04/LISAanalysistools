@@ -102,6 +102,7 @@ __all__ = [
     "latest_complete_epoch",
     "make_warm_self_hook",
     "next_epoch_index",
+    "prune_epochs",
     "self_epoch_root",
     "store_stage",
     "warm_seed",
@@ -118,6 +119,11 @@ LEAF_ROWS_H5 = "leaf_rows.h5"
 #: the fitter npz (kept: small, and the referee's input)
 FIT_NPZ = "self_fit.npz"
 _EPOCH_RE = re.compile(r"^epoch_(\d{4,})$")
+#: pruning (Mike, 2026-10-14: "remove like all except the last few ... or keep
+#: every 10 refits ... so we can see the difference over time"): the newest
+#: KEEP_LAST_EPOCHS complete epochs and every KEEP_EVERY_EPOCH-th stay whole
+KEEP_LAST_EPOCHS = 3
+KEEP_EVERY_EPOCH = 10
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +200,62 @@ def next_epoch_index(root: str) -> int:
     """``1 + max(every epoch dir)``: a crashed build's directory is never reused."""
     ks = list_epochs(root)
     return (ks[-1] + 1) if ks else 0
+
+
+def prune_epochs(root: str, keep_last: int = KEEP_LAST_EPOCHS,
+                 keep_every: int = KEEP_EVERY_EPOCH) -> typing.Tuple[int, int]:
+    """Strip old epochs down to their ``DONE.json``: ``(n_epochs, bytes_freed)``.
+
+    Kept whole: the newest ``keep_last`` COMPLETE epochs and every epoch
+    whose index is a multiple of ``keep_every`` (a long-run record to compare
+    refits over time; ``<= 0`` keeps none extra). Every other epoch OLDER
+    than the newest complete one loses every file but its manifest, so the
+    build history (rows, components, walls) stays readable while the epoch
+    stops being complete (its npz is gone) and no move adopts it again. A
+    crashed build's leftovers go the same way. Directories are never removed
+    (:func:`next_epoch_index` must not reuse an index) and nothing at or
+    above the newest complete epoch is touched (a build in progress). Safe
+    while the moves run: a rank reads an epoch's npz into memory when it
+    adopts it, and the head only ever directs the ranks to the newest one.
+    Each epoch keeps ~40-70 MB of npz files; unpruned, a refit every stored
+    row grows a run directory by ~10 GB a day.
+    """
+    ks = list_epochs(root)
+    names = {}
+    for k in ks:
+        try:
+            names[k] = os.listdir(epoch_dir(root, k))
+        except OSError:
+            names[k] = []
+    # A stripped epoch holds its manifest only: never complete, so skip its
+    # JSON read (one per epoch per build adds up when gb_search_1 refits
+    # every row on a shared filesystem).
+    complete = [k for k in ks if any(n != MANIFEST for n in names[k])
+                and read_manifest(root, k) is not None]
+    if not complete:
+        return 0, 0
+    newest = complete[-1]
+    keep = set(complete[-max(1, int(keep_last)):])
+    n_pruned = n_bytes = 0
+    for k in ks:
+        if k >= newest or k in keep or (int(keep_every) > 0
+                                        and k % int(keep_every) == 0):
+            continue
+        d = epoch_dir(root, k)
+        removed = False
+        for name in names[k]:
+            p = os.path.join(d, name)
+            if name == MANIFEST or not os.path.isfile(p):
+                continue
+            try:
+                size = os.path.getsize(p)
+                os.remove(p)
+            except OSError:
+                continue
+            n_bytes += size
+            removed = True
+        n_pruned += int(removed)
+    return n_pruned, n_bytes
 
 
 def _write_manifest(d: str, manifest: dict) -> None:
@@ -522,8 +584,12 @@ class WarmSelfHook:
     def __init__(self, *, epoch_root: str, tobs: float, last_k: int,
                  every_search: int, every_pe: int,
                  device: typing.Optional[int] = None, branch: str = "gb",
-                 builder=None, runner=None):
+                 builder=None, runner=None,
+                 keep_last: int = KEEP_LAST_EPOCHS,
+                 keep_every: int = KEEP_EVERY_EPOCH):
         self.epoch_root = str(epoch_root)
+        self.keep_last = int(keep_last)
+        self.keep_every = int(keep_every)
         self.tobs = float(tobs)
         self.last_k = int(last_k)
         self.every_search = int(every_search)
@@ -673,6 +739,23 @@ class WarmSelfHook:
             walls.get("read", 0.0), walls.get("fit", 0.0),
             walls.get("referee", 0.0), walls.get("apply", 0.0))
         self._finish_build(t_all, comm, main_rank, dropped_so_far)
+        self._prune()
+
+    def _prune(self) -> None:
+        """Strip older epochs after a successful build (:func:`prune_epochs`)."""
+        try:
+            n, freed = prune_epochs(self.epoch_root, self.keep_last,
+                                    self.keep_every)
+        except Exception as exc:                  # noqa: BLE001
+            logger.warning(
+                "[GB_WARM_SELF] pruning older epochs failed (%s: %s); the "
+                "build is unaffected.", type(exc).__name__, exc)
+            return
+        if n:
+            logger.info(
+                "[GB_WARM_SELF] pruned %d older epoch(s) to their %s (kept "
+                "whole: the newest %d and every %d-th); freed %.1f MB.", n,
+                MANIFEST, self.keep_last, self.keep_every, freed / 1e6)
 
 
 def make_warm_self_hook(curr, *, store_path: typing.Optional[str] = None):
