@@ -4497,6 +4497,8 @@ export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-6}
 export EMRI_LADDER_REANCHOR_NATS=${EMRI_LADDER_REANCHOR_NATS:-50}
 export MBH_LADDER_TMAX=${MBH_LADDER_TMAX:-10}
 export MBH_LADDER_REANCHOR_NATS=${MBH_LADDER_REANCHOR_NATS:-0}
+export SOBBH_LADDER_TMAX=${SOBBH_LADDER_TMAX:-6}
+export SOBBH_LADDER_REANCHOR_NATS=${SOBBH_LADDER_REANCHOR_NATS:-20}
 # 12 -> 8 (user ruling 2026-09-16, with repeats 25 -> 20: sobbh cost
 # trim now that the single-call fix landed). NOTE: SOBHB's ladder lives
 # in the stored PerLeafLadderState (betas_all per leaf), so on a RESUME

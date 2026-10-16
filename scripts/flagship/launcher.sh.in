@@ -4658,15 +4658,26 @@ export EMRI_NTEMPS=${EMRI_NTEMPS:-8}
 #                        EMRI but 3 and 6, and on the new ladder nothing else
 #                        brings them back (a swap into a state 100 nats worse
 #                        never happens).
-# SOBBH (SNR 4-10) stays on the uncapped make_ladder spacing. A RESUMED store
-# keeps its stored ladders: put EMRI_LADDER_RESET_ON_RESUME=1
-# MBH_LADDER_RESET_ON_RESUME=1 on the relaunch line ONCE to replace them
-# (logged leaf by leaf; the old rungs' states stay where they are and the
-# guard re-anchors the lost EMRI ones at the first block).
+#   SOBBH_LADDER_TMAX=6 / SOBBH_LADDER_REANCHOR_NATS=20 (user ruling
+#                        2026-10-15, "update the SOBHBs"): until then SOBBH
+#                        stayed on the uncapped make_ladder spacing (beta down
+#                        to 0.007, T_max ~150), measured on the 1yr tar 2 at
+#                        row 28: hot-pair swaps 0.80-0.95 (prior sampling),
+#                        cold pairs 0.26-0.56. The EMRI ladder (ratio 1.29)
+#                        instead; an SNR-10 SOBBH keeps SNR 4 on the top rung.
+#                        Guard 20: a lost SNR-10 SOBBH is 50 nats down against
+#                        a 27.5-nat expected drop at the top rung (ndim 11);
+#                        the SNR 3-5 leaves (12-27 nats whole) can never trip it.
+# A RESUMED store keeps its stored ladders: put EMRI_LADDER_RESET_ON_RESUME=1
+# MBH_LADDER_RESET_ON_RESUME=1 SOBBH_LADDER_RESET_ON_RESUME=1 on the relaunch
+# line ONCE to replace them (logged leaf by leaf; the old rungs' states stay
+# where they are and the guard re-anchors the lost ones at the first block).
 export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-6}
 export EMRI_LADDER_REANCHOR_NATS=${EMRI_LADDER_REANCHOR_NATS:-50}
 export MBH_LADDER_TMAX=${MBH_LADDER_TMAX:-10}
 export MBH_LADDER_REANCHOR_NATS=${MBH_LADDER_REANCHOR_NATS:-0}
+export SOBBH_LADDER_TMAX=${SOBBH_LADDER_TMAX:-6}
+export SOBBH_LADDER_REANCHOR_NATS=${SOBBH_LADDER_REANCHOR_NATS:-20}
 # 12 -> 8 (user ruling 2026-09-16, with repeats 25 -> 20: sobbh cost
 # trim now that the single-call fix landed). NOTE: SOBHB's ladder lives
 # in the stored PerLeafLadderState (betas_all per leaf), so on a RESUME

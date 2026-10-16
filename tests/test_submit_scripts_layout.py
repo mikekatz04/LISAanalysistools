@@ -889,6 +889,7 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             # code defaults None / 200.
             "EMRI_LADDER_TMAX", "EMRI_LADDER_REANCHOR_NATS",
             "MBH_LADDER_TMAX", "MBH_LADDER_REANCHOR_NATS",
+            "SOBBH_LADDER_TMAX", "SOBBH_LADDER_REANCHOR_NATS",
             # 2026-10-14: the search-stage cold -> hot rotation cadence of the
             # source ladders (code default 200, exported for visibility).
             *COLD_TO_HOT_KNOBS,
@@ -1863,6 +1864,7 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             # 2026-10-13: the ladder cap exports, mirrored in the 3mo twin
             "EMRI_LADDER_TMAX", "EMRI_LADDER_REANCHOR_NATS",
             "MBH_LADDER_TMAX", "MBH_LADDER_REANCHOR_NATS",
+            "SOBBH_LADDER_TMAX", "SOBBH_LADDER_REANCHOR_NATS",
             # 2026-10-14: the cold -> hot rotation cadence, mirrored in the
             # 3mo twin (inert there: no source branch is armed)
             *COLD_TO_HOT_KNOBS,
@@ -3129,8 +3131,8 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
 
     Of the per-leaf ladder knobs of the same day, ``{BRANCH}_LADDER_RESET_ON_RESUME``
     is a one-off launch-line knob (a standing export would reset the ladders
-    at every relaunch), ``SOBBH_LADDER_REANCHOR_NATS`` runs at the code
-    default (200), ``MBH_LADDER_REANCHOR_NATS`` is exported OFF (0) and
+    at every relaunch), ``SOBBH_LADDER_REANCHOR_NATS`` is exported at 20
+    (since 2026-10-15; the code default 200 before), ``MBH_LADDER_REANCHOR_NATS`` is exported OFF (0) and
     ``EMRI_LADDER_REANCHOR_NATS`` at 50: the second ruling of 2026-10-13
     ("focus on sampling the main modes (+ the sky move for MBHs) in terms of
     tempering") after the guard was measured re-anchoring MBHB hot rungs that
@@ -3157,9 +3159,6 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
                     knob = f"{b}_LADDER_RESET_ON_RESUME"
                     self.assertNotIn(knob, exports, knob)
                     self.assertNotRegex(src, rf"(?m)^export {knob}=", knob)
-                knob = "SOBBH_LADDER_REANCHOR_NATS"
-                self.assertNotIn(knob, exports, knob)
-                self.assertNotRegex(src, rf"(?m)^export {knob}=", knob)
 
     def test_the_ladder_caps_are_main_mode(self):
         """User ruling 2026-10-13 (the second of the day, after the T_max 100
@@ -3169,11 +3168,16 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
         of tempering". EMRI T_max 6 (an SNR-15 EMRI keeps SNR 6 on the top
         rung), MBH T_max 10 (SNR 180-1000 keeps SNR 56-330), the MBH lost-rung
         guard off and the EMRI guard at 50 nats (a lost EMRI rung is SNR^2/2
-        down, 72-1150; 200 only caught the two loudest); SOBBH stays on the
-        uncapped make_ladder spacing. Exported in every v9 production
+        down, 72-1150; 200 only caught the two loudest); SOBBH joined on
+        2026-10-15 (T_max 6, guard 20). Exported in every v9 production
         launcher, overridable on the line."""
         want = {"EMRI_LADDER_TMAX": "6", "EMRI_LADDER_REANCHOR_NATS": "50",
-                "MBH_LADDER_TMAX": "10", "MBH_LADDER_REANCHOR_NATS": "0"}
+                "MBH_LADDER_TMAX": "10", "MBH_LADDER_REANCHOR_NATS": "0",
+                # 2026-10-15 (Mike, "update the SOBHBs"): the SOBBH ladder
+                # capped like the EMRI one (its default make_ladder spacing
+                # reached beta 0.007; hot pairs swapped at 0.8-0.95 = prior
+                # sampling on the 1yr), guard 20 nats (a lost SNR-10 source).
+                "SOBBH_LADDER_TMAX": "6", "SOBBH_LADDER_REANCHOR_NATS": "20"}
         for path in V9_PRODUCTION:
             exports = _exports(path)
             src = open(path).read()
@@ -3182,8 +3186,6 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
                     self.assertEqual(exports.get(knob), val, knob)
                     self.assertRegex(
                         src, rf"(?m)^export {knob}=\$\{{{knob}:-{val}\}}$", knob)
-                self.assertNotIn("SOBBH_LADDER_TMAX", exports)
-                self.assertNotRegex(src, r"(?m)^export SOBBH_LADDER_TMAX=")
 
     def test_the_axis_adaptation_is_on_in_every_v9_production_launcher(self):
         """2026-10-14 (Mike: "some of the emris are sampling terribly"): the
