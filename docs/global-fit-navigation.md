@@ -342,6 +342,21 @@ three modules); the referee's own backend choice (`GB_WARM_START_REFEREE_BACKEND
 read by the referee. Tests: `tests/test_warmstart_self_refit.py`,
 `tests/test_warmstart_self_refit_entry.py`, `tests/test_warmstart_self_refit_prune.py`.
 
+**The one-draw adoption lag** (`GB_WARM_SELF_ADOPT_LAG` / `warm_self_adopt_lag`, default
+1; Mike 2026-10-16: "refit on the current data holding our previous within-run refit
+information, use the previous information on the current proposal and then switch it
+out") amends the head build above: `begin_propose` polls FIRST (an epoch already
+complete on disk is adopted at once), then builds; an epoch built inside that call is
+held, the propose draws from the epoch adopted before the build (the original warm
+start on the run's first build) and ships THAT index in the directive, and the next
+warm draw (either twin, any stage) adopts the new one (a build due there again: build
+k+1, use k). Compute ranks never poll; the head builder keeps the newest two epochs
+whole. Why: on the 9mo job 767 each of the 5 draws from an epoch built at that same
+entry lost 15-20 leaves and 100-527 nats per walker (a fresh fit sits on the current
+cold leaves, so the weakest die together); draws on epochs >= 13 rows old were the
+job's best. 0 = the build propose uses its own epoch. Tests:
+`tests/test_warmstart_self_refit_lag.py`.
+
 ### 2.9 Monitoring: `src/lisatools/globalfit/monitor/` and `scripts/diagnostics/`
 
 | tool | command | what |

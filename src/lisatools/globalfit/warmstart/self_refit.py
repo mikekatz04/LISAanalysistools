@@ -51,9 +51,17 @@ THE PIECES (all in this module, wired from four places):
    the head's ``GFHDFBackend.save_step``); at a warm move's entry
    (:meth:`WarmSelfMixer.begin_propose`, called once per propose with the
    live stage) it builds when :func:`warm_self_due` says so, through the
-   same pipeline as 1. below plus :func:`consensus_filter`, and the
-   propose that triggered it already draws from the new epoch. Every rank
-   waits for it (~75 s on the 9mo).
+   same pipeline as 1. below plus :func:`consensus_filter`. Every rank
+   waits for it (~75 s on the 9mo). THE ADOPTION LAG (Mike, 2026-10-16:
+   "refit on the current data holding our previous within-run refit
+   information, use the previous information on the current proposal and
+   then switch it out"; ``GB_WARM_SELF_ADOPT_LAG``, default on): the
+   propose that triggered a build draws from the epoch held BEFORE it (the
+   original warm start on the run's first build) and the next warm draw
+   adopts the new one. On the 9mo job 767 every draw from an epoch built at
+   that same entry lost 15-20 leaves and 100-527 nats per walker (a fresh
+   fit sits on the current cold leaves, so the weakest die together), while
+   draws on epochs >= 13 rows old were the job's best iterations.
 1. **The saver build** (``GB_WARM_SELF_AT_ENTRY=0``; :class:`WarmSelfHook`,
    saver rank, ``hdfbackend``'s save
    loop). Right after one of its own saves, when the run's active recipe
@@ -101,7 +109,10 @@ THE PIECES (all in this module, wired from four places):
    floor_eps / p_floor / circ_images / use_cupy and the per-rank seeds
    ``_warm_start_seed(gb_info, tag ^ (epoch + 1))`` (full) and the same
    XOR ``_FILTERED_SEED_XOR`` (filtered), so the candidate streams change
-   per epoch and differ per rank and per container.
+   per epoch and differ per rank and per container. A compute rank never
+   polls: the directive's epoch is the only one it adopts, so under the
+   adoption lag no rank can reach a freshly built epoch before the head
+   ships it.
 5. **Resume**: nothing is held in memory that the disk does not also
    hold. The head refills its buffer and the active stage's start from the
    store at set-up; both builders take the latest complete epoch's
@@ -274,7 +285,10 @@ def prune_epochs(root: str, keep_last: int = KEEP_LAST_EPOCHS,
     (:func:`next_epoch_index` must not reuse an index) and nothing at or
     above the newest complete epoch is touched (a build in progress). Safe
     while the moves run: a rank reads an epoch's npz into memory when it
-    adopts it, and the head only ever directs the ranks to the newest one.
+    adopts it, and the head directs the ranks to the newest one -- or, on a
+    build propose under the adoption lag, to the one before it, which the
+    ranks load AFTER this prune (the head builder then keeps at least the
+    newest two whole).
     Each epoch keeps ~40-70 MB of npz files; unpruned, a refit every stored
     row grows a run directory by ~10 GB a day.
     """
@@ -1112,6 +1126,14 @@ class WarmSelfHeadBuilder:
     rank waits for it (the compute ranks are parked on the propose). It
     never raises: a failure logs, retries after another cadence, and the
     propose goes on with the epoch it has.
+
+    ``adopt_lag`` (``GB_WARM_SELF_ADOPT_LAG``, ruling 2026-10-16) only words
+    the build line and guards the prune: the MIXER holds the new epoch back
+    for one draw (:meth:`WarmSelfMixer.begin_propose`), so the build line
+    names the epoch this propose uses instead (the newest complete one
+    before the build), and the prune keeps at least the newest two epochs
+    whole, because the ranks load that previous one after it.
+    ``last_built_epoch`` is the index of the latest successful build.
     """
 
     def __init__(self, *, epoch_root: str, buffer: WarmSelfBuffer,
@@ -1119,7 +1141,7 @@ class WarmSelfHeadBuilder:
                  device: typing.Optional[int] = None, consensus: float = 0.95,
                  branch: str = "gb", builder=None, runner=None,
                  filter_fn=None, keep_last: int = KEEP_LAST_EPOCHS,
-                 keep_every: int = KEEP_EVERY_EPOCH):
+                 keep_every: int = KEEP_EVERY_EPOCH, adopt_lag: bool = True):
         self.epoch_root = str(epoch_root)
         self.buffer = buffer
         self.tobs = float(tobs)
@@ -1131,6 +1153,7 @@ class WarmSelfHeadBuilder:
         self.branch = str(branch)
         self.keep_last = int(keep_last)
         self.keep_every = int(keep_every)
+        self.adopt_lag = bool(adopt_lag)
         self._builder = builder or build_self_epoch
         self._runner = runner
         self._filter = filter_fn or consensus_filter
@@ -1138,6 +1161,7 @@ class WarmSelfHeadBuilder:
         self._stage_start = 0
         self._failed_at: typing.Optional[int] = None
         self.n_built = 0
+        self.last_built_epoch: typing.Optional[int] = None
 
     def _stage_clock_start(self, stage: str, rows: int) -> int:
         if stage != self._stage:
@@ -1243,25 +1267,36 @@ class WarmSelfHeadBuilder:
                 pass
         self._failed_at = None
         self.n_built += 1
+        self.last_built_epoch = int(k)
         a, b = prov["rows"]
+        # the adoption lag: this propose draws from the newest complete epoch
+        # that existed before this build (the mixer polled it first)
+        held = ""
+        if self.adopt_lag:
+            held = ("; held for the next warm draw, this propose uses "
+                    + ("the original warm start" if latest is None
+                       else f"epoch {int(latest[0])}"))
         logger.info(
             "[GB_WARM_SELF] epoch %d built ON THE HEAD at the %s warm entry "
             "from head states %d..%d (%d samples): %d components; filtered: kept %d "
             "of %d clusters (%d held by every walker dropped) in %.1f s "
             "(read %.1f, fit %.1f, referee %.1f, apply %.1f, filter %.1f); "
-            "every rank waited for it.", k, stage, a, b, prov["n_samples"],
+            "every rank waited for it%s.", k, stage, a, b, prov["n_samples"],
             int(res["n_components"]), n_kept, n_clusters, n_clusters - n_kept,
             walls["total"], walls.get("read", 0.0), walls.get("fit", 0.0),
             walls.get("referee", 0.0), walls.get("apply", 0.0),
-            walls.get("filter", 0.0))
+            walls.get("filter", 0.0), held)
+        # under the lag the ranks load the epoch BEFORE this one after the
+        # prune below: keep at least the newest two whole
+        keep_last = max(self.keep_last, 2) if self.adopt_lag else self.keep_last
         try:
-            n, freed = prune_epochs(self.epoch_root, self.keep_last,
+            n, freed = prune_epochs(self.epoch_root, keep_last,
                                     self.keep_every)
             if n:
                 logger.info(
                     "[GB_WARM_SELF] pruned %d older epoch(s) to their %s "
                     "(kept whole: the newest %d and every %d-th); freed "
-                    "%.1f MB.", n, MANIFEST, self.keep_last, self.keep_every,
+                    "%.1f MB.", n, MANIFEST, keep_last, self.keep_every,
                     freed / 1e6)
         except Exception as exc:                  # noqa: BLE001
             logger.warning("[GB_WARM_SELF] pruning older epochs failed "
@@ -1315,16 +1350,19 @@ def make_head_builder(curr, backend=None, *,
         last_k=last_k, every_search=int(gb.warm_self_every_search),
         every_pe=int(gb.warm_self_every_pe),
         device=(int(gpus[0]) if gpus else None),
-        consensus=float(getattr(gb, "warm_self_consensus", 0.95)))
+        consensus=float(getattr(gb, "warm_self_consensus", 0.95)),
+        adopt_lag=bool(getattr(gb, "warm_self_adopt_lag", True)))
     register_head_builder(builder)
     logger.info(
         "[GB_WARM_SELF] head builder armed: the buffer holds %d of the last %d "
         "stored rows (store rows %d, stage %s from row %d); builds at the warm "
         "move's entry every %d search / %d PE rows, consensus %.2f, device "
-        "%s, epochs under %s.", len(buf), last_k, buf.n_stored,
-        buf.stage_name, buf.stage_start, builder.every_search,
+        "%s, epochs under %s; adoption lag %s.", len(buf), last_k,
+        buf.n_stored, buf.stage_name, buf.stage_start, builder.every_search,
         builder.every_pe, builder.consensus, builder.device,
-        builder.epoch_root)
+        builder.epoch_root,
+        "ON (a build's epoch serves from the next warm draw)"
+        if builder.adopt_lag else "OFF (a build's epoch serves its own propose)")
     return builder
 
 
@@ -1375,6 +1413,12 @@ class WarmSelfMixer:
     :meth:`begin_propose` first lets the registered head builder build a
     due epoch, so the propose that triggered it already draws from it.
     Pickle/deepcopy safe: numpy containers and plain scalars only.
+
+    ``adopt_lag`` (default True; ``GB_WARM_SELF_ADOPT_LAG``, Mike
+    2026-10-16) amends the build propose: an epoch the head builds INSIDE
+    :meth:`begin_propose` is held (``held_epoch``) and that propose draws
+    from the epoch adopted before the build; the next warm draw adopts it.
+    ``adopt_lag=False``: the propose that triggered a build draws from it.
     """
 
     is_warm_self_mixer = True
@@ -1382,8 +1426,13 @@ class WarmSelfMixer:
 
     def __init__(self, original, *, epoch_root: str, load_kwargs: dict,
                  split=(1.0, 1.0, 1.0), build_seed=None, tag: int = 0,
-                 name: str = "warm"):
+                 name: str = "warm", adopt_lag: bool = True):
         self.split = parse_split(split)
+        #: hold an epoch built at this propose's entry for the next draw
+        self.adopt_lag = bool(adopt_lag)
+        #: the epoch the head built in the CURRENT begin_propose and held back
+        #: (adopted at the next draw); None on every other propose / rank
+        self.held_epoch: typing.Optional[int] = None
         self.original = original
         self.self_full = None
         self.self_filtered = None
@@ -1514,11 +1563,28 @@ class WarmSelfMixer:
         return CHOICES[int(self._choice_rng.choice(len(CHOICES), p=self._probs))]
 
     def begin_propose(self, rank=None, stage=None) -> dict:
-        """HEAD / single process: build if due, poll, choose; the directive."""
+        """HEAD / single process: poll, build if due, choose; the directive.
+
+        The poll comes FIRST, so an epoch already complete on disk (the
+        previous within-run refit, a resumed run's, a saver-built one) is
+        adopted at once. An epoch the registered head builder builds in THIS
+        call is, with ``adopt_lag`` (Mike, 2026-10-16: "use the previous
+        information on the current proposal and then switch it out"), NOT
+        adopted: this propose draws from the epoch held before the build
+        (the original warm start when there is none) and the directive
+        ships THAT epoch, so every rank uses it too; the next warm draw's
+        poll adopts the new one. ``adopt_lag=False`` re-polls after the
+        build and draws from the new epoch at once.
+        """
+        self.held_epoch = None
+        self.poll(rank)
         builder = head_builder_for(self.epoch_root)
         if builder is not None and stage is not None and rank in (None, 0):
-            builder.maybe_build(stage)
-        self.poll(rank)
+            if builder.maybe_build(stage):
+                if self.adopt_lag:
+                    self.held_epoch = getattr(builder, "last_built_epoch", None)
+                else:
+                    self.poll(rank)
         # A stage that never refits (gb_search_seed, source_search, ...)
         # draws only from the ORIGINAL parent warm start, even when a self
         # epoch exists on disk (Mike, 2026-10-15: "making sure gb search seed
@@ -1540,6 +1606,13 @@ class WarmSelfMixer:
         pre-2026-10-15 directive's ``"self"`` is the full refit. A rank that
         cannot load the head's epoch keeps what it holds and says so; its
         propose stays internally consistent either way.
+
+        The directive is AUTHORITATIVE: a rank never polls the epoch root,
+        so the shipped epoch is the only one it adopts, even when a newer
+        complete one is on disk (the adoption lag ships the epoch held
+        before a build while the fresh one already sits there), and a
+        directive without an epoch (the head holds no self refit) is the
+        original whatever the rank holds.
         """
         if not directive:
             self.choice = "orig"
@@ -1549,7 +1622,7 @@ class WarmSelfMixer:
             self._adopt(int(k), None, rank)
         c = str(directive.get("choice") or "orig")
         c = "full" if c == "self" else c
-        if c not in CHOICES:
+        if c not in CHOICES or k is None:
             c = "orig"
         self.choice = c if (c == "orig" or self.self_full is not None) \
             else "orig"

@@ -22,7 +22,8 @@ would need waveforms):
   cadence, one epoch per build carrying BOTH npz files, never raises;
 * the mixer: original / full / filtered by the split's deterministic schedule,
   the build happens at the head's propose entry and is adopted in that same
-  propose, compute ranks never build.
+  propose with ``adopt_lag=False`` (the default one-draw lag is pinned in
+  ``test_warmstart_self_refit_lag.py``), compute ranks never build.
 """
 
 from __future__ import annotations
@@ -447,6 +448,9 @@ class SplitMixerTest(_TmpDir):
         sr.register_head_builder(_Builder())
         self.addCleanup(sr.unregister_head_builder, self.root)
         m = self._mixer((0, 0, 1))
+        # the pre-2026-10-16 behaviour; the default one-draw adoption lag is
+        # pinned in tests/test_warmstart_self_refit_lag.py
+        m.adopt_lag = False
         d = m.begin_propose(rank=0, stage="gb_search_1")
         self.assertEqual(built, ["gb_search_1"])
         self.assertEqual((d["epoch"], d["choice"]), (0, "filtered"))

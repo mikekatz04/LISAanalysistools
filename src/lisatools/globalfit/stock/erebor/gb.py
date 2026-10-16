@@ -719,6 +719,21 @@ class GBSettings(Settings):
     warm_self_consensus: float = dataclasses.field(
         default_factory=env_default("GB_WARM_SELF_CONSENSUS", 0.95, float)
     )
+    # warm_self_adopt_lag: the ONE-DRAW ADOPTION LAG of the head's entry
+    # refit (user ruling 2026-10-16: "refit on the current data holding our
+    # previous within-run refit information, use the previous information on
+    # the current proposal and then switch it out"). A warm propose whose
+    # entry builds epoch k draws from the epoch held before the build (the
+    # original warm start on the run's first build) and ships THAT epoch to
+    # every rank; the next warm draw adopts k. On the 9mo job 767 every draw
+    # from an epoch built at that same entry lost 15-20 leaves and 100-527
+    # nats per walker, while draws on epochs >= 13 rows old were the job's
+    # best. Epochs already complete on disk are adopted at once either way.
+    # False -> the build propose draws from its own new epoch (pre-10-16).
+    # Env: GB_WARM_SELF_ADOPT_LAG.
+    warm_self_adopt_lag: bool = dataclasses.field(
+        default_factory=env_default("GB_WARM_SELF_ADOPT_LAG", True, bool)
+    )
     # PE-stage extrinsic DRAW (user design ruling 2026-08-25). STAGE
     # SPLIT: the SEARCH RJ stages (rj_fstat_search / rj_prior_removal /
     # rj_replace) PIN phi0/cos_iota/psi deterministically at the F-stat

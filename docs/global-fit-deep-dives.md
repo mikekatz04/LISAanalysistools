@@ -294,6 +294,11 @@ Cold lnL per walker per row (`global_fit/log_like[:, 0, 0, :]`), max / mean
   `rj_warm_search` propose once an epoch exists and is ORIG / FULL /
   FILTERED about one third each (a random draw per propose) on `rj_warm_pe`
   (ORIG on every propose before the first epoch).
+  Since 2026-10-16 (`GB_WARM_SELF_ADOPT_LAG=1`) a build iteration's draw uses
+  the previous refit: its build line ends `held for the next warm draw, this
+  propose uses epoch j` (`... the original warm start` on the run's first
+  build), its `this propose used` names epoch j, and the ranks' `adopted epoch
+  k` appears at the next warm draw.
   The point of the feature is the `cold` birth acceptance of the `filtered`
   and `full` tallies against `orig` on the same line. Sick: `head epoch k
   build FAILED` (read its traceback; the epoch dir stays incomplete and is

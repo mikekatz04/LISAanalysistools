@@ -4795,7 +4795,9 @@ def _warm_self_wrap(container, *, gb_info, general_info, tag, name,
     mixer = WarmSelfMixer(
         container, epoch_root=root, split=_split,
         load_kwargs=load_kwargs, build_seed=getattr(gb_info, "build_seed", None),
-        tag=int(tag), name=str(name))
+        tag=int(tag), name=str(name),
+        # the one-draw adoption lag (ruling 2026-10-16, GB_WARM_SELF_ADOPT_LAG)
+        adopt_lag=bool(getattr(gb_info, "warm_self_adopt_lag", True)))
     logger.info(
         "[GB_WARM_SELF] %s: the original warm start (%d components), the full "
         "self refit and the filtered self refit from %s, split original/full/"
