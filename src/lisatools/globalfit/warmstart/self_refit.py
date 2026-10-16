@@ -24,7 +24,12 @@ USER RULINGS (Mike, 2026-10-14/15) -- the current design:
   across the two self-refitting proposals" -> one build makes the FULL and
   the FILTERED (:func:`consensus_filter`) containers; PE split ``1,1,1``.
 * "search split should be 100% refit on sources that do not exist in all
-  four (with high confidence)" -> search split ``0,0,1``.
+  four (with high confidence)" -> search split ``0,0,1``; then "do the split
+  between the old run fit warm start and the refit filtered warm start
+  during gb search 1/2 so we make sure not to leave out leaves from the
+  previous run ... 20 % old run refit warmstart / 80% self refit warmstart
+  filtered" -> search split ``0.2,0,0.8``; then (2026-10-16) "Let's split
+  them 0.5/0/0.5 in search" -> ``0.5,0,0.5``.
 * "Use the same refitting cadence as we do now" (search every stored row =
   every cycle at the entry), "the default refitting duration for full pe
   ... 25 iterations".
@@ -94,9 +99,12 @@ THE PIECES (all in this module, wired from four places):
    ``rj_proposal_distribution``). It holds the ORIGINAL parent-derived
    container, the FULL self refit and the FILTERED one (``None`` until an
    epoch exists). Each propose DRAWS one at random with probabilities ~
-   ``GB_WARM_SELF_SPLIT_SEARCH`` / ``_PE`` (``0,0,1`` / ``1,1,1`` = one third
-   each; 100 % original while no self epoch exists; Mike 2026-10-15: "just
-   draw each of these with 1/3 probability each") and that container serves
+   ``GB_WARM_SELF_SPLIT_SEARCH`` / ``_PE`` (``0.5,0,0.5`` = 50 % original,
+   50 % filtered / ``1,1,1`` = one third each; 100 % original while no self
+   epoch exists; Mike 2026-10-15: "just draw each of these with 1/3
+   probability each", then for search "20 % old run refit warmstart / 80%
+   self refit warmstart filtered", then 2026-10-16 "0.5/0/0.5 in search")
+   and that container serves
    the birth draws AND every logpdf of the propose (the BandSorter's death
    factors are computed from the same object), so forward and reverse
    densities always agree within a propose. A fixed-probability mixture of
@@ -1408,11 +1416,14 @@ class WarmSelfMixer:
     container. Before any self epoch exists every propose uses the
     original; then each propose DRAWS its container at random with
     probabilities ~ ``split`` (original, full, filtered): ``1,1,1`` one third
-    each, ``0,0,1`` always the filtered one. An epoch without a filtered npz
+    each, ``0.5,0,0.5`` the original on 50 % and the filtered one on 50 %,
+    ``0,0,1`` always the filtered one. An epoch without a filtered npz
     serves its full refit where the filtered one is chosen. On the head,
-    :meth:`begin_propose` first lets the registered head builder build a
-    due epoch, so the propose that triggered it already draws from it.
-    Pickle/deepcopy safe: numpy containers and plain scalars only.
+    :meth:`begin_propose` first adopts any newer complete epoch on disk,
+    then lets the registered head builder build a due epoch; under the
+    default adoption lag (below) the propose that triggered the build
+    still draws from the epoch it held, and the next warm draw adopts the
+    new one. Pickle/deepcopy safe: numpy containers and plain scalars only.
 
     ``adopt_lag`` (default True; ``GB_WARM_SELF_ADOPT_LAG``, Mike
     2026-10-16) amends the build propose: an epoch the head builds INSIDE

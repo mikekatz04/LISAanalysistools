@@ -254,8 +254,10 @@ samples (x4 walkers)"; "keep the original warm start in the fit"; 25 % original 
 refit in full_pe every 250 rows; 2026-10-14 for gb_search_2: refit EVERY stored row and
 draw ONLY from the refit, after the 9mo's first PE epoch carried 84 % of the lnL gain in
 its seven self draws; 2026-10-15: build on the head at the warm moves' entry, one build
-gives a FULL and a FILTERED refit, search draws only the filtered one, PE one third each
-of original / full / filtered, PE every 25 rows). Why: per-walker GB
+gives a FULL and a FILTERED refit, PE one third each of original / full / filtered, PE
+every 25 rows; search first drew only the filtered one, then 20 % original / 80 % filtered
+"so we make sure not to leave out leaves from the previous run", then 50 % / 50 % on
+2026-10-16 after the 1yr tar 4 found the original still holding ~1,000 sources no walker had). Why: per-walker GB
 completeness at SNR > 8 was 91 % on the 9mo while the union of the four cold walkers
 was 96.5 %; a mixture fitted to ALL cold walkers proposes to each walker what the
 others hold. The pieces:
@@ -276,7 +278,9 @@ others hold. The pieces:
   `epoch_NNNN/leaf_rows.h5` (the same layout `copy_leaf_rows` makes from the store), runs
   fit -> referee -> apply exactly as `build.py` does (`_default_runner`, CLI defaults, the
   run's Tobs, `--gmm-gpu` = the head's device), then `consensus_filter`, writes the
-  manifest LAST, prunes, and the propose that triggered it draws from the new epoch.
+  manifest LAST and prunes. The propose that triggered it draws from the epoch held
+  before the build, and the next warm draw adopts the new one (the one-draw adoption lag,
+  below; with `GB_WARM_SELF_ADOPT_LAG=0` the triggering propose draws from the new epoch).
   Every rank waits (the compute ranks are parked on the propose; ~75 s on the 9mo), so the
   `[GF_TIMING]` wall of `rj_warm_search` / `rj_warm_pe` now INCLUDES the build on a build
   propose: not a regression. Only the head rank builds. Rows are counted as the states the
@@ -311,7 +315,8 @@ others hold. The pieces:
   `rj_proposal_distribution` of `rj_warm_search` / `rj_warm_pe` when `GB_WARM_SELF=1`;
   built by `recipe._warm_self_wrap`). At each propose the head polls the epoch root,
   adopts a newer complete epoch, DRAWS ORIGINAL / FULL / FILTERED at random with
-  probabilities ~ the twin's split (`0,0,1` search = always the filtered refit; `1,1,1`
+  probabilities ~ the twin's split (`0.5,0,0.5` search = the original on 50 % of the
+  proposes and the filtered refit on 50 %, never the full one; `1,1,1`
   PE = one third each, drawn per propose; 100 % original before the first epoch and in
   every stage that never refits -- `gb_search_seed`, `source_search` -- even with epochs
   on disk; an epoch
@@ -331,7 +336,7 @@ others hold. The pieces:
 | `GB_WARM_SELF_EVERY_SEARCH` (`warm_self_every_search`) | 1 | stored rows between refits in `gb_search_N`, N >= 1 (= every cycle at the entry; <= 0 off) |
 | `GB_WARM_SELF_EVERY_PE` (`warm_self_every_pe`) | 25 | stored rows (= iterations) between refits in `full_pe`, checked when `rj_warm_pe` is drawn (<= 0 off; 150 before 2026-10-15, 250 before 2026-10-14) |
 | `GB_WARM_SELF_LAST_K` (`warm_self_last_k`) | 50 | the run's last stored rows fed to a refit, every cold walker of each |
-| `GB_WARM_SELF_SPLIT_SEARCH` (`warm_self_split_search`) | `0,0,1` | `rj_warm_search` weights original / full / filtered once an epoch exists |
+| `GB_WARM_SELF_SPLIT_SEARCH` (`warm_self_split_search`) | `0.5,0,0.5` | `rj_warm_search` weights original / full / filtered once an epoch exists (`0,0,1` then `0.2,0,0.8` on 2026-10-15; `0.5,0,0.5` since 2026-10-16: the 1yr tar 4 found the original still holding ~1,000 sources no walker had while the filtered yield was spent) |
 | `GB_WARM_SELF_SPLIT_PE` (`warm_self_split_pe`) | `1,1,1` | `rj_warm_pe` weights original / full / filtered |
 | `GB_WARM_SELF_CONSENSUS` (`warm_self_consensus`) | 0.95 | per-walker row share and same-count share above which a cluster counts as held by every walker (dropped from the filtered refit) |
 

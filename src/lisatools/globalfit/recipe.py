@@ -4780,11 +4780,14 @@ def _warm_self_wrap(container, *, gb_info, general_info, tag, name,
     # Three containers (user rulings 2026-10-15): the ORIGINAL parent warm
     # start, the FULL self refit and the FILTERED one (minus the clusters
     # every walker holds), weighted "original,full,filtered". The SEARCH
-    # twin (rj_warm_search) takes ``warm_self_split_search`` ("0,0,1":
-    # "100% refit on sources that do not exist in all four"), the PE twin
+    # twin (rj_warm_search) takes ``warm_self_split_search`` ("0.5,0,0.5":
+    # 2026-10-15 "20 % old run refit warmstart / 80% self refit warmstart
+    # filtered", then 2026-10-16 "Let's split them 0.5/0/0.5 in search" --
+    # the 1yr tar 4 found the original still holding ~1,000 sources no walker
+    # had while the filtered yield was spent), the PE twin
     # ``warm_self_split_pe`` ("1,1,1": "each 1/3 of the time").
     _is_search = str(name).startswith("rj_warm_search")
-    _split = (getattr(gb_info, "warm_self_split_search", "0,0,1") if _is_search
+    _split = (getattr(gb_info, "warm_self_split_search", "0.5,0,0.5") if _is_search
               else getattr(gb_info, "warm_self_split_pe", "1,1,1"))
     for _old in ("GB_WARM_SELF_FRACTION", "GB_WARM_SELF_FRACTION_SEARCH"):
         if os.environ.get(_old) is not None:

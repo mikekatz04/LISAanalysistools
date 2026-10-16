@@ -4119,7 +4119,11 @@ export GB_WARM_START_LAST_K=${GB_WARM_START_LAST_K:-300}   # flagship (Mike 2026
 # refit that never changes, new refit with all sources, and new refit removal
 # of sources that are already in all walkers ... each 1/3 of the time",
 # search "100% refit on sources that do not exist in all four (with high
-# confidence)", PE every 25 iterations). The HEAD keeps this run's last
+# confidence)", PE every 25 iterations; later on 2026-10-15, search "20 % old
+# run refit warmstart / 80% self refit warmstart filtered" so no leaf of
+# the previous run is left out; 2026-10-16 "Let's split them 0.5/0/0.5 in
+# search": the 1yr tar 4 found the original still holding ~1,000 sources no
+# walker had while the filtered yield was spent). The HEAD keeps this run's last
 # GB_WARM_SELF_LAST_K stored cold rows x every walker in memory and, at a
 # warm move's entry once GB_WARM_SELF_EVERY_SEARCH rows (gb_search_1/2: every
 # cycle) or GB_WARM_SELF_EVERY_PE rows (full_pe) were stored since the last
@@ -4142,7 +4146,7 @@ export GB_WARM_SELF_AT_ENTRY=${GB_WARM_SELF_AT_ENTRY:-1}
 export GB_WARM_SELF_EVERY_SEARCH=${GB_WARM_SELF_EVERY_SEARCH:-1}
 export GB_WARM_SELF_EVERY_PE=${GB_WARM_SELF_EVERY_PE:-25}
 export GB_WARM_SELF_LAST_K=${GB_WARM_SELF_LAST_K:-50}
-export GB_WARM_SELF_SPLIT_SEARCH=${GB_WARM_SELF_SPLIT_SEARCH:-0,0,1}
+export GB_WARM_SELF_SPLIT_SEARCH=${GB_WARM_SELF_SPLIT_SEARCH:-0.5,0,0.5}
 export GB_WARM_SELF_SPLIT_PE=${GB_WARM_SELF_SPLIT_PE:-1,1,1}
 export GB_WARM_SELF_CONSENSUS=${GB_WARM_SELF_CONSENSUS:-0.95}
 if [ -n "${GB_WARM_START_COMPONENTS}" ] && [ ! -f "${GB_WARM_START_COMPONENTS}" ]; then

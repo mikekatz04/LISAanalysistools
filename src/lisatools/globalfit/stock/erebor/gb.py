@@ -697,12 +697,18 @@ class GBSettings(Settings):
     # propose draws one at random, probability ~ weight (1,1,1 = one third
     # each); it serves the births AND every density of the propose. User
     # rulings 2026-10-15: search "100% refit on sources that do not exist in
-    # all four (with high confidence)" -> "0,0,1"; PE "split the refits three
-    # ways ... each 1/3 of the time" -> "1,1,1". These replace
-    # GB_WARM_SELF_FRACTION / _FRACTION_SEARCH (0.75 / 1.0, two containers).
+    # all four (with high confidence)" -> "0,0,1", then "do the split between
+    # the old run fit warm start and the refit filtered warm start during gb
+    # search 1/2 so we make sure not to leave out leaves from the previous
+    # run ... 20 % old run refit warmstart / 80% self refit warmstart
+    # filtered" -> "0.2,0,0.8", then 2026-10-16 "Let's split them 0.5/0/0.5 in search"
+    # -> "0.5,0,0.5" (the 1yr tar 4: the original still held ~1,000 sources
+    # no walker had); PE "split the refits three ways ... each 1/3
+    # of the time" -> "1,1,1". These replace GB_WARM_SELF_FRACTION /
+    # _FRACTION_SEARCH (0.75 / 1.0, two containers).
     # Env: GB_WARM_SELF_SPLIT_SEARCH, GB_WARM_SELF_SPLIT_PE.
     warm_self_split_search: str = dataclasses.field(
-        default_factory=env_default("GB_WARM_SELF_SPLIT_SEARCH", "0,0,1", str)
+        default_factory=env_default("GB_WARM_SELF_SPLIT_SEARCH", "0.5,0,0.5", str)
     )
     warm_self_split_pe: str = dataclasses.field(
         default_factory=env_default("GB_WARM_SELF_SPLIT_PE", "1,1,1", str)

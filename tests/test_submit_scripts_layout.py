@@ -121,11 +121,14 @@ EIGEN_POOL_TEMPER_KNOBS = tuple(EIGEN_POOL_TEMPER_LINE)
 # 2026-10-15: built ON THE HEAD at the warm moves' entry (AT_ENTRY 1), PE every
 # 25, three containers "original,full,filtered": search 0,0,1, PE 1,1,1, the
 # consensus threshold 0.95; the two FRACTION knobs are gone.
+# 2026-10-15 (later): search 0.2,0,0.8 ("20 % old run refit warmstart / 80%
+# self refit warmstart filtered", so no leaf of the previous run is left out).
+# 2026-10-16: search 0.5,0,0.5 ("Let's split them 0.5/0/0.5 in search").
 WARM_SELF_LINE = {
     "GB_WARM_SELF": "1", "GB_WARM_SELF_AT_ENTRY": "1",
     "GB_WARM_SELF_EVERY_SEARCH": "1",
     "GB_WARM_SELF_EVERY_PE": "25", "GB_WARM_SELF_LAST_K": "50",
-    "GB_WARM_SELF_SPLIT_SEARCH": "0,0,1", "GB_WARM_SELF_SPLIT_PE": "1,1,1",
+    "GB_WARM_SELF_SPLIT_SEARCH": "0.5,0,0.5", "GB_WARM_SELF_SPLIT_PE": "1,1,1",
     "GB_WARM_SELF_CONSENSUS": "0.95",
 }
 WARM_SELF_KNOBS = tuple(WARM_SELF_LINE)

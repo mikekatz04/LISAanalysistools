@@ -20,7 +20,8 @@ would need waveforms):
   the last ``last_k`` rows, and tracks the stage of the rows it saw;
 * the head builder: due only in numbered search stages / full_pe at the
   cadence, one epoch per build carrying BOTH npz files, never raises;
-* the mixer: original / full / filtered by the split's deterministic schedule,
+* the mixer: original / full / filtered drawn at random per propose with
+  probabilities ~ the split (search 50 % original / 50 % filtered by default),
   the build happens at the head's propose entry and is adopted in that same
   propose with ``adopt_lag=False`` (the default one-draw lag is pinned in
   ``test_warmstart_self_refit_lag.py``), compute ranks never build.
@@ -125,7 +126,7 @@ class SettingsTest(unittest.TestCase):
     FIELDS = {
         "warm_self_at_entry": ("GB_WARM_SELF_AT_ENTRY", True, "0", False),
         "warm_self_every_pe": ("GB_WARM_SELF_EVERY_PE", 25, "40", 40),
-        "warm_self_split_search": ("GB_WARM_SELF_SPLIT_SEARCH", "0,0,1", "1,0,1", "1,0,1"),
+        "warm_self_split_search": ("GB_WARM_SELF_SPLIT_SEARCH", "0.5,0,0.5", "1,0,1", "1,0,1"),
         "warm_self_split_pe": ("GB_WARM_SELF_SPLIT_PE", "1,1,1", "2,1,1", "2,1,1"),
         "warm_self_consensus": ("GB_WARM_SELF_CONSENSUS", 0.95, "0.9", 0.9),
     }
@@ -384,11 +385,34 @@ class SplitMixerTest(_TmpDir):
         self.assertEqual(seq[0], seq[1])
         self.assertNotEqual(seq[0], seq[2])
 
-    def test_search_uses_only_the_filtered_refit(self):
-        m = self._mixer((0, 0, 1))
+    def test_search_default_draws_50_percent_original_50_percent_filtered(self):
+        """Mike, 2026-10-15 (later): "do the split between the old run fit
+        warm start and the refit filtered warm start during gb search 1/2 so
+        we make sure not to leave out leaves from the previous run ... 20 %
+        old run refit warmstart / 80% self refit warmstart filtered", then
+        2026-10-16 "Let's split them 0.5/0/0.5 in search". The stock default
+        drives it in both numbered search stages; the full refit is never
+        drawn there."""
+        from lisatools.globalfit.stock.erebor.gb import GBSettings
+
+        field = {f.name: f for f in dataclasses.fields(GBSettings)}[
+            "warm_self_split_search"]
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GB_WARM_SELF_SPLIT_SEARCH", None)
+            split = field.default_factory()
+        m = self._mixer(split)
         self._epoch(0)
-        self.assertEqual([m.begin_propose()["choice"] for _ in range(9)],
-                         ["filtered"] * 9)
+        for stage in ("gb_search_1", "gb_search_2"):
+            got = []
+            for _ in range(2500):
+                c = m.begin_propose(rank=0, stage=stage)["choice"]
+                got.append(c)
+                self.assertNotEqual(c, "full", stage)
+                want = m.original if c == "orig" else m.self_filtered
+                self.assertIs(m.active, want, (stage, c))
+            # binomial(2500, 0.5): sd 25; 5 sd
+            self.assertLess(abs(got.count("orig") - 1250), 125, stage)
+            self.assertEqual(got.count("orig") + got.count("filtered"), 2500)
 
     def test_each_choice_serves_its_own_container_for_every_density(self):
         m = self._mixer((1, 1, 1))
@@ -657,12 +681,21 @@ class HeadWiringTest(_TmpDir):
 
 class WrapSplitTest(_TmpDir):
     def test_each_twin_takes_its_split(self):
+        """The stock defaults through the recipe's wrap: rj_warm_search draws
+        50 % original / 50 % filtered, rj_warm_pe one third each."""
+        from lisatools.globalfit.stock.erebor.gb import GBSettings
+
         orig_path = os.path.join(self.tmp, "orig.npz")
         _write_components(orig_path)
         orig = WarmStartComponents.from_npz(orig_path, seed=1, **LOAD_KW)
         store = os.path.join(self.tmp, "run", "gf_testing.h5")
-        gb_info = SimpleNamespace(warm_self=True, warm_self_split_search="0,0,1",
-                                  warm_self_split_pe="1,1,1", build_seed=99)
+        fields = {f.name: f for f in dataclasses.fields(GBSettings)}
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for env in ("GB_WARM_SELF_SPLIT_SEARCH", "GB_WARM_SELF_SPLIT_PE"):
+                os.environ.pop(env, None)
+            defaults = {n: fields[n].default_factory()
+                        for n in ("warm_self_split_search", "warm_self_split_pe")}
+        gb_info = SimpleNamespace(warm_self=True, build_seed=99, **defaults)
         kw = dict(gb_info=gb_info,
                   general_info=SimpleNamespace(main_file_path=store),
                   load_kwargs=dict(LOAD_KW))
@@ -670,7 +703,7 @@ class WrapSplitTest(_TmpDir):
                                         name="rj_warm_search", **kw)
         pe = recipe._warm_self_wrap(orig, tag=recipe._WARM_SEED_TAG_PE,
                                     name="rj_warm_pe", **kw)
-        self.assertEqual(search.split, (0.0, 0.0, 1.0))
+        self.assertEqual(search.split, (0.5, 0.0, 0.5))
         self.assertEqual(pe.split, (1.0, 1.0, 1.0))
 
 

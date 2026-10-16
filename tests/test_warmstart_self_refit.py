@@ -191,16 +191,17 @@ class WrapTest(_TmpDir):
         self.assertEqual(out.split, (1.0, 1.0, 1.0))
 
     def test_the_search_twin_takes_the_search_split(self):
-        """User rulings 2026-10-15: search "100% refit on sources that do not
-        exist in all four" -- rj_warm_search wraps with
-        ``warm_self_split_search`` ("0,0,1"), the PE twin with
+        """User rulings 2026-10-15: search "20 % old run refit warmstart / 80%
+        self refit warmstart filtered", then 2026-10-16 "0.5/0/0.5 in search"
+        -- rj_warm_search wraps with ``warm_self_split_search`` ("0.5,0,0.5"),
+        the PE twin with
         ``warm_self_split_pe`` ("1,1,1"); each twin ignores the other's knob."""
         orig_path = os.path.join(self.tmp, "orig.npz")
         _write_components(orig_path)
         orig = WarmStartComponents.from_npz(orig_path, seed=1, **LOAD_KW)
         store = os.path.join(self.tmp, "run", "gf_testing.h5")
         gb_info = SimpleNamespace(warm_self=True, warm_self_split_pe="1,1,1",
-                                  warm_self_split_search="0,0,1", build_seed=99)
+                                  warm_self_split_search="0.5,0,0.5", build_seed=99)
         search = recipe._warm_self_wrap(
             orig, gb_info=gb_info,
             general_info=SimpleNamespace(main_file_path=store),
@@ -211,7 +212,7 @@ class WrapTest(_TmpDir):
             general_info=SimpleNamespace(main_file_path=store),
             tag=recipe._WARM_SEED_TAG_PE, name="rj_warm_pe",
             load_kwargs=dict(LOAD_KW))
-        self.assertEqual(search.split, (0.0, 0.0, 1.0))
+        self.assertEqual(search.split, (0.5, 0.0, 0.5))
         self.assertEqual(pe.split, (1.0, 1.0, 1.0))
         # the knobs are independent
         gb_info.warm_self_split_search = "1,0,1"
@@ -221,12 +222,21 @@ class WrapTest(_TmpDir):
             tag=recipe._WARM_SEED_TAG_SEARCH, name="rj_warm_search",
             load_kwargs=dict(LOAD_KW))
         self.assertEqual(search2.split, (1.0, 0.0, 1.0))
-        # with an epoch present the search twin uses the filtered refit on
-        # EVERY propose (this epoch has no filtered npz: it serves the full)
+        # with an epoch present the search twin draws the original on ~50 %
+        # of its proposes and the filtered refit on the rest, never the full
+        # one by name (this epoch has no filtered npz: "filtered" serves the
+        # full refit's container)
         _write_epoch(search.epoch_root, 0)
-        choices = [search.begin_propose()["choice"] for _ in range(12)]
-        self.assertEqual(choices, ["filtered"] * 12)
-        self.assertIs(search.active, search.self_full)
+        choices = []
+        for _ in range(2000):
+            c = search.begin_propose()["choice"]
+            choices.append(c)
+            self.assertIs(search.active,
+                          search.original if c == "orig" else search.self_full)
+        self.assertEqual(choices.count("full"), 0)
+        # binomial(2000, 0.5): sd 22.4; 5 sd
+        self.assertLess(abs(choices.count("orig") - 1000), 112)
+        self.assertEqual(choices.count("orig") + choices.count("filtered"), 2000)
 
     def test_both_twins_and_the_saver_are_wired(self):
         """``build_gb_moves`` / ``run_global_fit`` are too heavy to construct

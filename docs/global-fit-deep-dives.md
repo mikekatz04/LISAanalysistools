@@ -290,8 +290,9 @@ Cold lnL per walker per row (`global_fit/log_like[:, 0, 0, :]`), max / mean
   threshold is too loose or the walkers have collapsed onto one solution;
   nearly all = the walkers disagree wholesale). On EVERY compute rank one
   `rank r adopted epoch k ... filtered: m components` per epoch, the same k on
-  all ranks within a propose. `this propose used` reads FILTERED on every
-  `rj_warm_search` propose once an epoch exists and is ORIG / FULL /
+  all ranks within a propose. `this propose used` reads ORIG on about 50 %
+  and FILTERED on about 50 % of the `rj_warm_search` proposes once an epoch
+  exists, never FULL, and is ORIG / FULL /
   FILTERED about one third each (a random draw per propose) on `rj_warm_pe`
   (ORIG on every propose before the first epoch).
   Since 2026-10-16 (`GB_WARM_SELF_ADOPT_LAG=1`) a build iteration's draw uses
@@ -657,9 +658,13 @@ Point-in-time; use them to recognise an order of magnitude, not as a spec.
   residual F-stat refit every 150), and KEEP the original. 2026-10-15: "build
   everything on the head at entry time for the refit"; one build gives the
   FULL refit and the FILTERED one ("removal of sources that are already in
-  all walkers"); `rj_warm_search` draws only the filtered refit ("100% refit
-  on sources that do not exist in all four (with high confidence)"),
-  `rj_warm_pe` one third each of original / full / filtered. Before
+  all walkers"); `rj_warm_search` draws the original on 50 % of its
+  proposes and the filtered refit on 50 % ("100% refit on sources that do
+  not exist in all four (with high confidence)", then "20 % old run refit
+  warmstart / 80% self refit warmstart filtered" so no leaf of the previous
+  run is left out, then "0.5/0/0.5 in search" on 2026-10-16 when the 1yr
+  tar 4 found the original still holding ~1,000 sources no walker had), `rj_warm_pe` one third each of original / full /
+  filtered. Before
   building, the filter was checked on the 9mo: the consensus clusters took
   83 % of the full mixture's draws, and the filter takes the share of draws
   landing on a source the walker already holds from 93 % to 57 %.
