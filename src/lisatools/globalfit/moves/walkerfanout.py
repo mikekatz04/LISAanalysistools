@@ -14,7 +14,10 @@ Semantics that change only when several compute ranks exist (design spec,
   per propose instead of once per repeat. Ranks never adapt.
 * The mid-iteration checkpoint granularity drops from per leaf to per propose.
 * Eigen / info-matrix tables are rank-local proposal shapes; the sidecar is
-  written by the head only.
+  written by the head only. With ``{BRANCH}_EIGEN_ADAPT_POOL`` the add/remove
+  family's step-scale adaptation still runs per rank, on the rank's own axes,
+  but from the UNION of every walker's rung ensemble, which the head ships in
+  each propose payload (``ResidualAddOneRemoveOneMove._note_eigen_pool_sample``).
 * Stretch complements (PSD RedBlue splits) are the rank's local block.
 * Cross-rank tempering swaps: none (within-rank); see the spec's WP8.
 * Sub-state delta counters of the fanned-out branches equal the SUM over ranks

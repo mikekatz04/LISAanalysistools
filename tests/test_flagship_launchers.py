@@ -705,6 +705,13 @@ class EveryOtherKnobIsTheNineMonthsTest(unittest.TestCase):
                 # 2026-10-14: per-axis step-scale adaptation of the source eigen tables
                 "EMRI_EIGEN_AXIS_ADAPT": "1", "MBH_EIGEN_AXIS_ADAPT": "1",
                 "SOBBH_EIGEN_AXIS_ADAPT": "1",
+                # 2026-10-15: pooled / tempered / factor-capped adaptation
+                "EMRI_EIGEN_ADAPT_POOL": "1", "MBH_EIGEN_ADAPT_POOL": "1",
+                "SOBBH_EIGEN_ADAPT_POOL": "1",
+                "EMRI_EIGEN_TEMPER_SIGMAS": "1", "MBH_EIGEN_TEMPER_SIGMAS": "1",
+                "SOBBH_EIGEN_TEMPER_SIGMAS": "1",
+                "EMRI_EIGEN_ADAPT_MAX_FACTOR": "100", "MBH_EIGEN_ADAPT_MAX_FACTOR": "100",
+                "SOBBH_EIGEN_ADAPT_MAX_FACTOR": "100",
                 "GALFOR_FK_PRIOR": "0.8e-3,1e-2", "GALFOR_F1_PRIOR": "1e-4,1e-2",
                 "GALFOR_F2_PRIOR": "0.8e-3,1e-2", "NWALKERS": "4", "GB_NTEMPS": "24",
                 "MOJITO_PSD_REFERENCE_FIT_UNEQUAL_ARM": "1", "UNEQUAL_ARM": "1"}

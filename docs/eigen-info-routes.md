@@ -33,6 +33,8 @@ without an attached lookup table GBGPU raises, so it always goes with
 | GB in-model factor | the chunked delegate's matrix; with `SIGHET_INFOMAT=1` + `GB_INFOMAT_PER_BLOCK=1` (set in the v9 launchers) sig-het second differences of lnL per block | **lookup Gram** `<dh_a\|dh_b>` (GBGPU) + **host factor cache** | `SIGHET_INFOMAT_ENGINE=lookup` (needs `SIGHET_REF_BUILD=lookup`), `GB_CHOL_CACHE=1` | cache error: cache disabled AND `SIGHET_INFOMAT_ENGINE` unset, direct per-block factors resume | **Production**: on in the 6mo / 1yr v9 launchers; healthy on the cluster since 6mo job 738 |
 | SOBBH / EMRI / MBH eigen tables | `"ll"`: likelihood second differences | `"gram"`: Gram matrix of the move's own templates | `{BRANCH}_EIGEN_INFO=gram` | Gram error: the ll route | **Launcher default** (`gram`) in the 6mo / 1yr / 9mo v9 launchers since 2026-10-07 (V9-30, Mike's production line; `ll` on the line restores the second differences); CPU-validated, first GPU run = the first launch on those defaults |
 | SOBBH / EMRI / MBH step SCALE (after either route above) | the information-matrix sigma | **adapted from the chain**: per-axis robust width of the leaf's rung ensemble, floor = the matrix sigma, axes kept (2026-10-14) | `{BRANCH}_EIGEN_AXIS_ADAPT=1` | adaptation error: the information-matrix table | Code default OFF; CPU-tested only, no run yet |
+| SOBBH / EMRI / MBH adaptation buffer (walker-block fan-out) | the rank's own walkers | **pooled**: the union of every walker's rung ensemble, shipped by the head per propose (2026-10-15) | `{BRANCH}_EIGEN_ADAPT_POOL=1` (with `{BRANCH}_EIGEN_AXIS_ADAPT=1`) | no shipped sample yet: the own buffer | Code default OFF; CPU-tested only, no run yet |
+| SOBBH / EMRI / MBH step per RUNG | the cold sigma at every rung | **tempered**: rung `k` steps `sigma / sqrt(beta_k)`, capped (2026-10-15) | `{BRANCH}_EIGEN_TEMPER_SIGMAS=1` | no ladder: the cold sigma | Code default OFF; CPU-tested only, no run yet |
 | PSD / galfor (/ sgwb) eigen tables | `"ll"`: likelihood second differences | `"fisher"`: expected Fisher of the noise covariance | `{PSD,GALFOR,SGWB}_EIGEN_INFO=fisher` | Fisher error: the ll route | **Launcher default** (`fisher` for PSD and GALFOR) in the 6mo / 1yr / 9mo v9 launchers since 2026-10-07 (V9-30); CPU-validated, first GPU run = the first launch on those defaults |
 
 ## GB in-model factors: the lookup Gram and `GB_CHOL_CACHE`
@@ -242,6 +244,13 @@ autocorrelation time was 2-6 iterations.
    table by table on its own axes.
 5. Until the buffer holds `{BRANCH}_EIGEN_ADAPT_MIN_VISITS` (10) visits, the
    table is the information-matrix one.
+6. **Safety cap** (`{BRANCH}_EIGEN_ADAPT_MAX_FACTOR`, default 100, added
+   2026-10-15): the adapted sigma never exceeds 100x the information-matrix
+   sigma, so step 4 becomes `max(sigma_fisher, min(width, cap, max_factor x
+   sigma_fisher))` (`addremovemove.factor_capped_sigmas`, applied to
+   `adapt_axis_sigmas`' output). The floor and the prior-box cap are
+   unchanged, and the factor cap sits under the floor, so it can never push a
+   sigma below the information-matrix one. See "The safety cap" below.
 
 The scale changes only at a refresh, at a leaf-visit boundary, so the
 proposal stays frozen and symmetric inside every repeat sweep (the same
@@ -261,7 +270,8 @@ when the axes did not change). A resume with the switch OFF runs the
 installed as ONE `(ndim, ndim)` table for every rung: the same cold-unit
 sigma at every temperature. `eigen_refresh.temper_sigmas` is used by the
 noise branches only. The adaptation keeps that behaviour, with cold-unit
-widths in a shared table.
+widths in a shared table. (Since 2026-10-15, `{BRANCH}_EIGEN_TEMPER_SIGMAS=1`
+widens it per rung at install time; see the next section.)
 
 **Measured** (CPU, `tests/test_eigen_axis_adapt.py::MixingTest`, 5-D
 Gaussian, long axis 20x the table sigma, 4 rungs x 2 walkers, 25 repeats per
@@ -281,6 +291,179 @@ restart the parenthesis reads `carried from the persisted table, buffer n of
 information-matrix table. Nothing is logged when the switch is off.
 
 Tests: `tests/test_eigen_axis_adapt.py`.
+
+### The safety cap (`{BRANCH}_EIGEN_ADAPT_MAX_FACTOR`)
+
+Added 2026-10-15 (user ruling, after the 12mo's first tar with the
+adaptation live). On MBH leaves 4/7/8/9/10/11 and EMRI 0/2/7 the narrowest
+Fisher axis (the last axis, the best-measured phase / time combination) came
+out x600-4900 wider, at the prior-box cap. The rung chains straddle discrete
+degenerate solutions (sky-mode hops, phase degeneracies) inside the 50-visit
+window, so the per-rung MAD measures the distance between solutions, not a
+width. `draw_axis_step` picks one axis per repeat, so such an axis wastes
+~1/ndim of the proposals.
+
+- Per axis: `adapted = max(fisher, min(width, box cap, max_factor x
+  fisher))`. A 5000x width becomes 100x, a 56x width is untouched, and an
+  axis whose box cap is below `max_factor x fisher` stays at the box cap.
+  `max_factor < 1` leaves the floor.
+- Knob: kwarg / settings field `eigen_adapt_max_factor` > env
+  `{BRANCH}_EIGEN_ADAPT_MAX_FACTOR` > **100**. `<= 0` or `inf` = no cap. An
+  unreadable value warns once and keeps 100.
+- The default is 100 although the other switches default off. The cap acts
+  only inside the adaptation, so with `{BRANCH}_EIGEN_AXIS_ADAPT` off it is
+  inert and stock runs stay bit-identical
+  (`tests/test_eigen_pool_temper.py::GoldenStreamTest`).
+- The cap also applies to an adapted scale ADOPTED from the sidecar (the
+  first visit after a restart), so a sidecar written by an uncapped run does
+  not serve uncapped until the leaf's next refresh. Log: `[EMRI_EIGEN] leaf
+  k: persisted step scale factor-capped at x100 on N entries`.
+- Tempering (`{BRANCH}_EIGEN_TEMPER_SIGMAS`) multiplies the ADAPTED,
+  factor-capped sigma, with its own box cap unchanged. The sidecar stores the
+  capped cold sigma.
+- Log: the adaptation line gains `, factor-capped at x100 on N axes` after
+  its parenthesis, and its ratios are taken after the cap, so a capped line
+  reads `max x100.0`.
+
+Tests: `tests/test_eigen_axis_adapt.py::FactorCapTest`.
+
+## Add/remove source branches: pooled adaptation and tempered steps (`{BRANCH}_EIGEN_ADAPT_POOL`, `{BRANCH}_EIGEN_TEMPER_SIGMAS`)
+
+Added 2026-10-15 (user ruling "just do 1 for now", item 1 of the sampling
+list). Both switches are independent, code default OFF, and with both off
+every proposal is bit-identical to the code before them (pinned against HEAD
+aaace7ab by `tests/test_eigen_pool_temper.py::GoldenStreamTest`).
+
+**Why** (9mo, EMRI leaf 3, SNR 50, plunge in the window). Walker 0's hot
+rungs (T >= 2.1) spanned the whole degenerate ridge (p0 12.3309..12.3372,
+with M and a sliding along it), while walkers 1 and 3 had ladders whose
+EVERY rung stayed within 1e-4. Two causes: every rung proposed with the same
+cold-sized sigma (the shared source table is untempered), and the per-rank
+adaptation above can only learn 1e-4 from a stuck walker, because in
+production each compute rank holds one walker. EMRI leaf 0 shows the same
+(one walker crossed the e0 valley, the others creep), and MBH / SOBBH can in
+principle too.
+
+### Pooling (`{BRANCH}_EIGEN_ADAPT_POOL=1`, needs `{BRANCH}_EIGEN_AXIS_ADAPT=1`)
+
+```
+head, top of propose (fanout_prepare_state, before the state is sliced and
+before the cold->hot rotation edits a hot rung):
+    coords[:ntemps, :, leaf] of EVERY walker + betas_all[leaf], every alive leaf
+        -> propose payload "eigen_pool"   (ntemps x nwalkers x ndim floats per leaf)
+every compute rank, the head's own body included (fanout_apply_extra):
+    append to its POOLED ring buffer (_eigen_pool_buffer, the same K visits)
+every table refresh (_eigen_adapt_table), on the rank's OWN axes:
+    pooled ring >= {BRANCH}_EIGEN_ADAPT_MIN_VISITS ? the union : the own ring
+```
+
+- The adapted sigma of every walker is the robust width of the UNION of all
+  walkers' rung ensembles: the same estimator as before (cold units per
+  rung, periodic wrap, axis-basis MAD, floor and cap), run on a sample that
+  holds every walker. Each rung is centred on its own median over the union,
+  so walkers sitting at different places on the ridge contribute their
+  spread. That spread is the point of pooling.
+- **Why the raw ensemble is shipped and not widths.** Each rank rebuilds its
+  table from its OWN walker at every refresh (walker_max / Gram at the rank's
+  max-lnL cold walker). Compute ranks adopt the head's persisted table only at
+  start-up, so the axes differ between ranks. Widths measured on the head's
+  axes could only be mapped onto a rank's axes through a Gaussian
+  approximation (`carried_axis_widths`). The raw ensemble is as small as the
+  state slice itself (8 rungs x 4 walkers x 12 dims = 384 floats per EMRI
+  leaf per propose), and with it each rank computes the exact union estimator
+  on its own axes.
+- The state at the top of a propose is the previous propose's end-of-visit
+  ensemble, so the pooled sample is what the single-process body buffers at
+  the end of each visit. Its betas are one pooled ladder step later, and the
+  first propose after a start also buffers the starting state.
+- **Layouts.** Pooling only acts under the walker-block fan-out (production:
+  one walker per compute rank). Single process and the `GF_GPU_ROUTING=1`
+  replica layout run the add/remove body FLAT on one process (the head runs
+  the full ensemble, the replicas only score rows), so the own buffer
+  already is the union and nothing is shipped. The replicas build and hold no
+  table at all.
+- **Fallbacks.** Switch off: no sample, no payload key (the payload is
+  byte-identical). Pooled ring shorter than the minimum (the first proposes,
+  or a rank that never received a payload): the rank's own ring, exactly as
+  before. A failed note or append warns (`pooled adaptation sample not
+  shipped / not recorded`) and the own ring serves. Never persisted: after a
+  restart the pooled ring refills like the own ring.
+- Detailed balance: the buffer only feeds the table refresh, which happens at
+  a leaf-visit boundary, so every repeat sweep still runs a frozen symmetric
+  proposal.
+
+### Tempered steps (`{BRANCH}_EIGEN_TEMPER_SIGMAS=1`)
+
+- Rung `k` steps with `sigma_k = sigma / sqrt(beta_k)` (the target at inverse
+  temperature `beta` is `exp(beta lnL)`, `1 / sqrt(beta)` wider than the
+  cold one; `EigenAxisMove` applies no temperature scaling of its own). The
+  tempered sigma is capped at the table's own cap (`axis_caps`), so a railed
+  axis stays at the prior-box step, and its floor is the cold sigma. `beta <=
+  0` keeps the cold sigma (`eigen_refresh.temper_sigmas`).
+- The multiplier is fixed at the start of each leaf visit from the visit's
+  ladder (`betas_all[leaf]`, the leaf's temperature control) and held for the
+  whole visit. It depends only on the rung, never on the point, so each
+  rung's proposal is a frozen symmetric kernel. Under the fan-out the ranks
+  never adapt their ladders. In single-process mode the ladder adapts every
+  repeat, but the step keeps the visit-start ladder.
+- Installed per split (`_install_eigen_split_table`, the same seam the
+  per-walker stash uses): a shared table becomes per-rung rows `(ntemps,
+  nwalkers_split, 1, ndim, ndim)`, and a `per_walker` stash is tempered row
+  by row at install time (so the lost-rung guard's row edits are respected).
+  The random stream is unchanged: the cold rung draws bit-identically, and
+  rung `k`'s step is exactly `1 / sqrt(beta_k)` times the untempered one.
+- The stored table (`_eigen_tables`) and the sidecar entry stay the COLD
+  table (the adapted cold sigma with `{BRANCH}_EIGEN_AXIS_ADAPT`).
+
+### Log lines
+
+- `[EMRI_EIGEN] leaf k: step scale adapted on N of 12 axes, max x12.3 (axis 3,
+  ridge), median x1.8 (50 visits, 8 rungs, pooled over 4 walkers)` (also
+  `[MBH_EIGEN]`, `[SOBBH_EIGEN]`). `pooled over W walkers` appears when the
+  union served: the shipped ring on a block rank, or the own ring of a
+  full-ensemble body with the pool switch on.
+- With tempering on, the refresh's line carries `, tempered 1/sqrt(beta) over
+  8 rungs, x1.00..x2.45` inside the same parenthesis. When the adaptation line
+  does not fire (adaptation off, or nothing moved by 20 %) the refresh logs
+  `[EMRI_EIGEN] leaf k: step tempered 1/sqrt(beta) over 8 rungs,
+  x1.00..x2.45` instead. Either way it is once per leaf refresh.
+- DEBUG, on the head, once per propose with the pool on: `[EMRI_EIGEN]
+  propose payload: pooled adaptation sample, L leaves x 8 rungs x 4 walkers
+  (F floats)`.
+- WARNING: `no ladder to temper the eigen step with` (once per move),
+  `tempered eigen step failed`, `pooled adaptation sample not shipped / not
+  recorded`. Each falls back as above.
+
+### Measured (CPU, synthetic)
+
+`tests/test_eigen_axis_adapt.py::PooledRidgeTest`: the 5-D Gaussian with
+its long axis 20x the table sigma, 4 walkers x 8 rungs (T_max 6), 25
+repeats per visit, refresh every 5 visits, 160 visits. Walker 0 starts
+stationary. Walkers 1-3 start with every rung at -2 sigma on the ridge.
+Each walker runs on its own one-walker "rank" behind the real head and rank
+hooks. Stuck walkers, seed 33:
+
+| configuration | first visit cold c4 > +1 sigma | IAT over the run (repeats) | IAT, 2nd half |
+|---|---|---|---|
+| information-matrix table | 100, 83, never | 199 | 11 |
+| per-rank adaptation (a523d4c0) | 31, 19, 38 | 167 | 6 |
+| per-rank adaptation + tempered | 16, 10, 13 | 57 | 5 |
+| pooled adaptation | 21, 18, 20 | 102 | 3 |
+| pooled + tempered | 10, 10, 11 | 41 | 4 |
+
+The 10-visit floor of the pooled rows is `{BRANCH}_EIGEN_ADAPT_MIN_VISITS`
+plus the refresh cadence. Seeds 1-5 give 11-15 (pooled + tempered) against
+16-37 (per-rank) visits, and an over-the-run IAT of 48-65 against 125-255.
+In this Gaussian toy a stuck walker's own adaptation still bootstraps within
+~30 visits. A ridge on which it cannot (the 1e-4 ladders of the 9mo) is the
+case pooling is for, and no synthetic test here reproduces it.
+
+Tests: `tests/test_eigen_pool_temper.py` (pooling across two FakeWorld
+ranks with a stuck and a spanning walker, the payload seam and its
+fallbacks, the tempered rows and draws, the cap, the per-walker stash, the
+sidecar, the log lines, the real EMRI move single-process, under the 4-rank
+block fan-out and under the 4 x 2 routed layout, the knobs, and the golden
+bit-identity with both off), `tests/test_eigen_axis_adapt.py::PooledRidgeTest`.
 
 ## Noise branches: `{PSD,GALFOR}_EIGEN_INFO=fisher`
 
@@ -340,6 +523,9 @@ lines use them: `{BRANCH}_EIGEN_REFRESH` seeds `eigen_refresh_every` and
 | `{SOBBH,EMRI,MBH}_EIGEN_AXIS_ADAPT` | Settings field + move `eigen_axis_adapt` | `False` (tables bit-identical) | not set as of 2026-10-14 (the coordinator adds the exports) |
 | `{SOBBH,EMRI,MBH}_EIGEN_ADAPT_VISITS` | move `eigen_adapt_visits` | `50` (ring-buffer length, visits) | not set |
 | `{SOBBH,EMRI,MBH}_EIGEN_ADAPT_MIN_VISITS` | move `eigen_adapt_min_visits` | `10` | not set |
+| `{SOBBH,EMRI,MBH}_EIGEN_ADAPT_MAX_FACTOR` | Settings field + move `eigen_adapt_max_factor` | `100` (inert unless `_EIGEN_AXIS_ADAPT` is on; `<= 0` / `inf` = no cap) | not set as of 2026-10-15 (the coordinator adds the exports) |
+| `{SOBBH,EMRI,MBH}_EIGEN_ADAPT_POOL` | Settings field + move `eigen_adapt_pool` | `False` (per-rank buffer, bit-identical) | not set as of 2026-10-15 (the coordinator adds the exports) |
+| `{SOBBH,EMRI,MBH}_EIGEN_TEMPER_SIGMAS` | Settings field + move `eigen_temper_sigmas` | `False` (cold sigma at every rung, bit-identical) | not set as of 2026-10-15 (the coordinator adds the exports) |
 | `{PSD,GALFOR,SGWB}_EIGEN_INFO` | PSDMove `eigen_info` | `ll` | `fisher` for PSD and GALFOR (default since 2026-10-07, V9-30; `${K:-fisher}`); SGWB not set |
 | `{PSD,GALFOR,SGWB}_EIGEN_EPS_REL` | Settings / PSDMove `eigen_eps_rel` | `1e-4` | not set |
 
@@ -350,4 +536,7 @@ an attribute set on a live move wins. Unlike `eigen_eps_rel` /
 line (env) or on the built move. The same holds for `eigen_adapt_visits` /
 `eigen_adapt_min_visits`. `eigen_axis_adapt` is also a field of the
 EMRI / MBH / SOBBH Settings, handed to the move by `SingleSourcePEBuilder`
-like `eigen_table_scope`.
+like `eigen_table_scope`. `eigen_adapt_pool`, `eigen_temper_sigmas` and
+`eigen_adapt_max_factor` are Settings fields too, stamped onto the built move by
+`stock/erebor/source_runtime.py::build_source_moves`
+(`stamp_source_move_settings`; a value the builder already set wins).

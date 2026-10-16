@@ -38,6 +38,38 @@ COLD_TO_HOT_EVERY_DEFAULT = 125
 #: stage kinds the rotation runs in: every search kind, never PE
 COLD_TO_HOT_STAGE_KINDS = ("search", "rj")
 
+# ---- safety cap of the eigen step-scale adaptation (ruling 2026-10-15) -------
+#: default {BRANCH}_EIGEN_ADAPT_MAX_FACTOR: the adapted sigma never exceeds 100x
+#: the information-matrix sigma. Inert unless {BRANCH}_EIGEN_AXIS_ADAPT is on.
+EIGEN_ADAPT_MAX_FACTOR_DEFAULT = 100.0
+
+
+def factor_capped_sigmas(sigmas_fisher, sigmas_adapted, max_factor):
+    """``max(sigma_fisher, min(sigma_adapted, max_factor x sigma_fisher))`` per axis.
+
+    Applied to :func:`eigen_refresh.adapt_axis_sigmas`' output (``max(fisher,
+    min(width, box cap))``) this is exactly ``max(fisher, min(width, box cap,
+    max_factor x fisher))`` for every ``max_factor``: the Fisher floor and the
+    prior-box cap are unchanged, and the factor cap sits under the floor, so it
+    can never push a sigma below the information-matrix one (``max_factor < 1``
+    just leaves the floor). ``max_factor`` ``None`` / ``<= 0`` / non-finite:
+    no cap, ``sigmas_adapted`` returned as is (same object).
+
+    Why (12mo, first tar with the adaptation live): the narrowest Fisher axis
+    (the best-measured phase / time combination) came out x600-4900 wider on
+    MBH leaves 4/7/8/9/10/11 and EMRI 0/2/7, at the prior-box cap, because the
+    rung chains straddle DISCRETE degenerate solutions (sky-mode hops, phase
+    degeneracies) inside the 50-visit window; ``draw_axis_step`` picks one axis
+    per repeat, so such an axis wastes ~1/ndim of the proposals.
+    """
+    if max_factor is None:
+        return sigmas_adapted
+    mf = float(max_factor)
+    if not np.isfinite(mf) or mf <= 0.0:
+        return sigmas_adapted
+    sf = np.asarray(sigmas_fisher, dtype=float)
+    return np.maximum(sf, np.minimum(np.asarray(sigmas_adapted, dtype=float), sf * mf))
+
 
 def cold_to_hot_offset(event: int, nwalkers: int) -> int:
     """Walker offset of rotation ``event``: ``1 + event mod (nwalkers - 1)``.
@@ -254,6 +286,24 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         eigen_adapt_min_visits: the buffer must hold this many visits before
             a refresh adapts (until then the table is the information-matrix
             one). ``None`` reads ``{BRANCH}_EIGEN_ADAPT_MIN_VISITS``, then 10.
+        eigen_adapt_pool: under the walker-block fan-out, adapt every rank's
+            step scale from the UNION of all walkers' rung ensembles (the
+            head ships the full ensemble's rung coordinates in every propose
+            payload) instead of the rank's own walkers. Acts only with
+            ``eigen_axis_adapt`` on. ``None`` reads
+            ``{BRANCH}_EIGEN_ADAPT_POOL``, then ``False``. See
+            :meth:`_note_eigen_pool_sample`.
+        eigen_temper_sigmas: rung ``k`` of the eigen inner move steps with
+            ``sigma / sqrt(beta_k)`` (capped at the table's own cap) instead
+            of the cold sigma at every rung; the stored / persisted table
+            stays the cold one. ``None`` reads
+            ``{BRANCH}_EIGEN_TEMPER_SIGMAS``, then ``False``. See
+            :meth:`_eigen_visit_rung_scale`.
+        eigen_adapt_max_factor: safety cap of the step-scale adaptation: an
+            adapted sigma never exceeds this multiple of the
+            information-matrix sigma (:func:`factor_capped_sigmas`). ``None``
+            reads ``{BRANCH}_EIGEN_ADAPT_MAX_FACTOR``, then 100; ``<= 0`` or
+            ``inf`` = no cap. Inert unless ``eigen_axis_adapt`` is on.
         ladder_reanchor_nats: the lost-rung guard's threshold in lnL nats
             (:meth:`_reanchor_lost_rungs`); ``0`` disables the guard.
             ``None`` reads ``{BRANCH}_LADDER_REANCHOR_NATS``, then 200.
@@ -290,6 +340,9 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         eigen_axis_adapt: bool = None,
         eigen_adapt_visits: int = None,
         eigen_adapt_min_visits: int = None,
+        eigen_adapt_pool: bool = None,
+        eigen_temper_sigmas: bool = None,
+        eigen_adapt_max_factor: float = None,
         ladder_reanchor_nats: float = None,
         cold_to_hot_every: int = None,
         **kwargs,
@@ -387,6 +440,12 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         self.eigen_axis_adapt = eigen_axis_adapt
         self.eigen_adapt_visits = eigen_adapt_visits
         self.eigen_adapt_min_visits = eigen_adapt_min_visits
+        # cross-rank pooling of the adaptation buffer and the per-rung
+        # tempered step (both kwarg > env > off at USE time)
+        self.eigen_adapt_pool = eigen_adapt_pool
+        self.eigen_temper_sigmas = eigen_temper_sigmas
+        # the adaptation's safety cap (kwarg > env > 100 at USE time)
+        self.eigen_adapt_max_factor = eigen_adapt_max_factor
         # lost-rung guard threshold (kwarg > env > 200 at USE time, like the
         # eigen knobs above; see _ladder_reanchor_nats)
         self.ladder_reanchor_nats = ladder_reanchor_nats
@@ -479,21 +538,46 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
     # step-scale adaptation from the chain ({BRANCH}_EIGEN_AXIS_ADAPT)
     # ------------------------------------------------------------------
 
+    def _eigen_switch(self, attr, knob):
+        """Attribute ``attr`` > ``{BRANCH}_<knob>`` env > ``False``.
+
+        Strings take 1/0, true/false, yes/no, on/off (case-insensitive);
+        anything else is off.
+        """
+        val = getattr(self, attr, None)
+        if val is None:
+            val = os.environ.get(
+                f"{str(self.branch_name).upper()}_{knob}", None)
+        if val is None:
+            return False
+        if isinstance(val, str):
+            return val.strip().lower() in ("1", "true", "yes", "on")
+        return bool(val)
+
     def _eigen_axis_adapt(self):
         """kwarg > ``{BRANCH}_EIGEN_AXIS_ADAPT`` env > ``False``.
 
         Strings take 1/0, true/false, yes/no, on/off (case-insensitive);
         anything else is off.
         """
-        val = getattr(self, "eigen_axis_adapt", None)
-        if val is None:
-            val = os.environ.get(
-                f"{str(self.branch_name).upper()}_EIGEN_AXIS_ADAPT", None)
-        if val is None:
-            return False
-        if isinstance(val, str):
-            return val.strip().lower() in ("1", "true", "yes", "on")
-        return bool(val)
+        return self._eigen_switch("eigen_axis_adapt", "EIGEN_AXIS_ADAPT")
+
+    def _eigen_adapt_pool(self):
+        """kwarg > ``{BRANCH}_EIGEN_ADAPT_POOL`` env > ``False``.
+
+        Pool the step-scale adaptation over EVERY walker's rung ensemble
+        under the walker-block fan-out (:meth:`_note_eigen_pool_sample`).
+        Acts only together with :meth:`_eigen_axis_adapt`.
+        """
+        return self._eigen_switch("eigen_adapt_pool", "EIGEN_ADAPT_POOL")
+
+    def _eigen_temper_sigmas(self):
+        """kwarg > ``{BRANCH}_EIGEN_TEMPER_SIGMAS`` env > ``False``.
+
+        Step rung ``k`` with ``sigma / sqrt(beta_k)``
+        (:meth:`_eigen_visit_rung_scale`).
+        """
+        return self._eigen_switch("eigen_temper_sigmas", "EIGEN_TEMPER_SIGMAS")
 
     def _eigen_adapt_visits(self):
         """kwarg > ``{BRANCH}_EIGEN_ADAPT_VISITS`` env > 50 (ring length K)."""
@@ -502,6 +586,34 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             val = os.environ.get(
                 f"{str(self.branch_name).upper()}_EIGEN_ADAPT_VISITS", None)
         return max(1, int(val)) if val is not None else 50
+
+    def _eigen_adapt_max_factor(self):
+        """kwarg > ``{BRANCH}_EIGEN_ADAPT_MAX_FACTOR`` env > 100; ``None`` = no cap.
+
+        ``<= 0``, ``inf`` or ``nan`` mean no cap (``None``). An unreadable
+        value warns once and keeps the default. Inert unless
+        :meth:`_eigen_axis_adapt` is on (it only acts inside the adaptation).
+        """
+        val = getattr(self, "eigen_adapt_max_factor", None)
+        if val is None:
+            val = os.environ.get(
+                f"{str(self.branch_name).upper()}_EIGEN_ADAPT_MAX_FACTOR", None)
+            if isinstance(val, str) and not val.strip():
+                val = None
+        if val is None:
+            val = EIGEN_ADAPT_MAX_FACTOR_DEFAULT
+        try:
+            f = float(val)
+        except (TypeError, ValueError):
+            if not getattr(self, "_eigen_max_factor_warned", False):
+                self._eigen_max_factor_warned = True
+                logger.warning(
+                    "[%s_EIGEN] unreadable eigen_adapt_max_factor %r; using %g",
+                    str(self.branch_name).upper(), val, EIGEN_ADAPT_MAX_FACTOR_DEFAULT)
+            f = EIGEN_ADAPT_MAX_FACTOR_DEFAULT
+        if not np.isfinite(f) or f <= 0.0:
+            return None
+        return f
 
     def _eigen_adapt_min_visits(self):
         """kwarg > ``{BRANCH}_EIGEN_ADAPT_MIN_VISITS`` env > 10."""
@@ -573,28 +685,127 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             b = np.array(asnumpy(betas), dtype=float, copy=True).ravel()[:x.shape[0]]
             if b.size < x.shape[0]:
                 return
-            K = self._eigen_adapt_visits()
-            buf = getattr(self, "_eigen_adapt_buffer", None)
-            if buf is None:
-                buf = self._eigen_adapt_buffer = {}
-            ring = buf.get(int(leaf))
-            if ring is None or ring.maxlen != K:
-                ring = buf[int(leaf)] = collections.deque(
-                    [] if ring is None else list(ring)[-K:], maxlen=K)
-            ring.append((x, b))
+            self._eigen_ring("_eigen_adapt_buffer", leaf).append((x, b))
         except Exception as exc:  # noqa: BLE001 -- telemetry must not crash a propose
             logger.warning(
                 "[%s_EIGEN] leaf %d: adaptation sample not recorded (%r)",
                 str(self.branch_name).upper(), int(leaf), exc,
             )
 
-    def _eigen_adapt_rung_samples(self, leaf):
+    def _eigen_ring(self, attr, leaf):
+        """``leaf``'s ring buffer in the ``{leaf: deque}`` dict ``attr``.
+
+        Created on first use; re-sized (keeping the newest entries) when
+        :meth:`_eigen_adapt_visits` changed since.
+        """
+        K = self._eigen_adapt_visits()
+        buf = getattr(self, attr, None)
+        if buf is None:
+            buf = {}
+            setattr(self, attr, buf)
+        ring = buf.get(int(leaf))
+        if ring is None or ring.maxlen != K:
+            ring = buf[int(leaf)] = collections.deque(
+                [] if ring is None else list(ring)[-K:], maxlen=K)
+        return ring
+
+    # ---- cross-rank pooling ({BRANCH}_EIGEN_ADAPT_POOL, ruling 2026-10-15) ----
+
+    def _eigen_pool_block_head(self):
+        """True on the HEAD of a walker-block fan-out.
+
+        That is the only layout whose bodies see a PART of the ensemble:
+        single process and the flat (``GF_GPU_ROUTING`` replica) body run
+        the full ensemble on one process, so their own buffer already IS
+        the union and nothing needs shipping.
+        """
+        if not self.fanout_active:
+            return False
+        layout = self.fanout.layout
+        return not (getattr(layout, "replica_mode", False)
+                    and self._flat_body_ok(layout))
+
+    def _note_eigen_pool_sample(self, state):
+        """Head, before the state is sliced: the full rung ensemble per leaf.
+
+        User ruling 2026-10-15 (9mo, EMRI leaf 3): walker 0's hot rungs
+        spanned the whole degenerate ridge while walkers 1 and 3 sat with
+        EVERY rung within 1e-4; a rank that adapts from its own walker can
+        only learn the 1e-4. With ``{BRANCH}_EIGEN_ADAPT_POOL`` (and
+        ``{BRANCH}_EIGEN_AXIS_ADAPT``) on, the head takes ``coords[:ntemps,
+        :, leaf]`` of EVERY walker for every alive leaf, with the leaf's
+        ladder ``betas_all[leaf]``, and :meth:`fanout_payload_extra` ships
+        it (``ntemps x nwalkers x ndim`` floats per leaf) to every compute
+        rank, the head's own body included; :meth:`fanout_apply_extra`
+        appends it to the rank's POOLED ring buffer
+        (``_eigen_pool_buffer``, the same K visits), and
+        :meth:`_eigen_adapt_table` adapts from that union on the rank's OWN
+        table axes. The state at the top of a propose is the previous
+        propose's end-of-visit ensemble, so this is the same sample the
+        single-process body buffers at the end of each visit (its betas
+        one pooled ladder step later). Called before the cold -> hot
+        rotation edits a hot rung. A no-op off the block head, with either
+        switch off, or without an eigen inner move.
+        """
+        self._eigen_pool_outgoing = None
+        if not self._eigen_pool_block_head():
+            return
+        if not (self._eigen_axis_adapt() and self._eigen_adapt_pool()):
+            return
+        if not any(isinstance(m, EigenAxisMove) for m in getattr(self, "moves", ())):
+            return
+        try:
+            sub = (getattr(state, "sub_states", None) or {}).get(self.branch_name)
+            if sub is None or not getattr(sub, "tempered_initialized", False):
+                return
+            coords = np.asarray(asnumpy(sub.coords), dtype=float)
+            inds = np.asarray(asnumpy(sub.inds), dtype=bool)
+            betas_all = np.asarray(asnumpy(sub.betas_all), dtype=float)
+            nt = min(int(self.ntemps), int(coords.shape[0]), int(betas_all.shape[-1]))
+            out = {}
+            for leaf in range(int(coords.shape[2])):
+                if not inds[0, 0, leaf]:
+                    continue
+                out[int(leaf)] = (np.array(coords[:nt, :, leaf], copy=True),
+                                  np.array(betas_all[leaf, :nt], copy=True))
+            self._eigen_pool_outgoing = out or None
+        except Exception as exc:  # noqa: BLE001 -- telemetry must not crash a propose
+            logger.warning(
+                "[%s_EIGEN] pooled adaptation sample not shipped (%r); the ranks "
+                "adapt from their own walkers this propose",
+                str(self.branch_name).upper(), exc,
+            )
+
+    def _push_eigen_pool(self, pool):
+        """Rank: append the head's shipped union sample to the pooled ring."""
+        if not self._eigen_axis_adapt():
+            return
+        try:
+            for leaf, (x, b) in dict(pool).items():
+                self._eigen_ring("_eigen_pool_buffer", leaf).append(
+                    (np.array(x, dtype=float, copy=True),
+                     np.array(b, dtype=float, copy=True).ravel()))
+        except Exception as exc:  # noqa: BLE001 -- telemetry must not crash a propose
+            logger.warning(
+                "[%s_EIGEN] pooled adaptation sample not recorded (%r)",
+                str(self.branch_name).upper(), exc,
+            )
+
+    def _eigen_ring_walkers(self, attr, leaf):
+        """Walker count of the widest entry in ``leaf``'s ring ``attr`` (0: empty)."""
+        ring = (getattr(self, attr, None) or {}).get(int(leaf))
+        return max((int(x.shape[1]) for x, _ in ring), default=0) if ring else 0
+
+    def _eigen_adapt_rung_samples(self, leaf, pool=False):
         """``([(X_k, beta_k), ...], n_visits)`` pooled per rung from the buffer.
 
         Rung ``k`` pools every buffered visit's rung-``k`` rows over the
-        rank's walkers, each with the beta it was drawn at.
+        rank's walkers, each with the beta it was drawn at. ``pool=True``
+        reads the cross-rank union buffer (:meth:`_note_eigen_pool_sample`)
+        instead of the rank's own.
         """
-        ring = (getattr(self, "_eigen_adapt_buffer", None) or {}).get(int(leaf))
+        attr = "_eigen_pool_buffer" if pool else "_eigen_adapt_buffer"
+        ring = (getattr(self, attr, None) or {}).get(int(leaf))
         if not ring:
             return [], 0
         nt = max(x.shape[0] for x, _ in ring)
@@ -615,14 +826,24 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         along it in steps ``ratio^2`` iterations from crossing.
 
         * Samples: the leaf's ring buffer (:meth:`_note_eigen_adapt_sample`),
-          the last K visits x every rung x the rank's walkers.
+          the last K visits x every rung x the rank's walkers. With
+          ``{BRANCH}_EIGEN_ADAPT_POOL`` on and the head's shipped union
+          buffer holding at least the minimum (:meth:`_note_eigen_pool_sample`),
+          the last K visits x every rung x EVERY walker instead, on this
+          rank's own axes; the log then says ``pooled over W walkers``
+          (single process / the flat replica body: the own buffer, which
+          already holds every walker).
         * Cold units: each sample's deviation from its rung's own robust
           centre, periodic columns wrapped to ``[-P/2, P/2)`` first, times
           ``sqrt(beta)`` (:func:`eigen_refresh.cold_unit_deviations`).
         * Width: ``1.4826 x MAD`` of the coordinates in the table's axis
           basis (:func:`eigen_refresh.empirical_axis_widths`).
         * Adapted sigma: ``max(sigma_fisher, min(width, cap))``, the cap the
-          table is built with (:func:`eigen_refresh.adapt_axis_sigmas`). The
+          table is built with (:func:`eigen_refresh.adapt_axis_sigmas`),
+          then the safety cap ``max(sigma_fisher, min(that, max_factor x
+          sigma_fisher))`` (:func:`factor_capped_sigmas`,
+          ``{BRANCH}_EIGEN_ADAPT_MAX_FACTOR``, default 100): together
+          ``max(fisher, min(width, box cap, max_factor x fisher))``. The
           axes are returned unchanged.
 
         Fewer than :meth:`_eigen_adapt_min_visits` buffered visits: the
@@ -642,6 +863,17 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             axes_np = np.asarray(asnumpy(axes), dtype=float)
             rungs, n_vis = self._eigen_adapt_rung_samples(leaf)
             need = self._eigen_adapt_min_visits()
+            pooled = 0
+            if self._eigen_adapt_pool():
+                p_rungs, p_vis = self._eigen_adapt_rung_samples(leaf, pool=True)
+                if p_vis >= need:
+                    # the head's union of every walker's rung ensemble
+                    rungs, n_vis = p_rungs, p_vis
+                    pooled = self._eigen_ring_walkers("_eigen_pool_buffer", leaf)
+                elif not getattr(self, "_fanout_body", False):
+                    # single process / the flat replica body: the own
+                    # buffer already holds every walker
+                    pooled = self._eigen_ring_walkers("_eigen_adapt_buffer", leaf)
             emp, source = None, None
             if n_vis >= need:
                 inds, periods = self._eigen_periodic_columns()
@@ -650,6 +882,8 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                     emp = eigen_refresh.empirical_axis_widths(axes_np, dev)
                     source = (f"{n_vis} visits, "
                               f"{sum(1 for _, b in rungs if np.any(b > 0))} rungs")
+                    if pooled > 1:
+                        source += f", pooled over {pooled} walkers"
                 self._eigen_carried_dict().pop(leaf, None)
             elif leaf in self._eigen_carried_dict():
                 a_old, s_old = self._eigen_carried_dict()[leaf]
@@ -660,10 +894,15 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                 return table
             widths = eigen_refresh.prior_box_widths(
                 self.priors[self.branch_name], self.ndim)
-            sig_a = eigen_refresh.adapt_axis_sigmas(axes_np, floor, emp, widths)
+            sig_box = eigen_refresh.adapt_axis_sigmas(axes_np, floor, emp, widths)
+            mf = self._eigen_adapt_max_factor()
+            sig_a = factor_capped_sigmas(floor, sig_box, mf)
             if not np.all(np.isfinite(sig_a)):
                 raise ValueError("non-finite adapted sigmas")
-            self._log_eigen_adapt(leaf, axes_np, floor, sig_a, widths, source)
+            n_capped = int(np.sum(np.any(
+                (sig_a < sig_box).reshape(-1, floor.shape[-1]), axis=0)))
+            self._log_eigen_adapt(leaf, axes_np, floor, sig_a, widths, source,
+                                  factor_capped=(mf, n_capped))
             return (axes, sig_a)
         except Exception as exc:  # noqa: BLE001 -- never crash the sampler
             logger.warning(
@@ -673,7 +912,8 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             )
             return table
 
-    def _log_eigen_adapt(self, leaf, axes, floor, adapted, widths, source):
+    def _log_eigen_adapt(self, leaf, axes, floor, adapted, widths, source,
+                         factor_capped=None):
         """One INFO line when any axis moved by more than 20 %.
 
         ``[EMRI_EIGEN] leaf k: step scale adapted on N of 12 axes, max x12.3
@@ -682,6 +922,13 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         over the tables, per axis); the median is over the N adapted axes;
         ``ridge`` marks the table's widest unrailed axis (largest sigma as a
         fraction of its cap -- the flattest direction the matrix measured).
+        With the pooled buffer the parenthesis adds ``pooled over W
+        walkers``; with ``{BRANCH}_EIGEN_TEMPER_SIGMAS`` on, this refresh's
+        tempering note (:meth:`_eigen_temper_note`) rides in it too, so the
+        refresh logs the tempering once. ``factor_capped = (max_factor, N)``
+        with ``N > 0`` appends ``, factor-capped at x100 on N axes``; the
+        ratios are taken AFTER the cap, so a capped line reads ``max
+        x100.0``.
         """
         with np.errstate(divide="ignore", invalid="ignore"):
             ratio = np.where(floor > 0, adapted / floor, 1.0)
@@ -690,6 +937,10 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         moved = r > 1.2
         if not np.any(moved):
             return
+        note = getattr(self, "_eigen_refresh_note", None)
+        if note:
+            source = f"{source}, {note}"
+            self._eigen_refresh_note = None
         cap = eigen_refresh.axis_caps(axes, widths)
         with np.errstate(divide="ignore", invalid="ignore"):
             frac = np.nanmax((floor / cap).reshape(-1, d), axis=0)
@@ -697,15 +948,19 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         ridge = (int(np.argmax(np.where(unrailed, frac, -np.inf)))
                  if np.any(unrailed) else None)
         j = int(np.argmax(r))
+        capped_note = ""
+        if factor_capped is not None and factor_capped[0] is not None and factor_capped[1] > 0:
+            capped_note = (f", factor-capped at x{float(factor_capped[0]):g} on "
+                           f"{int(factor_capped[1])} axes")
         logger.info(
             "[%s_EIGEN] leaf %d: step scale adapted on %d of %d axes, max x%.1f "
-            "(axis %d%s), median x%.1f (%s)",
+            "(axis %d%s), median x%.1f (%s)%s",
             str(self.branch_name).upper(), int(leaf), int(moved.sum()), d,
             float(r[j]), j, ", ridge" if j == ridge else "",
-            float(np.median(r[moved])), source,
+            float(np.median(r[moved])), source, capped_note,
         )
 
-    def refresh_inner_move_tables(self, leaf, work):
+    def refresh_inner_move_tables(self, leaf, work, betas=None):
         """Feed per-leaf ``(axes, sigmas)`` tables to eigen inner moves.
 
         Called once per leaf visit in ``propose`` — after
@@ -740,6 +995,13 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         itself the adapted scale changes only here, at a leaf-visit
         boundary, so the proposal stays frozen and symmetric inside each
         repeat sweep.
+
+        With ``{BRANCH}_EIGEN_TEMPER_SIGMAS`` on, every visit also fixes the
+        per-rung step multiplier ``1 / sqrt(beta_k)`` from ``betas`` (the
+        visit's ladder; default: the leaf's temperature control) for the
+        whole visit (:meth:`_eigen_visit_rung_scale`); the stored and
+        persisted table stays the COLD one, and the tempered rows are
+        installed per split (:meth:`_install_eigen_split_table`).
         """
         eigen_moves = [m for m in self.moves if isinstance(m, EigenAxisMove)]
         if not eigen_moves:
@@ -752,8 +1014,17 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             self._adopt_persisted_eigen_table(leaf)
         visits = self._eigen_visit_count.get(leaf, 0)
         self._eigen_visit_count[leaf] = visits + 1
+        temper = self._eigen_temper_sigmas()
+        if temper and betas is None:
+            tcs = getattr(self, "temperature_controls", None)
+            if tcs is not None and leaf < len(tcs) and tcs[leaf] is not None:
+                betas = tcs[leaf].betas
         if (leaf not in self._eigen_tables
                 or visits % self._eigen_refresh_cadence() == 0):
+            # the tempering note rides in the adaptation line when that
+            # line fires (_log_eigen_adapt), else it gets its own line
+            self._eigen_refresh_note = (
+                self._eigen_temper_note(betas) if temper else None)
             table = self._build_eigen_table(leaf, work)
             if self._eigen_axis_adapt():
                 table = self._eigen_adapt_table(leaf, table)
@@ -762,13 +1033,123 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                 getattr(self, "_eigen_fisher_sigmas", {}).pop(leaf, None)
             self._eigen_tables[leaf] = table
             self._persist_eigen_table(leaf)
+            note = getattr(self, "_eigen_refresh_note", None)
+            if note:
+                logger.info("[%s_EIGEN] leaf %d: step %s",
+                            str(self.branch_name).upper(), leaf, note)
+            self._eigen_refresh_note = None
         axes, sigmas = self._eigen_tables[leaf]
+        tempered = self._eigen_visit_rung_scale(leaf, betas) if temper else None
+        if not temper:
+            getattr(self, "_eigen_rung_scales", {}).pop(leaf, None)
         if getattr(axes, "ndim", 2) == 4:
             # per-(temp, walker) tables: the red/blue seam installs the
             # split-sliced view right before each get_proposal call
             return
+        if tempered is not None:
+            # per-rung rows: installed per split by the same seam; the
+            # full-ensemble view goes in now for callers without the seam
+            full = np.ones((len(tempered), int(np.shape(work.coords)[1])), dtype=bool)
+            for move in eigen_moves:
+                self._install_eigen_split_table(move, leaf, full)
+            return
         for move in eigen_moves:
             move.set_axes(self.branch_name, axes, sigmas)
+
+    # ---- per-rung tempered step ({BRANCH}_EIGEN_TEMPER_SIGMAS, 2026-10-15) ----
+
+    def _eigen_rung_scale(self, betas):
+        """``1 / sqrt(beta_k)`` per sampled rung (``beta <= 0``: 1), host numpy.
+
+        :func:`eigen_refresh.temper_sigmas` applied to unit sigmas: the
+        target at inverse temperature ``beta`` is ``exp(beta lnL)``, whose
+        width is ``1 / sqrt(beta)`` times the cold one, while
+        ``EigenAxisMove`` applies no temperature scaling of its own.
+        """
+        b = np.asarray(asnumpy(betas), dtype=float).ravel()[: int(self.ntemps)]
+        return eigen_refresh.temper_sigmas(np.ones_like(b), b)
+
+    def _eigen_temper_note(self, betas):
+        """``"tempered 1/sqrt(beta) over 8 rungs, x1.00..x2.45"`` (or ``None``)."""
+        if betas is None:
+            return None
+        s = self._eigen_rung_scale(betas)
+        if not s.size:
+            return None
+        return (f"tempered 1/sqrt(beta) over {s.size} rungs, "
+                f"x{float(np.min(s)):.2f}..x{float(np.max(s)):.2f}")
+
+    def _eigen_temper_widths(self):
+        """The prior-box widths the tempered steps are capped with (cached)."""
+        w = getattr(self, "_eigen_temper_box", None)
+        if w is None:
+            w = self._eigen_temper_box = eigen_refresh.prior_box_widths(
+                self.priors[self.branch_name], self.ndim)
+        return w
+
+    def _eigen_tempered_rows(self, axes, sigmas, scale):
+        """``max(sigma, min(sigma x scale, cap))`` row by row.
+
+        ``axes`` ``(..., ndim, ndim)``, ``sigmas`` ``(..., ndim)``, ``scale``
+        broadcastable to ``sigmas[..., 0]``. The cap is the table's own
+        (:func:`eigen_refresh.axis_caps`), so an axis railed at the prior
+        box stays there; the cold sigma is the floor (a custom table above
+        its cap keeps its own sigma, as in the adaptation).
+        """
+        sig = np.asarray(asnumpy(sigmas), dtype=float)
+        cap = eigen_refresh.axis_caps(np.asarray(asnumpy(axes), dtype=float),
+                                      self._eigen_temper_widths())
+        wide = sig * np.asarray(scale, dtype=float)[..., None]
+        return np.maximum(sig, np.minimum(wide, cap))
+
+    def _eigen_visit_rung_scale(self, leaf, betas):
+        """Fix this visit's per-rung step for ``leaf``; ``None`` when unusable.
+
+        User ruling 2026-10-15 (9mo, EMRI leaf 3): walkers 1 and 3 had
+        ladders whose EVERY rung stayed within 1e-4 because every rung
+        proposed with the same cold-sized sigma (the shared source table is
+        untempered; only the noise branches' ``temper_sigmas`` widened it).
+        With ``{BRANCH}_EIGEN_TEMPER_SIGMAS`` on, rung ``k`` steps with
+        ``sigma / sqrt(beta_k)``, capped at the table's cap and never below
+        the cold sigma (:meth:`_eigen_tempered_rows`); the cold rung
+        (``beta = 1``) is unchanged bit for bit. ``betas`` are the visit's
+        ladder as it stood at the start of the visit and the scale is fixed
+        for the whole visit, so it depends only on the rung, never on the
+        point: each rung's proposal stays a frozen symmetric kernel. Stored
+        as ``_eigen_rung_scales[leaf] = (scale, tempered shared sigmas or
+        None)``; a per-walker stash is tempered row by row at install time
+        (the lost-rung guard edits its rows during the visit).
+        """
+        store = getattr(self, "_eigen_rung_scales", None)
+        if store is None:
+            store = self._eigen_rung_scales = {}
+        store.pop(int(leaf), None)
+        if betas is None:
+            if not getattr(self, "_eigen_temper_warned", False):
+                self._eigen_temper_warned = True
+                logger.warning(
+                    "[%s_EIGEN] leaf %d: no ladder to temper the eigen step with; "
+                    "every rung steps with the cold sigma",
+                    str(self.branch_name).upper(), int(leaf))
+            return None
+        try:
+            scale = self._eigen_rung_scale(betas)
+            if scale.size != int(self.ntemps):
+                raise ValueError(f"{scale.size} betas for {int(self.ntemps)} rungs")
+            axes, sigmas = self._eigen_tables[int(leaf)]
+            shared = None
+            if getattr(axes, "ndim", 2) == 2:
+                shared = self._eigen_tempered_rows(
+                    np.broadcast_to(np.asarray(asnumpy(axes)), (scale.size,) + np.shape(axes)),
+                    np.broadcast_to(np.asarray(asnumpy(sigmas)), (scale.size,) + np.shape(sigmas)),
+                    scale)
+            store[int(leaf)] = (scale, shared)
+            return scale
+        except Exception as exc:  # noqa: BLE001 -- never crash the sampler
+            logger.warning(
+                "[%s_EIGEN] leaf %d: tempered eigen step failed (%r); every rung "
+                "steps with the cold sigma", str(self.branch_name).upper(), int(leaf), exc)
+            return None
 
     # ------------------------------------------------------------------
     # eigen table persistence (the sidecar next to the run's store)
@@ -863,6 +1244,20 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         if self._eigen_axis_adapt():
             floor = np.array(sigmas if fisher is None else fisher, copy=True)
             self._eigen_fisher_dict()[leaf] = floor
+            if fisher is not None:
+                # the safety cap holds for an adopted scale too (a sidecar
+                # written before {BRANCH}_EIGEN_ADAPT_MAX_FACTOR existed, or
+                # with a larger factor, would otherwise serve uncapped until
+                # the leaf's next refresh)
+                mf = self._eigen_adapt_max_factor()
+                capped = factor_capped_sigmas(floor, sigmas, mf)
+                n_cap = int(np.count_nonzero(np.asarray(capped) < np.asarray(sigmas)))
+                if n_cap:
+                    logger.info(
+                        "[%s_EIGEN] leaf %d: persisted step scale factor-capped at "
+                        "x%g on %d entries", str(self.branch_name).upper(), int(leaf),
+                        float(mf), n_cap)
+                    sigmas = capped
             if fisher is not None and not np.array_equal(fisher, sigmas):
                 # carried over the restart: maps onto the next refresh's
                 # axes while the (unpersisted) ring buffer refills
@@ -922,7 +1317,12 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         ``split_mask`` is the same ``(ntemps, nwalkers)`` boolean the
         proposal ``sets`` are built with, so the sliced table rows line up
         with the coords rows exactly. No-op for shared tables (installed
-        at refresh time) and for non-eigen inner moves.
+        at refresh time) and for non-eigen inner moves -- unless
+        ``{BRANCH}_EIGEN_TEMPER_SIGMAS`` fixed a per-rung step for this
+        visit (:meth:`_eigen_visit_rung_scale`): then every row of rung
+        ``k`` gets its tempered sigma, for a shared table and a per-walker
+        stash alike (same rows, same random draws, only the step widths
+        differ).
         """
         if not isinstance(move_here, EigenAxisMove):
             return
@@ -930,11 +1330,29 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         if not tabs or int(leaf) not in tabs:
             return
         axes, sigmas = tabs[int(leaf)]
+        tempered = (getattr(self, "_eigen_rung_scales", None) or {}).get(int(leaf))
         if getattr(axes, "ndim", 2) != 4:
+            if tempered is None:
+                return
+            # shared table, one tempered sigma vector per rung
+            sig_rung = tempered[1]
+            nt, ndim = sig_rung.shape
+            n_here = int(np.count_nonzero(split_mask)) // nt
+            ax = np.broadcast_to(np.asarray(asnumpy(axes), dtype=float),
+                                 (nt, n_here, 1, ndim, ndim))
+            sg = np.broadcast_to(sig_rung[:, None, None, :], (nt, n_here, 1, ndim))
+            move_here.set_axes(self.branch_name, ax, sg)
             return
         ndim = axes.shape[-1]
-        ax = axes[split_mask].reshape(self.ntemps, -1, 1, ndim, ndim)
-        sg = sigmas[split_mask].reshape(self.ntemps, -1, 1, ndim)
+        ax = axes[split_mask]
+        sg = sigmas[split_mask]
+        if tempered is not None:
+            # rows come out rung-major (C order), so the rung of each is
+            # its first nonzero index
+            rung = np.nonzero(np.asarray(split_mask))[0]
+            sg = self._eigen_tempered_rows(ax, sg, tempered[0][rung])
+        ax = ax.reshape(self.ntemps, -1, 1, ndim, ndim)
+        sg = sg.reshape(self.ntemps, -1, 1, ndim)
         move_here.set_axes(self.branch_name, ax, sg)
 
     def _build_eigen_table(self, leaf, work):
@@ -2170,7 +2588,12 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return int(val)
 
     def fanout_prepare_state(self, model, state):
-        """The mixin seam: runs on the full ensemble before any slicing."""
+        """The mixin seam: runs on the full ensemble before any slicing.
+
+        The pooled adaptation sample is taken FIRST (block head only,
+        :meth:`_note_eigen_pool_sample`): the rotation below edits a hot rung.
+        """
+        self._note_eigen_pool_sample(state)
         self._maybe_rotate_cold_into_hot(state)
 
     def _maybe_rotate_cold_into_hot(self, state) -> bool:
@@ -2803,16 +3226,33 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return list(self.temperature_controls)
 
     def fanout_payload_extra(self):
-        return {
+        extra = {
             "fancy_swap_clock": int(getattr(self, "_fancy_swap_clock", 0)),
             "dbg_step": int(getattr(self, "_dbg_step", 0)),
         }
+        # {BRANCH}_EIGEN_ADAPT_POOL: the full ensemble's rung coordinates,
+        # taken by fanout_prepare_state this propose (absent otherwise, so
+        # the payload is unchanged with the switch off)
+        pool = getattr(self, "_eigen_pool_outgoing", None)
+        if pool:
+            extra["eigen_pool"] = pool
+            self._eigen_pool_outgoing = None
+            x0 = next(iter(pool.values()))[0]
+            logger.debug(
+                "[%s_EIGEN] propose payload: pooled adaptation sample, %d leaves x "
+                "%d rungs x %d walkers (%d floats)", str(self.branch_name).upper(),
+                len(pool), int(x0.shape[0]), int(x0.shape[1]),
+                int(sum(np.size(x) + np.size(b) for x, b in pool.values())))
+        return extra
 
     def fanout_apply_extra(self, extra):
         if "fancy_swap_clock" in extra:
             self._fancy_swap_clock = int(extra["fancy_swap_clock"])
         if "dbg_step" in extra:
             self._dbg_step = int(extra["dbg_step"])
+        if extra.get("eigen_pool"):
+            # every rank, the head's own body included, buffers the union
+            self._push_eigen_pool(extra["eigen_pool"])
 
     def fanout_reply_extra(self, part):
         return {
@@ -3009,8 +3449,10 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
 
             # per-leaf eigen tables for EigenAxisMove inner moves (no-op for
             # stretch-only stacks); must run with the leaf exposed and
-            # _current_leaf set
-            self.refresh_inner_move_tables(leaf, work)
+            # _current_leaf set. The visit-start ladder fixes the per-rung
+            # tempered step ({BRANCH}_EIGEN_TEMPER_SIGMAS) for the visit.
+            self.refresh_inner_move_tables(
+                leaf, work, betas=temperature_control_here.betas)
 
             old_coords = (
                 work.coords[: self.ntemps, :, leaf].reshape(-1, ndim)

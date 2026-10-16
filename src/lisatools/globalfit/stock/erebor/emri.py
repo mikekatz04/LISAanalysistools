@@ -125,6 +125,33 @@ class EMRISettings(Settings):
     eigen_axis_adapt: bool = dataclasses.field(
         default_factory=env_default("EMRI_EIGEN_AXIS_ADAPT", False, bool)
     )
+    # Eigen inner move (user ruling 2026-10-15, "just do 1 for now"):
+    # under the walker-block fan-out, adapt every rank's step scale from the
+    # UNION of all walkers' rung ensembles (the head ships the full
+    # ensemble's rung coordinates in every propose payload) instead of the
+    # rank's own walker. Acts only with eigen_axis_adapt. Off = the per-rank
+    # buffer, bit-identical. See
+    # ResidualAddOneRemoveOneMove._note_eigen_pool_sample.
+    eigen_adapt_pool: bool = dataclasses.field(
+        default_factory=env_default("EMRI_EIGEN_ADAPT_POOL", False, bool)
+    )
+    # Eigen inner move (same ruling): rung k steps with sigma / sqrt(beta_k)
+    # (capped at the table's own cap) instead of the cold sigma at every
+    # rung; the persisted table stays the cold one. Off = every rung the cold
+    # sigma, bit-identical. See
+    # ResidualAddOneRemoveOneMove._eigen_visit_rung_scale.
+    eigen_temper_sigmas: bool = dataclasses.field(
+        default_factory=env_default("EMRI_EIGEN_TEMPER_SIGMAS", False, bool)
+    )
+    # Safety cap of the step-scale adaptation (ruling 2026-10-15, after the
+    # 12mo's first tar: rung chains straddling discrete degenerate solutions
+    # widened the best-measured axis x600-4900, to the prior box): an adapted
+    # sigma never exceeds this multiple of the information-matrix sigma.
+    # <= 0 or inf = no cap. Inert unless eigen_axis_adapt is on. See
+    # addremovemove.factor_capped_sigmas.
+    eigen_adapt_max_factor: float = dataclasses.field(
+        default_factory=env_default("EMRI_EIGEN_ADAPT_MAX_FACTOR", 100.0, float)
+    )
 
 
 class EMRISetup(Setup):

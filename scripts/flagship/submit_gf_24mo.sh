@@ -4872,6 +4872,32 @@ export SOBBH_EIGEN_JUMP_FACTOR=${SOBBH_EIGEN_JUMP_FACTOR:-3.0}
 export EMRI_EIGEN_AXIS_ADAPT=${EMRI_EIGEN_AXIS_ADAPT:-1}
 export MBH_EIGEN_AXIS_ADAPT=${MBH_EIGEN_AXIS_ADAPT:-1}
 export SOBBH_EIGEN_AXIS_ADAPT=${SOBBH_EIGEN_AXIS_ADAPT:-1}
+# POOLED + TEMPERED source eigen steps and the widening cap (user ruling
+# 2026-10-15 after the 9mo EMRI dive: walkers 1 and 3 of EMRI 3 had ladders
+# whose EVERY rung stayed within 1e-4 of p0 while walker 0's hot rungs spanned
+# the whole fixed-plunge ridge, because every rung stepped with the same
+# cold-sized sigma and a per-rank adaptation can only learn 1e-4 from a stuck
+# walker). POOL: every rank adapts from the UNION of all walkers' rung
+# ensembles, shipped by the head in the propose payload (needs
+# _EIGEN_AXIS_ADAPT=1; no-op under GF_GPU_ROUTING=1, where the head already
+# holds every walker). TEMPER: rung k steps sigma / sqrt(beta_k), capped at
+# the table's own cap and never below the cold sigma; the sidecar keeps the
+# cold table. MAX_FACTOR: the adapted width may exceed the Fisher sigma by at
+# most this factor -- the 1yr tar 2 showed x600-4900 on the narrowest axis
+# where hot rungs straddle sky- / phase-degenerate solutions (one wasted axis
+# in ndim), while the 9mo ridges needed at most x56. Synthetic 4-walker x
+# 8-rung ridge: the stuck walkers reach +1 sigma at visit 10 instead of 19-38,
+# autocorrelation 167 -> 41. Code defaults OFF / OFF / 100 (stock runs
+# bit-identical); rollback =0 / =0 / =0 (uncapped) on the launch line.
+export EMRI_EIGEN_ADAPT_POOL=${EMRI_EIGEN_ADAPT_POOL:-1}
+export MBH_EIGEN_ADAPT_POOL=${MBH_EIGEN_ADAPT_POOL:-1}
+export SOBBH_EIGEN_ADAPT_POOL=${SOBBH_EIGEN_ADAPT_POOL:-1}
+export EMRI_EIGEN_TEMPER_SIGMAS=${EMRI_EIGEN_TEMPER_SIGMAS:-1}
+export MBH_EIGEN_TEMPER_SIGMAS=${MBH_EIGEN_TEMPER_SIGMAS:-1}
+export SOBBH_EIGEN_TEMPER_SIGMAS=${SOBBH_EIGEN_TEMPER_SIGMAS:-1}
+export EMRI_EIGEN_ADAPT_MAX_FACTOR=${EMRI_EIGEN_ADAPT_MAX_FACTOR:-100}
+export MBH_EIGEN_ADAPT_MAX_FACTOR=${MBH_EIGEN_ADAPT_MAX_FACTOR:-100}
+export SOBBH_EIGEN_ADAPT_MAX_FACTOR=${SOBBH_EIGEN_ADAPT_MAX_FACTOR:-100}
 # TABLE SCOPE. SOBBH is set ABOVE (SOBBH_EIGEN_SCOPE, walker_max per the
 # 2026-09-16 ruling; the 2026-09-08 per-walker ruling it superseded cost
 # 12 rungs x 10 walkers = 120 points x ~245 rows ~ 29k batched likelihood

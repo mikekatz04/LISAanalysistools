@@ -95,6 +95,19 @@ class SOBBHSettings(Settings):
     eigen_axis_adapt: bool = dataclasses.field(
         default_factory=env_default("SOBBH_EIGEN_AXIS_ADAPT", False, bool)
     )
+    # Same meaning as EMRISettings.eigen_adapt_pool / eigen_temper_sigmas
+    # (SOBBH_EIGEN_ADAPT_POOL / SOBBH_EIGEN_TEMPER_SIGMAS; ruling 2026-10-15).
+    eigen_adapt_pool: bool = dataclasses.field(
+        default_factory=env_default("SOBBH_EIGEN_ADAPT_POOL", False, bool)
+    )
+    eigen_temper_sigmas: bool = dataclasses.field(
+        default_factory=env_default("SOBBH_EIGEN_TEMPER_SIGMAS", False, bool)
+    )
+    # Same meaning as EMRISettings.eigen_adapt_max_factor
+    # (SOBBH_EIGEN_ADAPT_MAX_FACTOR, default 100; <= 0 or inf = no cap).
+    eigen_adapt_max_factor: float = dataclasses.field(
+        default_factory=env_default("SOBBH_EIGEN_ADAPT_MAX_FACTOR", 100.0, float)
+    )
 
 
 class SOBBHSetup(Setup):

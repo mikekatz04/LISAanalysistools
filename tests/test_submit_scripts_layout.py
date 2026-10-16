@@ -99,6 +99,17 @@ EIGEN_JUMP_MIX_KNOBS = tuple(EIGEN_JUMP_MIX_LINE)
 # (code default off).
 EIGEN_AXIS_ADAPT_LINE = {f"{b}_EIGEN_AXIS_ADAPT": "1" for b in ("EMRI", "MBH", "SOBBH")}
 EIGEN_AXIS_ADAPT_KNOBS = tuple(EIGEN_AXIS_ADAPT_LINE)
+# 2026-10-15 (Mike, "just do 1 for now" of the EMRI sampling list, then the
+# widening cap after the 1yr tar 2): the adaptation buffer POOLED across
+# ranks, the eigen step TEMPERED per rung (sigma / sqrt(beta_k)) and the
+# adapted width capped at MAX_FACTOR x the Fisher sigma -- ON in the
+# launchers (code defaults off / off / 100).
+EIGEN_POOL_TEMPER_LINE = {
+    **{f"{b}_EIGEN_ADAPT_POOL": "1" for b in ("EMRI", "MBH", "SOBBH")},
+    **{f"{b}_EIGEN_TEMPER_SIGMAS": "1" for b in ("EMRI", "MBH", "SOBBH")},
+    **{f"{b}_EIGEN_ADAPT_MAX_FACTOR": "100" for b in ("EMRI", "MBH", "SOBBH")},
+}
+EIGEN_POOL_TEMPER_KNOBS = tuple(EIGEN_POOL_TEMPER_LINE)
 # 2026-10-13 (Mike): the GB warm-start SELF refit -- the saver rebuilds the
 # mixture from the run's own last 50 rows x every cold walker every 5 rows in
 # gb_search_2 and every 250 in full_pe; the warm moves draw 75 % of their
@@ -883,6 +894,8 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             # 2026-10-14: per-axis step-scale adaptation of the source eigen
             # tables ON (code default off); EigenJumpMixLauncherTest pins it.
             *EIGEN_AXIS_ADAPT_KNOBS,
+            # 2026-10-15: pooled / tempered / factor-capped adaptation, same block
+            *EIGEN_POOL_TEMPER_KNOBS,
             # 2026-10-13: the ladder caps (first ruling: EMRI T_max 100; second
             # ruling the same day: main-mode tempering -- EMRI T_max 6, MBH
             # T_max 10, the MBH lost-rung guard off, the EMRI guard at 50 nats);
@@ -1861,6 +1874,8 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             *EIGEN_JUMP_MIX_KNOBS,
             # 2026-10-14: the per-axis step-scale adaptation switches, same reason
             *EIGEN_AXIS_ADAPT_KNOBS,
+            # 2026-10-15: pooled / tempered / factor-capped adaptation, same block
+            *EIGEN_POOL_TEMPER_KNOBS,
             # 2026-10-13: the ladder cap exports, mirrored in the 3mo twin
             "EMRI_LADDER_TMAX", "EMRI_LADDER_REANCHOR_NATS",
             "MBH_LADDER_TMAX", "MBH_LADDER_REANCHOR_NATS",
@@ -3196,6 +3211,22 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
             exports = _exports(path)
             src = open(path).read()
             for knob, want in EIGEN_AXIS_ADAPT_LINE.items():
+                with self.subTest(script=os.path.basename(path), knob=knob):
+                    self.assertEqual(exports.get(knob), want)
+                    self.assertRegex(
+                        src, rf"(?m)^export {knob}=\$\{{{knob}:-{want}\}}$")
+
+    def test_the_pooled_tempered_capped_adaptation_is_on_in_every_v9_production_launcher(self):
+        """2026-10-15 (Mike, "just do 1 for now" + the widening cap): the
+        adaptation buffer is POOLED across ranks, the eigen step TEMPERED per
+        rung and the adapted width capped at 100 x the Fisher sigma in every
+        v9 production launcher ({BRANCH}_EIGEN_ADAPT_POOL=1,
+        {BRANCH}_EIGEN_TEMPER_SIGMAS=1, {BRANCH}_EIGEN_ADAPT_MAX_FACTOR=100,
+        overridable on the line); the code defaults stay off / off / 100."""
+        for path in V9_PRODUCTION:
+            exports = _exports(path)
+            src = open(path).read()
+            for knob, want in EIGEN_POOL_TEMPER_LINE.items():
                 with self.subTest(script=os.path.basename(path), knob=knob):
                     self.assertEqual(exports.get(knob), want)
                     self.assertRegex(

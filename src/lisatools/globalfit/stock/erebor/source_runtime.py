@@ -2699,4 +2699,29 @@ def build_source_moves(curr, acs, priors, state, cfg) -> dict:
         stock_moves["emri_pe"] = build_emri_move_runtime(curr, acs, priors, state, cfg)
     if "sobbh" in curr.source_info:
         stock_moves["sobbh_pe"] = build_sobbh_move_runtime(curr, acs, priors, state, cfg)
+    for name, move in stock_moves.items():
+        stamp_source_move_settings(move, curr.source_info[name[: -len("_pe")]])
     return stock_moves
+
+
+#: Branch Settings fields handed to the built add/remove move as attributes
+#: (2026-10-15: the eigen adaptation's cross-rank pool, the per-rung
+#: tempered step and the adaptation's safety cap). The move reads them at
+#: USE time (attribute > env > default), so a field set on the fit block
+#: reaches the move; an attribute the builder already set (a ``move_kwargs``
+#: entry) wins.
+SOURCE_MOVE_SETTINGS_ATTRS = ("eigen_adapt_pool", "eigen_temper_sigmas",
+                              "eigen_adapt_max_factor")
+
+
+def stamp_source_move_settings(move, info) -> None:
+    """Copy :data:`SOURCE_MOVE_SETTINGS_ATTRS` from the branch ``info`` onto ``move``.
+
+    Only onto a move that has the attribute (the add/remove family) and
+    only where it is still ``None``; a field left ``None`` changes nothing.
+    """
+    for attr in SOURCE_MOVE_SETTINGS_ATTRS:
+        val = getattr(info, attr, None)
+        if val is None or not hasattr(move, attr) or getattr(move, attr) is not None:
+            continue
+        setattr(move, attr, val)
