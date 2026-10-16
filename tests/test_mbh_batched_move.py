@@ -614,11 +614,15 @@ class MBHBatchedParityTest(unittest.TestCase):
 
         rows = self._rows(3)
         rows[2, 10] += 30 * LAYER            # merger far past the kept box
-        self.move.compute_like(rows, np.array([0, 1, 2]))
+        out = self.move.compute_like(rows, np.array([0, 1, 2]))
         st = self.move._stats
         self.assertEqual(st["outside_box"], 1)
         self.assertGreater(st["gen_s"], 0.0)
         self.assertGreater(st["score_s"], 0.0)
+        # the cut row is REJECTED at the floor (its template would be truncated)
+        self.assertEqual(out[2], -1e300)
+        self.assertTrue(np.all(out[:2] > -1e299))
+        self.assertTrue(np.isnan(self.move._last_h_h[2]) and np.isnan(self.move._last_d_h[2]))
         self.move._current_leaf = 1          # flush happens at the NEXT leaf's setup
         try:
             with self.assertLogs("lisatools.globalfit.moves.mbhbatchedmove", logging.INFO) as cm:
@@ -654,13 +658,54 @@ class MBHBatchedParityTest(unittest.TestCase):
             st = self.move._stats
             # only the layer-90 row (in the data, before the box) is cut by the box
             self.assertEqual((st["outside_box"], st["outside_data"]), (1, 1))
-            self.assertTrue(np.all(np.isfinite(out)))
+            # ... and rejected at the floor; the past-the-data-end row (clamped
+            # to the box edge) and the in-box row are scored
+            self.assertEqual(out[2], -1e300)
+            self.assertTrue(np.all(out[:2] > -1e299))
         finally:
             self.move._leaf_windows[0] = saved
         self.move._stats = self.move._new_stats()
-        self.move.compute_like(rows[:1], np.array([0]))           # box around layer 64
+        out = self.move.compute_like(rows[:1], np.array([0]))     # box around layer 64
         st = self.move._stats
         self.assertEqual((st["outside_box"], st["outside_data"]), (1, 1))
+        self.assertEqual(out[0], -1e300)                          # cut by the box: rejected
+
+    def test_outside_box_rows_are_rejected_unless_disabled(self):
+        """The job 769 phantom (2026-10-16): a row merging outside the locked
+        kept box scores a TRUNCATED template (~0 power when the merger is well
+        before the box), so it is "free" at every rung and, once accepted,
+        sits in the state with a template the residual does not carry. Such
+        rows are rejected at the floor; ``MBH_REJECT_OUTSIDE_BOX=0`` restores
+        the truncated scoring, which leaves the in-box rows untouched."""
+        import os
+        from unittest import mock
+
+        rows = self._rows(4)
+        rows[1, 10] += 30 * LAYER            # merger past the kept box
+        rows[3, 10] -= 60 * LAYER            # merger before the kept box (the 769 case)
+        idx = np.array([0, 1, 2, 0])
+        self.assertTrue(self.move.reject_outside_box)
+        out = self.move.compute_like(rows, idx)
+        self.assertEqual(self.move._stats["outside_box"], 2)
+        self.assertEqual(list(out[[1, 3]]), [-1e300, -1e300])
+        self.assertTrue(np.all(np.isnan(self.move._last_h_h[[1, 3]])))
+        self.assertTrue(np.all(out[[0, 2]] > -1e299))
+        # the old truncated scoring, on request: finite everywhere, the in-box
+        # rows bit-identical, the before-the-box row's template ~ empty
+        self.move.reject_outside_box = False
+        try:
+            old = self.move.compute_like(rows, idx)
+        finally:
+            self.move.reject_outside_box = True
+        self.assertTrue(np.all(old > -1e299))
+        np.testing.assert_array_equal(old[[0, 2]], out[[0, 2]])
+        self.assertLess(self.move._last_h_h[3], 1e-3 * self.move._last_h_h[0])
+        # the env knob
+        env = {k: v for k, v in os.environ.items() if k != "MBH_REJECT_OUTSIDE_BOX"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertTrue(_build_move(self.acs, self.adapter).reject_outside_box)
+        with mock.patch.dict(os.environ, {"MBH_REJECT_OUTSIDE_BOX": "0"}):
+            self.assertFalse(_build_move(self.acs, self.adapter).reject_outside_box)
 
     def test_batch_refusal_falls_back_to_container_path(self):
         from lisatools.utils.exceptions import BatchNotLaunchable

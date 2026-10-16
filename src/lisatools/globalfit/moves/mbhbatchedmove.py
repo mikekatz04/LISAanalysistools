@@ -66,6 +66,24 @@ exactly ``|tEarly| ~ 2.1e5 M`` before merger; every leaf has such a sliver
 at its own ``(eta, s1z, s2z)``. The upstream fix is
 ``optx.root_find(..., throw=False)`` (or hoisting the ``isnan`` test out of
 the vmapped function); here the row is simply rejected.
+
+A row whose IN-DATA merger falls OUTSIDE the locked kept box is rejected at
+the same floor (``MBH_REJECT_OUTSIDE_BOX=0`` restores the old truncated
+scoring). The window scores the box only, so such a row's template is
+TRUNCATED there: a merger 68 d before the box scores ``<h|h> ~ 0`` and the
+row is "free" at every rung. Accepting it puts a point in the state whose
+template the residual does not carry. The 1yr flagship job 769 (2026-10-16)
+did exactly that with MBHB 10 on walker 2 (``t_plunge`` 195 d against a box
+pinned to the last 102 d of the data, the source merging after the data
+end): the cold-chain record held ``<h|h>`` 0.000 for the point, then 24,917
+(SNR 158) for the SAME coords once the window was rebuilt around it, with
+the walker's total lnL and its residual unchanged -- and a resume rebuilds
+the residual from the coords through the stock full generator, which would
+subtract the phantom for real. With the floor, the CURRENT point of a rung
+outside the box scores the floor too (``prev_logl`` comes through
+:meth:`compute_like`), so the next in-box proposal replaces it, the
+tempering swap never pulls it down and the lost-rung guard re-anchors it.
+Such rows stay counted in ``outside_box``.
 ``MBH_BATCHED_FILL=0`` restores the dense
 per-row expose/fold. The built-in fast-vs-slow check (``_verify_prev_logl``)
 recomputes through the stock generator at matching convention with
@@ -244,8 +262,10 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
     posterior width, plus hot-rung excursions) staying inside
     ``window_margin`` of the locked window's reference time; a much wider
     spread needs ``MBH_WINDOW_MARGIN_DAYS`` resized to match, or rows land
-    outside the locked kept box (counted as ``outside_box`` in the
-    ``[MBH_BATCH]`` telemetry).
+    outside the locked kept box and are REJECTED at the floor (counted as
+    ``outside_box`` in the ``[MBH_BATCH]`` telemetry; the module docstring
+    has the production case, ``MBH_REJECT_OUTSIDE_BOX=0`` the old truncated
+    scoring).
     """
 
     _record_dh_default = "1"
@@ -301,6 +321,14 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
         self._gen_fail_logged = {}
         self.check_ll_tol = float(
             os.environ.get(f"{self._dbg_prefix}_CHECK_LL_TOL", "0.5")
+        )
+        #: rows whose in-data merger falls outside the locked kept box are
+        #: scored at the floor (rejected) instead of through a truncated
+        #: template; ``{BRANCH}_REJECT_OUTSIDE_BOX=0`` restores the truncated
+        #: scoring (module docstring: the job 769 phantom).
+        self.reject_outside_box = (
+            os.environ.get(f"{self._dbg_prefix}_REJECT_OUTSIDE_BOX", "1").strip().lower()
+            not in ("0", "false", "off", "no")
         )
         gen_kwargs = dict(self.waveform_gen_kwargs or {})
         dropped = sorted(set(gen_kwargs) - set(_ACCEPTED_GEN_KWARGS))
@@ -542,13 +570,17 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
             self._stats["leaf"] = leaf
         valid_pos = np.where(valid)[0]
         # rows whose IN-DATA merger falls outside the locked kept box: their
-        # template is truncated there (the scoring is still a valid windowed
-        # likelihood, but a steady count means the margin/prior sizing is off
-        # -- see the class docstring). A merger outside the data's active
+        # template would be TRUNCATED there (a merger well before the box
+        # scores <h|h> ~ 0, a "free" point at every rung), so they are
+        # REJECTED at the floor -- accepting one puts a point in the state
+        # whose template the residual does not carry (the module docstring
+        # has the job 769 phantom; MBH_REJECT_OUTSIDE_BOX=0 restores the
+        # truncated scoring). A steady count means the margin/prior sizing is
+        # off -- see the class docstring. A merger outside the data's active
         # time box is clamped to that box's edge first: the data itself ends
-        # there, so a row merging after the data end is truncated by the box
-        # only if the box stops short of the data end (and likewise at the
-        # start). Such rows are counted separately, as information.
+        # there, so a row merging after the data end is cut by the box only
+        # if the box stops short of the data end (and likewise at the start).
+        # Such rows are counted separately, as information.
         layer_dt = float(self._wdm.layer_dt)
         t0_grid = self._grid_t0_abs()
         box_lo = t0_grid + geom["n_start"] * layer_dt
@@ -556,11 +588,12 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
         act_lo = t0_grid + int(self._wdm.ind_min_t) * layer_dt
         act_hi = t0_grid + (int(self._wdm.ind_max_t) + 1) * layer_dt
         t_merge = self._stock_waveform_t0() + coords[valid_pos, _T_PLUNGE_COL]
-        self._stats["outside_box"] += int(np.sum(
-            (np.maximum(t_merge, act_lo) < box_lo) | (np.minimum(t_merge, act_hi) > box_hi)
-        ))
+        cut = (np.maximum(t_merge, act_lo) < box_lo) | (np.minimum(t_merge, act_hi) > box_hi)
+        self._stats["outside_box"] += int(np.sum(cut))
         self._stats["outside_data"] += int(np.sum((t_merge < act_lo) | (t_merge >= act_hi)))
-        for device, pos in self._split_rows(idx[valid_pos]):
+        if self.reject_outside_box:
+            valid_pos = valid_pos[~cut]      # out / d_h / h_h keep the floor / NaN
+        for device, pos in (self._split_rows(idx[valid_pos]) if valid_pos.size else ()):
             rows = valid_pos[pos]
             with self._device_contexts(device):
                 adapter = self._adapter()
@@ -899,13 +932,16 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
             logger.info(
                 "[MBH_BATCH] leaf %s: %d rows in %d chunks, %.1f s (%.3f s/row; "
                 "generate=%.2f s, score=%.2f s), %d fallbacks, outside_box=%d "
-                "(rows whose in-data merger falls outside the kept box), "
+                "(rows whose in-data merger falls outside the kept box%s), "
                 "outside_data=%d (rows merging outside the data's active time "
                 "box: expected for a source merging near/after a data edge)"
                 "%s",
                 st["leaf"], st["rows"], st["chunks"], st["seconds"],
                 st["seconds"] / st["rows"], st["gen_s"], st["score_s"],
-                st["fallbacks"], st["outside_box"], st["outside_data"],
+                st["fallbacks"], st["outside_box"],
+                (": rejected at the floor" if getattr(self, "reject_outside_box", True)
+                 else ": scored truncated"),
+                st["outside_data"],
                 (f", gen_failed={st['gen_failed']} (rows the waveform model could not "
                  "generate at runtime; scored at the floor)") if st["gen_failed"] else "",
             )
