@@ -2034,7 +2034,7 @@ class _ColdBandLnL:
     """
 
     __slots__ = ("peak", "value", "max", "streak", "resets", "shut",
-                 "lag_held", "lag_reopened")
+                 "held_open", "reopened")
 
     def __init__(self, band_info):
         self.peak = band_info["band_cold_logl_peak_w"]
@@ -2043,10 +2043,12 @@ class _ColdBandLnL:
         self.streak = band_info["band_shutoff_streak_w"]
         self.resets = band_info["band_shutoff_reset_w"]
         self.shut = band_info.get("band_rj_shutoff_w")
-        #: telemetry of the last :meth:`judge`: pairs the cross-walker lag
-        #: rule held open past the plain streak, and shut pairs it reopened
-        self.lag_held = 0
-        self.lag_reopened = 0
+        #: telemetry of the last :meth:`judge` under the all-walker rule:
+        #: occupied pairs converged on their own streak but kept open because
+        #: their band is not converged on every walker, and shut pairs
+        #: reopened because their band stopped being converged everywhere
+        self.held_open = 0
+        self.reopened = 0
 
     @property
     def shape(self):
@@ -2075,8 +2077,7 @@ class _ColdBandLnL:
         np.maximum.at(self.peak, (w_idx[good], b_idx[good]), lls[good])
         return int(good.sum())
 
-    def judge(self, tol, conv_iter, occ, require_occ=True,
-              lag_leaves=0, lag_extra=0, reopen_lagging=False):
+    def judge(self, tol, conv_iter, occ, require_occ=True, all_walkers=True):
         """One iteration's verdict. Returns the newly-converged mask.
 
         Consumes the peak: ``cur`` is the best this (walker, sub-band)
@@ -2088,25 +2089,32 @@ class _ColdBandLnL:
         cannot improve -- its streak advances, which is correct: nothing
         refined it, so it did not get better.
 
-        **Cross-walker lag (Mike 2026-10-17, "let's make it neighbor
-        aware", across walkers).** ``occ`` is every walker's cold leaf
-        count per band; a pair is BEHIND when some other walker holds at
-        least ``lag_leaves`` more cold leaves in that band (0 disables
-        the rule). A behind pair needs ``conv_iter + lag_extra``
-        consecutive flat judges to shut instead of ``conv_iter``, and
-        with ``reopen_lagging`` a SHUT behind pair reopens with a fresh
-        streak (the caller passes it once per process, so a relaunch
-        heals a lagging walker by itself). Why: on the 1yr flagship (job
-        780, rows 71-104) the valve shut 46 of walker 0's 58 pairs at
-        1.5-2.5 mHz while the other walkers kept adding ~5 sources a row
-        there; a shut pair runs no RJ, so walker 0 could never take the
-        185 leaves (378 consensus sources) it lacked and fell 3,750 nats
-        behind, its own foreground absorbing the missing power. Why the
-        extra patience is finite: walkers legitimately disagree by one or
-        two leaves in dozens of bands (doubles, blends), and a pair held
-        open for ever would hold the stage open for ever (the stage ends
-        at 0 active pairs); a behind pair that cannot catch up in
-        ``lag_extra`` further judges shuts like any other.
+        **The all-walker rule (Mike 2026-10-17).** The convergence
+        criterion stays per (walker, band) -- no improvement of the cold
+        band gain by ``tol`` for ``conv_iter`` consecutive judges -- but
+        the SHUT decision is per band: "I don't want it to shut off unless
+        all 4 walkers have reached shutoff together ... If one walker
+        reaches convergence criterion but the others are not, then all
+        walkers should be open including the one that might pass the
+        convergence criterion ... It can change its status back and forth
+        as it determines the current convergence. That sub-band only gets
+        shut off when all other walkers are converged together at the
+        same instant." So a band shuts on every walker at the judge where
+        every walker holding a source in it is converged, and a shut band
+        reopens on every walker at the judge where any of its walkers
+        stops being converged (its streak reset by a gain above the
+        all-time max + tol, which in-model refinement or a noise change can
+        still produce in a shut band). A walker holding nothing in the band
+        has no criterion to meet and does not vote (``require_occ``); its
+        empty pair is never shut, so it may still receive births there.
+        ``all_walkers=False`` is the pre-2026-10-17 per-walker valve.
+
+        Why: on the 1yr flagship (job 780, rows 71-104) the per-walker
+        valve shut 46 of walker 0's 58 pairs at 1.5-2.5 mHz while the
+        other walkers kept adding ~5 sources a row there; a shut pair runs
+        no RJ, so walker 0 could never take the 185 leaves it lacked and
+        fell 3,750 nats behind, its own foreground absorbing the missing
+        power.
         """
         cur = np.where(np.isfinite(self.peak), self.peak, -np.inf)
         self.value[:] = cur
@@ -2119,25 +2127,33 @@ class _ColdBandLnL:
         self.streak[improved] = 0
         self.streak[~improved] += 1
         occ_arr = np.asarray(occ)
-        need = np.full(self.streak.shape, int(conv_iter), dtype=np.int64)
-        behind = np.zeros(self.streak.shape, dtype=bool)
-        if int(lag_leaves) > 0 and occ_arr.ndim == 2 and occ_arr.shape == self.streak.shape:
-            behind = (occ_arr.max(axis=0)[None, :] - occ_arr) >= int(lag_leaves)
-            need[behind] += max(0, int(lag_extra))
-        converged = self.streak >= need
-        self.lag_held = int((behind & ~converged & (self.streak >= int(conv_iter))).sum())
-        self.lag_reopened = 0
-        if self.shut is not None:
-            if reopen_lagging and behind.any():
-                reopen = self.shut & behind
-                if require_occ:
-                    reopen = reopen & (occ_arr > 0)
-                self.lag_reopened = int(reopen.sum())
-                self.shut[reopen] = False
-                self.streak[reopen] = 0
-            converged = converged & ~self.shut
+        pair_conv = self.streak >= int(conv_iter)
+        self.held_open = 0
+        self.reopened = 0
+        if not all_walkers:
+            converged = pair_conv
+            if self.shut is not None:
+                converged = converged & ~self.shut
+            if require_occ:
+                converged = converged & (occ_arr > 0)
+            self.peak[:] = -np.inf
+            return converged
         if require_occ:
-            converged = converged & (occ_arr > 0)
+            occupied = occ_arr > 0
+            vote = pair_conv | ~occupied                 # an empty pair does not vote
+            band_all = vote.all(axis=0) & occupied.any(axis=0)
+        else:
+            occupied = np.ones(self.streak.shape, dtype=bool)
+            band_all = pair_conv.all(axis=0)
+        band_all_w = np.broadcast_to(band_all[None, :], self.streak.shape)
+        self.held_open = int((pair_conv & occupied & ~band_all_w).sum())
+        if self.shut is not None:
+            reopen = self.shut & ~band_all_w
+            self.reopened = int(reopen.sum())
+            self.shut[reopen] = False
+            converged = band_all_w & ~self.shut & occupied
+        else:
+            converged = band_all_w & occupied
         self.peak[:] = -np.inf
         return converged
 
@@ -23499,25 +23515,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self._publish_shutoff_w_pending(shut, occ)
             return
         np.maximum(_view.peak, _cur_obs, out=_view.peak)
-        # CROSS-WALKER LAG RULE (Mike 2026-10-17): the first judge of this
-        # process reopens shut pairs that trail another walker by
-        # GB_SEARCH_BAND_SHUTOFF_LAG_LEAVES cold leaves (so a relaunch heals a
-        # lagging walker), and every judge gives such pairs
-        # GB_SEARCH_BAND_SHUTOFF_LAG_EXTRA_JUDGES more flat judges before they
-        # may shut. See _ColdBandLnL.judge for the job-780 case behind it.
-        _lag_reopen = not getattr(self, "_lag_reopen_done", False)
-        self._lag_reopen_done = True
+        # THE ALL-WALKER RULE (Mike 2026-10-17): the convergence criterion
+        # stays per (walker, band); a band shuts on every walker only at a
+        # judge where every walker holding a source in it is converged, and
+        # a shut band reopens on every walker as soon as one of them is not.
+        # GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS=0 restores the per-walker valve.
+        # See _ColdBandLnL.judge for the job-780 case behind it.
         converged = _view.judge(tol, self.search_shutoff_conv_iter, occ,
                                 require_occ=self._shutoff_require_occ(),
-                                lag_leaves=self._shutoff_lag_leaves(),
-                                lag_extra=self._shutoff_lag_extra_judges(),
-                                reopen_lagging=_lag_reopen)
-        if _view.lag_reopened:
+                                all_walkers=self._shutoff_all_walkers())
+        if _view.reopened:
             logger.info(
-                "[GB_GATE %s] cross-walker lag rule: %d shut (walker, band) "
-                "pair(s) trailing another walker by >= %d cold leaves REOPENED "
-                "with a fresh streak (first judge of this process).",
-                self.name, int(_view.lag_reopened), int(self._shutoff_lag_leaves()))
+                "[GB_GATE %s] all-walker rule: %d shut (walker, band) pair(s) "
+                "REOPENED -- their band is no longer converged on every walker "
+                "(%d occupied pair(s) converged on their own streak are held "
+                "open for the same reason).",
+                self.name, int(_view.reopened), int(_view.held_open))
         # ---- RATCHET FLOOR (user design 2026-10-02: "maybe don't do RJ
         # shutoff during the ratchet cycles ... you can shut off bands above
         # 7 mHz if their likelihoods converge as usual"). While the galfor
@@ -23571,8 +23584,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     "-- streak p50 %.0f p90 %.0f of %d; resets/pair mean "
                     "%.2f max %d; chronic %d young %d fresh %d | "
                     "max-minus-now gain p50 %.2f p90 %.2f (tol %.2f) | "
-                    "lag rule: held %d reopened %d (>= %d leaves behind, "
-                    "+%d judges) | "
+                    "all-walker rule %s: held open %d reopened %d | "
                     "peak: %d of %d occupied cells observed this cycle "
                     "(%d walker(s) reporting)",
                     self.name, _n_occ, int((_occ & shut).sum()),
@@ -23587,10 +23599,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     float(np.percentile(_gap, 50)) if _gap.size else float("nan"),
                     float(np.percentile(_gap, 90)) if _gap.size else float("nan"),
                     float(tol),
-                    int(getattr(_view, "lag_held", 0)),
-                    int(getattr(_view, "lag_reopened", 0)),
-                    int(self._shutoff_lag_leaves()),
-                    int(self._shutoff_lag_extra_judges()),
+                    "on" if self._shutoff_all_walkers() else "off",
+                    int(getattr(_view, "held_open", 0)),
+                    int(getattr(_view, "reopened", 0)),
                     # OBSERVED, not "finite after the fold". The old count
                     # was isfinite(value) AFTER the single cap_stats fold,
                     # so it read as if every occupied cell had been
@@ -23713,30 +23724,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "GB_SEARCH_BAND_SHUTOFF_REQUIRE_OCC", "1") == "1"
 
     @staticmethod
-    def _shutoff_lag_leaves() -> int:
-        """Cross-walker lag rule (Mike 2026-10-17): a (walker, band) pair
-        trailing another walker by this many cold leaves in the band is
-        BEHIND -- it gets extra patience and is reopened at a relaunch.
-        0 disables. Env: ``GB_SEARCH_BAND_SHUTOFF_LAG_LEAVES`` (default 2:
-        one leaf of disagreement is the ordinary doubles / blend noise)."""
-        raw = os.environ.get("GB_SEARCH_BAND_SHUTOFF_LAG_LEAVES", "").strip()
-        n = int(raw) if raw else 2
-        if n < 0:
-            raise ValueError(f"GB_SEARCH_BAND_SHUTOFF_LAG_LEAVES must be >= 0, got {n}.")
-        return n
-
-    @staticmethod
-    def _shutoff_lag_extra_judges() -> int:
-        """Extra flat judges a BEHIND pair needs before it may shut (on top
-        of GB_SEARCH_BAND_SHUTOFF_CONV_ITER). Env:
-        ``GB_SEARCH_BAND_SHUTOFF_LAG_EXTRA_JUDGES`` (default 6: two more
-        full windows, ~11 h at a 110-min cycle, enough for the warm-start
-        containers to deliver the sources the walker lacks)."""
-        raw = os.environ.get("GB_SEARCH_BAND_SHUTOFF_LAG_EXTRA_JUDGES", "").strip()
-        n = int(raw) if raw else 6
-        if n < 0:
-            raise ValueError(f"GB_SEARCH_BAND_SHUTOFF_LAG_EXTRA_JUDGES must be >= 0, got {n}.")
-        return n
+    def _shutoff_all_walkers() -> bool:
+        """The all-walker rule (Mike 2026-10-17): a band shuts only when every
+        walker holding a source in it is converged at the same judge, and
+        reopens for all of them when one stops being converged. Env:
+        ``GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS`` (default 1; 0 = the per-walker
+        valve of before)."""
+        return os.environ.get("GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS", "1").strip() in (
+            "1", "true", "True", "yes", "on")
 
     def _shutoff_band_lls(self, model, new_state):
         """This iteration's ``(nwalkers, nbands)`` cold-chain per-band GAIN.

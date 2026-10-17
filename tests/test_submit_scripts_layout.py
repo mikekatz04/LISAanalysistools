@@ -159,12 +159,11 @@ SEARCH2_INMODEL_KNOBS = tuple(SEARCH2_INMODEL_LINE)
 FSTAT_SEARCH_REF_LINE = {"GB_FSTAT_SEARCH_REF": "rotate"}
 FSTAT_SEARCH_REF_KNOBS = tuple(FSTAT_SEARCH_REF_LINE)
 
-# 2026-10-17 (Mike, "let's make it neighbor aware" across walkers): the
-# per-walker RJ valve's cross-walker lag rule, exported for visibility
-# (code defaults 2 / 6; 0 leaves = the old valve).
-SHUTOFF_LAG_LINE = {"GB_SEARCH_BAND_SHUTOFF_LAG_LEAVES": "2",
-                    "GB_SEARCH_BAND_SHUTOFF_LAG_EXTRA_JUDGES": "6"}
-SHUTOFF_LAG_KNOBS = tuple(SHUTOFF_LAG_LINE)
+# 2026-10-17 (Mike): the RJ valve's all-walker rule -- a sub-band shuts
+# only when every walker holding a source in it is converged together --
+# exported for visibility (code default on; 0 = the per-walker valve).
+SHUTOFF_ALL_WALKERS_LINE = {"GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS": "1"}
+SHUTOFF_ALL_WALKERS_KNOBS = tuple(SHUTOFF_ALL_WALKERS_LINE)
 
 _STUB_SBATCH = """#!/usr/bin/env bash
 for a in "$@"; do printf '%s\\n' "$a"; done
@@ -940,8 +939,8 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             *SEARCH2_INMODEL_KNOBS,
             # 2026-10-16: the search F-stat epochs rotate through the walkers
             *FSTAT_SEARCH_REF_KNOBS,
-            # 2026-10-17: the valve's cross-walker lag rule
-            *SHUTOFF_LAG_KNOBS,
+            # 2026-10-17: the valve's all-walker rule
+            *SHUTOFF_ALL_WALKERS_KNOBS,
             # V9-26 (2026-10-02): the EMRI direct-to-WDM scoring path's knobs
             # (default full = the v8 path); SixMonthEMRIDirectTest pins the block.
             "EMRI_LIKELIHOOD", "EMRI_BATCH_MAX_SIZE", "EMRI_DIRECT_TABLE",
@@ -1924,8 +1923,8 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             *SEARCH2_INMODEL_KNOBS,
             # 2026-10-16: the rotating search F-stat reference, mirrored
             *FSTAT_SEARCH_REF_KNOBS,
-            # 2026-10-17: the valve's cross-walker lag rule, mirrored
-            *SHUTOFF_LAG_KNOBS,
+            # 2026-10-17: the valve's all-walker rule, mirrored
+            *SHUTOFF_ALL_WALKERS_KNOBS,
             # 3MO-8 (2026-10-02): nor is the 6mo EMRI direct-to-WDM block: no
             # EMRI branch is armed here, and its lookup table is built for the
             # 6-month grid's Nf and dt only.

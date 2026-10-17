@@ -2591,22 +2591,20 @@ export GB_SEARCH_BAND_SHUTOFF_CONV_ITER=3
 # Read from env AT JUDGE TIME and NOT part of the band_shutoff_w_step
 # stamp, so the persisted streak/max survive this change.
 export GB_SEARCH_BAND_SHUTOFF_LL_TOL=20
-# CROSS-WALKER LAG RULE (Mike 2026-10-17: "let's make it neighbor aware",
-# across walkers). A (walker, band) pair that trails another walker by >=
-# LAG_LEAVES cold leaves in that band is BEHIND: it needs CONV_ITER +
-# LAG_EXTRA_JUDGES flat judges to shut instead of CONV_ITER, and the first
-# judge of every job reopens shut behind pairs with a fresh streak, so a
-# relaunch heals a lagging walker by itself. Why: on the 1yr job 780 the
-# valve shut 46 of walker 0's 58 pairs at 1.5-2.5 mHz (row 71) while the
-# other walkers kept adding ~5 sources a row there; a shut pair runs no RJ,
-# so walker 0 could never take the 185 leaves it lacked and fell 3,750 nats
-# behind, its own foreground absorbing the missing power. The patience is
-# finite on purpose: walkers legitimately disagree by a leaf or two in
-# dozens of bands, and a pair held open for ever would hold the stage open
-# for ever. Both read at judge time; LAG_LEAVES=0 restores the old valve.
-# Log: "[GB_GATE] ... lag rule: held N reopened M" and the REOPENED line.
-export GB_SEARCH_BAND_SHUTOFF_LAG_LEAVES=${GB_SEARCH_BAND_SHUTOFF_LAG_LEAVES:-2}
-export GB_SEARCH_BAND_SHUTOFF_LAG_EXTRA_JUDGES=${GB_SEARCH_BAND_SHUTOFF_LAG_EXTRA_JUDGES:-6}
+# THE ALL-WALKER RULE (Mike 2026-10-17): the convergence criterion above
+# stays per (walker, band), but a sub-band shuts off -- on every walker --
+# only at a judge where every walker holding a source in it is converged
+# together, and a shut band reopens on every walker as soon as one of them
+# stops being converged (its band gain beat the all-time max by LL_TOL
+# again). A converged walker in a band the others have not converged stays
+# OPEN. Why: on the 1yr job 780 the per-walker valve shut 46 of walker 0's
+# 58 pairs at 1.5-2.5 mHz (row 71) while the other walkers kept adding ~5
+# sources a row there; a shut pair runs no RJ, so walker 0 could never take
+# the 185 leaves it lacked and fell 3,750 nats behind, its own foreground
+# absorbing the missing power. Read at judge time; 0 = the per-walker valve.
+# Log: "[GB_GATE] ... all-walker rule on: held open N reopened M" and the
+# REOPENED line when a band stops being converged everywhere.
+export GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS=${GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS:-1}
 # A PURE IN-MODEL PASS AFTER rj_prior_removal (2026-09-28, Mike).
 # rj_prior_removal is the ONLY RJ move with no in-model partner, so the
 # SAVED STATE -- and the residual the next iteration's births are drawn
