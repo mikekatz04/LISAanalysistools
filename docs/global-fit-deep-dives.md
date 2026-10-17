@@ -550,6 +550,17 @@ runs inside `rj_fstat_search`):
   (it did: 400-s stalls, then a crash that took both store copies). It runs
   on its own rank now.
 - Two of four ranks sweeping at 19k evals/s vs 80k = a slow node, not code.
+- With `GB_PARA_SEARCH=1` (the parallel residual search, `rj_para_search_pe`,
+  `docs/gb-para-search.md`): one `[GB_PARA_SEARCH] epoch k built: W walkers`
+  per `GB_PARA_SEARCH_EVERY_PE` PE iterations with W = every walker and `0
+  rank error(s)`; its wall is time EVERY rank waited inside that propose
+  (budget ~15-25 min at 9mo, section 5 there; worst case ~60 min). Per walker
+  read the `rank r walker w:` line: most bands converged (not at
+  `MAX_STEPS`), finds per walker in the hundreds at SNR 5 (noise peaks clear
+  SNR 5 in many 9mo sub-bands, expected), `capped` > 0 means the stage-2 cap
+  bound. Then `adopted epoch k` on every rank, the same k, one draw after the
+  build, and the move's own cold birth acceptance in `[GB_PARA_SEARCH
+  rj_para_search_pe] ... this propose used` against the other RJ moves'.
 
 ---
 

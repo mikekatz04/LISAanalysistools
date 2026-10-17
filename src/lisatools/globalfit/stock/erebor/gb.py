@@ -740,6 +740,119 @@ class GBSettings(Settings):
     warm_self_adopt_lag: bool = dataclasses.field(
         default_factory=env_default("GB_WARM_SELF_ADOPT_LAG", True, bool)
     )
+    # ---- GB PARALLEL RESIDUAL SEARCH (rj_para_search_pe; user ruling
+    # 2026-10-16, docs/gb-para-search.md). "build the paraensemble setup to
+    # sample 1 GB per sub-band per walker (cold-chain only) ... run the
+    # parallel-tempered fixed-dimensional MCMC on each cold (walker, band)
+    # until they all converge per sub-band in max logL. Then determine if any
+    # source has been found at all above optimal SNR of 5 or 7 (probably 5),
+    # turn each sub-band's surviving source into a GMM, combine them into a
+    # large GMM, and then we slot that in and sample from it."
+    # para_search: master switch. True -> build_gb_moves builds
+    # rj_para_search_pe and setup_gb_moves composes it into the PE stage(s)
+    # carrying rj_prior_pe; its PE draw-one share is GB_PE_RJ_PARA_FRACTION
+    # (default 0: outside the draw, every PE iteration). False (default) -> no
+    # move object exists; the run is bit-identical. Env: GB_PARA_SEARCH.
+    para_search: bool = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH", False, bool)
+    )
+    # para_search_every_pe: PE iterations between two searches (the move's
+    # journaled clock, <run_dir>/warmstart/parasearch/clock.json; the first
+    # build runs at the move's first PE entry; <= 0 -> that first build only).
+    # Env: GB_PARA_SEARCH_EVERY_PE.
+    para_search_every_pe: int = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_EVERY_PE", 100, int)
+    )
+    # para_search_ntemps / _nwalkers: chains per sub-band (one GB each) of the
+    # stage-1 F-stat PT; stage 2 runs para_search_stage2_ntemps rungs of the
+    # same walkers. Env: GB_PARA_SEARCH_NTEMPS, GB_PARA_SEARCH_NWALKERS,
+    # GB_PARA_SEARCH_STAGE2_NTEMPS (<= 0 -> the stage-1 count).
+    para_search_ntemps: int = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_NTEMPS", 8, int)
+    )
+    para_search_nwalkers: int = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_NWALKERS", 16, int)
+    )
+    para_search_stage2_ntemps: int = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_STAGE2_NTEMPS", 4, int)
+    )
+    # para_search_snr_min / _det_frac: the detection gate. Stage 1 keeps a
+    # cluster whose best sqrt(2F) >= snr_min; stage 2 keeps a find whose best
+    # sample has opt SNR sqrt(<h|h>) >= snr_min and det SNR
+    # <r|h>/sqrt(<h|h>) >= det_frac x opt. Env: GB_PARA_SEARCH_SNR_MIN,
+    # GB_PARA_SEARCH_DET_FRAC.
+    para_search_snr_min: float = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_SNR_MIN", 5.0, float)
+    )
+    para_search_det_frac: float = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_DET_FRAC", 0.7, float)
+    )
+    # para_search_converge_tol / _window / _min_steps / _max_steps: a sub-band
+    # stops once its cold-rung running max lnL has not improved by more than
+    # tol nats over window steps, after >= min_steps and at most max_steps.
+    # Env: GB_PARA_SEARCH_CONVERGE_TOL, GB_PARA_SEARCH_CONVERGE_WINDOW,
+    # GB_PARA_SEARCH_MIN_STEPS, GB_PARA_SEARCH_MAX_STEPS.
+    para_search_converge_tol: float = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_CONVERGE_TOL", 0.5, float)
+    )
+    para_search_converge_window: int = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_CONVERGE_WINDOW", 50, int)
+    )
+    para_search_min_steps: int = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_MIN_STEPS", 100, int)
+    )
+    para_search_max_steps: int = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_MAX_STEPS", 600, int)
+    )
+    # para_search_stage2_steps: the short full-likelihood stage per find (the
+    # GMM is fitted to the cold rung's last half). Env:
+    # GB_PARA_SEARCH_STAGE2_STEPS.
+    para_search_stage2_steps: int = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_STAGE2_STEPS", 100, int)
+    )
+    # para_search_split_bins: 2+ sources per sub-band. The pooled cold +
+    # warm-rung samples (para_search_cluster_rungs rungs) and comb cells split
+    # into clusters further apart than this many 1/Tobs bins; each cluster
+    # that passes the gate is its own find. Also the merge radius across
+    # walkers and band edges. Env: GB_PARA_SEARCH_SPLIT_BINS,
+    # GB_PARA_SEARCH_CLUSTER_RUNGS.
+    para_search_split_bins: float = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_SPLIT_BINS", 4.0, float)
+    )
+    para_search_cluster_rungs: int = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_CLUSTER_RUNGS", 2, int)
+    )
+    # para_search_scorer: the stage-1 F-stat ("auto" = the shared-reference
+    # sig-het F-stat when the GB comp has it, else "chunked", the exact
+    # per-candidate one); para_search_group_bands: sub-bands per sampler run
+    # (0 = as many as one sig-het reference block holds; all with chunked).
+    # Env: GB_PARA_SEARCH_SCORER, GB_PARA_SEARCH_GROUP_BANDS.
+    para_search_scorer: str = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_SCORER", "auto", str)
+    )
+    para_search_group_bands: int = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_GROUP_BANDS", 0, int)
+    )
+    # para_search_init: "comb" (default) seeds the stage-1 cold + warm rungs
+    # at the best cells of a 1-bin f0 comb x n_sky sky points per sub-band
+    # (n_sky = the F-stat fit's Doppler law, clipped to
+    # [para_search_init_nsky_min, para_search_init_nsky_max]); "prior" starts
+    # every rung from the prior. Env: GB_PARA_SEARCH_INIT,
+    # GB_PARA_SEARCH_INIT_NSKY_MIN, GB_PARA_SEARCH_INIT_NSKY_MAX.
+    para_search_init: str = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_INIT", "comb", str)
+    )
+    para_search_init_nsky_min: int = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_INIT_NSKY_MIN", 8, int)
+    )
+    para_search_init_nsky_max: int = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_INIT_NSKY_MAX", 64, int)
+    )
+    # para_search_max_finds: stage-2 cost bound per walker (the loudest
+    # stage-1 finds are kept; <= 0 = no cap). Env: GB_PARA_SEARCH_MAX_FINDS.
+    para_search_max_finds: int = dataclasses.field(
+        default_factory=env_default("GB_PARA_SEARCH_MAX_FINDS", 512, int)
+    )
     # PE-stage extrinsic DRAW (user design ruling 2026-08-25). STAGE
     # SPLIT: the SEARCH RJ stages (rj_fstat_search / rj_prior_removal /
     # rj_replace) PIN phi0/cos_iota/psi deterministically at the F-stat

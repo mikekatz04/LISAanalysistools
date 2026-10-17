@@ -759,8 +759,15 @@ class GFCombineMove(CombineMove, GlobalFitMove):
     #: move and the live-residual move by ``GB_PE_RJ_FSTAT_RESIDUAL_SPLIT``.
     #: Listed right after ``rj_fstat_pe`` so a stage WITHOUT it keeps the
     #: pre-2026-10-12 member order, weights and therefore draws bit-for-bit.
+    #: ``rj_para_search_pe`` (the GB parallel residual search, user ruling
+    #: 2026-10-16) joins LAST with its own share ``GB_PE_RJ_PARA_FRACTION``
+    #: (default 0): at 0, or on a stage without it, the member tuple and the
+    #: weights are exactly today's, so every draw is bit-identical.
     _PE_RJ_DRAW_ONE_MEMBERS = ("rj_fstat_pe", "rj_fstat_pe_residual",
-                               "rj_prior_pe", "rj_warm_pe")
+                               "rj_prior_pe", "rj_warm_pe", "rj_para_search_pe")
+    #: members that join the draw only when given probability mass (at 0 they
+    #: stay outside it and run every iteration in their fixed slot)
+    _PE_RJ_OPTIONAL_MEMBERS = ("rj_warm_pe", "rj_para_search_pe")
     #: the F-stat members of the draw: a stage carrying only one of them
     #: hands it the whole F-stat share (the total stays the launcher's)
     _PE_RJ_FSTAT_MEMBERS = ("rj_fstat_pe", "rj_fstat_pe_residual")
@@ -785,22 +792,26 @@ class GFCombineMove(CombineMove, GlobalFitMove):
             return False, None
         raw_f = os.environ.get("GB_PE_RJ_FSTAT_FRACTION", "0.8")
         raw_w = os.environ.get("GB_PE_RJ_WARM_FRACTION", "0")
-        p_f, p_w = float(raw_f), float(raw_w)
+        raw_p = os.environ.get("GB_PE_RJ_PARA_FRACTION", "0")
+        p_f, p_w, p_p = float(raw_f), float(raw_w), float(raw_p)
         for name, raw, p in (("GB_PE_RJ_FSTAT_FRACTION", raw_f, p_f),
-                             ("GB_PE_RJ_WARM_FRACTION", raw_w, p_w)):
+                             ("GB_PE_RJ_WARM_FRACTION", raw_w, p_w),
+                             ("GB_PE_RJ_PARA_FRACTION", raw_p, p_p)):
             if not np.isfinite(p) or not (0.0 <= p <= 1.0):
                 raise ValueError(
                     f"{name}={raw!r} must lie in [0, 1] (a per-PE-iteration "
                     "draw probability).")
-        if p_f + p_w > 1.0 + 1e-12:
+        if p_f + p_w + p_p > 1.0 + 1e-12:
             raise ValueError(
                 f"GB_PE_RJ_FSTAT_FRACTION={raw_f!r} + GB_PE_RJ_WARM_FRACTION="
-                f"{raw_w!r} exceed 1; rj_prior_pe takes the remainder.")
+                f"{raw_w!r} + GB_PE_RJ_PARA_FRACTION={raw_p!r} exceed 1; "
+                "rj_prior_pe takes the remainder.")
         s = pe_rj_fstat_residual_split()
         return True, {"rj_fstat_pe": p_f * (1.0 - s),
                       "rj_fstat_pe_residual": p_f * s,
-                      "rj_prior_pe": 1.0 - p_f - p_w,
-                      "rj_warm_pe": p_w}
+                      "rj_prior_pe": 1.0 - p_f - p_w - p_p,
+                      "rj_warm_pe": p_w,
+                      "rj_para_search_pe": p_p}
 
     def _pe_rj_draw_one_plan(self, model):
         """Sub-move sequence for THIS propose under the PE-only exclusive
@@ -858,7 +869,8 @@ class GFCombineMove(CombineMove, GlobalFitMove):
             probs[fstat_here[0]] = sum(probs[n] for n in self._PE_RJ_FSTAT_MEMBERS)
         members = tuple(
             n for n in self._PE_RJ_DRAW_ONE_MEMBERS
-            if n in names and (n != "rj_warm_pe" or probs.get(n, 0.0) > 0.0))
+            if n in names and (n not in self._PE_RJ_OPTIONAL_MEMBERS
+                               or probs.get(n, 0.0) > 0.0))
         weights = np.array([probs[n] for n in members], dtype=float)
         if weights.sum() <= 0:
             weights = np.ones(len(members))

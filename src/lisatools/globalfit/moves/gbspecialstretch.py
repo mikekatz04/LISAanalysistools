@@ -4150,6 +4150,12 @@ GB_OPS = ("gb_run_proposal", "gb_run_tempering", "gb_finish", "gb_sync",
           "gb_fstat_ref_row", "gb_fstat_comb", "gb_fstat_stage_b",
           "gb_fstat_release")
 
+#: The GB parallel residual search's build command (``rj_para_search_pe``,
+#: issued from the head's ``setup()`` with no session open, like the F-stat
+#: fit ops). Kept OUT of :data:`GB_OPS`, whose exact contents three suites
+#: pin as the session + F-stat protocol; ``gf_serve`` dispatches it first.
+GB_PARA_SEARCH_OP = "gb_para_search"
+
 #: Head-set knobs every compute rank must follow PER PROPOSE.
 #:
 #: A recipe step applies its stage profile and its PE declarations to the
@@ -8268,6 +8274,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # warm-start self refit: credit this census to the container
                 # this propose drew from ([GB_WARM_SELF <move>] line)
                 self._warm_self_note(sp)
+                # GB parallel residual search ([GB_PARA_SEARCH <move>] line)
+                self._para_search_note(sp)
                 self._rj_split = None
             # ---- GB_CAP_DIAG report (read-only) --------------------------
             # THE DECISIVE LINE. into_at_cap > 0 => the birth gate leaked
@@ -25838,6 +25846,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return self._gb_serve_finish(payload, clock, model)
         if op == "gb_sync":
             return self._gb_serve_sync(payload, clock, model)
+        if op == GB_PARA_SEARCH_OP:
+            # the GB parallel residual search (rj_para_search_pe): symmetric
+            # refusal on every rank of a move that cannot serve it, before any
+            # body runs (the _require_fstat_grid_move rule)
+            if not hasattr(self, "_gb_serve_para_search"):
+                raise ValueError(
+                    f"move {self.name!r} was sent 'gb_para_search', but only "
+                    "the GB parallel search move (GBParaSearchRJMove) can "
+                    "serve it.")
+            return self._gb_serve_para_search(payload, clock, model)
         if op == "gb_fstat_release":
             # Deliberately NOT behind ``_FSTAT_OP_REQUIRES``, unlike the other
             # two F-stat ops: this body reads nothing that belongs to
@@ -26031,6 +26049,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # takes that choice and loads that epoch before the sorter is
             # built, so the births and every logpdf of the propose agree.
             self._warm_self_apply((payload or {}).get("warm_self"))
+            # GB parallel residual search: the head's epoch (rj_para_search_pe)
+            self._para_search_apply((payload or {}).get("para_search"))
             rj_prop = (
                 None if not self.is_rj_prop
                 else self.rj_proposal_distribution[self.branch_name]
@@ -28357,6 +28377,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             mixer.note_census(sp, move_name=self.name,
                               rank=self._warm_self_rank())
 
+    # ---- GB parallel residual search (GB_PARA_SEARCH, 2026-10-16) ----------
+    # ``GBParaSearchRJMove`` (rj_para_search_pe) overrides both: the head's
+    # epoch choice rides to the ranks in the ``gb_run_proposal`` payload
+    # ("para_search") and every rank loads exactly that epoch before its
+    # BandSorter is built. No-ops on every other GB move.
+    def _para_search_apply(self, directive):
+        return None
+
+    def _para_search_note(self, sp):
+        return None
+
     def _propose_replace_passes(self, model, state, passes):
         """Run one complete replace sweep per entry in ``passes``.
 
@@ -29279,6 +29310,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # warm-start self refit: the head's epoch + container choice
                 # for THIS propose (None off the warm moves / with it off)
                 "warm_self": getattr(self, "_warm_self_directive", None),
+                # GB parallel residual search: the head's adopted epoch
+                # (None off rj_para_search_pe)
+                "para_search": getattr(self, "_para_search_directive", None),
             })
             return payload
 
@@ -33648,6 +33682,398 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
             f"Runtime of GPU GMM FIT: {round(time.perf_counter() - st, 3)} seconds"
         )
         self.rj_proposal_distribution = {self.branch_name: rj_dist}
+
+
+# ===========================================================================
+# rj_para_search_pe: the parallel residual search, modernised (user ruling
+# 2026-10-16; lisatools.globalfit.warmstart.para_search, docs/gb-para-search.md)
+# ===========================================================================
+def _para_mc_lims(move):
+    """The search box of the third column: the run's chirp-mass box.
+
+    The old move's ``_third_col_search_bounds`` (chirp-mass basis): the joint
+    ``("f0", "Mc")`` prior's ``mc_lims``, else the ``Mc`` uniform's bounds,
+    else ``(0.001, 1.0)``.
+    """
+    pr = move.priors[move.branch_name].priors_in
+    gmm = pr.get(("f0", "Mc"))
+    if gmm is not None and getattr(gmm, "mc_lims", None) is not None:
+        lo, hi = gmm.mc_lims
+    elif "Mc" in pr:
+        lo, hi = float(pr["Mc"].minimum), float(pr["Mc"].maximum)
+    else:
+        lo, hi = 0.001, 1.0
+    return float(lo), float(hi)
+
+
+def _make_move_para_scorer(move, model, row, mode):
+    """A :class:`~lisatools.globalfit.warmstart.para_search.ResidualScorer`
+    whose three entry points go through the move's band-engine ROUTERS, so a
+    multi-shard ACA (several GPUs on one rank) is scored on the shard that
+    owns the row: ``_RoutedBandEngine.route_fstat_ll`` (exact chunked F-stat),
+    ``route_sighet_fstat`` (the shared-reference scorer) and the parent
+    engine's ``get_ll`` inside ``exact_scoring`` (the chunked full likelihood
+    even if a sig-het in-model reference were still built). ``row`` is the
+    walker's row of THIS process's ACA.
+    """
+    from lisatools.globalfit.warmstart.para_search import ResidualScorer
+
+    class _Scorer(ResidualScorer):
+        def fstat_exact(self, P):
+            n = int(P.shape[0])
+            self.n_fstat += n
+            di = self._di(n, self.row)
+            return _RoutedBandEngine.route_fstat_ll(
+                self.chunked, "get_fstat_ll_wdm", self.holder, P,
+                data_index=di, noise_index=di, convert_to_ra_dec=False)
+
+        def _sighet_call(self, f0_lims_hz):
+            return _RoutedBandEngine.route_sighet_fstat(
+                self.sighet, self.holder, xp=self.xp, Tobs=self.tobs,
+                f0_lims_hz=(float(f0_lims_hz[0]), float(f0_lims_hz[-1])),
+                data_index=self.row, noise_index=self.noise_row)
+
+        def full(self, P):
+            xp = self.xp
+            n = int(P.shape[0])
+            self.n_full += n
+            eng = move._likelihood_engine
+            d_h = xp.empty(n)
+            h_h = xp.empty(n)
+            for s in range(0, n, self.batch):
+                e = min(s + self.batch, n)
+                di = self._di(e - s, self.row)
+                with eng.exact_scoring():
+                    eng.get_ll(self.holder, P[s:e], data_index=di, noise_index=di,
+                               N_vals=None, waveform_kwargs=move.waveform_kwargs)
+                d_h[s:e] = xp.asarray(eng.d_h_out).real
+                h_h[s:e] = xp.asarray(eng.h_h_out).real
+            return d_h, h_h
+
+    comp = move.gb_wdm_comp
+    chunked = getattr(comp, "chunked", comp)
+    sig = comp if hasattr(comp, "setup_fstat_references") else None
+    return _Scorer(chunked, model.analysis_container_arr, row=int(row),
+                   sighet=sig, tobs=move._para_tobs(), mode=mode)
+
+
+class GBParaSearchRJMove(GBSpecialRJPriorMove):
+    """``rj_para_search_pe``: RJ births from the run's own per-walker residual search.
+
+    User ruling 2026-10-16 (Mike, verbatim in docs/gb-para-search.md): one GB
+    per sub-band per cold walker, a parallel-tempered fixed-dimension MCMC per
+    (walker, band) on the walker's OWN residual to per-band convergence in max
+    lnL, the finds above opt SNR 5 turned into GMMs, combined over the four
+    walkers into one birth mixture, which this move then samples from. The
+    search itself is :mod:`lisatools.globalfit.warmstart.para_search`; this
+    class is the WIRING:
+
+    * ``setup()`` (HEAD / single process, every propose): PE stages only
+      (any other stage: the move proposes nothing); poll the epoch root and
+      adopt the newest COMPLETE epoch FIRST; then, when a build is due (no
+      epoch has ever been built, or ``GB_PARA_SEARCH_EVERY_PE`` PE iterations
+      since the last build on the journaled clock), BUILD: one
+      ``gb_para_search`` fan-out command, every compute rank searching every
+      walker row of its own ACA (the head included; single process: the head
+      searches all walkers), the head merging the replies and writing
+      ``epoch_NNNN/parasearch.npz`` + ``DONE.json``. The epoch built here is
+      NOT adopted by this propose (the one-draw lag of the self refit, same
+      reason: never draw from a container fitted on the current state); the
+      next draw's poll adopts it. With no epoch held the move proposes
+      nothing this iteration.
+    * the propose payload ships ``"para_search": {"epoch": k}``; each rank
+      loads exactly that epoch (``_para_search_apply``), never polling.
+    * births and every density come from
+      :class:`~lisatools.globalfit.warmstart.para_search.ParaSearchHolder`
+      (a ``WarmStartComponents`` of the epoch, observable basis,
+      ``circ_images`` > 0 for exact PE densities). Constructed like
+      ``rj_warm_pe`` (``use_prior_removal=False``, ``pe_extrinsic_draw=False``,
+      the PE overrides), by ``recipe.build_gb_moves`` when ``GB_PARA_SEARCH=1``.
+
+    Refuses the ``GF_GPU_ROUTING=1`` replica layout (several ranks per walker
+    block) at ``install_walker_fanout``: v1 searches each walker on the rank
+    that owns its whole residual.
+    """
+
+    def __init__(self, *args, para_search_cfg=None, para_search_root=None,
+                 para_search_load_kwargs=None, para_search_seed=None,
+                 para_search_tag=0, **kwargs):
+        from lisatools.globalfit.warmstart.para_search import (
+            ParaSearchConfig,
+            ParaSearchHolder,
+        )
+
+        super().__init__(*args, **kwargs)
+        self._para_search_cfg = (ParaSearchConfig.from_env()
+                                 if para_search_cfg is None else para_search_cfg)
+        self._para_search_root = (None if para_search_root is None
+                                  else str(para_search_root))
+        self._para_holder = ParaSearchHolder(
+            epoch_root=self._para_search_root or "",
+            load_kwargs=dict(para_search_load_kwargs or {}),
+            build_seed=para_search_seed, tag=int(para_search_tag),
+            name=str(getattr(self, "name", "rj_para_search_pe")))
+        self._para_build_seed = para_search_seed
+        self._para_clock = None
+        self._para_last_attempt = None
+        self._para_search_directive = None
+        self._para_stage_warned = False
+        self._para_epochs_built = 0
+
+    # ---- wiring ----------------------------------------------------------
+    def install_walker_fanout(self, curr):
+        super().install_walker_fanout(curr)
+        if self.fanout_active and self._replica_active():
+            raise NotImplementedError(
+                f"{self.name}: the GB parallel residual search (GB_PARA_SEARCH=1) "
+                "does not support the GF_GPU_ROUTING=1 replica layout (several "
+                "compute ranks per walker block) in v1: each walker's residual "
+                "is searched on the ONE rank that holds it. Unset GB_PARA_SEARCH "
+                "or GF_GPU_ROUTING (docs/gb-para-search.md).")
+
+    def _para_tobs(self) -> float:
+        bs = getattr(self, "_basis_settings", None)
+        if bs is not None and getattr(bs, "Tobs", None):
+            return float(bs.Tobs)
+        return 1.0 / float(self.df)
+
+    def _para_rank(self):
+        return 0 if self.gf_rank is None else int(self.gf_rank)
+
+    def _para_log_tag(self, w):
+        return f"rank {self._para_rank()} walker {int(w)}"
+
+    def _para_search_apply(self, directive):
+        """COMPUTE RANK: hold exactly the head's epoch for this propose."""
+        self._para_holder.apply_directive(directive, rank=self._para_rank())
+        self.rj_proposal_distribution = (
+            None if self._para_holder.epoch is None
+            else {self.branch_name: self._para_holder})
+
+    def _para_search_note(self, sp):
+        self._para_holder.note_census(sp, move_name=self.name,
+                                      rank=self._para_rank())
+
+    # ---- the clock -------------------------------------------------------
+    def _para_tick(self) -> int:
+        from lisatools.globalfit.warmstart.para_search import ParaSearchClock
+
+        if self._para_clock is None:
+            self._para_clock = ParaSearchClock(self._para_search_root)
+        return self._para_clock.tick(getattr(self, "gf_iteration", None))
+
+    def _para_last_build_clock(self):
+        """``built_at_clock`` of the newest epoch with a manifest (complete or
+        a zero-source build), else ``None`` (never built)."""
+        from lisatools.globalfit.warmstart.self_refit import (
+            MANIFEST,
+            epoch_dir,
+            list_epochs,
+        )
+
+        for k in reversed(list_epochs(self._para_search_root)):
+            try:
+                with open(os.path.join(epoch_dir(self._para_search_root, k),
+                                       MANIFEST)) as fh:
+                    man = json.load(fh)
+                return float(man.get("built_at_clock", -np.inf))
+            except (OSError, ValueError, TypeError):
+                continue
+        return None
+
+    def _para_build_due(self, clock) -> bool:
+        every = int(self._para_search_cfg.every_pe)
+        last = self._para_last_build_clock()
+        if self._para_last_attempt is not None:
+            last = (self._para_last_attempt if last is None
+                    else max(last, self._para_last_attempt))
+        if last is None:
+            return True                         # the run's first entry
+        if every <= 0:
+            return False
+        return clock - last >= every
+
+    # ---- setup: poll, maybe build, choose ---------------------------------
+    def setup(self, model, branches):
+        from lisatools.globalfit.warmstart.para_search import para_search_stage_ok
+
+        holder = self._para_holder
+        self._para_search_directive = None
+        kind = getattr(self, "gf_stage_kind", None)
+        stage = getattr(self, "gf_stage_name", None)
+        if not self._para_search_root or not para_search_stage_ok(kind, stage):
+            if not self._para_stage_warned:
+                self._para_stage_warned = True
+                logger.warning(
+                    "[GB_PARA_SEARCH %s] stage %s (kind %s): PE stages only in v1 "
+                    "-- this move proposes nothing here.", self.name, stage, kind)
+            self.rj_proposal_distribution = None
+            return
+        holder.poll(rank=self._para_rank())       # adopt BEFORE any build
+        clock = self._para_tick()
+        if self._para_build_due(clock):
+            self._para_build(model, clock, stage)
+        if holder.epoch is None:
+            logger.info("[GB_PARA_SEARCH %s] no complete epoch held yet: this "
+                        "propose draws nothing (clock %d).", self.name, clock)
+            self.rj_proposal_distribution = None
+            return
+        self.rj_proposal_distribution = {self.branch_name: holder}
+        self._para_search_directive = holder.directive()
+
+    # ---- the build ---------------------------------------------------------
+    def _para_walker_seeds(self, k, w0, w1):
+        base = 0 if self._para_build_seed is None else int(self._para_build_seed)
+        return [int(np.random.SeedSequence([base, int(k), int(w)])
+                    .generate_state(1, dtype=np.uint32)[0]) for w in range(w0, w1)]
+
+    def _para_build(self, model, clock, stage):
+        from lisatools.globalfit.warmstart.para_search import (
+            merge_finds,
+            write_epoch,
+        )
+        from lisatools.globalfit.warmstart.self_refit import (
+            epoch_dir,
+            next_epoch_index,
+            prune_epochs,
+        )
+
+        root = self._para_search_root
+        os.makedirs(root, exist_ok=True)
+        k = next_epoch_index(root)
+        d = epoch_dir(root, k)
+        os.makedirs(d, exist_ok=True)
+        self._para_last_attempt = float(clock)
+        cfg = self._para_search_cfg
+        t0 = time.perf_counter()
+        nw_total = int(self.nwalkers)
+        try:
+            if self.fanout_active:
+                def _payload(rank, w0, w1):
+                    return {"epoch": int(k), "w0": int(w0), "w1": int(w1),
+                            "cfg": cfg.as_dict(),
+                            "seeds": self._para_walker_seeds(k, w0, w1)}
+
+                replies, _tok = self._fanout_cmd(GB_PARA_SEARCH_OP, _payload, model)
+                reps = [replies[r] for r in sorted(replies)]
+            else:
+                reps = [self._gb_serve_para_search(
+                    {"epoch": int(k), "w0": 0, "w1": nw_total,
+                     "cfg": cfg.as_dict(),
+                     "seeds": self._para_walker_seeds(k, 0, nw_total)},
+                    None, model)]
+            t_ranks = time.perf_counter() - t0
+            walker_finds, errors = [], []
+            for rep in reps:
+                walker_finds.extend((rep or {}).get("finds") or [])
+                errors.extend((rep or {}).get("errors") or [])
+            if not walker_finds:
+                raise RuntimeError(f"no walker finished its search ({errors})")
+            tobs = self._para_tobs()
+            sources = merge_finds(walker_finds, tobs=tobs,
+                                  radius_bins=float(cfg.split_bins), seed=int(k))
+            gpu = None
+            if self.backend.uses_cupy:
+                try:
+                    gpu = int(self.xp.cuda.runtime.getDevice())
+                except Exception:                      # noqa: BLE001
+                    gpu = None
+            man = write_epoch(
+                d, sources, walker_finds, tobs=tobs, transform_fn=self.transform_fn,
+                gmm_gpu=gpu, seed=int(k) + 7,
+                manifest_extra=dict(
+                    epoch=int(k), built_at_clock=float(clock), stage=str(stage),
+                    built_at_iteration=getattr(self, "gf_iteration", None),
+                    knobs=cfg.as_dict(), errors=errors, rank_wall=t_ranks,
+                    n_compute=(1 if not self.fanout_active
+                               else int(self.fanout.layout.n_compute))))
+            if man is not None:
+                npz = os.path.join(d, man["npz"])
+                with open(npz, "rb") as fh:               # shared-FS barrier
+                    os.fsync(fh.fileno())
+            n_finds = int(sum(int(r["n_finds"]) for r in walker_finds))
+            logger.info(
+                "[GB_PARA_SEARCH] epoch %d built: %d walkers, %d finds -> %d "
+                "components after de-dup (%d sources; %d rank error(s)), npz %s "
+                "in %.1f s (ranks %.1f s, head merge + GMM %.1f s); adopted at "
+                "the NEXT draw of %s", k, len(walker_finds), n_finds,
+                0 if man is None else int(man["n_components"]), len(sources),
+                len(errors), "none (0 sources)" if man is None
+                else os.path.join(d, man["npz"]), time.perf_counter() - t0,
+                t_ranks, time.perf_counter() - t0 - t_ranks, self.name)
+            self._para_epochs_built += 1
+            try:
+                n_p, n_b = prune_epochs(root)
+                if n_p:
+                    logger.info("[GB_PARA_SEARCH] pruned %d older epoch(s) "
+                                "(%.1f MB)", n_p, n_b / 1e6)
+            except Exception:                              # noqa: BLE001
+                pass
+        except Exception as exc:                           # noqa: BLE001
+            logger.error(
+                "[GB_PARA_SEARCH] epoch %d build FAILED (%s: %s); keeping epoch "
+                "%s, next attempt in %d PE iterations.", k, type(exc).__name__,
+                exc, self._para_holder.epoch, int(cfg.every_pe), exc_info=True)
+
+    # ---- the rank body -----------------------------------------------------
+    def _para_builder(self, model, row, cfg):
+        from lisatools.globalfit.warmstart.para_search import (
+            ParaSearchBuilder,
+            band_restricted_priors_in,
+            build_search_prior,
+        )
+
+        uc = bool(self.backend.uses_cupy)
+        priors_global = self.priors if not self.backend.uses_cuda else self.gpu_priors
+        prior = build_search_prior(
+            band_restricted_priors_in(priors_global[self.branch_name].priors_in,
+                                      use_cupy=uc),
+            input_basis=list(self.transform_fn.input_basis), use_cupy=uc)
+        scorer = _make_move_para_scorer(self, model, row, cfg.scorer)
+        edges = _to_numpy(self.band_edges)
+        lims = (edges[1], edges[-2]) if len(edges) >= 4 else (edges[0], edges[-1])
+        gpu = None
+        if uc:
+            gpu = int(self.xp.cuda.runtime.getDevice())
+        return ParaSearchBuilder(
+            scorer, band_edges_hz=edges, transform_fn=self.transform_fn,
+            prior=prior, mc_lims=_para_mc_lims(self),
+            ratio_max=float(_gb_fdot_astro_ratio_max(self) or 1.0), cfg=cfg,
+            gpu=gpu, periodic=self.periodic, f0_lims_hz=lims,
+            tag=self._para_log_tag(row))
+
+    def _gb_serve_para_search(self, payload, clock, model):
+        """``gb_para_search``: search every walker row of this rank's ACA.
+
+        Never raises: a failed walker is reported in ``errors`` and the head
+        builds the epoch from the others. Replies host numpy only.
+        """
+        from lisatools.globalfit.warmstart.para_search import ParaSearchConfig
+
+        self._bind_rank_acs(model)
+        cfg = ParaSearchConfig(**dict(payload["cfg"]))
+        w0, w1 = int(payload["w0"]), int(payload["w1"])
+        seeds = list(payload.get("seeds") or [None] * (w1 - w0))
+        finds, errors = [], []
+        for row in range(w1 - w0):
+            w = w0 + row
+            try:
+                b = self._para_builder(model, row, cfg)
+                b.tag = self._para_log_tag(w)
+                rec = b.run(walker=w, seed=seeds[row])
+                finds.append(_gb_host(rec))
+            except Exception as exc:                       # noqa: BLE001
+                logger.error("[GB_PARA_SEARCH] %s: search FAILED (%s: %s)",
+                             self._para_log_tag(w), type(exc).__name__, exc,
+                             exc_info=True)
+                errors.append(f"walker {w}: {type(exc).__name__}: {exc}")
+            finally:
+                try:
+                    self.mempool.free_all_blocks()
+                except Exception:                          # noqa: BLE001
+                    pass
+        return {"finds": finds, "errors": errors,
+                "rank": None if self.fanout is None else int(self.fanout.rank)}
 
 
 # GBSpecialRJSearchMove (the MPI multi-GPU search delegate) was removed

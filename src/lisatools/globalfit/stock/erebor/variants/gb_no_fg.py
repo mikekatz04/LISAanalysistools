@@ -1353,6 +1353,18 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
         elif "rj_replace_pe" not in _pe_names:
             recipe.add_move("rj_replace_pe", after=_pe_anchor, branch="gb")
 
+    # GB PARALLEL RESIDUAL SEARCH (user ruling 2026-10-16,
+    # docs/gb-para-search.md): with gb.para_search on, every PE stage that
+    # carries rj_prior_pe gets rj_para_search_pe right after it (its PE
+    # draw-one share is GB_PE_RJ_PARA_FRACTION; at 0 it runs every iteration
+    # outside the draw). Not a mode-dependent insertion: the move is a PE
+    # move in both GB_MODE flavors (and proposes nothing outside PE stages).
+    # Off (default): the recipe is untouched.
+    if getattr(gb_info, "para_search", False):
+        from lisatools.globalfit.warmstart.para_search import compose_para_search
+
+        compose_para_search(recipe)
+
     requested = recipe.stock_names()
     include_search = any(name.endswith("_search") for name in requested)
     include_refit = any(name.startswith("rj_refit") for name in requested)

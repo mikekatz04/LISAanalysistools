@@ -6215,6 +6215,83 @@ def build_gb_moves(
             os.environ.get("GB_WARM_START_FLOOR_EPS", "0.05"),
         )
 
+    #* ============ GB PARALLEL RESIDUAL SEARCH (rj_para_search_pe) ============
+    # USER RULING 2026-10-16 (docs/gb-para-search.md): one GB per sub-band per
+    # cold walker, a PT MCMC per (walker, band) on the walker's OWN residual,
+    # the finds above opt SNR 5 turned into GMMs and combined over the walkers
+    # into one birth mixture. Built only with GB_PARA_SEARCH=1
+    # (gb.para_search); stage-composed by setup_gb_moves into the PE stage(s)
+    # carrying rj_prior_pe; drawn in the PE draw-one at GB_PE_RJ_PARA_FRACTION.
+    # The rj_warm_pe pattern: use_prior_removal=False, pe_extrinsic_draw=False
+    # (the mixture draws all nine columns and prices them), the PE overrides;
+    # its container is the newest complete epoch under
+    # <run_dir>/warmstart/parasearch, loaded like the warm PE twin's (floor box
+    # = the run's prior box, GB_WARM_START_FLOOR_EPS, circ_images =
+    # GB_WARM_START_CIRC_IMAGES for exact wrapped-normal densities).
+    gb_para_move = None
+    if bool(getattr(gb_info, "para_search", False)):
+        from .moves.gbspecialstretch import GBParaSearchRJMove
+        from .warmstart.para_search import (
+            PARA_SEARCH_MOVE,
+            ParaSearchConfig,
+            para_search_epoch_root,
+        )
+
+        if int(engine_info.ndims["gb"]) != 9:
+            raise ValueError(
+                "GB_PARA_SEARCH=1 requires the 9-column sampled GB basis "
+                "(distance + fdot_astro_ratio) -- this run samples "
+                f"ndim={engine_info.ndims['gb']}.")
+        _ps_mc = list(getattr(gb_info, "m_chirp_lims", None) or [0.001, 1.0])
+        _ps_dist = list(getattr(gb_info, "dist_lims", None) or [0.001, 40.0])
+        _ps_ratio = float(getattr(gb_info, "fdot_astro_ratio_max", None) or 1.0)
+        _ps_lo_i, _ps_hi_i = (1, -2) if len(band_edges) >= 4 else (0, -1)
+        _ps_floor = (
+            [_ps_dist[0], float(band_edges[_ps_lo_i]) * 1e3, _ps_mc[0],
+             0.0, -1.0, 0.0, 0.0, -1.0, -_ps_ratio],
+            [_ps_dist[-1], float(band_edges[_ps_hi_i]) * 1e3, _ps_mc[-1],
+             2.0 * np.pi, 1.0, np.pi, 2.0 * np.pi, 1.0, _ps_ratio],
+        )
+        _ps_load = dict(
+            new_tobs=float(general_info.Tobs), use_cupy=use_gpu_priors,
+            floor_box=_ps_floor,
+            floor_eps=float(os.environ.get("GB_WARM_START_FLOOR_EPS", "0.05")),
+            p_floor=0.0,
+            circ_images=int(os.environ.get("GB_WARM_START_CIRC_IMAGES", "3")),
+        )
+        _ps_cfg = ParaSearchConfig.from_settings(gb_info)
+        _ps_root = para_search_epoch_root(general_info.main_file_path)
+        # its own domain tag beside the warm twins' 0x3A12 / 0x3A13: the
+        # container seeds are warm_seed(build_seed, tag ^ (epoch + 1)), per
+        # rank and epoch (the self refit's rule)
+        _PARA_SEED_TAG = 0x3A14
+        gb_para_move = GBParaSearchRJMove(
+            *gb_move_args,
+            rj_proposal_distribution=None,
+            is_rj_prop=True,
+            name=PARA_SEARCH_MOVE,
+            use_prior_removal=False,
+            pe_extrinsic_draw=False,
+            para_search_cfg=_ps_cfg,
+            para_search_root=_ps_root,
+            para_search_load_kwargs=_ps_load,
+            para_search_seed=getattr(gb_info, "build_seed", None),
+            para_search_tag=_PARA_SEED_TAG,
+            gpus=[],
+            **{**gb_move_kwargs,
+               "rj_flip_fraction_default": _rj_flip_default,
+               **_imr_defaults, **_pe_cap_off,
+               **warm_pe_move_overrides()},
+        )
+        gb_para_move.accepted = np.zeros((ntemps, nwalkers_local))
+        gb_para_move.install_walker_fanout(curr)
+        logger.info(
+            "build_gb_moves: %s armed (epochs under %s; every %d PE iterations; "
+            "%d x %d chains per sub-band, SNR >= %g; draw share "
+            "GB_PE_RJ_PARA_FRACTION=%s).", PARA_SEARCH_MOVE, _ps_root,
+            int(_ps_cfg.every_pe), int(_ps_cfg.ntemps), int(_ps_cfg.nwalkers),
+            float(_ps_cfg.snr_min), os.environ.get("GB_PE_RJ_PARA_FRACTION", "0"))
+
     #* ------------------------- PE REPLACE (rj_replace_pe) -------------------------
     # USER DIRECTIVE 2026-08-28: "we need a PE replace that also uses the
     # same machinery as fstat pe". Same fixed-dimension REPLACEMENT move as
@@ -6375,6 +6452,8 @@ def build_gb_moves(
     if gb_pe_replace_move is not None:
         gb_pe_moves.append(gb_pe_replace_move)
     gb_pe_moves += [gb_pe_prior_birth_move, gb_pe_fstat_mcmc_move]
+    if gb_para_move is not None:
+        gb_pe_moves.append(gb_para_move)
     if gb_replace_move is not None:
         gb_pe_moves.append(gb_replace_move)
     gb_pe_moves += gb_in_model_moves
