@@ -2981,6 +2981,13 @@ export GB_SEARCH_BAND_SHUTOFF_CONV_ITER=3
 # Read from env AT JUDGE TIME and NOT part of the band_shutoff_w_step
 # stamp, so the persisted streak/max survive this change.
 export GB_SEARCH_BAND_SHUTOFF_LL_TOL=20
+# CROSS-WALKER LAG RULE (Mike 2026-10-17, "let's make it neighbor aware"
+# across walkers; the flagship template carries the full note): a pair
+# trailing another walker by >= LAG_LEAVES cold leaves in its band needs
+# CONV_ITER + LAG_EXTRA_JUDGES flat judges to shut, and the first judge of
+# every job reopens shut behind pairs. LAG_LEAVES=0 restores the old valve.
+export GB_SEARCH_BAND_SHUTOFF_LAG_LEAVES=${GB_SEARCH_BAND_SHUTOFF_LAG_LEAVES:-2}
+export GB_SEARCH_BAND_SHUTOFF_LAG_EXTRA_JUDGES=${GB_SEARCH_BAND_SHUTOFF_LAG_EXTRA_JUDGES:-6}
 # A PURE IN-MODEL PASS AFTER rj_prior_removal (2026-09-28, Mike).
 # rj_prior_removal is the ONLY RJ move with no in-model partner, so the
 # SAVED STATE -- and the residual the next iteration's births are drawn
