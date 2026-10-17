@@ -341,7 +341,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         search_kwargs=None,
         stretch_probability=0.5,
         band_units=2,
-        gamma_base=0.84, # = 2.38 / sqrt(D) where D=4
+        gamma_base=0.84, # = 2.38 / sqrt(D) where D=8
         debug_settings: Optional[GBDebugSettings] = None,
         sighet_settings: Optional[GBSigHetSettings] = None,
         leaf_cap_settings: Optional[GBLeafCapSettings] = None,
@@ -354,6 +354,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         self.a = float(kwargs.get("a", 2.0))
         self.nfriends = int(kwargs.get("nfriends", 32))
+        self.lift_scale = float(kwargs.get("lift_scale", 2.0))
+        self.lift_kmax = int(kwargs.get("lift_kmax", 2))
+        self._lift = None
+        self._inds_run = {}
+        self._last_log_norm = None
+        self._turns = self.xp.arange(-self.lift_kmax, self.lift_kmax + 1)
+        self._periodic_cache = {}
         self.return_gpu = True
         self.use_gpu = self.backend.uses_cupy
 
