@@ -4115,6 +4115,30 @@ export GB_SEARCH_1_SOURCE_EVERY=${GB_SEARCH_1_SOURCE_EVERY:-1}   # 2026-10-10 ru
 export GB_SEARCH_2_SOURCE_EVERY=${GB_SEARCH_2_SOURCE_EVERY:-1}
 export GB_SEARCH_2_NOISE_MODE=${GB_SEARCH_2_NOISE_MODE:-cycle_end}
 export GB_SEARCH_2_RESET_VALVES=${GB_SEARCH_2_RESET_VALVES:-1}
+# ---- gb_search_2 IN-MODEL BUDGET (Mike 2026-10-16: "Gb search 2 should spend
+# less time in the in-model mixing but maybe with some quick checker to make
+# sure the logL is not seriously improving during those steps anymore";
+# gb_search_1 stays as is). The checkers already exist and stay: the pure
+# in-model moves' per-sub-band group rule ([GB_IMGROUP]: passes until no open
+# sub-band gained D/2 over the window) and the RJ moves' per-row polish rule
+# ([GB_IMCONV]: a row retires once its best gain stalls over the window). Both
+# windows are FLOORS, so these shorten the floors in gb_search_2 only (applied
+# at the stage's entry, a resume included; the other stages run the moves as
+# built: 25 repeats/pass, 3 passes, 250). Measured on the 1yr flagship job 774
+# (gb_search_2, 146-min cycle, 2026-10-16): the three dedicated in-model legs
+# ran 10-12 passes x 25 repeats each, of which the 3 warm-up passes (129-147 s
+# each, half the leg) could shut nothing, for a net cold lnL change per
+# propose of about zero (the legs are mixing, the gains come from the RJ
+# moves); the RJ moves' newborn polish ran 255 repeats per row against a
+# 250-repeat floor for a median gain of 0.2 nats (top tenth +22 nats, which
+# the rule keeps running). Expected: ~20 min off the in-model legs and ~18
+# min off the polish per cycle (~26 %). Rate bars at the same D/2 = 4.0:
+# group 4.0/(2 x 15) = 0.133 lnL/repeat (was 0.053), newborn 4.0/100 = 0.04
+# (was 0.016) -- looser, which is the direction asked for. Unset any of the
+# three on the line to keep that knob as built.
+export GB_SEARCH_2_NUM_REPEAT_PROPOSALS=${GB_SEARCH_2_NUM_REPEAT_PROPOSALS:-15}
+export GB_SEARCH_2_INMODEL_GROUP_ITERS=${GB_SEARCH_2_INMODEL_GROUP_ITERS:-2}
+export GB_SEARCH_2_INMODEL_CONVERGE_ITERS=${GB_SEARCH_2_INMODEL_CONVERGE_ITERS:-100}
 # NO PARENT: GB_SEARCH_3_WARM_EVERY is not exported -- it cadences
 # rj_warm_search and there is no warm move to cadence (a knob that resolves
 # and reaches nothing).

@@ -167,6 +167,13 @@ Key env knobs
                          per-(walker, band) cold-lnL max re-learned AND the
                          per-band barren valve revived (the per-walker window
                          is released at every new step anyway)
+    GB_SEARCH_{N}_NUM_REPEAT_PROPOSALS / _INMODEL_GROUP_ITERS /
+    _INMODEL_CONVERGE_ITERS  the stage's in-model budget (profile key
+                         ``inmodel_budget``, 2026-10-16): the pure in-model
+                         moves' repeats per pass and group window (passes),
+                         the RJ moves' newborn polish window (repeats); set
+                         at EVERY entry of the stage, the other stages run
+                         the moves as built (gb_search_1 untouched)
     --print-recipe / GF_PRINT_RECIPE=1  print the resolved recipe (stages,
                          stop rules, profiles, noise, source cadence, moves)
                          and exit: no data, no MPI
@@ -876,6 +883,42 @@ def search_stage_source_every(name: str):
     return n
 
 
+#: ``GB_SEARCH_{N}_<SUFFIX>`` -> the stage profile's ``inmodel_budget`` key
+#: (``recipe.INMODEL_BUDGET_KEYS``: the first two reach the pure in-model
+#: moves, the third the RJ moves' newborn polish).
+_INMODEL_BUDGET_KNOBS = (
+    ("NUM_REPEAT_PROPOSALS", "num_repeat_proposals"),
+    ("INMODEL_GROUP_ITERS", "inmodel_group_iters"),
+    ("INMODEL_CONVERGE_ITERS", "inmodel_converge_iters"),
+)
+
+
+def search_stage_inmodel_budget(name: str):
+    """``GB_SEARCH_{N}_NUM_REPEAT_PROPOSALS`` / ``_INMODEL_GROUP_ITERS`` /
+    ``_INMODEL_CONVERGE_ITERS``: the stage's in-model budget as the profile
+    key ``inmodel_budget`` (``{attribute: int}``, only the knobs that are
+    set; None when none is). Applied at the stage entry by
+    ``recipe.apply_inmodel_budget``: repeats per pass and the group window
+    (passes) on the pure in-model moves, the newborn polish window (repeats)
+    on the RJ moves. A stage that sets none runs the moves as built, so
+    gb_search_1 is untouched by a gb_search_2 budget (Mike 2026-10-16).
+    """
+    out = {}
+    for suffix, attr in _INMODEL_BUDGET_KNOBS:
+        knob = _stage_knob(name, suffix)
+        raw = (os.environ.get(knob) or "").strip() if knob else ""
+        if not raw:
+            continue
+        try:
+            n = int(raw)
+        except ValueError:
+            raise ValueError(f"{knob}={raw!r} must be an integer >= 1.") from None
+        if n < 1:
+            raise ValueError(f"{knob}={n} must be >= 1.")
+        out[attr] = n
+    return out or None
+
+
 def search_stage_noise_max_rounds(name: str) -> int:
     """``GB_SEARCH_{N}_NOISE_MAX_ROUNDS``: the cycle-end convergence's ceiling."""
     knob = _stage_knob(name, "NOISE_MAX_ROUNDS")
@@ -1046,6 +1089,18 @@ def search_stage_profiles():
                   f"at the stage's fresh entry the per-(walker, band) cold-lnL max "
                   f"is re-learned and the per-band barren valve revived", flush=True)
             prof = dict(prof, reset_valves=True)
+        # inmodel_budget (2026-10-16): written only when a knob is set, so
+        # the other profile dicts stay byte-identical; applied at EVERY entry
+        # of the stage (a resume included) by SearchStageProfileStep.
+        budget = search_stage_inmodel_budget(name)
+        if budget:
+            _num = name.rpartition("_")[2]
+            print(f"[V9-STAGE {name}] profile inmodel_budget={budget} from "
+                  f"GB_SEARCH_{_num}_NUM_REPEAT_PROPOSALS / _INMODEL_GROUP_ITERS / "
+                  f"_INMODEL_CONVERGE_ITERS (the in-model moves' repeats per pass "
+                  f"and group window in passes, the RJ moves' newborn polish window "
+                  f"in repeats; the other stages run the moves as built)", flush=True)
+            prof = dict(prof, inmodel_budget=budget)
         out.append((name, prof, sampled))
     return tuple(out)
 
@@ -2069,13 +2124,19 @@ def build_fit():
     def _search_stage(name, *, noise_mode, phase_maximize, opt_snr,
                       peak_min_snr, reset_band_max=False, warm_every=1,
                       seed_only=False, prior_births=None, reset_valves=False,
-                      source_every=None, noise_max_rounds=_CYCLE_END_MAX_ROUNDS):
+                      source_every=None, noise_max_rounds=_CYCLE_END_MAX_ROUNDS,
+                      inmodel_budget=None):
         # the stage profile as the step sees it; reset_band_max is only
         # written when set so the other stages' dicts stay byte-identical
         _profile = dict(phase_maximize=phase_maximize, opt_snr=opt_snr,
                         peak_min_snr=peak_min_snr)
         if reset_band_max:
             _profile["reset_band_max"] = True
+        if inmodel_budget:
+            # GB_SEARCH_{N}_NUM_REPEAT_PROPOSALS / _INMODEL_GROUP_ITERS /
+            # _INMODEL_CONVERGE_ITERS (2026-10-16): applied by the step at
+            # EVERY entry of the stage; written only when set
+            _profile["inmodel_budget"] = dict(inmodel_budget)
         if prior_births is not None:
             # move-scoped: what the shared rj_prior_removal proposes HERE
             _profile["prior_births"] = bool(prior_births)

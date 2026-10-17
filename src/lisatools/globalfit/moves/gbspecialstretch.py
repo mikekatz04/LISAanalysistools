@@ -4179,6 +4179,14 @@ GB_RANK_LIVE_ATTRS = (
     # without shipping them the head's 25 / 25 would reach one walker in four.
     "inmodel_repeats_newborn",
     "inmodel_repeats_survivor",
+    # Stage profile ``inmodel_budget`` (Mike 2026-10-16: gb_search_2 spends
+    # less time in the in-model steps, gb_search_1 unchanged): the pure
+    # in-model moves' group window (passes) and the RJ moves' newborn
+    # convergence window (repeats); ``num_repeat_proposals`` above carries
+    # the repeats per pass. Without shipping them the head's values would
+    # reach one walker in four (see ``recipe.apply_inmodel_budget``).
+    "inmodel_group_iters",
+    "inmodel_converge_iters",
 )
 
 
@@ -18008,8 +18016,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     "stage-scoped valve's decision to make, not this one's.",
                     self.name, str(self.branch_name).upper())
             return None
-        if not getattr(self, "_group_armed_logged", False):
+        # Logged once per move -- and again whenever a stage profile moves
+        # the window or the repeats per pass (``inmodel_budget``, 2026-10-16).
+        _group_key = (int(self.inmodel_group_iters), int(self.num_repeat_proposals))
+        if (not getattr(self, "_group_armed_logged", False)
+                or getattr(self, "_group_armed_key", _group_key) != _group_key):
             self._group_armed_logged = True
+            self._group_armed_key = _group_key
             logger.info(
                 "[GB_IMGROUP %s] armed: window %d pass(es), dll %.2f "
                 "(scale=%s), max %d passes, %d repeats/source/pass.",
@@ -18357,8 +18370,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # verification line that does its own arithmetic is not a
         # verification line.
         _n_gate = self._converge_gate_rungs()
-        if not getattr(self, "_converge_armed_logged", False):
+        # Logged once per move -- and again whenever a stage profile moves
+        # the window (``inmodel_budget``, 2026-10-16), so the log says which
+        # window the blocks that follow ran under.
+        _armed_key = (str(mode), int(self.inmodel_converge_iters),
+                      int(getattr(self, "inmodel_converge_iters_survivor", 0) or 0))
+        if (not getattr(self, "_converge_armed_logged", False)
+                or getattr(self, "_converge_armed_key", _armed_key) != _armed_key):
             self._converge_armed_logged = True
+            self._converge_armed_key = _armed_key
             logger.info(
                 "[GB_IMCONV %s] armed (%s): window %d%s, dll %.2f "
                 "(= %.3f lnL/repeat), ceiling %d, stop_frac %.2f, "

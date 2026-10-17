@@ -742,7 +742,12 @@ class LauncherRecipeTest(unittest.TestCase):
         self.assertEqual(_noise_moves(s1), [])
         self.assertEqual(s2.step_kwargs["profile"], dict(
             phase_maximize=False, opt_snr=5.0, peak_min_snr=6.25, prior_births=True,
-            reset_valves=True))
+            reset_valves=True,
+            # 2026-10-16 (Mike): gb_search_2 spends less time in the in-model
+            # steps -- 15 repeats/pass, a 2-pass group window, a 100-repeat
+            # newborn polish window; gb_search_1 carries no budget (as built)
+            inmodel_budget=dict(num_repeat_proposals=15, inmodel_group_iters=2,
+                                inmodel_converge_iters=100)))
         self.assertEqual({m.name: m.every for m in s2.moves if m.name in SRC},
                          dict.fromkeys(SRC, 1))
         noise = _noise_moves(s2)

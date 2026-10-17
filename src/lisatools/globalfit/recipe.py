@@ -1189,6 +1189,79 @@ def apply_inmodel_repeats(moves, repeats, tag: str = "pe") -> dict:
     return changed
 
 
+#: The stage profile's ``inmodel_budget`` keys and which GB moves each one
+#: reaches: the repeats per pass and the group window (in passes) go to the
+#: PURE in-model moves (``is_rj_prop`` False: in_model, in_model_fstat,
+#: in_model_removal), the newborn convergence window (in repeats) to the RJ
+#: moves, whose in-model polish ``_converge_state_for`` reads it per block.
+INMODEL_BUDGET_KEYS = {
+    "num_repeat_proposals": "in_model",
+    "inmodel_group_iters": "in_model",
+    "inmodel_converge_iters": "rj",
+}
+
+
+def apply_inmodel_budget(gb_moves, budget, tag: str = "gb_search") -> dict:
+    """Set a stage's in-model budget on the GB moves; restore the built one otherwise.
+
+    Mike, 2026-10-16: "Gb search 2 should spend less time in the in-model
+    mixing but maybe with some quick checker to make sure the logL is not
+    seriously improving during those steps anymore"; gb_search_1 stays as
+    is. The checkers already exist -- the per-sub-band group rule of the
+    pure in-model moves (``[GB_IMGROUP]``: passes until no open sub-band
+    gained D/2 over the window) and the per-row rule of the RJ moves'
+    polish (``[GB_IMCONV]``: a row retires once its best gain stalls over
+    the window) -- and both windows are FLOORS on how long a step runs, so
+    a stage shortens its in-model time by shortening the windows, not by
+    cutting the checkers out. Measured on the 1yr flagship (job 774,
+    gb_search_2, 2026-10-16): the three dedicated in-model legs spent 3 x
+    25-repeat warm-up passes (half of each 13-15 min leg) before any
+    sub-band could shut, for a net cold lnL change per propose of about
+    zero; the RJ moves' newborn polish ran 255 repeats per row against a
+    250-repeat floor for a median gain of 0.2 nats (the top tenth +22).
+
+    ``budget`` is ``{key: int}`` over :data:`INMODEL_BUDGET_KEYS` (any
+    subset) or ``None``. Every key is written on every call: a key the
+    stage gives takes its value, a key it omits goes back to the value the
+    move was BUILT with (stashed on the move at the first call), so a stage
+    without a budget runs the constructor's -- the move objects are shared
+    across stages and a later stage must not inherit an earlier one's
+    budget. Returns ``{"<move>.<key>": (old, new)}`` for what changed.
+    """
+    want = {}
+    for k, v in dict(budget or {}).items():
+        if k not in INMODEL_BUDGET_KEYS:
+            raise ValueError(
+                f"inmodel_budget key {k!r} is not one of {sorted(INMODEL_BUDGET_KEYS)}.")
+        n = int(v)
+        if n < 1:
+            raise ValueError(f"inmodel_budget {k}={v!r} must be >= 1.")
+        want[k] = n
+    changed = {}
+    for m in gb_moves:
+        is_rj = bool(getattr(m, "is_rj_prop", False))
+        built = getattr(m, "_inmodel_budget_built", None)
+        if built is None:
+            built = {k: int(getattr(m, k)) for k in INMODEL_BUDGET_KEYS if hasattr(m, k)}
+            try:
+                m._inmodel_budget_built = built
+            except AttributeError:   # a frozen stand-in: nothing to restore later
+                pass
+        for k, family in INMODEL_BUDGET_KEYS.items():
+            if (family == "rj") != is_rj or k not in built:
+                continue
+            new = int(want.get(k, built[k]))
+            old = int(getattr(m, k))
+            if old != new:
+                setattr(m, k, new)
+                changed[f"{getattr(m, 'name', type(m).__name__)}.{k}"] = (old, new)
+    if changed:
+        logger.info("[V9-STAGE %s] in-model budget set on entry (%s): %s.", tag,
+                    "the stage's values" if want else "the built values restored",
+                    ", ".join(f"{k} {o} -> {n}" for k, (o, n) in changed.items()))
+    return changed
+
+
 class ReplicaPERecipeStep(PERecipeStep):
     """full_pe's twin that ENDS when the large-scale metrics converge.
 
@@ -1976,7 +2049,7 @@ class SearchStageProfileStep(RJRecipeStep):
         self.profile = dict(profile or {})
         _unknown = sorted(set(self.profile) - {
             "phase_maximize", "opt_snr", "peak_min_snr", "reset_band_max",
-            "prior_births", "reset_valves"})
+            "prior_births", "reset_valves", "inmodel_budget"})
         if _unknown:
             raise ValueError(
                 f"SearchStageProfileStep({stage_name!r}): unknown profile "
@@ -2894,6 +2967,12 @@ class SearchStageProfileStep(RJRecipeStep):
                         "unaffected)" if getattr(m, "rj_replace", False)
                         else "")
                 m.phase_maximize = bool(pm)
+
+        # The stage's in-model budget, on EVERY entry: the keys the profile
+        # gives are set, the ones it omits go back to the built values
+        # (apply_inmodel_budget). ``GB_SEARCH_{N}_NUM_REPEAT_PROPOSALS`` /
+        # ``_INMODEL_GROUP_ITERS`` / ``_INMODEL_CONVERGE_ITERS`` fill it.
+        apply_inmodel_budget(gb_moves, prof.get("inmodel_budget"), tag)
 
         peak = prof.get("peak_min_snr")
         if peak is not None:

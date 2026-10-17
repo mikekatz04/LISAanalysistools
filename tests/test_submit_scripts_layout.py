@@ -143,6 +143,16 @@ COLD_TO_HOT_LINE = {
 }
 COLD_TO_HOT_KNOBS = tuple(COLD_TO_HOT_LINE)
 
+# 2026-10-16 (Mike): gb_search_2 spends less time in the in-model steps, the
+# checkers (group rule, per-row polish rule) kept and their windows shortened
+# in that stage only; gb_search_1 as built (25 / 3 / 250).
+SEARCH2_INMODEL_LINE = {
+    "GB_SEARCH_2_NUM_REPEAT_PROPOSALS": "15",
+    "GB_SEARCH_2_INMODEL_GROUP_ITERS": "2",
+    "GB_SEARCH_2_INMODEL_CONVERGE_ITERS": "100",
+}
+SEARCH2_INMODEL_KNOBS = tuple(SEARCH2_INMODEL_LINE)
+
 _STUB_SBATCH = """#!/usr/bin/env bash
 for a in "$@"; do printf '%s\\n' "$a"; done
 exit 0
@@ -912,6 +922,9 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             # 2026-10-13: the GB warm-start self-refit block (code default
             # OFF); WarmSelfLauncherTest pins it.
             *WARM_SELF_KNOBS,
+            # 2026-10-16: the gb_search_2 in-model budget (stage profile
+            # inmodel_budget; unset = as built).
+            *SEARCH2_INMODEL_KNOBS,
             # V9-26 (2026-10-02): the EMRI direct-to-WDM scoring path's knobs
             # (default full = the v8 path); SixMonthEMRIDirectTest pins the block.
             "EMRI_LIKELIHOOD", "EMRI_BATCH_MAX_SIZE", "EMRI_DIRECT_TABLE",
@@ -1889,6 +1902,9 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             # 2026-10-13: the GB warm-start self-refit block, mirrored in the
             # 3mo twin (inert there: no GB_WARM_START_COMPONENTS)
             *WARM_SELF_KNOBS,
+            # 2026-10-16: the gb_search_2 in-model budget, mirrored in the
+            # 3mo twin
+            *SEARCH2_INMODEL_KNOBS,
             # 3MO-8 (2026-10-02): nor is the 6mo EMRI direct-to-WDM block: no
             # EMRI branch is armed here, and its lookup table is built for the
             # 6-month grid's Nf and dt only.

@@ -4946,6 +4946,22 @@ export GB_SEARCH_1_SOURCE_EVERY=${GB_SEARCH_1_SOURCE_EVERY:-1}   # 2026-10-10 ru
 export GB_SEARCH_2_SOURCE_EVERY=${GB_SEARCH_2_SOURCE_EVERY:-1}
 export GB_SEARCH_2_NOISE_MODE=${GB_SEARCH_2_NOISE_MODE:-cycle_end}
 export GB_SEARCH_2_RESET_VALVES=${GB_SEARCH_2_RESET_VALVES:-1}
+# ---- gb_search_2 IN-MODEL BUDGET (Mike 2026-10-16: "Gb search 2 should spend
+# less time in the in-model mixing but maybe with some quick checker to make
+# sure the logL is not seriously improving during those steps anymore";
+# gb_search_1 stays as is). The checkers stay (the [GB_IMGROUP] group rule of
+# the pure in-model moves, the [GB_IMCONV] per-row rule of the RJ polish);
+# both windows are FLOORS, so gb_search_2 shortens them: repeats per pass 25
+# -> 15, group window 3 -> 2 passes, newborn polish window 250 -> 100 (the
+# other stages run the moves as built). Measured on the 1yr flagship job 774
+# (2026-10-16): the dedicated in-model legs' net cold lnL per propose was
+# about zero and half of each leg was warm-up passes; the newborn polish ran
+# 255 repeats per row for a median gain of 0.2 nats. The flagship template
+# carries the full note. Unset any of the three on the line to keep that
+# knob as built.
+export GB_SEARCH_2_NUM_REPEAT_PROPOSALS=${GB_SEARCH_2_NUM_REPEAT_PROPOSALS:-15}
+export GB_SEARCH_2_INMODEL_GROUP_ITERS=${GB_SEARCH_2_INMODEL_GROUP_ITERS:-2}
+export GB_SEARCH_2_INMODEL_CONVERGE_ITERS=${GB_SEARCH_2_INMODEL_CONVERGE_ITERS:-100}
 export GB_SEARCH_3_WARM_EVERY=5
 
 # ---- MID-ITERATION CHECKPOINTS (user ask 2026-09-24: "make sure there are

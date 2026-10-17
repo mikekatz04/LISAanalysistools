@@ -196,6 +196,26 @@ the next.
   population), `in_model_fstat` 550-640, `rj_prior_removal` 1140-1180 (the
   largest fixed cost: prior births at SNR 5), `in_model_removal` 540-605,
   sobbh 10-16 / mbh 25-52 / emri 57-71, noise block 7.5 s, save 27 s.
+  1yr flagship `gb_search_2` (job 774, 2026-10-16, before the stage-2
+  in-model budget): cycle 146 min, in-model repeats 74 min of it (the polish
+  inside the RJ moves 35 min: warm 11 / fstat 8.5 / prior 15; the three
+  dedicated `in_model*` legs 40 min at 10-12 passes x 25 repeats each,
+  passes 1-3 = 129-147 s and unable to shut a sub-band, pass 4 shuts 90 %).
+  Reading the in-model cost against its gain: `[GB_IMGROUP in_model*] pass
+  k: cold dlnL` summed over a propose (early search 1 +149, late search 1
+  +12 / -12 / -17, search 2 -124 / -170 / -251 with swings of -760..+200 =
+  mixing and swap dips, not improvement); `[GB_IMCONV] ... by rung: GATED`
+  (cold rows: mature converge 92-95 % at ~28 repeats for +0.04 nats,
+  newborns 70-83 % at the full window for a median +0.2 and a top tenth
+  +22) and the `calibration` line's max (thousands = a newborn landing on
+  a real source; that tail is where the stage's lnL climb comes from).
+  Since 2026-10-16 the launchers give `gb_search_2` a shorter budget
+  (`GB_SEARCH_2_NUM_REPEAT_PROPOSALS=15`, `_INMODEL_GROUP_ITERS=2`,
+  `_INMODEL_CONVERGE_ITERS=100`; navigation 2.9's knob table), expected
+  ~26 % off the cycle; the first tar after it should show the `[GB_IMGROUP]`
+  armed line at `window 2 pass(es) ... 15 repeats` and the `[GB_IMCONV]`
+  armed line at `window 100` once the stage is entered, and `gb_search_1`
+  unchanged at 25 / 3 / 250.
 - Timings that are NOT a regression: the first call of a batched MBH or
   EMRI move pays JAX / CUDA JIT (minutes per rank per process); a job's
   first source block is 10x its steady state. The first 10 rounds of a

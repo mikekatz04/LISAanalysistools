@@ -4368,6 +4368,12 @@ export STAGE_V9_SEARCH=1
 # entirely and gb_search_1 leads the recipe. 0 is the documented off switch
 # and restores the pre-2026-09-26 recipe exactly.
 export GB_SEARCH_SEED_ITERS=0
+# gb_search_2 in-model budget (Mike 2026-10-16; the 6mo v9 source carries the
+# note): repeats per pass 25 -> 15, group window 3 -> 2 passes, newborn polish
+# window 250 -> 100 in gb_search_2 only; the other stages run the moves as built.
+export GB_SEARCH_2_NUM_REPEAT_PROPOSALS=${GB_SEARCH_2_NUM_REPEAT_PROPOSALS:-15}
+export GB_SEARCH_2_INMODEL_GROUP_ITERS=${GB_SEARCH_2_INMODEL_GROUP_ITERS:-2}
+export GB_SEARCH_2_INMODEL_CONVERGE_ITERS=${GB_SEARCH_2_INMODEL_CONVERGE_ITERS:-100}
 # GB_SEARCH_3_WARM_EVERY IS DELETED WITH IT. It cadences rj_warm_search inside
 # gb_search_3, and there is no warm move to cadence -- leaving it exported
 # would be a knob that resolves and reaches nothing, which is the recurring
