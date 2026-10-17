@@ -220,8 +220,15 @@ the next.
   EMRI move pays JAX / CUDA JIT (minutes per rank per process); a job's
   first source block is 10x its steady state. The first 10 rounds of a
   plateau search are slower than the rest.
-- The F-stat epochs: `DONE.json` per epoch (`wall_seconds`, `n_peaks`,
-  `clock`), the `[stageA]` line (nodes x sky evaluations; at 9mo 996k f0
+- The F-stat epochs: the `F-stat grid fit epoch k starting (walker_ref=w
+  ... rule=rotate ...)` line names the cold walker whose residual the grid
+  was fitted to. In the search stages that walker ROTATES by epoch since
+  2026-10-16 (`GB_FSTAT_SEARCH_REF`, epoch k fits walker k mod nwalkers; a
+  run of the same walker on consecutive epochs means `min` is set); before
+  that it was the min-lnL walker, which on the 1yr job 774 fitted walker 1
+  on five consecutive search-2 epochs while the fewest-leaf walker never
+  got a grid. PE draws a seeded random walker. `DONE.json` per epoch
+  (`wall_seconds`, `n_peaks`, `clock`), the `[stageA]` line (nodes x sky evaluations; at 9mo 996k f0
   nodes x adaptive sky up to 512 = 22 min before the shut-band skip, 2.3-7.7
   min after) and stage B (per-peak grids, ~1 min at a few hundred peaks, 13
   min at 1772). Peak counts should fall over a stage (9mo search 2: 463 ->

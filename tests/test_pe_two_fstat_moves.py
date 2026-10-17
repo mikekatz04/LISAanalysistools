@@ -54,7 +54,8 @@ from lisatools.sampling import fstat_proposal as FP
 #: the knobs this module is about, cleared unless a test sets them
 _KNOBS = ("GB_FSTAT_REFIT_EVERY_PE", "GB_FSTAT_REFIT_EVERY_PE_GB_FREE",
           "GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE", "GB_PE_RJ_FSTAT_RESIDUAL_SPLIT",
-          "GB_FSTAT_PE_REF", "GB_FSTAT_PE_REF_SEED", "GB_FSTAT_GB_FREE",
+          "GB_FSTAT_PE_REF", "GB_FSTAT_PE_REF_SEED", "GB_FSTAT_SEARCH_REF",
+          "GB_FSTAT_GB_FREE",
           "GB_FSTAT_FIT_PER_MOVE", "GB_FSTAT_FORCE_REFIT", "FSTAT_PEAK_MIN_SNR",
           "FSTAT_PEAK_MIN_F")
 
@@ -267,14 +268,18 @@ class ModeTest(_Isolated):
         self.assertFalse(r._fstat_gb_free_on())
         self.assertEqual(r._fstat_fit_ref_rule(), "random")  # ONE random walker
         self.assertEqual(r._fstat_root, os.path.join(self.root, "shared_pe_residual"))
-        # and the search moves are untouched: live residual, MIN walker, own root
+        # and the search moves are untouched by the PE knob: live residual,
+        # the ROTATING walker (2026-10-16; GB_FSTAT_SEARCH_REF), own root
         s = _bare(self.root, "rj_fstat_search", search=True)
         self.assertFalse(s._fstat_gb_free_on())
-        self.assertEqual(s._fstat_fit_ref_rule(), "min")
+        self.assertEqual(s._fstat_fit_ref_rule(), "rotate")
         self.assertEqual(s._fstat_root, os.path.join(self.root, "shared_search"))
         os.environ["GB_FSTAT_PE_REF"] = "max"
-        self.assertEqual(s._fstat_fit_ref_rule(), "min")
+        self.assertEqual(s._fstat_fit_ref_rule(), "rotate")
         self.assertEqual(r._fstat_fit_ref_rule(), "max")    # follows the PE knob
+        os.environ["GB_FSTAT_SEARCH_REF"] = "min"
+        self.assertEqual(s._fstat_fit_ref_rule(), "min")    # the search knob
+        self.assertEqual(r._fstat_fit_ref_rule(), "max")    # not the PE moves
 
     def test_three_distinct_roots(self):
         roots = {m._fstat_root for m in (

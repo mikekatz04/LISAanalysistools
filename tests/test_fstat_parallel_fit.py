@@ -781,7 +781,7 @@ class PERandomReferenceTest(unittest.TestCase):
         return move
 
     def _env(self, **kw):
-        keys = ("GB_FSTAT_PE_REF", "GB_FSTAT_PE_REF_SEED")
+        keys = ("GB_FSTAT_PE_REF", "GB_FSTAT_PE_REF_SEED", "GB_FSTAT_SEARCH_REF")
         env = {k: v for k, v in os.environ.items() if k not in keys}
         env.update(kw)
         return mock.patch.dict(os.environ, env, clear=True)
@@ -802,10 +802,19 @@ class PERandomReferenceTest(unittest.TestCase):
             picks = {self._move()._fstat_fit_ref_from(lls, k) for k in range(50)}
         self.assertEqual(picks, {2})
 
-    def test_search_min_knob_and_epochless_callers_keep_the_min(self):
+    def test_search_rotates_min_knobs_and_epochless_callers_keep_the_min(self):
+        """2026-10-16 (Mike): a search epoch cycles through the walkers (epoch
+        k -> walker k mod nwalkers), GB_FSTAT_SEARCH_REF=min restores the
+        min-lnL rule; an epochless caller (the per-propose centre) and the PE
+        min knob keep the argmin."""
         with self._env():
-            self.assertEqual(self._move(search=True)._fstat_fit_ref_from(self.LLS, 3), 6)
+            self.assertEqual(self._move(search=True)._fstat_fit_ref_from(self.LLS, 3), 3)
+            self.assertEqual([self._move(search=True)._fstat_fit_ref_from(self.LLS, k)
+                              for k in range(len(self.LLS))], list(range(len(self.LLS))))
+            self.assertEqual(self._move(search=True)._fstat_fit_ref_from(self.LLS), 6)
             self.assertEqual(self._move()._fstat_fit_ref_from(self.LLS), 6)
+        with self._env(GB_FSTAT_SEARCH_REF="min"):
+            self.assertEqual(self._move(search=True)._fstat_fit_ref_from(self.LLS, 3), 6)
         with self._env(GB_FSTAT_PE_REF="min"):
             self.assertEqual(self._move()._fstat_fit_ref_from(self.LLS, 3), 6)
         with self._env(GB_FSTAT_PE_REF="best"):
@@ -828,7 +837,8 @@ class PERandomReferenceTest(unittest.TestCase):
             self.assertEqual(self._move()._fstat_fit_ref_from(lls, 4), 2)
             self.assertEqual(self._move()._fstat_fit_ref_from(self.LLS, 4), 0)
             self.assertEqual(self._move()._fstat_fit_ref_from(self.LLS), 6)
-            self.assertEqual(self._move(search=True)._fstat_fit_ref_from(self.LLS, 4), 6)
+            # the PE knob never reaches a search move: it rotates (epoch 4 -> walker 4)
+            self.assertEqual(self._move(search=True)._fstat_fit_ref_from(self.LLS, 4), 4)
 
     def test_the_fit_and_the_centre_table_pass_the_epoch(self):
         from lisatools.globalfit.moves import gbspecialstretch as gbs

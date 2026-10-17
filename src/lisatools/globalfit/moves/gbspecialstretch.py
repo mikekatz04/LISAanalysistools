@@ -7394,13 +7394,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def _fstat_fit_ref_rule(self) -> str:
         """How this move picks the walker an F-stat EPOCH is fitted to.
 
-        ``"min"`` in search (always) and ``"random"`` in PE by default
-        (user ruling 2026-10-06): a PE refit fits a UNIFORMLY RANDOM cold
-        walker instead of the min-lnL one. ``GB_FSTAT_PE_REF=min`` restores
-        the min-lnL rule in PE; it has no effect on search moves
-        (:attr:`fstat_search_residual`). The PE live-residual move
-        (:attr:`fstat_pe_residual`) is a PE move here: it follows
-        ``GB_FSTAT_PE_REF`` like the galaxy move (ruling 2026-10-12).
+        ``"rotate"`` in search by default (``GB_FSTAT_SEARCH_REF``; user
+        ruling 2026-10-16) and ``"random"`` in PE by default
+        (``GB_FSTAT_PE_REF``; user ruling 2026-10-06). The two knobs are
+        independent: a PE knob has no effect on a search move
+        (:attr:`fstat_search_residual`) and the search knob none on a PE
+        move. The PE live-residual move (:attr:`fstat_pe_residual`) is a PE
+        move here: it follows ``GB_FSTAT_PE_REF`` like the galaxy move
+        (ruling 2026-10-12).
+
+        Why rotate in search (Mike 2026-10-16: "let's rotate the fits during
+        search. Not random, but cycle through ... during gb search 1 and
+        2"): the search rule had been the MIN-lnL cold walker since
+        2026-09-21 ("the residual with the most signal left"). On the 1yr
+        flagship's gb_search_2 (job 774) that fitted walker 1 on five
+        consecutive epochs while the walker with the FEWEST leaves (walker
+        0, by 10-33 leaves) never got a grid: with four walkers within a few
+        hundred nats the lnL spread is noise-model and typical-set spread,
+        not missing sources, so the min-lnL proxy picks one walker's
+        residual over and over. Cycling through the walkers by epoch gives
+        every residual a grid every ``nwalkers`` epochs, deterministically
+        (a resumed store re-derives the walker from the epoch number, as the
+        PE random stream does). ``GB_FSTAT_SEARCH_REF=min`` restores the
+        min-lnL rule.
 
         Why random in PE: in PE every walker is a posterior sample, and the
         min-lnL walker is a systematically atypical one, so fitting it every
@@ -7410,14 +7426,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``GB_FSTAT_PE_REF=max`` fits the max-lnL cold walker instead -- a
         manual one-relaunch override (Mike 2026-10-07: pair it with
         ``GB_FSTAT_FORCE_REFIT=1`` to refit the PE grid on a walker other
-        than the min-lnL one the earlier epochs used).
+        than the min-lnL one the earlier epochs used). ``rotate`` is accepted
+        there too, for symmetry; the ruled PE default stays ``random``.
         """
         if self.fstat_search_residual and not getattr(self, "fstat_pe_residual", False):
-            return "min"
+            rule = os.environ.get("GB_FSTAT_SEARCH_REF", "rotate").strip().lower()
+            if rule not in ("rotate", "min"):
+                raise ValueError(
+                    f"GB_FSTAT_SEARCH_REF must be 'rotate' or 'min'; got {rule!r} "
+                    "(Mike 2026-10-16: the search fits cycle through the walkers, "
+                    "not at random)")
+            return rule
         rule = os.environ.get("GB_FSTAT_PE_REF", "random").strip().lower()
-        if rule not in ("random", "min", "max"):
+        if rule not in ("random", "min", "max", "rotate"):
             raise ValueError(
-                f"GB_FSTAT_PE_REF must be 'random', 'min' or 'max'; got {rule!r}")
+                f"GB_FSTAT_PE_REF must be 'random', 'min', 'max' or 'rotate'; got {rule!r}")
         return rule
 
     def _fstat_fit_ref_from(self, lls, epoch=None):
@@ -7478,6 +7501,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if rule == "max":
             finite = np.where(np.isfinite(lls), lls, -np.inf)
             return int(np.argmax(finite))
+        if rule == "rotate":
+            # Search default since 2026-10-16: cycle through the cold walkers
+            # with a finite lnL, in walker order, one per epoch -- epoch k
+            # fits walker ``pool[k % len(pool)]``. Deterministic in the epoch
+            # (a resume re-derives it), every residual gets a grid every
+            # ``nwalkers`` epochs, no walker is skipped or repeated.
+            pool = np.flatnonzero(np.isfinite(lls))
+            if pool.size == 0:
+                pool = np.arange(lls.size)
+            return int(pool[int(epoch) % pool.size])
         if rule == "random":
             pool = np.flatnonzero(np.isfinite(lls))
             if pool.size == 0:
@@ -32291,9 +32324,10 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             _ll_ref, _ll_spread = float("nan"), float("nan")
         logger.info(
             "%s: F-stat grid fit epoch %d starting (walker_ref=%d GLOBAL on "
-            "rank %d row %d, lnL=%.3f, cold-walker lnL spread=%.3f, "
+            "rank %d row %d, rule=%s, lnL=%.3f, cold-walker lnL spread=%.3f, "
             "n_compute=%d, cache %s)",
-            self.name, k, w_global, owner_rank, local_index, _ll_ref,
+            self.name, k, w_global, owner_rank, local_index,
+            self._fstat_fit_ref_rule(), _ll_ref,
             _ll_spread, n_compute, cache_dir)
 
     def _run_fstat_fit(self, model, k: int, branches=None):

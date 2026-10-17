@@ -3698,6 +3698,9 @@ export GB_TEMPER_SKIP_SHUTOFF_BANDS=1
 # >>> is not falling by the third epoch this is a fixed ~1800 s/iteration
 # >>> bill and should go back to 5 or 10.
 export GB_FSTAT_REFIT_EVERY=2      # SEARCH stages: every 2nd iteration
+# Search epochs cycle through the cold walkers (Mike 2026-10-16; the 6mo v9
+# source carries the note); min = the 2026-09-21 min-lnL rule.
+export GB_FSTAT_SEARCH_REF=${GB_FSTAT_SEARCH_REF:-rotate}
 # 1 -> 2 (2026-09-28, Mike: "let's do fstat refit every two
 # iterations"; an intermediate 10 was staged and superseded). Measured on job 662
 # iteration 5: the refit cost 1129 s of a 5564 s iteration (20%, epochs
