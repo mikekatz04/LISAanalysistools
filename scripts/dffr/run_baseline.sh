@@ -2,16 +2,20 @@
 # * Baseline of the existing STFT GB response for one backend (step 0 of the DFFR integration).
 # What each part records, and the results, are in docs/response/dffr/tests.md.
 #
-# Usage: run_baseline.sh cpu|gpu OUTPUT_ROOT [PART ...]
+# Usage: run_baseline.sh --device cpu|gpu OUTPUT_ROOT [PART ...]   (the older form drops --device)
 #   PART: environment golden oracle benchmarks tests   (the default, in this order)
 #         gbgpu_tests lat_tests                         (the two halves of tests)
 #         golden_l1 benchmarks_l1                       (need MOJITO_L1, a complete Mojito L1 file)
-# Environment: PYTHON (default python), GBGPU_ROOT (default: next to this LAT clone), MOJITO_L1,
+# Environment: PYTHON (default python), LAT_ROOT (default: the LAT clone of this script; point it
+#   at a frozen clone to run that clone's scripts and record its commit), GBGPU_ROOT (default:
+#   next to LAT_ROOT), MOJITO_L1,
 #   BENCH_ARGS (extra arguments for stft_benchmarks.py, e.g. the GPU segment count and batches).
 set -euo pipefail
 
-usage="usage: run_baseline.sh cpu|gpu OUTPUT_ROOT [PART ...]"
+usage="usage: run_baseline.sh --device cpu|gpu OUTPUT_ROOT [PART ...]"
+[ "${1:-}" != "--device" ] || shift
 backend=${1:?$usage}
+case "$backend" in cpu | gpu) ;; *) echo "$usage" >&2 && exit 2 ;; esac
 output_root=${2:?$usage}
 shift 2
 parts=("$@")
@@ -20,7 +24,7 @@ parts=("$@")
 python_bin=${PYTHON:-python}
 mojito_l1=${MOJITO_L1:-}
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-lat_root=$(cd "$script_dir/../.." && pwd)
+lat_root=${LAT_ROOT:-$(cd "$script_dir/../.." && pwd)}
 gbgpu_root=${GBGPU_ROOT:-$(cd "$lat_root/../GBGPU" && pwd)}
 regression_dir="$output_root/regression/step0"
 benchmark_dir="$output_root/benchmarks/step0"
@@ -36,7 +40,7 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 [ "$backend" = gpu ] || export JAX_PLATFORMS=cpu
 export PYTHONWARNINGS=ignore::DeprecationWarning
 
-golden() { "$python_bin" "$script_dir/stft_golden_outputs.py" "$@"; }
+golden() { "$python_bin" "$lat_root/scripts/dffr/stft_golden_outputs.py" "$@"; }
 
 require_complete_mojito_file() {
     [ -n "$mojito_l1" ] || { echo "MOJITO_L1 is not set" >&2; return 2; }
@@ -70,7 +74,7 @@ benchmark_three_times() {
     shift
     for run in 1 2 3; do
         # shellcheck disable=SC2086
-        "$python_bin" "$script_dir/stft_benchmarks.py" --backend "$backend" "$@" \
+        "$python_bin" "$lat_root/scripts/dffr/stft_benchmarks.py" --backend "$backend" "$@" \
             --output "$benchmark_dir/${stem}_run$run.json" ${BENCH_ARGS:-}
     done
 }

@@ -7,13 +7,14 @@ The oracle configurations keep the array names of
 ``scripts/validation/stft_column_policy_oracle.py``, so the two captures can be compared.
 
 Usage:
-    python stft_golden_outputs.py --capture OUT.npz --backend cpu --mojito-l1 FILE.h5
-    python stft_golden_outputs.py --compare REF.npz --backend cpu --mojito-l1 FILE.h5
+    python stft_golden_outputs.py --capture OUT.npz --device cpu --mojito-l1 FILE.h5
+    python stft_golden_outputs.py --compare REF.npz --device cpu --mojito-l1 FILE.h5
     python stft_golden_outputs.py --compare-files REF.npz NEW.npz [--common-only]
 
 Comparisons ask for bit identity unless ``--rtol`` is given; differences are then normalised by
 the largest absolute value of each reference array. The exit status is 1 when any array fails.
-Fixtures, tolerances and results are recorded in ``docs/response/dffr/tests.md``.
+``--without-swap`` leaves out the two swap kernels, in captures and comparisons; the CPU runs use
+it from step 2 on. Fixtures, tolerances and results are recorded in ``docs/response/dffr/tests.md``.
 """
 
 import argparse
@@ -25,6 +26,8 @@ import numpy as np
 import stft_fixtures as fixtures
 
 METADATA_KEY = "__metadata__"
+#: Output names of get_swap_ll_stft (sw_*) and get_swap_ll_grad_stft (gswap_*).
+SWAP_OUTPUT_PREFIXES = ("sw_", "gswap_")
 
 # * Fisher evaluations: four sources, two per store window in the production fixtures.
 NUM_FISHER_SOURCES = 4
@@ -56,8 +59,16 @@ def first_sources(cells, count):
     return np.sort(np.asarray(selected))
 
 
-def evaluate(fixture):
-    """Every kernel output of one fixture, as host arrays keyed like the oracle script."""
+def is_swap_output(key):
+    """True for the outputs of get_swap_ll_stft and get_swap_ll_grad_stft (any fixture prefix)."""
+    return key.rsplit("/", 1)[-1].startswith(SWAP_OUTPUT_PREFIXES)
+
+
+def evaluate(fixture, with_swap=True):
+    """Every kernel output of one fixture, as host arrays keyed like the oracle script.
+
+    ``with_swap=False`` leaves out the two swap kernels, as the CPU runs do from step 2 on.
+    """
     comp = fixture.comp
     xp = comp.xp
     backend = fixture.description.get("backend")
@@ -74,11 +85,12 @@ def evaluate(fixture):
     outputs["d_h"] = comp.d_h_out
     outputs["h_h"] = comp.h_h_out
 
-    swap_names = ["sw_like_a", "sw_like_r", "sw_dha", "sw_dhr", "sw_aa", "sw_rr", "sw_ar"]
-    swap_terms = comp.get_swap_ll_stft(
-        params, params_partner, data_index=cells, noise_index=cells, start_freq_inds=starts
-    )
-    outputs.update(zip(swap_names, swap_terms))
+    if with_swap:
+        swap_names = ["sw_like_a", "sw_like_r", "sw_dha", "sw_dhr", "sw_aa", "sw_rr", "sw_ar"]
+        swap_terms = comp.get_swap_ll_stft(
+            params, params_partner, data_index=cells, noise_index=cells, start_freq_inds=starts
+        )
+        outputs.update(zip(swap_names, swap_terms))
 
     templates = xp.zeros((fixture.num_templates,) + fixture.template_shape, dtype=xp.complex128)
     # * Opposite signs on alternate sources, so the scatter both adds and subtracts.
@@ -96,11 +108,12 @@ def evaluate(fixture):
     outputs["grad"] = comp.get_ll_grad_stft(
         params, data_index=cells, noise_index=cells, start_freq_inds=starts
     )
-    grad_add, grad_remove = comp.get_swap_ll_grad_stft(
-        params, params_partner, data_index=cells, noise_index=cells, start_freq_inds=starts
-    )
-    outputs["gswap_a"] = grad_add
-    outputs["gswap_r"] = grad_remove
+    if with_swap:
+        grad_add, grad_remove = comp.get_swap_ll_grad_stft(
+            params, params_partner, data_index=cells, noise_index=cells, start_freq_inds=starts
+        )
+        outputs["gswap_a"] = grad_add
+        outputs["gswap_r"] = grad_remove
     if is_production:
         # * Envelope on: production templates use it, derivative paths default to off.
         outputs["grad_envelope"] = comp.get_ll_grad_stft(
@@ -110,16 +123,17 @@ def evaluate(fixture):
             start_freq_inds=starts,
             linear_envelope=True,
         )
-        grad_add, grad_remove = comp.get_swap_ll_grad_stft(
-            params,
-            params_partner,
-            data_index=cells,
-            noise_index=cells,
-            start_freq_inds=starts,
-            linear_envelope=True,
-        )
-        outputs["gswap_a_envelope"] = grad_add
-        outputs["gswap_r_envelope"] = grad_remove
+        if with_swap:
+            grad_add, grad_remove = comp.get_swap_ll_grad_stft(
+                params,
+                params_partner,
+                data_index=cells,
+                noise_index=cells,
+                start_freq_inds=starts,
+                linear_envelope=True,
+            )
+            outputs["gswap_a_envelope"] = grad_add
+            outputs["gswap_r_envelope"] = grad_remove
 
     fstat_sources = first_sources(fixture.cells, NUM_FSTAT_SOURCES)
     fstat_cells = xp.asarray(fixture.cells[fstat_sources])
@@ -159,14 +173,14 @@ def evaluate(fixture):
     return {key: fixtures.to_host(value) for key, value in outputs.items()}
 
 
-def capture(path, backend, config_names, mojito_l1):
+def capture(path, backend, config_names, mojito_l1, with_swap=True):
     orbits_cache = {}
     blob = {}
     descriptions = {}
     for name in config_names:
         fixture = fixtures.build_fixture(name, backend, mojito_l1, orbits_cache)
         fixture.description["backend"] = backend
-        outputs = evaluate(fixture)
+        outputs = evaluate(fixture, with_swap)
         for key, value in outputs.items():
             blob[f"{name}/{key}"] = value
         descriptions[name] = fixture.description
@@ -176,6 +190,7 @@ def capture(path, backend, config_names, mojito_l1):
         )
     metadata = fixtures.run_metadata(backend, mojito_l1)
     metadata["configs"] = descriptions
+    metadata["with_swap"] = with_swap
     blob[METADATA_KEY] = np.array(json.dumps(metadata))
     np.savez(path, **blob)
     print(f"[capture] wrote {path} ({len(blob) - 1} arrays)")
@@ -271,7 +286,14 @@ def main(argv=None):
     mode.add_argument("--capture", metavar="OUT_NPZ")
     mode.add_argument("--compare", metavar="REF_NPZ")
     mode.add_argument("--compare-files", nargs=2, metavar=("REF_NPZ", "NEW_NPZ"))
-    parser.add_argument("--backend", choices=["cpu", "gpu"], default="cpu")
+    parser.add_argument(
+        "--device",
+        "--backend",
+        dest="backend",
+        choices=["cpu", "gpu"],
+        default="cpu",
+        help="cpu or gpu (--backend is the older name)",
+    )
     parser.add_argument("--mojito-l1", default=None, help="Mojito L1 .h5 file (l1 fixtures)")
     parser.add_argument("--configs", nargs="+", choices=fixtures.ALL_CONFIGS, default=None)
     parser.add_argument(
@@ -282,15 +304,27 @@ def main(argv=None):
         action="store_true",
         help="with --compare-files, compare only the arrays both files hold",
     )
+    parser.add_argument(
+        "--without-swap",
+        action="store_true",
+        help="leave out get_swap_ll_stft and get_swap_ll_grad_stft, in captures and comparisons",
+    )
     args = parser.parse_args(argv)
+    with_swap = not args.without_swap
+
+    def without_swap(blob):
+        # * A reference that holds swap arrays still serves a run without them.
+        return {key: value for key, value in blob.items() if with_swap or not is_swap_output(key)}
 
     if args.capture:
         config_names = args.configs or list(fixtures.ALL_CONFIGS)
-        capture(args.capture, args.backend, config_names, args.mojito_l1)
+        capture(args.capture, args.backend, config_names, args.mojito_l1, with_swap)
         return 0
     if args.compare_files:
         reference_blob, candidate_blob = (load_blob(path) for path in args.compare_files)
-        return report(reference_blob, candidate_blob, args.rtol, args.common_only)
+        return report(
+            without_swap(reference_blob), without_swap(candidate_blob), args.rtol, args.common_only
+        )
 
     reference_blob = load_blob(args.compare)
     config_names = args.configs or stored_configs(reference_blob)
@@ -299,10 +333,12 @@ def main(argv=None):
     for name in config_names:
         fixture = fixtures.build_fixture(name, args.backend, args.mojito_l1, orbits_cache)
         fixture.description["backend"] = args.backend
-        for key, value in evaluate(fixture).items():
+        for key, value in evaluate(fixture, with_swap).items():
             candidate_blob[f"{name}/{key}"] = value
     reference_subset = {
-        key: value for key, value in reference_blob.items() if key.split("/", 1)[0] in config_names
+        key: value
+        for key, value in without_swap(reference_blob).items()
+        if key.split("/", 1)[0] in config_names
     }
     return report(reference_subset, candidate_blob, args.rtol)
 

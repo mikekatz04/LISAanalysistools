@@ -7,8 +7,8 @@ a production fixture of ``stft_fixtures.py``. Each point is one warm-up call fol
 times include the Python work of each method, which the global fit pays as well.
 
 Usage:
-    python stft_benchmarks.py --backend cpu --mojito-l1 FILE.h5 --output OUT.json
-    python stft_benchmarks.py --backend gpu --mojito-l1 FILE.h5 --num-segments 365 \\
+    python stft_benchmarks.py --device cpu --mojito-l1 FILE.h5 --output OUT.json
+    python stft_benchmarks.py --device gpu --mojito-l1 FILE.h5 --num-segments 365 \\
         --batch-sizes 1 10 100 1000 10000 --output OUT.json
 
 Results and the commands of each run are recorded in ``docs/response/dffr/tests.md``.
@@ -80,7 +80,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--backend", choices=["cpu", "gpu"], default="cpu")
+    parser.add_argument(
+        "--device",
+        "--backend",
+        dest="backend",
+        choices=["cpu", "gpu"],
+        default="cpu",
+        help="cpu or gpu (--backend is the older name)",
+    )
     parser.add_argument("--mojito-l1", default=None, help="Mojito L1 .h5 file (l1 fixtures)")
     parser.add_argument(
         "--config", choices=list(fixtures.PRODUCTION_CONFIGS), default="l1_tdi2_envelope"
@@ -89,8 +96,15 @@ def main(argv=None):
     parser.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 8, 64])
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--methods", nargs="+", choices=METHODS, default=list(METHODS))
+    parser.add_argument(
+        "--without-swap",
+        action="store_true",
+        help="leave out get_swap_ll_stft and get_swap_ll_grad_stft (CPU runs from step 2 on)",
+    )
     parser.add_argument("--output", required=True, metavar="OUT_JSON")
     args = parser.parse_args(argv)
+    if args.without_swap:
+        args.methods = [method for method in args.methods if "swap" not in method]
 
     fixture = fixtures.build_production_fixture(
         args.config,
