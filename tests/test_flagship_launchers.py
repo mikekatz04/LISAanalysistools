@@ -681,7 +681,7 @@ class EveryOtherKnobIsTheNineMonthsTest(unittest.TestCase):
                 self.assertEqual(same, [], f"{name}: declared deltas that do not differ: {same}")
 
     def test_the_v930_production_defaults_hold_everywhere(self):
-        line = {"MIDIT_CHECKPOINT": "0", "MBH_NTEMPS": "8", "EMRI_NTEMPS": "8",
+        line = {"MIDIT_CHECKPOINT": "0", "MBH_NTEMPS": "8", "EMRI_NTEMPS": "12",
                 "EMRI_TRAJ_WORKERS": "8", "MBH_WINDOW_DECIMATE": "2",
                 "SOBBH_EIGEN_INFO": "gram", "EMRI_EIGEN_INFO": "gram", "MBH_EIGEN_INFO": "gram",
                 "PSD_EIGEN_INFO": "fisher", "GALFOR_EIGEN_INFO": "fisher",
@@ -695,7 +695,9 @@ class EveryOtherKnobIsTheNineMonthsTest(unittest.TestCase):
                 "FSTAT_STAGEB_NSKY_MAX": "512", "FSTAT_STAGEB_GROUP_MAX_GB": "1.0",
                 # 2026-10-12: PE F-stat refit 150, the two PE F-stat moves, MBH sky-mode hops
                 "GB_FSTAT_REFIT_EVERY_PE": "150", "GB_FSTAT_REFIT_EVERY_PE_GB_FREE": "0",
-                "GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE": "6.5", "GB_PE_RJ_FSTAT_RESIDUAL_SPLIT": "0.5",
+                "GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE": "6.5",
+                # 2026-10-18 (Mike): split 0.5 -> 0.9, warm 0.1 -> 0.4
+                "GB_PE_RJ_FSTAT_RESIDUAL_SPLIT": "0.9", "GB_PE_RJ_WARM_FRACTION": "0.4",
                 "MBH_SKY_MOVE_BOTH_WEIGHT": "0.02", "MBH_SKY_MOVE_LAT_WEIGHT": "0.04",
                 "MBH_SKY_MOVE_LONG_WEIGHT": "0.02",
                 # 2026-10-13: the eigen jump mixture (10 % of the draws at 3 sigma)

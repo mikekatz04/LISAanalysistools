@@ -3112,10 +3112,13 @@ class PeTwoFstatMovesLauncherTest(unittest.TestCase):
         "GB_FSTAT_REFIT_EVERY_PE": "150",          # now the RESIDUAL move's
         "GB_FSTAT_REFIT_EVERY_PE_GB_FREE": "0",    # the galaxy: fit once
         "GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE": "6.5",
-        "GB_PE_RJ_FSTAT_RESIDUAL_SPLIT": "0.5",
-        # the totals the split divides are unchanged
+        # 2026-10-18 (Mike): split 0.5 -> 0.9 and warm 0.1 -> 0.4 -- on the
+        # 9mo job 773 the galaxy grid accepted 0.4 cold births per draw, the
+        # residual grid 2.5, the prior 2.5 and the warm self refit 18.6
+        "GB_PE_RJ_FSTAT_RESIDUAL_SPLIT": "0.9",
+        # the F-stat total the split divides is unchanged
         "GB_PE_RJ_FSTAT_FRACTION": "0.45",
-        "GB_PE_RJ_WARM_FRACTION": "0.1",
+        "GB_PE_RJ_WARM_FRACTION": "0.4",
     }
 
     def test_every_v9_launcher_exports_the_ruling(self):
@@ -3141,7 +3144,7 @@ class PeTwoFstatMovesLauncherTest(unittest.TestCase):
         # galaxy cadence / floor are hard, like GB_FSTAT_REFIT_EVERY_PE
         src = open(NINE_MO_V9).read()
         self.assertRegex(src, r"(?m)^export GB_PE_RJ_FSTAT_RESIDUAL_SPLIT="
-                              r"\$\{GB_PE_RJ_FSTAT_RESIDUAL_SPLIT:-0\.5\}$")
+                              r"\$\{GB_PE_RJ_FSTAT_RESIDUAL_SPLIT:-0\.9\}$")
         self.assertRegex(src, r"(?m)^export GB_FSTAT_REFIT_EVERY_PE_GB_FREE=0$")
         self.assertRegex(src, r"(?m)^export GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE=6\.5$")
 
@@ -3165,7 +3168,8 @@ class V930ProductionDefaultsTest(unittest.TestCase):
 
     LINE = {
         "MIDIT_CHECKPOINT": "0",
-        "MBH_NTEMPS": "8", "EMRI_NTEMPS": "8",
+        # 2026-10-18 (the EMRI sampling audit): EMRI 8 -> 12 rungs (T_max 16)
+        "MBH_NTEMPS": "8", "EMRI_NTEMPS": "12",
         "EMRI_TRAJ_WORKERS": "8",
         "MBH_WINDOW_DECIMATE": "2",
         "SOBBH_EIGEN_INFO": "gram", "EMRI_EIGEN_INFO": "gram", "MBH_EIGEN_INFO": "gram",
@@ -3261,7 +3265,10 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
         # 2026-10-18 (the EMRI sampling audit, item 6): EMRI guard 50 -> 100 --
         # the 9mo job 773 firings were the top rungs' own tail (72-100 nats on
         # leaves lost at 118-1262), not lost rungs
-        want = {"EMRI_LADDER_TMAX": "6", "EMRI_LADDER_REANCHOR_NATS": "100",
+        # 2026-10-18 (Mike, with the audit): EMRI T_max 6 -> 16 on 12 rungs,
+        # the same make_ladder spacing extended upward so the hot rungs can
+        # find islands no walker holds (EMRI_NTEMPS 8 -> 12 in LINE above)
+        want = {"EMRI_LADDER_TMAX": "16", "EMRI_LADDER_REANCHOR_NATS": "100",
                 "MBH_LADDER_TMAX": "10", "MBH_LADDER_REANCHOR_NATS": "0",
                 # 2026-10-15 (Mike, "update the SOBHBs"): the SOBBH ladder
                 # capped like the EMRI one (its default make_ladder spacing

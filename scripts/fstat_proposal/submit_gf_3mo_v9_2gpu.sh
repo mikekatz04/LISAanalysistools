@@ -3736,7 +3736,7 @@ export GB_FSTAT_REFIT_EVERY_PE=150
 # randomly drawn cold walker every GB_FSTAT_REFIT_EVERY_PE overall iterations.
 export GB_FSTAT_REFIT_EVERY_PE_GB_FREE=0
 export GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE=6.5
-export GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=${GB_PE_RJ_FSTAT_RESIDUAL_SPLIT:-0.5}
+export GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=${GB_PE_RJ_FSTAT_RESIDUAL_SPLIT:-0.9}
 export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
 # STAGE-B STACK CHUNKING -- fixes the 2026-09-21 epoch-9 OOM.
 # StackedFStatProposal4D.__init__ corner-averages the ENTIRE K-box 4-D grid

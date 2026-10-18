@@ -2173,7 +2173,12 @@ export GB_PE_RJ_DRAW_ONE=1
 # 2026-10-02: "put the warm proposal in with the other two rj moves. Draw them
 # at 0.45 prior, 0.45 fstat, 0.1 warm start"); prior takes the remainder.
 export GB_PE_RJ_FSTAT_FRACTION=${GB_PE_RJ_FSTAT_FRACTION:-0.45}
-export GB_PE_RJ_WARM_FRACTION=${GB_PE_RJ_WARM_FRACTION:-0.1}
+# Warm share 0.1 -> 0.4 (user ruling 2026-10-18, with the residual split 0.9
+# below): on the 9mo job 773 the warm (self-refit) draw accepted 18.6 cold
+# births per draw against 2.5 for the residual grid, 2.5 for the prior and
+# 0.4 for the GB-free galaxy grid, so the mix moves toward the channels that
+# still find sources; prior takes the remainder (0.15).
+export GB_PE_RJ_WARM_FRACTION=${GB_PE_RJ_WARM_FRACTION:-0.4}
 # Per-block EXACT info matrices through the sig-het fast route
 # (~2.4 ms/src vs ~29-46 chunked). The data_index misindex is FIXED and
 # multi-GPU slots now route by the BUFFER's slot shards. First
@@ -4095,9 +4100,13 @@ export GB_FSTAT_REFIT_EVERY_PE_GB_FREE=0
 # the cached comb at 6.5 gives (candidates are floor-independent, the per-band
 # cap keeps the top F), with no refit. 'none' = full_pe's declared floor.
 export GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE=6.5
-# The residual move's share of GB_PE_RJ_FSTAT_FRACTION (0.45 -> 0.225 each);
-# prior 0.45 and warm 0.1 unchanged. 0 or 1 composes ONE F-stat move.
-export GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=${GB_PE_RJ_FSTAT_RESIDUAL_SPLIT:-0.5}
+# The residual move's share of GB_PE_RJ_FSTAT_FRACTION. 0.5 -> 0.9 (user
+# ruling 2026-10-18): on the 9mo job 773 the GB-free galaxy grid accepted 0.4
+# cold births per draw (cleared out) against 2.5 for the live-residual grid,
+# whose yield did not decay over the 160 rows its grid aged, so the F-stat
+# share goes to the residual move (0.45 -> 0.405 residual / 0.045 galaxy);
+# warm 0.4 above, prior the remaining 0.15. 0 or 1 composes ONE F-stat move.
+export GB_PE_RJ_FSTAT_RESIDUAL_SPLIT=${GB_PE_RJ_FSTAT_RESIDUAL_SPLIT:-0.9}
 # GB_FSTAT_FORCE_REFIT=1 on a launch line now refits BOTH PE grids (one new
 # epoch per root, the 3.5-h galaxy included) -- leave it off a PE resume.
 # WHICH WALKER A PE REFIT FITS (code default, NOT exported; user ruling
@@ -5092,7 +5101,15 @@ echo "[DATA] SOURCE_TYPES=${SOURCE_TYPES} (COMBINED = pre-summed stream; classes
 # 200; 0 = off) below its leaf's cold rung, beyond the rung's expected
 # tempering drop, to the cold state ("[EMRI_LADDER] leaf N: re-anchored ...").
 export MBH_NTEMPS=${MBH_NTEMPS:-8}
-export EMRI_NTEMPS=${EMRI_NTEMPS:-8}
+# EMRI 8 -> 12 rungs with T_max 6 -> 16 below (user ruling 2026-10-18, the
+# EMRI sampling audit): the loud EMRIs' posteriors are combs of discrete
+# islands and a T=6 top rung cannot find islands no walker holds; 12 rungs to
+# 16 keeps today's make_ladder spacing (ratio 1.29, cold-pair swaps 0.6-0.7)
+# and extends it upward at ~8 % of the iteration wall. A RESUMED store keeps
+# its 8 stored rungs: migrate it first (scripts/fstat_proposal/
+# rerung_store_branches.py --set emri=12) and put EMRI_LADDER_RESET_ON_RESUME=1
+# on that one relaunch line.
+export EMRI_NTEMPS=${EMRI_NTEMPS:-12}
 # Ladder caps (user ruling 2026-10-13, second ruling of the day: "I want to
 # focus on sampling the main modes (+ the sky move for MBHs) in terms of
 # tempering"). The first ruling capped the EMRI ladder at T_max = 100 (an
@@ -5158,7 +5175,8 @@ export EMRI_NTEMPS=${EMRI_NTEMPS:-8}
 # MBH_LADDER_RESET_ON_RESUME=1 SOBBH_LADDER_RESET_ON_RESUME=1 on the relaunch
 # line ONCE to replace them (logged leaf by leaf; the old rungs' states stay
 # where they are and the guard re-anchors the lost ones at the first block).
-export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-6}
+# EMRI T_max 6 -> 16 with 12 rungs (user ruling 2026-10-18; see EMRI_NTEMPS).
+export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-16}
 export EMRI_LADDER_REANCHOR_NATS=${EMRI_LADDER_REANCHOR_NATS:-100}
 export MBH_LADDER_TMAX=${MBH_LADDER_TMAX:-10}
 export MBH_LADDER_REANCHOR_NATS=${MBH_LADDER_REANCHOR_NATS:-0}
