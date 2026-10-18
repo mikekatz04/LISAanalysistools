@@ -4614,15 +4614,16 @@ echo "[DATA] SOURCE_TYPES=${SOURCE_TYPES} (COMBINED = pre-summed stream; classes
 # 200; 0 = off) below its leaf's cold rung, beyond the rung's expected
 # tempering drop, to the cold state ("[EMRI_LADDER] leaf N: re-anchored ...").
 export MBH_NTEMPS=${MBH_NTEMPS:-8}
-# EMRI 8 -> 12 rungs with T_max 6 -> 16 below (user ruling 2026-10-18, the
+# EMRI 8 -> 14 rungs with T_max 6 -> 64 below (user ruling 2026-10-18, the
 # EMRI sampling audit): the loud EMRIs' posteriors are combs of discrete
-# islands and a T=6 top rung cannot find islands no walker holds; 12 rungs to
-# 16 keeps today's make_ladder spacing (ratio 1.29, cold-pair swaps 0.6-0.7)
-# and extends it upward at ~8 % of the iteration wall. A RESUMED store keeps
+# islands and a T=6 top rung cannot find islands no walker holds; the top rung
+# should see the LOUDEST leaf (EMRI 3, SNR 50) at an effective SNR ~6, i.e.
+# T_max ~ (50/6)^2 ~ 64; 14 rungs keep the spacing at 1.38 (swaps ~0.55), at
+# ~11 % of the iteration wall. A RESUMED store keeps
 # its 8 stored rungs: migrate it first (scripts/fstat_proposal/
-# rerung_store_branches.py --set emri=12) and put EMRI_LADDER_RESET_ON_RESUME=1
+# rerung_store_branches.py --set emri=14) and put EMRI_LADDER_RESET_ON_RESUME=1
 # on that one relaunch line.
-export EMRI_NTEMPS=${EMRI_NTEMPS:-12}
+export EMRI_NTEMPS=${EMRI_NTEMPS:-14}
 # Ladder caps (user ruling 2026-10-13, second ruling of the day: "I want to
 # focus on sampling the main modes (+ the sky move for MBHs) in terms of
 # tempering"). The first ruling capped the EMRI ladder at T_max = 100 (an
@@ -4688,8 +4689,8 @@ export EMRI_NTEMPS=${EMRI_NTEMPS:-12}
 # MBH_LADDER_RESET_ON_RESUME=1 SOBBH_LADDER_RESET_ON_RESUME=1 on the relaunch
 # line ONCE to replace them (logged leaf by leaf; the old rungs' states stay
 # where they are and the guard re-anchors the lost ones at the first block).
-# EMRI T_max 6 -> 16 with 12 rungs (user ruling 2026-10-18; see EMRI_NTEMPS).
-export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-16}
+# EMRI T_max 6 -> 64 with 14 rungs (user ruling 2026-10-18; see EMRI_NTEMPS).
+export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-64}
 export EMRI_LADDER_REANCHOR_NATS=${EMRI_LADDER_REANCHOR_NATS:-100}
 export MBH_LADDER_TMAX=${MBH_LADDER_TMAX:-10}
 export MBH_LADDER_REANCHOR_NATS=${MBH_LADDER_REANCHOR_NATS:-0}

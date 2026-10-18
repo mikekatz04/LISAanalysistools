@@ -3168,8 +3168,8 @@ class V930ProductionDefaultsTest(unittest.TestCase):
 
     LINE = {
         "MIDIT_CHECKPOINT": "0",
-        # 2026-10-18 (the EMRI sampling audit): EMRI 8 -> 12 rungs (T_max 16)
-        "MBH_NTEMPS": "8", "EMRI_NTEMPS": "12",
+        # 2026-10-18 (the EMRI sampling audit): EMRI 8 -> 14 rungs (T_max 64)
+        "MBH_NTEMPS": "8", "EMRI_NTEMPS": "14",
         "EMRI_TRAJ_WORKERS": "8",
         "MBH_WINDOW_DECIMATE": "2",
         "SOBBH_EIGEN_INFO": "gram", "EMRI_EIGEN_INFO": "gram", "MBH_EIGEN_INFO": "gram",
@@ -3265,10 +3265,10 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
         # 2026-10-18 (the EMRI sampling audit, item 6): EMRI guard 50 -> 100 --
         # the 9mo job 773 firings were the top rungs' own tail (72-100 nats on
         # leaves lost at 118-1262), not lost rungs
-        # 2026-10-18 (Mike, with the audit): EMRI T_max 6 -> 16 on 12 rungs,
+        # 2026-10-18 (Mike, with the audit): EMRI T_max 6 -> 64 on 14 rungs,
         # the same make_ladder spacing extended upward so the hot rungs can
-        # find islands no walker holds (EMRI_NTEMPS 8 -> 12 in LINE above)
-        want = {"EMRI_LADDER_TMAX": "16", "EMRI_LADDER_REANCHOR_NATS": "100",
+        # find islands no walker holds (EMRI_NTEMPS 8 -> 14 in LINE above)
+        want = {"EMRI_LADDER_TMAX": "64", "EMRI_LADDER_REANCHOR_NATS": "100",
                 "MBH_LADDER_TMAX": "10", "MBH_LADDER_REANCHOR_NATS": "0",
                 # 2026-10-15 (Mike, "update the SOBHBs"): the SOBBH ladder
                 # capped like the EMRI one (its default make_ladder spacing
