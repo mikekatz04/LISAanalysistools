@@ -2,10 +2,13 @@
 #define __LAT_DFFR_KERNELS_HH__
 
 // lat_dffr_kernels.hh -- the Direct Fast Fresnel Response (DFFR) of the STFT likelihood: settings,
-// source contract, windowed chirp transform, TDI weights and segment table. Ported from the
-// standalone package direct-fast-fresnel-response at commit 01530a5 (src/dffr/cutils/dffr.cu). The
-// source-independent diagnostics of LAT are in lat_dffr_diagnostics.cu.
-// docs/response/dffr/README.md describes the response and its integration.
+// source contract, windowed chirp transform, TDI weights, segment table, the tile that hands the
+// pixels to the consumers of lat_stft_kernels.hh (get_ll, fill_global, swap_ll, the F-statistic and
+// both gradients), and two diagnostics of a batch of sources (compact template, segment table).
+// Ported from the standalone package direct-fast-fresnel-response at commit 01530a5
+// (src/dffr/cutils/dffr.cu). A source package (GBGPU for galactic binaries) instantiates the tile
+// and the diagnostics with its source model; the source-independent diagnostics of LAT are in
+// lat_dffr_diagnostics.cu. docs/response/dffr/README.md describes the response and its integration.
 //
 // * Response. Within one segment the signal that reaches spacecraft s is a linear chirp under a
 // * slowly varying envelope, expanded about the segment midpoint, so its windowed transform is a
@@ -41,14 +44,16 @@
 // * pass by all threads of a block. A pixel then costs three windowed transforms, of six bounded
 // * integrals each (one on a boxcar), and 18 complex multiply-adds that apply the weights.
 
-#include "gbt_global.h"    // cmplx, gcmplx, CUDA_* macros, THREAD_START_X, BLOCK_INCR_X
-#include "Detector.hpp"    // KinematicsTable
-#include "domains.hpp"     // STFTFresnel
-#include "lat_fresnel.hh"  // lat_fresnel_series, lat_fresnel_aux, LAT_FRESNEL_SEAM
+#include "gbt_global.h"        // cmplx, gcmplx, CUDA_* macros, THREAD_START_X, BLOCK_INCR_X
+#include "Detector.hpp"        // KinematicsTable
+#include "domains.hpp"         // STFTFresnel, STFTDomain
+#include "lat_fresnel.hh"      // lat_fresnel_series, lat_fresnel_aux, LAT_FRESNEL_SEAM
+#include "lat_stft_kernels.hh" // StftBandBinMap, stft_tile_arena, the launch helpers
 
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #define DFFR_NUM_SPACECRAFT 3
 #define DFFR_NUM_LINKS 6
@@ -1171,6 +1176,310 @@ CUDA_DEVICE inline void dffr_evaluate_pixel(const DFFRSegmentTable<Rows> &table,
                           dffr_mul(weights[entry + 1], expansion_moment);
     }
   }
+}
+
+// ===========================================================================
+// The DFFR tile of the STFT consumers
+// ===========================================================================
+// * The tile builds the segment table of Rows segments per pass in its template's dynamic shared
+// * memory, with all threads of the block, and maps the pixels band bin first (StftBandBinMap).
+// * On the GPU Rows is the warp size, 32, so that a warp takes one band bin of 32 segments. One
+// * template, 32 rows of 1012 bytes plus the source constants and the settings, takes 32 672
+// * bytes, within the 49 152 a launch gets. The consumers that hold two templates (swap_ll, its
+// * gradient and the F-statistic) take 65 344 bytes through the opt-in launch path, or 32 960 at
+// * Rows = 16 (DFFR_ROWS_PER_PASS_HALF); both are instantiated, and the A100 benchmarks of the
+// * integration choose. On the CPU a block is one thread and Rows is 1, which evaluates the pixels
+// * in the order of the standalone package's CPU backend.
+// * values() doubles DFFR's pixel: the consumers halve every value, the positive-frequency half of
+// * a real signal, and a DFFR pixel is that half already. Doubling and halving are exact.
+
+#ifdef __CUDACC__
+#define DFFR_ROWS_PER_PASS 32
+#define DFFR_ROWS_PER_PASS_HALF 16
+#else
+#define DFFR_ROWS_PER_PASS 1
+#define DFFR_ROWS_PER_PASS_HALF 1
+#endif
+
+// Launch inputs of the DFFR tile, passed by value to the kernels: the settings, the kinematics
+// table of the grid (its arrays on the device of the launch) and the source model's own inputs.
+template <class SourceT>
+struct DFFRTileInputs {
+  DFFRSettings settings;
+  KinematicsTable kinematics;
+  typename SourceT::Model model;
+};
+
+template <class SourceT, int Rows>
+struct DFFRTile {
+  static_assert(SourceT::num_components == 1,
+                "the DFFR tile evaluates component 0 only; see the source-model contract");
+  using Map = StftBandBinMap<Rows>;
+  using Inputs = DFFRTileInputs<SourceT>;
+
+  struct BlockShared {
+    typename Map::Shared bands;
+    typename SourceT::Model model;
+  };
+
+  // * One template's dynamic shared memory: its source constants, the settings its pixels read and
+  // * its segment table, so that a template keeps one pointer in registers.
+  struct Arena {
+    typename SourceT::Constants source;
+    DFFRSettings settings;
+    DFFRSegmentTable<Rows> table;
+  };
+
+  CUDA_CALLABLE_MEMBER static size_t table_bytes() { return sizeof(Arena); }
+
+  struct Context {
+    BlockShared *shared;
+
+    // * Thread 0 publishes the source model; every consumer synchronises after the context.
+    CUDA_DEVICE Context(const Inputs &inputs, STFTDomain *stft, BlockShared &shared_in)
+        : shared(&shared_in) {
+      (void)stft;
+      if (THREAD_START_X == 0) shared->model = inputs.model;
+    }
+
+    CUDA_DEVICE int rows_per_pass() const { return Rows; }
+    CUDA_DEVICE typename Map::Shared *band_shared() const { return &shared->bands; }
+  };
+
+  struct Template {
+    Arena *arena;
+
+    CUDA_DEVICE Template(Context &context, unsigned char *table)
+        : arena(reinterpret_cast<Arena *>(table)) {
+      (void)context;
+    }
+
+    // * One thread fills the constants; build() starts with the barrier that publishes them.
+    CUDA_DEVICE void load(Context &context, double *params, int bin_i) {
+      (void)bin_i;
+      if (THREAD_START_X == 0) SourceT::load(&arena->source, context.shared->model, params);
+    }
+
+    CUDA_DEVICE void build(Context &context, const Inputs &inputs, int row_base, int rows_here) {
+      (void)context;
+      CUDA_SYNC_THREADS;
+      if (THREAD_START_X == 0) arena->settings = inputs.settings;
+      dffr_build_segment_table<SourceT, Rows>(arena->table, inputs.settings, inputs.kinematics,
+                                              arena->source, row_base, rows_here);
+      CUDA_SYNC_THREADS;
+    }
+
+    CUDA_DEVICE int carrier_bin(int row) const {
+      return arena->table.start_freq_ind[row] + arena->settings.num_side_bins;
+    }
+
+    CUDA_DEVICE STFT_TILE_PIXEL_INLINE void values(int row, int freq_j_here, double freq_here,
+                                                   cmplx *out) const {
+      dffr_evaluate_pixel(arena->table, arena->settings, row,
+                          freq_j_here - arena->table.start_freq_ind[row], freq_j_here, freq_here,
+                          out);
+      for (int channel = 0; channel < DFFR_NUM_CHANNELS; channel += 1)
+        out[channel] = 2.0 * out[channel];
+    }
+  };
+};
+
+// Launch inputs of the tile from the bound grid, the kinematics table and the knobs; *stft_launch
+// receives the domain pointer the consumers read, the device copy on the GPU. Host only.
+// ! Raises std::invalid_argument for a setup DFFR cannot represent.
+template <class SourceT>
+inline DFFRTileInputs<SourceT> dffr_tile_inputs(STFTFresnel *fresnel, STFTDomain *stft,
+                                               const KinematicsTable *kinematics,
+                                               const typename SourceT::Model &model,
+                                               int n_side_bins, int tdi_generation,
+                                               bool linear_envelope, bool first_order_delays,
+                                               double chirp_rate_floor,
+                                               STFTDomain **stft_launch) {
+  if (stft->tdi_type != TDI_XYZ || stft->num_channels != DFFR_NUM_CHANNELS)
+    throw std::invalid_argument("dffr: the response computes the X, Y and Z channels; the domain "
+                                "holds another TDI set.");
+  // * The Fresnel object carries the window and the domain the grid; both must be one grid.
+  if (fresnel->num_times != stft->num_times || fresnel->num_freqs != stft->num_freqs ||
+      fresnel->t0 != stft->t0 || fresnel->f_min != stft->f_min || fresnel->dt != stft->dt ||
+      fresnel->df != stft->df)
+    throw std::invalid_argument(
+        "dffr: the STFTFresnel and the STFTDomain describe different grids.");
+  DFFRTileInputs<SourceT> inputs;
+  inputs.settings = dffr_make_settings(*fresnel, linear_envelope, first_order_delays,
+                                       tdi_generation, n_side_bins, chirp_rate_floor);
+  dffr_check_table(inputs.settings, *kinematics, stft->t0);
+  inputs.kinematics = *kinematics;
+  inputs.model = model;
+#ifdef __CUDACC__
+  *stft_launch = stft_device_domain(stft);
+#else
+  *stft_launch = stft;
+#endif
+  return inputs;
+}
+
+// ===========================================================================
+// Diagnostics: the compact template and the segment table of a batch of sources
+// ===========================================================================
+
+// Per source and segment, everything the segment table build computes, for the stage checks.
+struct DFFRSegmentTableOutput {
+  double *effective_frequency;  // [source][segment][3]
+  double *chirp_rate;           // [source][segment][3]
+  cmplx *reference_phasor;      // [source][segment][3]
+  cmplx *link_amplitude;        // [source][segment][6]
+  cmplx *envelope_slope;        // [source][segment][6]
+  cmplx *emission_phasor;       // [source][segment][6]
+  double *emission_frequency;   // [source][segment][6]
+  cmplx *tdi_weights;           // [source][segment][18]
+  int *start_freq_ind;          // [source][segment]
+};
+
+// * The constants of one source, from its parameters; the table build that follows starts with a
+// * barrier. Every thread of the block calls it.
+template <class SourceT, int Rows>
+CUDA_DEVICE inline void dffr_load_source(typename DFFRTile<SourceT, Rows>::Arena *arena,
+                                         const DFFRTileInputs<SourceT> &inputs, double *params,
+                                         const double *params_all, int bin_i, int nparams) {
+  CUDA_SYNC_THREADS;
+  for (int index = THREAD_START_X; index < nparams; index += BLOCK_INCR_X)
+    params[index] = params_all[(size_t)bin_i * nparams + index];
+  CUDA_SYNC_THREADS;
+  if (THREAD_START_X == 0) SourceT::load(&arena->source, inputs.model, params);
+}
+
+// The compact template of every source: per segment the band of 2 n_side_bins + 1 bins from the
+// segment's band start, template_out[((source * 3 + channel) * NT + segment) * band + band_bin],
+// and the band starts, start_out[source * NT + segment]. Bins outside the grid hold zero. These
+// are DFFR's pixel values, the amounts fill_global adds with a factor of one.
+template <class SourceT, int Rows>
+CUDA_KERNEL void dffr_fill_template_kernel(cmplx *template_out, int *start_out,
+                                           DFFRTileInputs<SourceT> inputs, const double *params_all,
+                                           int num_bin, int nparams, unsigned char *host_arena) {
+  using Arena = typename DFFRTile<SourceT, Rows>::Arena;
+  CUDA_SHARED double params[N_PARAMS_MAX];
+  Arena *arena = reinterpret_cast<Arena *>(stft_tile_arena(host_arena));
+  const DFFRSettings &settings = inputs.settings;
+  const int num_times = settings.num_time_segments;
+  const int band_width = 2 * settings.num_side_bins + 1;
+
+  for (int bin_i = BLOCK_START_X; bin_i < num_bin; bin_i += GRID_INCR_X) {
+    dffr_load_source<SourceT, Rows>(arena, inputs, params, params_all, bin_i, nparams);
+    for (int row_base = 0; row_base < num_times; row_base += Rows) {
+      const int rows_here = (num_times - row_base < Rows) ? (num_times - row_base) : Rows;
+      CUDA_SYNC_THREADS;
+      dffr_build_segment_table<SourceT, Rows>(arena->table, settings, inputs.kinematics,
+                                              arena->source, row_base, rows_here);
+      CUDA_SYNC_THREADS;
+
+      for (int pixel = THREAD_START_X; pixel < rows_here * band_width; pixel += BLOCK_INCR_X) {
+        const int band_bin = pixel / rows_here;
+        const int row = pixel - band_bin * rows_here;
+        const int segment_index = row_base + row;
+        const int start_freq_ind = arena->table.start_freq_ind[row];
+        const int bin_index = start_freq_ind + band_bin;
+        if (band_bin == 0) start_out[(size_t)bin_i * num_times + segment_index] = start_freq_ind;
+
+        cmplx channels[DFFR_NUM_CHANNELS] = {cmplx(0.0, 0.0), cmplx(0.0, 0.0), cmplx(0.0, 0.0)};
+        if (bin_index >= 0 && bin_index < settings.num_bins) {
+          const double frequency = settings.f_min + ((double)bin_index) * settings.df;
+          dffr_evaluate_pixel(arena->table, settings, row, band_bin, bin_index, frequency,
+                              channels);
+        }
+        const size_t stride = (size_t)num_times * band_width;
+        const size_t base = (size_t)bin_i * DFFR_NUM_CHANNELS * stride;
+        const size_t offset = (size_t)segment_index * band_width + band_bin;
+        for (int channel = 0; channel < DFFR_NUM_CHANNELS; channel += 1)
+          template_out[base + (size_t)channel * stride + offset] = channels[channel];
+      }
+    }
+  }
+}
+
+// Copies of every bin-independent quantity of the segment table, for the stage checks.
+template <class SourceT, int Rows>
+CUDA_KERNEL void dffr_segment_table_kernel(DFFRSegmentTableOutput output,
+                                           DFFRTileInputs<SourceT> inputs, const double *params_all,
+                                           int num_bin, int nparams, unsigned char *host_arena) {
+  using Arena = typename DFFRTile<SourceT, Rows>::Arena;
+  CUDA_SHARED double params[N_PARAMS_MAX];
+  Arena *arena = reinterpret_cast<Arena *>(stft_tile_arena(host_arena));
+  const int num_times = inputs.settings.num_time_segments;
+
+  for (int bin_i = BLOCK_START_X; bin_i < num_bin; bin_i += GRID_INCR_X) {
+    dffr_load_source<SourceT, Rows>(arena, inputs, params, params_all, bin_i, nparams);
+    for (int row_base = 0; row_base < num_times; row_base += Rows) {
+      const int rows_here = (num_times - row_base < Rows) ? (num_times - row_base) : Rows;
+      CUDA_SYNC_THREADS;
+      dffr_build_segment_table<SourceT, Rows>(arena->table, inputs.settings, inputs.kinematics,
+                                              arena->source, row_base, rows_here);
+      CUDA_SYNC_THREADS;
+
+      const DFFRSegmentTable<Rows> &table = arena->table;
+      for (int row = THREAD_START_X; row < rows_here; row += BLOCK_INCR_X) {
+        const size_t segment = (size_t)bin_i * num_times + row_base + row;
+        for (int spacecraft_index = 0; spacecraft_index < DFFR_NUM_SPACECRAFT;
+             spacecraft_index += 1) {
+          const int slot = row * DFFR_NUM_SPACECRAFT + spacecraft_index;
+          const size_t out = segment * DFFR_NUM_SPACECRAFT + spacecraft_index;
+          output.effective_frequency[out] = table.effective_frequency[slot];
+          output.chirp_rate[out] = table.chirp_rate[slot];
+          output.reference_phasor[out] = table.reference_phasor[slot];
+        }
+        for (int link_index = 0; link_index < DFFR_NUM_LINKS; link_index += 1) {
+          const int slot = row * DFFR_NUM_LINKS + link_index;
+          const size_t out = segment * DFFR_NUM_LINKS + link_index;
+          output.link_amplitude[out] = table.link_amplitude[slot];
+          output.envelope_slope[out] = table.envelope_slope[slot];
+          output.emission_phasor[out] = table.emission_phasor[slot];
+          output.emission_frequency[out] = table.emission_frequency[slot];
+        }
+        for (int entry = 0; entry < DFFR_TDI_WEIGHTS; entry += 1)
+          output.tdi_weights[segment * DFFR_TDI_WEIGHTS + entry] =
+              table.tdi_weights[row * DFFR_TDI_WEIGHTS + entry];
+        output.start_freq_ind[segment] = table.start_freq_ind[row];
+      }
+    }
+  }
+}
+
+// Host launchers of the two diagnostics; they synchronise.
+template <class SourceT, int Rows>
+inline void dffr_fill_template(cmplx *template_out, int *start_out,
+                               const DFFRTileInputs<SourceT> &inputs, const double *params_all,
+                               int num_bin, int nparams) {
+  if (num_bin < 1) return;
+  const size_t shared_bytes = DFFRTile<SourceT, Rows>::table_bytes();
+#ifdef __CUDACC__
+  stft_prepare_dynamic_shared(dffr_fill_template_kernel<SourceT, Rows>, shared_bytes);
+  dffr_fill_template_kernel<SourceT, Rows><<<num_bin, NUM_THREADS_HERE, shared_bytes>>>(
+      template_out, start_out, inputs, params_all, num_bin, nparams, nullptr);
+  gpuErrchk(cudaGetLastError());
+  gpuErrchk(cudaDeviceSynchronize());
+#else
+  std::vector<unsigned char> host_arena(shared_bytes);
+  dffr_fill_template_kernel<SourceT, Rows>(template_out, start_out, inputs, params_all, num_bin,
+                                           nparams, host_arena.data());
+#endif
+}
+
+template <class SourceT, int Rows>
+inline void dffr_segment_table(const DFFRSegmentTableOutput &output,
+                               const DFFRTileInputs<SourceT> &inputs, const double *params_all,
+                               int num_bin, int nparams) {
+  if (num_bin < 1) return;
+  const size_t shared_bytes = DFFRTile<SourceT, Rows>::table_bytes();
+#ifdef __CUDACC__
+  stft_prepare_dynamic_shared(dffr_segment_table_kernel<SourceT, Rows>, shared_bytes);
+  dffr_segment_table_kernel<SourceT, Rows><<<num_bin, NUM_THREADS_HERE, shared_bytes>>>(
+      output, inputs, params_all, num_bin, nparams, nullptr);
+  gpuErrchk(cudaGetLastError());
+  gpuErrchk(cudaDeviceSynchronize());
+#else
+  std::vector<unsigned char> host_arena(shared_bytes);
+  dffr_segment_table_kernel<SourceT, Rows>(output, inputs, params_all, num_bin, nparams,
+                                           host_arena.data());
+#endif
 }
 
 #endif  // __LAT_DFFR_KERNELS_HH__

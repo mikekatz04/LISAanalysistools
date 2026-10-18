@@ -45,6 +45,7 @@
 #include "lat_tdi_on_the_fly.hh"  // LISATDIonTheFly base (SourceT) + Vec / Orbits / TDIConfig
 #include <cstring>                // std::memcmp / std::memcpy for the per-device launch structs
 #include <stdexcept>              // std::runtime_error
+#include <string>                 // std::to_string in the launch errors
 #include <type_traits>            // std::is_same
 #include <vector>                 // host arena of a tile launch on the CPU
 
@@ -141,6 +142,34 @@ inline const STFTDeviceStructs& stft_device_structs(
     if (new_fresnel)    stft_upload_struct(held.fresnel,    held.fresnel_bytes,    fresnel);
     if (new_stft)       stft_upload_struct(held.stft,       held.stft_bytes,       stft);
     return held;
+}
+
+// The device copy of a domain alone, for tiles that read no other struct (DFFR), with the same rule:
+// a launch uploads the domain only when its bytes differ from the device's copy.
+struct STFTDeviceDomain
+{
+    STFTDomain* stft = nullptr;
+    unsigned char stft_bytes[sizeof(STFTDomain)];
+};
+
+inline STFTDomain* stft_device_domain(STFTDomain* stft)
+{
+    static STFTDeviceDomain per_device[STFT_MAX_DEVICES];
+    int device = 0;
+    gpuErrchk(cudaGetDevice(&device));
+    if (device < 0 || device >= STFT_MAX_DEVICES)
+        throw std::runtime_error("stft_device_domain: device id is not below STFT_MAX_DEVICES.");
+    STFTDeviceDomain& held = per_device[device];
+
+    const bool first = (held.stft == nullptr);
+    if (first)
+        gpuErrchk(cudaMalloc(&held.stft, sizeof(STFTDomain)));
+    if (first || std::memcmp(held.stft_bytes, stft, sizeof(STFTDomain)) != 0)
+    {
+        cudaDeviceSynchronize();
+        stft_upload_struct(held.stft, held.stft_bytes, stft);
+    }
+    return held.stft;
 }
 #endif
 
@@ -608,6 +637,69 @@ struct StftRowPerThreadMap
     CUDA_DEVICE void finish_pass() const {}
 };
 
+// * Band bin first: the pixels of a pass run band bin by band bin, each over the rows of the pass,
+// * so with Rows the warp size the 32 threads of a warp take one band bin of 32 segments. Which
+// * Fresnel branch an endpoint takes depends on its distance from the carrier, about the same for
+// * one band bin in every segment, so the branch stays the same within a warp. A row's band may be
+// * wider than 2 n_side_bins + 1 (the union band of swap_ll); the pass covers the widest.
+// ! The bands live in the tile's static shared memory: finish_bands publishes them, and
+// ! finish_pass keeps the next pass from overwriting them while a thread still reads them.
+template <int Rows>
+struct StftBandBinMap
+{
+    struct Shared
+    {
+        int band_lo[Rows];     // first active bin of each row's band
+        int band_width[Rows];  // its number of bins
+    };
+
+    Shared* bands;
+    int rows_here;
+    int widest;  // widest band of the pass, after finish_bands
+
+    template <class ContextT>
+    CUDA_DEVICE StftBandBinMap(const ContextT& context, int rows_here_in)
+        : bands(context.band_shared()), rows_here(rows_here_in), widest(0)
+    {
+    }
+
+    CUDA_DEVICE int first_row() const { return THREAD_START_X; }
+    CUDA_DEVICE int row_stride() const { return BLOCK_INCR_X; }
+
+    CUDA_DEVICE void set_band(int row_in_pass, int lo, int hi)
+    {
+        bands->band_lo[row_in_pass] = lo;
+        bands->band_width[row_in_pass] = hi - lo + 1;
+    }
+
+    CUDA_DEVICE void finish_bands()
+    {
+        CUDA_SYNC_THREADS;
+        int width = 0;
+        for (int row = 0; row < rows_here; row += 1)
+            width = (bands->band_width[row] > width) ? bands->band_width[row] : width;
+        widest = width;
+    }
+
+    // A pixel is band_bin * rows_here + row.
+    CUDA_DEVICE int first_pixel() const { return THREAD_START_X; }
+    CUDA_DEVICE int end_pixel() const { return rows_here * widest; }
+    CUDA_DEVICE int pixel_stride() const { return BLOCK_INCR_X; }
+
+    CUDA_DEVICE bool locate(int pixel, int* row_out, int* freq_j_out) const
+    {
+        const int band_bin = pixel / rows_here;
+        const int row = pixel - band_bin * rows_here;
+        if (band_bin >= bands->band_width[row])
+            return false;
+        *row_out = row;
+        *freq_j_out = bands->band_lo[row] + band_bin;
+        return true;
+    }
+
+    CUDA_DEVICE void finish_pass() const { CUDA_SYNC_THREADS; }
+};
+
 // A column policy (above) as a tile. Thread tid builds and evaluates the columns tid,
 // tid + blockDim.x, ... in turn, each over its whole band; the column states stay in registers.
 template <class ColumnT>
@@ -715,16 +807,41 @@ struct ColumnTile
 };
 
 // Dynamic shared memory of a tile launch; on the CPU the launcher passes a host buffer instead.
-// TODO: take the budget of tiles with shared tables from the device, not from the 48 kB that a
-// launch gets by default. cudaDevAttrMaxSharedMemoryPerBlockOptin is 227 kB on an H100 (228 kB per
-// SM) and 163 kB on an A100, so the two DFFR tables of swap (64.8 kB at 32 rows) fit 3 blocks per
-// SM on an H100 and 2 on an A100.
 #ifdef __CUDACC__
 static CUDA_DEVICE unsigned char* stft_tile_arena(unsigned char* host_arena)
 {
     extern __shared__ __align__(16) unsigned char stft_tile_dynamic_shared[];
     (void) host_arena;
     return stft_tile_dynamic_shared;
+}
+
+// A launch gets 48 kB of dynamic shared memory; a tile that needs more raises the kernel's limit,
+// within what the current device allows a block: cudaDevAttrMaxSharedMemoryPerBlockOptin, 163 kB on
+// an A100 and 227 kB on an H100, static shared memory included. The two DFFR tables of swap_ll
+// (64.8 kB at 32 rows) then fit 2 blocks per SM on an A100 and 3 on an H100.
+// ? Set at every such launch: the attribute belongs to the kernel and the device, and the calls cost
+// ? microseconds against kernels of milliseconds.
+// ! Raises std::runtime_error when the device cannot hold the launch.
+template <class KernelT>
+inline void stft_prepare_dynamic_shared(KernelT kernel, size_t dynamic_bytes)
+{
+    constexpr size_t default_limit = 48 * 1024;
+    if (dynamic_bytes <= default_limit)
+        return;
+    int device = 0, optin_limit = 0;
+    gpuErrchk(cudaGetDevice(&device));
+    gpuErrchk(cudaDeviceGetAttribute(&optin_limit, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+    cudaFuncAttributes attributes;
+    gpuErrchk(cudaFuncGetAttributes(&attributes, kernel));
+    if (dynamic_bytes + attributes.sharedSizeBytes > static_cast<size_t>(optin_limit))
+        throw std::runtime_error("stft tile launch: " + std::to_string(dynamic_bytes) +
+                                 " bytes of dynamic and " +
+                                 std::to_string(attributes.sharedSizeBytes) +
+                                 " bytes of static shared memory exceed the " +
+                                 std::to_string(optin_limit) + " bytes a block gets on device " +
+                                 std::to_string(device) + ".");
+    gpuErrchk(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                   static_cast<int>(dynamic_bytes)));
 }
 #else
 inline unsigned char* stft_tile_arena(unsigned char* host_arena)
@@ -899,6 +1016,7 @@ inline void stft_get_ll_launch(
 {
     const size_t shared_bytes = TileT::table_bytes();
 #ifdef __CUDACC__
+    stft_prepare_dynamic_shared(stft_get_ll_kernel<TileT>, shared_bytes);
     dim3 grid((unsigned) num_bin, 1u, 1u);
     stft_get_ll_kernel<TileT><<<grid, NUM_THREADS_HERE, shared_bytes>>>(
         d_h_out, h_h_out, inputs, stft,
@@ -1039,6 +1157,7 @@ inline void stft_fill_global_launch(
 {
     const size_t shared_bytes = TileT::table_bytes();
 #ifdef __CUDACC__
+    stft_prepare_dynamic_shared(stft_fill_global_kernel<TileT>, shared_bytes);
     dim3 grid((unsigned) num_bin, 1u, 1u);
     stft_fill_global_kernel<TileT><<<grid, NUM_THREADS_HERE, shared_bytes>>>(
         template_fill, inputs, stft,
@@ -1277,6 +1396,7 @@ inline void stft_swap_ll_launch(
 {
     const size_t shared_bytes = 2 * TileT::table_bytes();   // add and remove templates
 #ifdef __CUDACC__
+    stft_prepare_dynamic_shared(stft_swap_ll_kernel<TileT>, shared_bytes);
     dim3 grid((unsigned) num_bin, 1u, 1u);
     stft_swap_ll_kernel<TileT><<<grid, NUM_THREADS_HERE, shared_bytes>>>(
         d_h_add_out, d_h_remove_out, add_add_out, remove_remove_out, add_remove_out,
@@ -1473,6 +1593,7 @@ inline void stft_get_fstat_ll_launch(
 {
     const size_t shared_bytes = 2 * TileT::table_bytes();   // two filters at a time
 #ifdef __CUDACC__
+    stft_prepare_dynamic_shared(stft_get_fstat_ll_kernel<TileT>, shared_bytes);
     dim3 grid((unsigned) num_bin, 1u, 1u);
     stft_get_fstat_ll_kernel<TileT><<<grid, NUM_THREADS_HERE, shared_bytes>>>(
         N_re_out, N_im_out, M_re_out, M_im_out, inputs, stft,
@@ -1604,6 +1725,7 @@ inline void stft_get_ll_grad_launch(
 {
     const size_t shared_bytes = TileT::table_bytes();
 #ifdef __CUDACC__
+    stft_prepare_dynamic_shared(stft_get_ll_grad_kernel<TileT>, shared_bytes);
     dim3 grid((unsigned) num_bin, 1u, 1u);
     stft_get_ll_grad_kernel<TileT><<<grid, NUM_THREADS_HERE, shared_bytes>>>(
         grad_out, inputs, stft, params_all, data_index_all, noise_index_all, param_eps,
@@ -1786,6 +1908,7 @@ inline void stft_swap_ll_grad_launch(
 {
     const size_t shared_bytes = 2 * TileT::table_bytes();   // add and remove templates
 #ifdef __CUDACC__
+    stft_prepare_dynamic_shared(stft_swap_ll_grad_kernel<TileT>, shared_bytes);
     dim3 grid((unsigned) num_bin, 1u, 1u);
     stft_swap_ll_grad_kernel<TileT><<<grid, NUM_THREADS_HERE, shared_bytes>>>(
         grad_add_out, grad_remove_out, inputs, stft,
