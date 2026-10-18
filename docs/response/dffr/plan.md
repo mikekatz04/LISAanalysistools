@@ -9,8 +9,8 @@ branch `feat-dffr` in both repositories.
 
 | Step | Scope | Status | Date | Notes |
 | --- | --- | --- | --- | --- |
-| 0 | Branches, documents, baseline of the existing response | CPU part done, `L1Orbits` included; GPU part pending | 2026-10-17 | The GPU part must run from the base build before the first C++ change of step 1; every GPU node of SURF Spider has been down since 2026-10-16. Results in `tests.md`. |
-| 1 | Orbits cache | Not started | | |
+| 0 | Branches, documents, baseline of the existing response | CPU part done, `L1Orbits` included; GPU part pending | 2026-10-17 | The GPU part runs from a frozen environment of the step 0 code, which reproduces every CPU golden output bit for bit; every GPU node of SURF Spider has been down since 2026-10-16. Results in `tests.md`. |
+| 1 | Orbits cache | CPU part done; GPU part pending | 2026-10-17 | Existing outputs change by at most 6e-11 (templates, inner products), 2e-9 (gradients) and 2e-8 (Fisher on the TDI track, whose f̈ entries change by up to 8e-6); the step 1 captures are the new baseline. Results in `tests.md`. |
 | 2 | Fresnel split | Not started | | |
 | 3 | Tile seam | Not started | | |
 | 4 | DFFR kernels | Not started | | |
@@ -80,6 +80,10 @@ outputs (golden `.npz` files, timings, figures) go to a folder outside git, for 
   times in the orbit frame (absolute TCB for `L1Orbits`). Grids: 50 s for the base orbit classes;
   500 s positions and native light travel times (about 2.5 s) for `L1Orbits`. Standalone DFFR
   builds against the released 1.2.8 class (one grid, times relative to the file start).
+- The ESA orbit file that LAT ships starts at t0 = 2 073 211 130.8 s (TCB) and holds 1721
+  samples 161 790 s (1.87 days) apart, 8.8 years; LAT's base classes count times from its start.
+  The Mojito L1 file holds positions every 500 000 s (5.8 days) and light travel times every
+  2.5 s.
 - The only ad-hoc orbit derivative in the C++ of LAT, GBGPU and BBHx is
   `stft_get_spacecraft_acc` (`lat_stft_kernels.hh:177`, 3-point, 2000 s).
 - Production STFT (`mojito_input/galfor_psd_multigpu_stft_settings.py`, `recipe.py:1352`):
@@ -172,17 +176,45 @@ the grid and data from `STFTDomain`, window starts from `start_freq_inds` as tod
 
 ### Step 1: orbits cache
 
-- Port the 5-point stencils from dffr `kinematics.cu` into the four `Orbits` methods; port the
-  three build kernels into `Orbits::get_kinematics_table`, with a host-side coverage check that
-  raises when the midpoints plus margins leave either grid.
-- `KinematicsTableWrap`, `STFTComputationGroup.cpp_kinematics`, backend method lists.
-- `stft_get_spacecraft_acc` calls `orbits->get_acceleration`; this changes the existing outputs
-  slightly (3-point to 5-point), so the change is measured, reviewed, and becomes the new baseline.
-- Tests (`lisa-analysis-tools/tests/test_orbit_kinematics.py`): stencil methods against
-  analytic derivatives and against the file velocities; table against a NumPy mirror of the same
-  interpolation and stencils (bit-level on the CPU); CPU against GPU; coverage errors; against
-  dffr's lisaorbits builder on the ESA orbits that LAT ships (dffr environment). Existing STFT
-  tests pass.
+Done on the CPU on 2026-10-17; the GPU runs are pending.
+
+- `Orbits::get_velocity`, `get_acceleration`, `get_ltt_rate` and `get_ltt_acceleration`
+  (`Detector.cu`): five-point central differences of the linearly interpolated tables. Each grid
+  uses the whole number of its cells closest to 2000 s (`ORBIT_STENCIL_STEP`): 4 cells of the
+  500 s position grid, 800 cells of the 2.5 s light-travel-time grid of `L1Orbits`. With whole
+  cells, the five samples share one position within their cells, so the interpolation error of
+  the table cancels in the difference. The stencil centre is clamped so that every sample lies
+  between t0 and t0 + (N - 2) dt of its grid.
+- `KinematicsTable` and `Orbits::get_kinematics_table`: the three build kernels of dffr's
+  `kinematics.cu`, with the four methods as stencils, absolute times in the orbit frame, and the
+  link order, receivers and senders of the `Orbits` link arrays. A host-side check raises
+  `ValueError` when the midpoints, widened by two stencil steps (and by 20 s of light travel time
+  for the senders), leave the position or the light-travel-time grid.
+- `KinematicsTableWrap` in `binding_detector.{hpp,cxx}`: it holds the table by value, takes
+  C-contiguous float64 arrays without conversion and checks their lengths on both backends,
+  because it keeps raw pointers. It is a required field of `LISAToolsBackendMethods`; the GBGPU
+  and BBHx loaders fill every field of that table themselves, so each needs one line that passes
+  it, as for the STFT domain wraps. GBGPU `feat-dffr` has that line. BBHx does not: the line was
+  applied only to the local BBHx clone used for the tests, so BBHx fails to load against this
+  branch until its maintainers add it.
+- `STFTComputationGroup.cpp_kinematics(cpp_orbits)` builds the table at the group's segment
+  midpoints, on the group's device, on the first call and keeps it; another orbits object gets
+  its own table. `kinematics_fields` returns the arrays with their natural shapes, for tests and
+  for the exchange with standalone dffr.
+- `stft_get_spacecraft_acc` (three points, 2000 s) is removed; the TDI-phase frequency estimator
+  calls `Orbits::get_acceleration`. The truncation error of the old difference, (Omega h)^2 / 12
+  = 1.3e-8 of the annual acceleration, is gone; what remains is the rounding of the absolute
+  positions, about 5e-9.
+- Deviations: `get_window` is not changed in this effort; its last accepted cell reads one row
+  past a table, and no new method reaches that cell. The NumPy mirror is compared
+  within a rounding bound instead of bit for bit, because the CPU backend is built for x86-64-v3,
+  where GCC fuses multiply-adds that NumPy rounds separately. The exchange with standalone dffr
+  uses both of its builders: the C builder with the same stencil checks the port, the lisaorbits
+  builder the physics.
+- Tests: `tests/test_orbit_kinematics.py` (synthetic orbits on two offset grids against exact
+  and analytic derivatives, a NumPy mirror, the ESA file velocities, coverage errors, argument
+  checks, the group cache, CPU against GPU); regressions and the exchange with dffr in
+  `scripts/dffr/run_step1.sh`. Results in `tests.md`.
 
 ### Step 2: Fresnel split
 
@@ -199,7 +231,9 @@ the grid and data from `STFTDomain`, window starts from `start_freq_inds` as tod
   `gb_stft_*` wraps compile unchanged.
 - Gate: bit-identical outputs on CPU and GPU against the step-2 baseline
   (`scripts/validation/stft_column_policy_oracle.py`, golden files, GBGPU STFT tests), and
-  timings within run-to-run noise of the baseline.
+  timings within run-to-run noise of the baseline. The swap kernels, which this step rewrites
+  for two tables per tile, are left out of the CPU captures from step 2 on, so the gate covers
+  them on the GPU, plus the swap checks of `test_stft_gb.py` on the CPU.
 
 ### Step 4: DFFR kernels
 
@@ -264,15 +298,32 @@ the grid and data from `STFTDomain`, window starts from `start_freq_inds` as tod
 
 ## Verification
 
-- Rebuild after C++ changes, CPU and CUDA backends, on a GPU node. The author's setup on SURF
-  Spider: `ONLY="lisa-analysis-tools GBGPU" ./install_erebor_spider.sh` from `~/projects/erebor`.
+- Rebuild after C++ changes, CPU and CUDA backends, on any compute node: nvcc comes with the
+  environment, so the CUDA backends build without a GPU, and the install script then skips its
+  GPU checks. The author's setup on SURF Spider:
+  `ONLY="lisa-analysis-tools GBGPU" ./install_erebor_spider.sh` from `~/projects/erebor`.
+- Every script in `scripts/dffr/` takes `--device cpu|gpu`, so a run made on the CPU repeats on
+  a GPU with that one flag.
+- From step 2 on, the CPU golden captures and CPU benchmarks leave out `get_swap_ll_stft` and
+  `get_swap_ll_grad_stft` (`--without-swap` in both scripts). Both build their terms from the
+  same column evaluation as `get_ll_stft` and `get_ll_grad_stft`, which stay, and
+  `GBGPU/tests/test_stft_gb.py` keeps checking their own parts on the CPU: swap(A, A) against
+  get_ll(A), the add and remove symmetry with the conjugated cross term, and the swap gradient
+  against central differences. The two swap kernels took about 70 % of a CPU benchmark run. The
+  GPU runs keep both kernels.
+- A baseline that must come from the code before a step, but cannot be captured before the
+  rebuild, comes from a frozen environment of that code (`scripts/dffr/build_base_env.sh`). Such
+  an environment is accepted only if it reproduces the CPU golden outputs of that code bit for
+  bit.
 - CPU tests: `python -m pytest GBGPU/tests/test_stft_gb.py GBGPU/tests/test_stft_gb_accuracy.py
   GBGPU/tests/test_stft_gb_crossdomain.py` and `python -m unittest tests.test_orbit_kinematics`
   from the LAT root.
 - GPU tests and benchmarks with `force_backend="gpu"`, on one A100 MIG slice or a full A100 node.
 - dffr environment: `cd direct-fast-fresnel-response && uv sync --extra compare`; the regression
   scripts in `scripts/dffr/` exchange arrays as `.npz` files in the output folder's
-  `regression/`. Both sides use absolute times: the LAT orbits get `t0` equal to the file's `t0`.
+  `regression/`. The LAT side counts times from the start of the orbit file (`t0 = 0`, as the
+  base orbit classes do); the dffr side adds the file's `t0` to whole-second offsets, which is
+  exact, so both evaluate the orbits at the same times.
 - Every step ends with its entries in `tests.md` (what ran, where, tolerances, results,
   reproducing command) and its status row in this plan.
 
@@ -285,9 +336,25 @@ the grid and data from `STFTDomain`, window starts from `start_freq_inds` as tod
 - Sky frame of the shipped ESA file: LAT's `Orbits` docstring calls it ecliptic, the dffr docs
   call it ICRS. The regressions read raw file positions on both sides (`frame="ecliptic"`, no
   rotation); the question itself is checked in step 6.
-- `Orbits::get_window` accepts the last cell, where `interpolate` reads one row past the table;
-  the new methods stay below `t0 + (N - 2) dt`. A one-line fix of `get_window` is proposed for
-  step 1.
+- `Orbits::get_window` accepts the last cell of a table, index N - 1, where `interpolate` reads
+  row N, one past the end of the array: a lookup in the final dt of a table returns a value
+  computed from whatever memory follows the array (shown on the CPU backend with marker values
+  placed after a table). The new methods and the coverage check stay below t0 + (N - 2) dt.
+  `get_window` is left as it is in this effort; production data end well before the orbit files.
+- The base orbit classes (`Orbits._configure`) append the file's last sample after their
+  uniform 50 s grid, although the C++ class assumes row i at t0 + i dt. On the ESA file the last
+  cell then spans 74.7 s instead of 50 s, and positions in it are off by up to about 740 km. With
+  `t0` not zero, the same function builds its grid from t0 to about 2 t0 + span: 4.7e7 rows,
+  about 16 GB, for the ESA file's own t0. Neither reaches the new methods; both are noted, not
+  fixed.
+- Orbit representation: the base classes and `L1Orbits` pass a cubic spline through the file's
+  position samples (1.87 days apart on the ESA file, 5.8 days on the Mojito L1 file) and do not
+  use the file velocities. The derivatives of the interpolated positions differ from the file
+  velocities by 2.7e-7 (ESA) and 8.1e-6 (Mojito L1) of the orbital speed, and from the analytic
+  accelerations of lisaorbits by 8.4e-5 (ESA). Both responses read these positions. On the ESA
+  orbits, at 20 mHz, the position difference (up to 486 m) and the acceleration difference over
+  half a day each shift the phase by about 2e-7 rad. Step 6 measures the effect against the
+  time-domain truth.
 - GBT `CubicSplineSegment` derivative helpers return `c1 + c2 dx + c3 dx^2` and `c2 + c3 dx`,
   not the power-basis derivatives. Nothing calls them; noted only.
 - Shared memory: two segment tables for swap exceed 48 kB at 32 rows; the Fisher needs the
