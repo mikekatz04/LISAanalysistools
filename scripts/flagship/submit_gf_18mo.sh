@@ -4614,18 +4614,18 @@ echo "[DATA] SOURCE_TYPES=${SOURCE_TYPES} (COMBINED = pre-summed stream; classes
 # 200; 0 = off) below its leaf's cold rung, beyond the rung's expected
 # tempering drop, to the cold state ("[EMRI_LADDER] leaf N: re-anchored ...").
 export MBH_NTEMPS=${MBH_NTEMPS:-8}
-# EMRI 8 -> 11 rungs with T_max 6 -> 625 below (user ruling 2026-10-18, the
+# EMRI 8 -> 12 rungs with T_max 6 -> 625 below (user ruling 2026-10-18, the
 # EMRI sampling audit): the loud EMRIs' posteriors are combs of discrete
 # islands and a T=6 top rung cannot find islands no walker holds; the top rung
 # should see the LOUDEST leaf (EMRI 3, SNR 50) at an effective SNR ~2 ("go
-# until it is at SNR ~2"), i.e. T_max = (50/2)^2 = 625; 11 rungs = Eryn's
-# make_ladder count for a 25 % swap rate at ndim 12 (ratio 1.90, "swaps
-# ideally at 25 %"), at
-# ~1.4x the EMRI move (~8 % of the iteration wall). A RESUMED store keeps
+# until it is at SNR ~2"), i.e. T_max = (50/2)^2 = 625; 12 rungs (ratio 1.80,
+# one more than Eryn's make_ladder count for a 25 % swap rate at ndim 12 --
+# the count the production store was migrated to), at
+# ~1.5x the EMRI move (~9 % of the iteration wall). A RESUMED store keeps
 # its 8 stored rungs: migrate it first (scripts/fstat_proposal/
-# rerung_store_branches.py --set emri=11) and put EMRI_LADDER_RESET_ON_RESUME=1
+# rerung_store_branches.py --set emri=12) and put EMRI_LADDER_RESET_ON_RESUME=1
 # on that one relaunch line.
-export EMRI_NTEMPS=${EMRI_NTEMPS:-11}
+export EMRI_NTEMPS=${EMRI_NTEMPS:-12}
 # Ladder caps (user ruling 2026-10-13, second ruling of the day: "I want to
 # focus on sampling the main modes (+ the sky move for MBHs) in terms of
 # tempering"). The first ruling capped the EMRI ladder at T_max = 100 (an
@@ -4691,7 +4691,7 @@ export EMRI_NTEMPS=${EMRI_NTEMPS:-11}
 # MBH_LADDER_RESET_ON_RESUME=1 SOBBH_LADDER_RESET_ON_RESUME=1 on the relaunch
 # line ONCE to replace them (logged leaf by leaf; the old rungs' states stay
 # where they are and the guard re-anchors the lost ones at the first block).
-# EMRI T_max 6 -> 625 with 11 rungs (user ruling 2026-10-18; see EMRI_NTEMPS).
+# EMRI T_max 6 -> 625 with 12 rungs (user ruling 2026-10-18; see EMRI_NTEMPS).
 export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-625}
 export EMRI_LADDER_REANCHOR_NATS=${EMRI_LADDER_REANCHOR_NATS:-100}
 export MBH_LADDER_TMAX=${MBH_LADDER_TMAX:-10}
