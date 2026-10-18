@@ -159,7 +159,7 @@ static CUDA_DEVICE cmplx stft_block_reduce_cmplx(cmplx* sdata)
 //     f0    = f_astro + arg( conj(z+) * z- * e^{-i 4 pi f_astro D} ) / (4 pi D)
 //     fdot0 = fdot_astro - f0 * (k . a_sc / c)
 //
-// Rate fdot0 is analytic via orbit acceleration differencing across DT_ORB = 2000 s.
+// Rate fdot0 is analytic, with the spacecraft acceleration from Orbits::get_acceleration.
 // Carrier demodulation shifts the first difference to baseband (|arg| < 1e-3 rad),
 // enabling wide baseline D = 2000 s and suppressing frequency noise as 1/D.
 // ---------------------------------------------------------------------------
@@ -170,33 +170,6 @@ constexpr double STFT_DT_STENCIL_DEMOD = 2000.0;         ///< demodulated half-w
 // exceeds the chirp itself (the production step 1e-19 does so below ~1 mHz). At this floor the phase
 // it costs over a segment is pi |dfdot| tau^2 ~ 6e-13 rad, far below every other error here.
 constexpr double STFT_FDOT_FLOOR = 1.0e-22;              ///< [Hz/s]
-
-// Spacecraft acceleration for the analytic Doppler rate. DT_ORB spans 4x the 500 s
-// linear interpolation grid to prevent node aliasing.
-template <class SourceT>
-CUDA_DEVICE inline Vec stft_get_spacecraft_acc(SourceT& src, double t, int sc)
-{
-    constexpr double DT_ORB = 2000.0; // [s] Spans 4x the 500 s position grid
-    constexpr double DT_ORB2_INV = 1.0 / (DT_ORB * DT_ORB);
-
-    double t_lo = src.orbits->sc_t0;
-    double t_hi = src.orbits->sc_t0
-                + (double)(src.orbits->sc_N - 2) * src.orbits->sc_dt;
-
-    double t_anchor = t;
-    if (t_anchor < t_lo + DT_ORB)
-        t_anchor = t_lo + DT_ORB;
-    if (t_anchor > t_hi - DT_ORB)
-        t_anchor = t_hi - DT_ORB;
-
-    Vec x_p = src.orbits->get_pos(t_anchor + DT_ORB, sc);
-    Vec x_0 = src.orbits->get_pos(t_anchor, sc);
-    Vec x_m = src.orbits->get_pos(t_anchor - DT_ORB, sc);
-
-    return Vec((x_p.x - 2.0 * x_0.x + x_m.x) * DT_ORB2_INV,
-               (x_p.y - 2.0 * x_0.y + x_m.y) * DT_ORB2_INV,
-               (x_p.z - 2.0 * x_0.z + x_m.z) * DT_ORB2_INV);
-}
 
 // Astro-model degradation shared by the guards below: fires only where the
 // TDI has no differentiable phase (identically-zero response samples at the
@@ -323,7 +296,7 @@ CUDA_DEVICE void stft_freq_fdot_from_tdi_phase(
 
         // Vertex spacecraft of each channel (X, Y, Z -> SC 1, 2, 3).
         int sc_id = ch + 1;
-        Vec a_sc = stft_get_spacecraft_acc(src, t, sc_id);
+        Vec a_sc = src.orbits->get_acceleration(t, sc_id);
         double k_dot_a = k.dot(a_sc);
 
         // fdot_0 = fdot_astro - f_0 * (k . a_sc / c)
