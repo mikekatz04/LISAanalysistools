@@ -681,7 +681,7 @@ class EveryOtherKnobIsTheNineMonthsTest(unittest.TestCase):
                 self.assertEqual(same, [], f"{name}: declared deltas that do not differ: {same}")
 
     def test_the_v930_production_defaults_hold_everywhere(self):
-        line = {"MIDIT_CHECKPOINT": "0", "MBH_NTEMPS": "8", "EMRI_NTEMPS": "18",
+        line = {"MIDIT_CHECKPOINT": "0", "MBH_NTEMPS": "8", "EMRI_NTEMPS": "11",
                 "EMRI_TRAJ_WORKERS": "8", "MBH_WINDOW_DECIMATE": "2",
                 "SOBBH_EIGEN_INFO": "gram", "EMRI_EIGEN_INFO": "gram", "MBH_EIGEN_INFO": "gram",
                 "PSD_EIGEN_INFO": "fisher", "GALFOR_EIGEN_INFO": "fisher",
