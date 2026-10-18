@@ -77,8 +77,18 @@ class EigenAxisJumpMixMove(EigenAxisMove):
         See :meth:`eryn.moves.EigenAxisMove.get_proposal` for the arguments
         and the return value. The base step below mirrors that method line
         for line (``tests/test_eigen_jump_mix.py`` pins the parity).
+
+        Per-row bookkeeping for the add/remove move's per-axis acceptance
+        accounting (2026-10-18): ``last_pick[name]`` is the eigen axis each
+        row stepped along and ``last_jump_scale[name]`` its step multiplier
+        (1 or ``jump_mix_factor``), both in the row order of the alive
+        leaves. With ``jump_mix == 0`` the eryn method runs untouched and
+        both are left EMPTY (the accounting then derives the axis from the
+        displacement).
         """
         if self.jump_mix <= 0.0:
+            self.last_pick = {}
+            self.last_jump_scale = {}
             return super().get_proposal(
                 branches_coords, random, branches_inds=branches_inds,
                 supps=supps, branch_supps=branch_supps, **kwargs,
@@ -86,6 +96,7 @@ class EigenAxisJumpMixMove(EigenAxisMove):
 
         q = {}
         self.last_jump_scale = {}
+        self.last_pick = {}
         for name, coords in branches_coords.items():
             xp = _array_module(coords)
             ntemps, nwalkers, nleaves_max, ndim = coords.shape
@@ -103,10 +114,11 @@ class EigenAxisJumpMixMove(EigenAxisMove):
             )
 
             if self.mode == "axis":
-                dy, _ = draw_axis_step(
+                dy, pick = draw_axis_step(
                     axes_rows, sigmas_rows, random,
                     jump_factor=self.jump_factor,
                 )
+                self.last_pick[name] = np.asarray(pick, dtype=int)
             else:
                 if hasattr(random, "standard_normal"):
                     z = np.asarray(random.standard_normal((nrows, ndim)))

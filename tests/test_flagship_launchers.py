@@ -712,6 +712,18 @@ class EveryOtherKnobIsTheNineMonthsTest(unittest.TestCase):
                 "SOBBH_EIGEN_TEMPER_SIGMAS": "1",
                 "EMRI_EIGEN_ADAPT_MAX_FACTOR": "100", "MBH_EIGEN_ADAPT_MAX_FACTOR": "100",
                 "SOBBH_EIGEN_ADAPT_MAX_FACTOR": "100",
+                # 2026-10-18: the EMRI sampling audit (docs/emri-sampling-audit.md)
+                "EMRI_EIGEN_AXIS_ACC_LOG": "1", "MBH_EIGEN_AXIS_ACC_LOG": "1",
+                "SOBBH_EIGEN_AXIS_ACC_LOG": "1", "EMRI_EIGEN_AXIS_ACC_TUNE": "1",
+                "EMRI_EIGEN_AXIS_ACC_MIN": "0.1", "EMRI_EIGEN_AXIS_ACC_MAX": "0.5",
+                "EMRI_EIGEN_AXIS_ACC_FACTOR": "2", "EMRI_DE_JUMP_MIX": "0.2",
+                "EMRI_DE_JUMP_MODE_FRAC": "0.5", "EMRI_LADDER_REANCHOR_NATS": "100",
+                # 2026-10-18 (Mike, "do this for the other sources"): the
+                # controller on for MBH / SOBBH, the jump at 0.1 / 0.2, the
+                # SOBBH guard 20 -> 60
+                "MBH_EIGEN_AXIS_ACC_TUNE": "1", "SOBBH_EIGEN_AXIS_ACC_TUNE": "1",
+                "MBH_DE_JUMP_MIX": "0.1", "SOBBH_DE_JUMP_MIX": "0.2",
+                "SOBBH_LADDER_REANCHOR_NATS": "60",
                 "GALFOR_FK_PRIOR": "0.8e-3,1e-2", "GALFOR_F1_PRIOR": "1e-4,1e-2",
                 "GALFOR_F2_PRIOR": "0.8e-3,1e-2", "NWALKERS": "4", "GB_NTEMPS": "24",
                 "MOJITO_PSD_REFERENCE_FIT_UNEQUAL_ARM": "1", "UNEQUAL_ARM": "1"}

@@ -108,6 +108,30 @@ class SOBBHSettings(Settings):
     eigen_adapt_max_factor: float = dataclasses.field(
         default_factory=env_default("SOBBH_EIGEN_ADAPT_MAX_FACTOR", 100.0, float)
     )
+    # Same meaning as the EMRISettings fields of the 2026-10-18 audit
+    # (SOBBH_EIGEN_AXIS_ACC_LOG / _TUNE / _MIN / _MAX / _FACTOR,
+    # SOBBH_DE_JUMP_MIX / _MODE_FRAC).
+    eigen_axis_acc_log: bool = dataclasses.field(
+        default_factory=env_default("SOBBH_EIGEN_AXIS_ACC_LOG", False, bool)
+    )
+    eigen_axis_acc_tune: bool = dataclasses.field(
+        default_factory=env_default("SOBBH_EIGEN_AXIS_ACC_TUNE", False, bool)
+    )
+    eigen_axis_acc_min: float = dataclasses.field(
+        default_factory=env_default("SOBBH_EIGEN_AXIS_ACC_MIN", 0.1, float)
+    )
+    eigen_axis_acc_max: float = dataclasses.field(
+        default_factory=env_default("SOBBH_EIGEN_AXIS_ACC_MAX", 0.5, float)
+    )
+    eigen_axis_acc_factor: float = dataclasses.field(
+        default_factory=env_default("SOBBH_EIGEN_AXIS_ACC_FACTOR", 2.0, float)
+    )
+    de_jump_mix: float = dataclasses.field(
+        default_factory=env_default("SOBBH_DE_JUMP_MIX", 0.0, float)
+    )
+    de_jump_mode_frac: float = dataclasses.field(
+        default_factory=env_default("SOBBH_DE_JUMP_MODE_FRAC", 0.5, float)
+    )
 
 
 class SOBBHSetup(Setup):

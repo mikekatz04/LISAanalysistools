@@ -110,7 +110,7 @@ def entry_key(branch, leaf):
 
 def make_entry(axes, sigmas, visits, *, scope, ndim, ntemps, nwalkers,
                x0=None, data_identity=None, store_iteration=None,
-               sigmas_fisher=None):
+               sigmas_fisher=None, axis_tune=None):
     """One sidecar entry: the table as the move consumes it + guards.
 
     ``axes``/``sigmas`` are stored in the EXACT shape the move holds in
@@ -127,6 +127,11 @@ def make_entry(axes, sigmas, visits, *, scope, ndim, ntemps, nwalkers,
     entry without it reads as "the table is the information-matrix one".
     Adding the key needs no format bump: older readers ignore it (and adopt
     the adapted sigmas, a stale-but-valid frozen proposal).
+
+    ``axis_tune`` (``{BRANCH}_EIGEN_AXIS_ACC_TUNE`` on, 2026-10-18): the
+    acceptance-driven controller's per-axis multiplier ``(ndim,)`` on the
+    table's (adapted) sigma -- ``sigmas`` is already the tuned step that ran.
+    Written only when given, same no-bump argument.
     """
     entry = {
         "axes": np.asarray(axes),
@@ -147,6 +152,8 @@ def make_entry(axes, sigmas, visits, *, scope, ndim, ntemps, nwalkers,
     }
     if sigmas_fisher is not None:
         entry["sigmas_fisher"] = np.asarray(sigmas_fisher)
+    if axis_tune is not None:
+        entry["axis_tune"] = np.asarray(axis_tune, dtype=float)
     return entry
 
 
@@ -272,7 +279,7 @@ def _guards_ok(entry, key, *, scope, ndim, ntemps, nwalkers,
 
 
 def load_entry(path, branch, leaf, *, scope, ndim, ntemps, nwalkers,
-               data_identity=None, return_fisher=False):
+               data_identity=None, return_fisher=False, return_tune=False):
     """``(axes, sigmas, visits)`` for one (branch, leaf), or ``None``.
 
     ``None`` means "build it" — no sidecar, no entry for this leaf, or
@@ -281,7 +288,9 @@ def load_entry(path, branch, leaf, *, scope, ndim, ntemps, nwalkers,
     ``return_fisher=True`` appends the entry's ``sigmas_fisher`` (the
     information-matrix floor of an adapted table; ``None`` for an entry
     written with the step-scale adaptation off): ``(axes, sigmas, visits,
-    sigmas_fisher)``.
+    sigmas_fisher)``. ``return_tune=True`` appends the entry's
+    ``axis_tune`` multiplier after that (``None`` when absent or not a
+    finite positive ``(ndim,)`` vector).
     """
     payload = load_sidecar(path)
     key = entry_key(branch, leaf)
@@ -294,6 +303,14 @@ def load_entry(path, branch, leaf, *, scope, ndim, ntemps, nwalkers,
     out = (entry["axes"], entry["sigmas"], int(entry.get("visits", 0)))
     if return_fisher:
         out = out + (entry.get("sigmas_fisher"),)
+    if return_tune:
+        tune = entry.get("axis_tune")
+        if tune is not None:
+            tune = np.asarray(tune, dtype=float)
+            if (tune.shape != (int(ndim),) or not np.all(np.isfinite(tune))
+                    or not np.all(tune > 0)):
+                tune = None
+        out = out + (tune,)
     return out
 
 

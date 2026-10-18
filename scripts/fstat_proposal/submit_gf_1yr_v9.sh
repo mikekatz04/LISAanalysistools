@@ -5123,6 +5123,19 @@ export EMRI_NTEMPS=${EMRI_NTEMPS:-8}
 #                        EMRI but 3 and 6, and on the new ladder nothing else
 #                        brings them back (a swap into a state 100 nats worse
 #                        never happens).
+#   EMRI_LADDER_REANCHOR_NATS 50 -> 100 (2026-10-18, the EMRI sampling audit,
+#                        docs/emri-sampling-audit.md item 6): on the 9mo (job 773,
+#                        rows 840-1007) every leaf's hot-rung deficit sits on the
+#                        tempered-Gaussian expectation (ndim/2)(T-1) (30 nats at the
+#                        top rung; medians 24-30 on 7 of the 8 leaves), and the 26
+#                        firings in 137 iterations were rungs 6-7 at 72-100 nats:
+#                        the posterior's own top-rung tail (q99 70-85), on leaves
+#                        whose LOST deficit SNR^2/2 is 118-1262 nats (EMRI 3, lost
+#                        at 1262, fired twice). 100 (130 at the top rung) still
+#                        catches a lost rung of every EMRI above SNR 16 and stops
+#                        undoing the top rungs' exploration of the islands; the
+#                        two faintest (SNR 12.8 / 15.4, lost at 82 / 118 nats) are
+#                        prior-dominated at T = 6 anyway.
 #   SOBBH_LADDER_TMAX=6 / SOBBH_LADDER_REANCHOR_NATS=20 (user ruling
 #                        2026-10-15, "update the SOBHBs"): until then SOBBH
 #                        stayed on the uncapped make_ladder spacing (beta down
@@ -5138,11 +5151,16 @@ export EMRI_NTEMPS=${EMRI_NTEMPS:-8}
 # line ONCE to replace them (logged leaf by leaf; the old rungs' states stay
 # where they are and the guard re-anchors the lost ones at the first block).
 export EMRI_LADDER_TMAX=${EMRI_LADDER_TMAX:-6}
-export EMRI_LADDER_REANCHOR_NATS=${EMRI_LADDER_REANCHOR_NATS:-50}
+export EMRI_LADDER_REANCHOR_NATS=${EMRI_LADDER_REANCHOR_NATS:-100}
 export MBH_LADDER_TMAX=${MBH_LADDER_TMAX:-10}
 export MBH_LADDER_REANCHOR_NATS=${MBH_LADDER_REANCHOR_NATS:-0}
 export SOBBH_LADDER_TMAX=${SOBBH_LADDER_TMAX:-6}
-export SOBBH_LADDER_REANCHOR_NATS=${SOBBH_LADDER_REANCHOR_NATS:-20}
+# SOBBH guard 20 -> 60 (user ruling 2026-10-18, with the EMRI audit): on the
+# 9mo job 773 it fired 60 times on the two bimodal SNR 9-10 leaves (0 and 1),
+# re-anchoring hot rungs sitting 45-55 nats below cold = the OTHER mass mode,
+# not a lost source; for a source this weak a T=6 rung's tail and a lost
+# source are the same number, so the guard yields to the exploration.
+export SOBBH_LADDER_REANCHOR_NATS=${SOBBH_LADDER_REANCHOR_NATS:-60}
 # 12 -> 8 (user ruling 2026-09-16, with repeats 25 -> 20: sobbh cost
 # trim now that the single-call fix landed). NOTE: SOBHB's ladder lives
 # in the stored PerLeafLadderState (betas_all per leaf), so on a RESUME
@@ -5429,6 +5447,66 @@ export SOBBH_EIGEN_TEMPER_SIGMAS=${SOBBH_EIGEN_TEMPER_SIGMAS:-1}
 export EMRI_EIGEN_ADAPT_MAX_FACTOR=${EMRI_EIGEN_ADAPT_MAX_FACTOR:-100}
 export MBH_EIGEN_ADAPT_MAX_FACTOR=${MBH_EIGEN_ADAPT_MAX_FACTOR:-100}
 export SOBBH_EIGEN_ADAPT_MAX_FACTOR=${SOBBH_EIGEN_ADAPT_MAX_FACTOR:-100}
+# ---- THE EMRI SAMPLING AUDIT (user ruling 2026-10-18; docs/emri-sampling-audit.md)
+# Mike: "do a fully audited and adjusted EMRI setup to get this to be better"
+# and "we do not have enough walkers for the stretch move, so we need to
+# improve what we have". The 9mo (job 773, rows 840-1007) EMRI posteriors are
+# a COMB of discrete islands along the intrinsic degeneracy (EMRI 3: p0
+# 12.3307 / 12.3310 / 12.3329 / 12.3346 / 12.3371, a / logm1 / m2 / e0 sliding
+# along, all within ~10 nats; EMRI 0: seven islands in (p0, e0, Phi_r0)); every
+# walker's ladder holds one or two islands, nothing moves a walker between
+# them (in PE there is no cross-walker channel at all: the walker-permuting
+# swap never fires at one walker per rank, the cold -> hot rotation is
+# search-only), and the pooled adaptation widened the narrow intrinsic axes
+# x14-100 from the BETWEEN-island offsets, where the walkers' own spread is
+# 0.04-0.2 of the step: 4 of 12 axes dead on EMRI 3, 3 on EMRI 0.
+#   {BRANCH}_EIGEN_AXIS_ACC_LOG=1: per-axis proposals / acceptances of the
+#     eigen move, cold vs hot rungs, one "[EMRI_EIGEN] leaf k (walker w): axis
+#     acceptance over the last 10 visits, cold ..." line per refresh per rank,
+#     and the adaptation line names the widened axes' cold acceptance.
+#     Telemetry only (the proposal stream is bit-identical); on for MBH and
+#     SOBBH too, nothing else of theirs changes.
+#   EMRI_EIGEN_AXIS_ACC_TUNE=1: after each refresh window an axis whose COLD
+#     acceptance fell below _ACC_MIN (0.1) has its step divided by _ACC_FACTOR
+#     (2; never below the Fisher sigma), one above _ACC_MAX (0.5) multiplied
+#     (never above the adapted width); frozen within a visit. Synthetic comb:
+#     the dead axes' cold acceptance 0.06 / 0.15 -> 0.32 / 0.38.
+#   EMRI_DE_JUMP_MIX=0.2: the cross-walker difference jump x' = x + gamma
+#     (x_a - x_b) (lisatools.sampling.moves.walkerdiffjump), partners = the
+#     start-of-propose rung ensembles of the OTHER walker group (walkers {0,2}
+#     and {1,3} alternate by global iteration, so it stays exact), gamma = 1
+#     (island to island) with probability _MODE_FRAC (0.5), else 2.38 /
+#     sqrt(2 d) x N(1, 0.1); 20 % of the stack, the eigen move the rest. The
+#     partners ride in the propose payload (8 leaves x 8 rungs x 4 walkers x
+#     12 floats, shared with the pooled adaptation sample). Synthetic comb (4
+#     walkers x 8 rungs, two islands 45 nats apart): 0 island switches in 200
+#     visits -> 70-98 per walker. Log: "[EMRI_DE] leaf k (walker w):
+#     cross-walker jumps over the last 10 visits (active on 5 of 10): mode cold
+#     a/b hot c/d, scaled ...", and the stack line "[EMRI] inner-move stack:
+#     EigenAxisJumpMixMove 0.800 (jump mix 0.10 x 3.0) | WalkerDifferenceJumpMove
+#     0.200 (cross-walker, mode frac 0.50)".
+# Code defaults OFF / OFF / 0 (stock runs bit-identical); rollback =0 on the
+# launch line. MBH / SOBBH (user ruling 2026-10-18, "do this for the other
+# sources"): the CONTROLLER on for both -- the pooled adaptation had widened
+# MBH's intrinsic axes until its cold acceptance fell from 0.4 to 0.07-0.21
+# on four leaves, and SOBBH 0/1 sat at 0.09-0.21 -- and the JUMP at 0.2 for
+# SOBBH (leaves 0/1 are bimodal in the masses at SNR 9-10, walkers in
+# different modes) and 0.1 for MBH (posterior-sized correlated steps; the
+# sky reflections already have the sky-hop move). The controller's band
+# (0.1-0.5, factor 2) and the mode fraction (0.5) are the code defaults.
+export EMRI_EIGEN_AXIS_ACC_LOG=${EMRI_EIGEN_AXIS_ACC_LOG:-1}
+export MBH_EIGEN_AXIS_ACC_LOG=${MBH_EIGEN_AXIS_ACC_LOG:-1}
+export SOBBH_EIGEN_AXIS_ACC_LOG=${SOBBH_EIGEN_AXIS_ACC_LOG:-1}
+export EMRI_EIGEN_AXIS_ACC_TUNE=${EMRI_EIGEN_AXIS_ACC_TUNE:-1}
+export MBH_EIGEN_AXIS_ACC_TUNE=${MBH_EIGEN_AXIS_ACC_TUNE:-1}
+export SOBBH_EIGEN_AXIS_ACC_TUNE=${SOBBH_EIGEN_AXIS_ACC_TUNE:-1}
+export EMRI_EIGEN_AXIS_ACC_MIN=${EMRI_EIGEN_AXIS_ACC_MIN:-0.1}
+export EMRI_EIGEN_AXIS_ACC_MAX=${EMRI_EIGEN_AXIS_ACC_MAX:-0.5}
+export EMRI_EIGEN_AXIS_ACC_FACTOR=${EMRI_EIGEN_AXIS_ACC_FACTOR:-2}
+export EMRI_DE_JUMP_MIX=${EMRI_DE_JUMP_MIX:-0.2}
+export MBH_DE_JUMP_MIX=${MBH_DE_JUMP_MIX:-0.1}
+export SOBBH_DE_JUMP_MIX=${SOBBH_DE_JUMP_MIX:-0.2}
+export EMRI_DE_JUMP_MODE_FRAC=${EMRI_DE_JUMP_MODE_FRAC:-0.5}
 # TABLE SCOPE. SOBBH is set ABOVE (SOBBH_EIGEN_SCOPE, walker_max per the
 # 2026-09-16 ruling; the 2026-09-08 per-walker ruling it superseded cost
 # 12 rungs x 10 walkers = 120 points x ~245 rows ~ 29k batched likelihood

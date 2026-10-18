@@ -2711,7 +2711,12 @@ def build_source_moves(curr, acs, priors, state, cfg) -> dict:
 #: reaches the move; an attribute the builder already set (a ``move_kwargs``
 #: entry) wins.
 SOURCE_MOVE_SETTINGS_ATTRS = ("eigen_adapt_pool", "eigen_temper_sigmas",
-                              "eigen_adapt_max_factor")
+                              "eigen_adapt_max_factor",
+                              # 2026-10-18 (the EMRI sampling audit): the
+                              # per-axis acceptance log and controller
+                              "eigen_axis_acc_log", "eigen_axis_acc_tune",
+                              "eigen_axis_acc_min", "eigen_axis_acc_max",
+                              "eigen_axis_acc_factor")
 
 
 def stamp_source_move_settings(move, info) -> None:

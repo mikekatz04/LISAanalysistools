@@ -168,7 +168,8 @@ def default_source_ladder(ndim, input_basis, ntemps, tmax=None):
 
 
 def make_default_inner_moves(
-    kind: str = "eigen", jump_mix: float = 0.0, jump_factor: float = 3.0
+    kind: str = "eigen", jump_mix: float = 0.0, jump_factor: float = 3.0,
+    de_jump_mix: float = 0.0, de_jump_mode_frac: float = 0.5,
 ) -> list:
     """Default single-source PE inner-move stack for an addremove branch.
 
@@ -183,11 +184,21 @@ def make_default_inner_moves(
     ``"stretch"`` — the legacy affine-invariant stretch (the jump knobs do
     not apply).
 
+    ``de_jump_mix > 0`` (eigen only; user ruling 2026-10-18, "we do not have
+    enough walkers for the stretch move, so we need to improve what we
+    have") adds the cross-walker difference jump
+    :class:`~lisatools.sampling.moves.walkerdiffjump.WalkerDifferenceJumpMove`
+    with that stack weight (the eigen move keeps ``1 - de_jump_mix``), its
+    fallback the eigen move itself, ``de_jump_mode_frac`` its share of
+    ``gamma = 1`` mode jumps. ``de_jump_mix == 0`` leaves the stack as above
+    (bit-identical).
+
     The single implementation behind every branch's ``inner_moves``
     fallback; the knobs are the branch Settings fields ``inner_move_kind``,
-    ``eigen_jump_mix`` and ``eigen_jump_factor`` (env
-    ``{BRANCH}_INNER_MOVE_KIND``, ``{BRANCH}_EIGEN_JUMP_MIX``,
-    ``{BRANCH}_EIGEN_JUMP_FACTOR``).
+    ``eigen_jump_mix``, ``eigen_jump_factor``, ``de_jump_mix`` and
+    ``de_jump_mode_frac`` (env ``{BRANCH}_INNER_MOVE_KIND``,
+    ``{BRANCH}_EIGEN_JUMP_MIX``, ``{BRANCH}_EIGEN_JUMP_FACTOR``,
+    ``{BRANCH}_DE_JUMP_MIX``, ``{BRANCH}_DE_JUMP_MODE_FRAC``).
     """
     kind_in = kind
     kind = str(kind).strip().lower()
@@ -196,17 +207,24 @@ def make_default_inner_moves(
         if jump_mix > 0.0:
             from lisatools.sampling.moves.eigenjumpmix import EigenAxisJumpMixMove
 
-            return [
-                (
-                    EigenAxisJumpMixMove(
-                        mode="axis", jump_mix=jump_mix, jump_mix_factor=float(jump_factor)
-                    ),
-                    1.0,
-                )
-            ]
-        from eryn.moves import EigenAxisMove
+            eigen = EigenAxisJumpMixMove(
+                mode="axis", jump_mix=jump_mix, jump_mix_factor=float(jump_factor)
+            )
+        else:
+            from eryn.moves import EigenAxisMove
 
-        return [(EigenAxisMove(mode="axis"), 1.0)]
+            eigen = EigenAxisMove(mode="axis")
+        de = float(de_jump_mix or 0.0)
+        if not (0.0 <= de < 1.0):
+            raise ValueError(f"de_jump_mix must be in [0, 1), got {de_jump_mix!r}")
+        if de > 0.0:
+            from lisatools.sampling.moves.walkerdiffjump import WalkerDifferenceJumpMove
+
+            return [
+                (eigen, 1.0 - de),
+                (WalkerDifferenceJumpMove(eigen, mode_frac=float(de_jump_mode_frac)), de),
+            ]
+        return [(eigen, 1.0)]
     if kind == "stretch":
         from eryn.moves import StretchMove
 
@@ -222,6 +240,8 @@ def inner_move_kwargs(settings) -> dict:
         kind=getattr(settings, "inner_move_kind", "eigen"),
         jump_mix=float(getattr(settings, "eigen_jump_mix", 0.0) or 0.0),
         jump_factor=float(getattr(settings, "eigen_jump_factor", 3.0)),
+        de_jump_mix=float(getattr(settings, "de_jump_mix", 0.0) or 0.0),
+        de_jump_mode_frac=float(getattr(settings, "de_jump_mode_frac", 0.5)),
     )
 
 

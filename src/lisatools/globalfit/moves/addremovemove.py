@@ -43,6 +43,18 @@ COLD_TO_HOT_STAGE_KINDS = ("search", "rj")
 #: the information-matrix sigma. Inert unless {BRANCH}_EIGEN_AXIS_ADAPT is on.
 EIGEN_ADAPT_MAX_FACTOR_DEFAULT = 100.0
 
+# ---- per-axis acceptance accounting + controller (ruling 2026-10-18) ---------
+#: {BRANCH}_EIGEN_AXIS_ACC_MIN / _MAX / _FACTOR defaults: an axis whose cold
+#: acceptance over a refresh window falls below MIN has its step divided by
+#: FACTOR, one above MAX multiplied by it (docs/emri-sampling-audit.md, B2)
+EIGEN_AXIS_ACC_MIN_DEFAULT = 0.1
+EIGEN_AXIS_ACC_MAX_DEFAULT = 0.5
+EIGEN_AXIS_ACC_FACTOR_DEFAULT = 2.0
+#: cold proposals an axis needs before the controller judges it; fewer carry
+#: over to the next window (one window at 10 visits x 25 repeats x 1 cold
+#: rung x 1/12 of the axis draws is ~20 per axis)
+EIGEN_AXIS_ACC_MIN_PROPOSALS = 8
+
 
 def factor_capped_sigmas(sigmas_fisher, sigmas_adapted, max_factor):
     """``max(sigma_fisher, min(sigma_adapted, max_factor x sigma_fisher))`` per axis.
@@ -154,6 +166,7 @@ from tqdm import tqdm
 from ...analysiscontainer import AnalysisContainerArray
 from ...domaincomputation import DomainComputationGroupArray
 from ...domains import DomainBase, DomainBaseArray, WDMSignal
+from ...sampling.moves.walkerdiffjump import KIND_MODE, KIND_SCALED, WalkerDifferenceJumpMove
 from ...utils.device import sensitivity_to_current_device
 from ...utils.utility import asnumpy, get_array_module
 from .. import midit_checkpoint
@@ -184,6 +197,8 @@ def describe_inner_moves(moves, weights) -> str:
                 f" (jump mix {float(mix):.2f} x "
                 f"{float(getattr(move, 'jump_mix_factor', 1.0)):.1f})"
             )
+        if isinstance(move, WalkerDifferenceJumpMove):
+            part += f" (cross-walker, mode frac {float(move.mode_frac):.2f})"
         parts.append(part)
     return " | ".join(parts)
 DEBUG_MODE = False
@@ -304,6 +319,23 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             information-matrix sigma (:func:`factor_capped_sigmas`). ``None``
             reads ``{BRANCH}_EIGEN_ADAPT_MAX_FACTOR``, then 100; ``<= 0`` or
             ``inf`` = no cap. Inert unless ``eigen_axis_adapt`` is on.
+        eigen_axis_acc_log: tally the eigen inner move's proposals and
+            acceptances per table axis (cold rung vs hot rungs) and log them
+            once per table refresh (telemetry only). ``None`` reads
+            ``{BRANCH}_EIGEN_AXIS_ACC_LOG``, then ``False``. See
+            :meth:`_note_inner_outcome`.
+        eigen_axis_acc_tune: the acceptance-driven per-axis step controller
+            (implies the accounting): at each table refresh an axis whose
+            cold acceptance over the window fell below ``eigen_axis_acc_min``
+            has its step divided by ``eigen_axis_acc_factor`` (never below
+            the information-matrix sigma), one above ``eigen_axis_acc_max``
+            multiplied by it (never above the adapted width, or the box cap
+            with the adaptation off). ``None`` reads
+            ``{BRANCH}_EIGEN_AXIS_ACC_TUNE``, then ``False``. See
+            :meth:`_eigen_axis_tune_table`.
+        eigen_axis_acc_min / eigen_axis_acc_max / eigen_axis_acc_factor:
+            the controller's band and step (``{BRANCH}_EIGEN_AXIS_ACC_MIN`` /
+            ``_MAX`` / ``_FACTOR``; 0.1 / 0.5 / 2).
         ladder_reanchor_nats: the lost-rung guard's threshold in lnL nats
             (:meth:`_reanchor_lost_rungs`); ``0`` disables the guard.
             ``None`` reads ``{BRANCH}_LADDER_REANCHOR_NATS``, then 200.
@@ -343,6 +375,11 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         eigen_adapt_pool: bool = None,
         eigen_temper_sigmas: bool = None,
         eigen_adapt_max_factor: float = None,
+        eigen_axis_acc_log: bool = None,
+        eigen_axis_acc_tune: bool = None,
+        eigen_axis_acc_min: float = None,
+        eigen_axis_acc_max: float = None,
+        eigen_axis_acc_factor: float = None,
         ladder_reanchor_nats: float = None,
         cold_to_hot_every: int = None,
         **kwargs,
@@ -446,6 +483,14 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         self.eigen_temper_sigmas = eigen_temper_sigmas
         # the adaptation's safety cap (kwarg > env > 100 at USE time)
         self.eigen_adapt_max_factor = eigen_adapt_max_factor
+        # per-axis acceptance log + controller (ruling 2026-10-18; kwarg > env
+        # > off / 0.1 / 0.5 / 2 at USE time; _note_inner_outcome,
+        # _eigen_axis_tune_table)
+        self.eigen_axis_acc_log = eigen_axis_acc_log
+        self.eigen_axis_acc_tune = eigen_axis_acc_tune
+        self.eigen_axis_acc_min = eigen_axis_acc_min
+        self.eigen_axis_acc_max = eigen_axis_acc_max
+        self.eigen_axis_acc_factor = eigen_axis_acc_factor
         # lost-rung guard threshold (kwarg > env > 200 at USE time, like the
         # eigen knobs above; see _ladder_reanchor_nats)
         self.ladder_reanchor_nats = ladder_reanchor_nats
@@ -952,6 +997,9 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         if factor_capped is not None and factor_capped[0] is not None and factor_capped[1] > 0:
             capped_note = (f", factor-capped at x{float(factor_capped[0]):g} on "
                            f"{int(factor_capped[1])} axes")
+        # {BRANCH}_EIGEN_AXIS_ACC_LOG / _TUNE (2026-10-18): how the widened
+        # axes fared over the window that just ended ("" with both off)
+        capped_note += self._widened_axis_acceptance_note(moved)
         logger.info(
             "[%s_EIGEN] leaf %d: step scale adapted on %d of %d axes, max x%.1f "
             "(axis %d%s), median x%.1f (%s)%s",
@@ -1002,8 +1050,16 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         whole visit (:meth:`_eigen_visit_rung_scale`); the stored and
         persisted table stays the COLD one, and the tempered rows are
         installed per split (:meth:`_install_eigen_split_table`).
+
+        2026-10-18 (the EMRI sampling audit): at a refresh the per-axis
+        tallies of the window that just ended (:meth:`_note_inner_outcome`,
+        ``{BRANCH}_EIGEN_AXIS_ACC_LOG`` / ``_TUNE``) feed the adaptation
+        line, the acceptance controller (:meth:`_eigen_axis_tune_table`,
+        after the adaptation, before the install) and the window's log
+        lines; every visit then fixes the cross-walker jump's partner spec
+        (:meth:`_de_leaf_spec`) when one is in the stack.
         """
-        eigen_moves = [m for m in self.moves if isinstance(m, EigenAxisMove)]
+        eigen_moves = self._eigen_inner_moves()
         if not eigen_moves:
             return
         if not hasattr(self, "_eigen_tables"):
@@ -1025,12 +1081,20 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             # line fires (_log_eigen_adapt), else it gets its own line
             self._eigen_refresh_note = (
                 self._eigen_temper_note(betas) if temper else None)
+            # the per-axis acceptance of the window that ends here (None
+            # with the accounting off): read by the adaptation line and the
+            # controller, logged below (ruling 2026-10-18)
+            report = self._eigen_axis_window_report(leaf)
+            self._eigen_axis_report = report
             table = self._build_eigen_table(leaf, work)
-            if self._eigen_axis_adapt():
+            adapted = self._eigen_axis_adapt()
+            if adapted:
                 table = self._eigen_adapt_table(leaf, table)
             else:
                 # off: no floor bookkeeping, the table is the built one
                 getattr(self, "_eigen_fisher_sigmas", {}).pop(leaf, None)
+            if self._eigen_axis_acc_tune():
+                table = self._eigen_axis_tune_table(leaf, table, adapted, report)
             self._eigen_tables[leaf] = table
             self._persist_eigen_table(leaf)
             note = getattr(self, "_eigen_refresh_note", None)
@@ -1038,6 +1102,12 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                 logger.info("[%s_EIGEN] leaf %d: step %s",
                             str(self.branch_name).upper(), leaf, note)
             self._eigen_refresh_note = None
+            self._log_eigen_axis_window(leaf, report)
+            self._eigen_axis_report = None
+        # the cross-walker jump's partner spec for this visit (no-op without
+        # a WalkerDifferenceJumpMove in the stack)
+        if self._de_moves():
+            self._de_leaf_spec(leaf)
         axes, sigmas = self._eigen_tables[leaf]
         tempered = self._eigen_visit_rung_scale(leaf, betas) if temper else None
         if not temper:
@@ -1152,6 +1222,524 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             return None
 
     # ------------------------------------------------------------------
+    # per-axis acceptance accounting + the acceptance-driven controller
+    # ({BRANCH}_EIGEN_AXIS_ACC_LOG / _TUNE; the EMRI sampling audit,
+    # user ruling 2026-10-18, docs/emri-sampling-audit.md items B1 / B2)
+    # ------------------------------------------------------------------
+
+    def _eigen_inner_moves(self):
+        """Every eigen move the tables must reach: the stack's own and the
+        fallbacks of its cross-walker jumps (usually the same object)."""
+        moves = [m for m in getattr(self, "moves", ()) if isinstance(m, EigenAxisMove)]
+        for de in self._de_moves():
+            fb = getattr(de, "fallback", None)
+            if isinstance(fb, EigenAxisMove) and not any(fb is m for m in moves):
+                moves.append(fb)
+        return moves
+
+    def _eigen_float_knob(self, attr, knob, default):
+        """Attribute ``attr`` > ``{BRANCH}_<knob>`` env > ``default`` (a float).
+
+        An empty env value counts as unset; an unreadable one warns once per
+        knob and keeps the default.
+        """
+        val = getattr(self, attr, None)
+        if val is None:
+            val = os.environ.get(f"{str(self.branch_name).upper()}_{knob}", None)
+            if isinstance(val, str) and not val.strip():
+                val = None
+        if val is None:
+            return float(default)
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            warned = getattr(self, "_eigen_knob_warned", None)
+            if warned is None:
+                warned = self._eigen_knob_warned = set()
+            if knob not in warned:
+                warned.add(knob)
+                logger.warning("[%s_EIGEN] unreadable %s %r; using %g",
+                               str(self.branch_name).upper(), attr, val, float(default))
+            return float(default)
+
+    def _eigen_axis_acc_log(self):
+        """kwarg > ``{BRANCH}_EIGEN_AXIS_ACC_LOG`` env > ``False``."""
+        return self._eigen_switch("eigen_axis_acc_log", "EIGEN_AXIS_ACC_LOG")
+
+    def _eigen_axis_acc_tune(self):
+        """kwarg > ``{BRANCH}_EIGEN_AXIS_ACC_TUNE`` env > ``False``."""
+        return self._eigen_switch("eigen_axis_acc_tune", "EIGEN_AXIS_ACC_TUNE")
+
+    def _eigen_axis_acc_bounds(self):
+        """``(acc_min, acc_max, factor)``; an inconsistent set warns once and
+        falls back to the defaults (0.1, 0.5, 2)."""
+        lo = self._eigen_float_knob("eigen_axis_acc_min", "EIGEN_AXIS_ACC_MIN",
+                                    EIGEN_AXIS_ACC_MIN_DEFAULT)
+        hi = self._eigen_float_knob("eigen_axis_acc_max", "EIGEN_AXIS_ACC_MAX",
+                                    EIGEN_AXIS_ACC_MAX_DEFAULT)
+        f = self._eigen_float_knob("eigen_axis_acc_factor", "EIGEN_AXIS_ACC_FACTOR",
+                                   EIGEN_AXIS_ACC_FACTOR_DEFAULT)
+        if not (0.0 <= lo < hi <= 1.0 and f > 1.0 and np.isfinite(f)):
+            if not getattr(self, "_eigen_acc_bounds_warned", False):
+                self._eigen_acc_bounds_warned = True
+                logger.warning(
+                    "[%s_EIGEN] inconsistent axis-acceptance controller knobs (min %r, "
+                    "max %r, factor %r); using %g / %g / %g", str(self.branch_name).upper(),
+                    lo, hi, f, EIGEN_AXIS_ACC_MIN_DEFAULT, EIGEN_AXIS_ACC_MAX_DEFAULT,
+                    EIGEN_AXIS_ACC_FACTOR_DEFAULT)
+            return (EIGEN_AXIS_ACC_MIN_DEFAULT, EIGEN_AXIS_ACC_MAX_DEFAULT,
+                    EIGEN_AXIS_ACC_FACTOR_DEFAULT)
+        return lo, hi, f
+
+    def _eigen_axis_accounting(self):
+        """Tally per-axis outcomes? The log or the controller is on and the
+        stack carries an eigen move."""
+        return ((self._eigen_axis_acc_log() or self._eigen_axis_acc_tune())
+                and bool(self._eigen_inner_moves()))
+
+    def _leaf_tally(self, attr, leaf, shape):
+        """``leaf``'s zero-initialised float tally in the ``{leaf: array}`` dict ``attr``."""
+        d = getattr(self, attr, None)
+        if d is None:
+            d = {}
+            setattr(self, attr, d)
+        arr = d.get(int(leaf))
+        if arr is None or arr.shape != tuple(shape):
+            arr = d[int(leaf)] = np.zeros(shape, dtype=float)
+        return arr
+
+    def _eigen_axis_tune_dict(self):
+        if getattr(self, "_eigen_axis_tune", None) is None:
+            self._eigen_axis_tune = {}
+        return self._eigen_axis_tune
+
+    def _walker_label(self):
+        """``"walker 1"`` / ``"walkers 0-3"``: the global walkers this body runs."""
+        w0 = self._walker_offset()
+        nw = int(getattr(self, "nwalkers", 1) or 1)
+        return f"walker {w0}" if nw == 1 else f"walkers {w0}-{w0 + nw - 1}"
+
+    def _derive_axis_picks(self, leaf, old_points, new_points, split_mask):
+        """The eigen axis each row stepped along, from its displacement.
+
+        For an eigen move that does not report its picks (the plain eryn
+        :class:`~eryn.moves.EigenAxisMove`, or the jump mixture at mix 0):
+        ``c = A^-1 dy`` with the periodic columns of ``dy`` wrapped to
+        ``[-P/2, P/2)`` has ONE nonzero entry for a one-axis draw. A periodic
+        step longer than half a period lands on the wrong axis; telemetry
+        only. Rows that did not move get -2.
+        """
+        tabs = getattr(self, "_eigen_tables", None) or {}
+        if int(leaf) not in tabs:
+            return None
+        axes = np.asarray(asnumpy(tabs[int(leaf)][0]), dtype=float)
+        d = axes.shape[-1]
+        x0 = np.asarray(asnumpy(old_points), dtype=float).reshape(-1, d)
+        x1 = np.asarray(asnumpy(new_points), dtype=float).reshape(-1, d)
+        inds, periods = self._eigen_periodic_columns()
+        dy = eigen_refresh.wrap_periodic(x1 - x0, inds, periods)
+        if axes.ndim == 2:
+            c = dy @ np.linalg.inv(axes).T
+        else:
+            a_rows = axes[np.asarray(split_mask, dtype=bool)].reshape(-1, d, d)
+            if a_rows.shape[0] != dy.shape[0]:
+                return None
+            c = np.linalg.solve(a_rows, dy[..., None])[..., 0]
+        pick = np.argmax(np.abs(c), axis=-1).astype(int)
+        pick[~np.any(dy != 0.0, axis=-1)] = -2
+        return pick
+
+    def _note_inner_outcome(self, move_here, leaf, rung_of_row, keep,
+                            old_points, new_points, split_mask):
+        """Tally one split's proposals and acceptances (B1, and the B3 jumps).
+
+        Called by ``propose_local`` after each split's Metropolis test.
+        Rows are the split's (temperature, walker) rows in C order -- the
+        order the eigen move draws them in. Per leaf: ``_eigen_axis_tally``
+        ``(band, [proposed, accepted], axis)`` for the eigen draws at the
+        table width (band 0 the cold rung, 1 the hot rungs), ``_eigen_jump_tally``
+        ``(band, [proposed, accepted])`` for the jump mixture's wide draws
+        (kept out of the per-axis counts: their step is ``jump_factor`` x the
+        table's), ``_de_tally`` ``(kind, band, [proposed, accepted])`` for
+        the cross-walker jumps (kind 0 the mode jump, 1 the scaled one).
+        Out-of-prior draws count as proposals, as in the in-model counters.
+        No random numbers, no state: the proposal stream is untouched. A
+        failure warns once and stops nothing.
+        """
+        is_de = isinstance(move_here, WalkerDifferenceJumpMove)
+        accounting = self._eigen_axis_accounting()
+        if not (is_de or accounting):
+            return
+        try:
+            name = self.branch_name
+            keep = np.asarray(asnumpy(keep), dtype=bool).ravel()
+            band = (np.asarray(rung_of_row).ravel() > 0).astype(int)
+            n = keep.size
+            kind = np.zeros(n, dtype=int)
+            eig = move_here
+            if is_de:
+                kind = np.asarray(move_here.last_kind.get(name, kind), dtype=int).ravel()
+                if kind.size != n:
+                    kind = np.zeros(n, dtype=int)
+                de = self._leaf_tally("_de_tally", leaf, (2, 2, 2))
+                for j, kd in enumerate((KIND_MODE, KIND_SCALED)):
+                    m = kind == kd
+                    np.add.at(de[j, :, 0], band[m], 1.0)
+                    np.add.at(de[j, :, 1], band[m & keep], 1.0)
+                eig = move_here.fallback
+            if not accounting or not isinstance(eig, EigenAxisMove):
+                return
+            src = move_here if is_de else eig
+            pick = (getattr(src, "last_pick", None) or {}).get(name)
+            pick = None if pick is None else np.asarray(pick, dtype=int).ravel()
+            if pick is None or pick.size != n:
+                pick = np.full(n, -2, dtype=int)
+            todo = (kind == 0) & (pick == -2)
+            if np.any(todo):
+                derived = self._derive_axis_picks(leaf, old_points, new_points, split_mask)
+                if derived is not None and derived.size == n:
+                    pick = np.where(todo, derived, pick)
+            base = (kind == 0) & (pick >= 0)
+            scale = (getattr(eig, "last_jump_scale", None) or {}).get(name)
+            if scale is not None and np.size(scale) == n:
+                wide = base & (np.asarray(scale, dtype=float).ravel() > 1.0)
+                base &= ~wide
+                jt = self._leaf_tally("_eigen_jump_tally", leaf, (2, 2))
+                np.add.at(jt[:, 0], band[wide], 1.0)
+                np.add.at(jt[:, 1], band[wide & keep], 1.0)
+            t = self._leaf_tally("_eigen_axis_tally", leaf, (2, 2, int(self.ndim)))
+            ok = base & (pick < int(self.ndim))
+            np.add.at(t[:, 0, :], (band[ok], pick[ok]), 1.0)
+            np.add.at(t[:, 1, :], (band[ok & keep], pick[ok & keep]), 1.0)
+        except Exception as exc:  # noqa: BLE001 -- telemetry must not crash a propose
+            if not getattr(self, "_eigen_tally_warned", False):
+                self._eigen_tally_warned = True
+                logger.warning("[%s_EIGEN] leaf %d: per-axis acceptance not recorded (%r)",
+                               str(self.branch_name).upper(), int(leaf), exc)
+
+    def _eigen_axis_window_report(self, leaf):
+        """The tallies since ``leaf``'s last refresh, then reset (``None`` when empty).
+
+        ``{"axis": (2, 2, ndim), "jump": (2, 2), "de": (2, 2, 2), "de_visits":
+        (2,)}`` (missing entries ``None``), consumed at the refresh: the
+        adaptation line, the controller and the window log read it.
+        """
+        out = {}
+        for key, attr in (("axis", "_eigen_axis_tally"), ("jump", "_eigen_jump_tally"),
+                          ("de", "_de_tally"), ("de_visits", "_de_visit_tally")):
+            d = getattr(self, attr, None) or {}
+            arr = d.pop(int(leaf), None)
+            out[key] = None if arr is None else np.array(arr, copy=True)
+        if all(v is None or not np.any(v) for v in out.values()):
+            return None
+        return out
+
+    @staticmethod
+    def _rates(prop, acc):
+        prop = np.asarray(prop, dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(prop > 0, np.asarray(acc, dtype=float) / np.where(prop > 0, prop, 1.0),
+                            np.nan)
+
+    @staticmethod
+    def _fmt_rates(r):
+        return " ".join("-" if not np.isfinite(v) else f"{v:.2f}" for v in np.ravel(r))
+
+    def _widened_axis_acceptance_note(self, moved):
+        """``", cold acceptance of the widened axes 8:0.00 9:0.04"`` from the
+        current window report (``""`` without one)."""
+        rep = getattr(self, "_eigen_axis_report", None)
+        if not rep or rep.get("axis") is None:
+            return ""
+        t = rep["axis"]
+        moved = np.asarray(moved, dtype=bool).ravel()
+        if t.shape[-1] != moved.size or not np.any(moved):
+            return ""
+        acc = self._rates(t[0, 0], t[0, 1])
+        parts = [f"{k}:{'-' if not np.isfinite(acc[k]) else f'{acc[k]:.2f}'}"
+                 for k in np.flatnonzero(moved)]
+        return ", cold acceptance of the widened axes " + " ".join(parts)
+
+    def _log_eigen_axis_window(self, leaf, report):
+        """The refresh window's acceptance lines (B1 and the B3 jumps).
+
+        ``[EMRI_EIGEN] leaf k (walker w): axis acceptance over the last 10
+        visits, cold 0.42 ... (n 14-22), hot 0.47 ...; jump-mix draws cold
+        a/b hot c/d`` with ``{BRANCH}_EIGEN_AXIS_ACC_LOG`` or ``_TUNE`` on,
+        and ``[EMRI_DE] leaf k (walker w): cross-walker jumps over the last
+        10 visits (active on 5): mode cold a/b hot c/d, scaled cold e/f hot
+        g/h`` with a jump in the stack.
+        """
+        if not report:
+            return
+        br = str(self.branch_name).upper()
+        who = self._walker_label()
+        nvis = self._eigen_refresh_cadence()
+        t = report.get("axis")
+        if t is not None and np.any(t[:, 0]) and (
+                self._eigen_axis_acc_log() or self._eigen_axis_acc_tune()):
+            n_cold = t[0, 0]
+            jt = report.get("jump")
+            jump = ""
+            if jt is not None and np.any(jt[:, 0]):
+                jump = (f"; jump-mix draws cold {int(jt[0, 1])}/{int(jt[0, 0])} "
+                        f"hot {int(jt[1, 1])}/{int(jt[1, 0])}")
+            logger.info(
+                "[%s_EIGEN] leaf %d (%s): axis acceptance over the last %d visits, cold %s "
+                "(n %d-%d per axis), hot %s%s", br, int(leaf), who, nvis,
+                self._fmt_rates(self._rates(t[0, 0], t[0, 1])),
+                int(np.min(n_cold)), int(np.max(n_cold)),
+                self._fmt_rates(self._rates(t[1, 0], t[1, 1])), jump)
+        de = report.get("de")
+        if self._de_moves() and (de is not None or report.get("de_visits") is not None):
+            dv = report.get("de_visits")
+            de = np.zeros((2, 2, 2)) if de is None else de
+            act = "" if dv is None else f" (active on {int(dv[0])} of {int(dv[1])})"
+            logger.info(
+                "[%s_DE] leaf %d (%s): cross-walker jumps over the last %d visits%s: mode "
+                "cold %d/%d hot %d/%d, scaled cold %d/%d hot %d/%d", br, int(leaf), who, nvis,
+                act, int(de[0, 0, 1]), int(de[0, 0, 0]), int(de[0, 1, 1]), int(de[0, 1, 0]),
+                int(de[1, 0, 1]), int(de[1, 0, 0]), int(de[1, 1, 1]), int(de[1, 1, 0]))
+
+    def _eigen_axis_tune_table(self, leaf, table, adapted, report):
+        """The acceptance-driven per-axis step controller (B2), at a refresh.
+
+        Why (9mo job 773, rows 840-1007): the adaptation widened the EMRI
+        tables' narrow intrinsic axes (logm1 / p0 / m2 / a / e0 combinations,
+        axes 8-11) by x14-100 -- the pooled union measures the OFFSETS
+        between walkers sitting on different islands of the leaf's comb, not
+        a traversable width -- and the cold walkers' own spread along those
+        axes is 0.04-0.2 of the widened step, so each such draw is a 5-25
+        sigma jump that is never accepted ("widened but rejected": 4 of 12
+        axes dead on EMRI 3, 3 on EMRI 0).
+
+        Per axis ``k`` a multiplier ``m_k`` on the table's sigma (the adapted
+        one with ``{BRANCH}_EIGEN_AXIS_ADAPT``, else the information-matrix
+        one) is kept per leaf. The window's cold-rung proposals and
+        acceptances along ``k`` accumulate until ``k`` has at least
+        :data:`EIGEN_AXIS_ACC_MIN_PROPOSALS`; then cold acceptance <
+        ``acc_min``: ``m_k /= factor``; > ``acc_max``: ``m_k *= factor``; the
+        accumulator restarts. The installed sigma is ``max(floor, min(m_k x
+        sigma, upper))`` with ``floor`` = the information-matrix sigma and
+        ``upper`` = the adapted sigma (adaptation on) or the table's
+        prior-box cap (off), and ``m_k`` is clipped so the step stays in
+        that band. The multiplier changes only here, at a leaf-visit
+        boundary, so every repeat sweep runs a frozen symmetric kernel (the
+        status of the table refresh itself). The tempered rungs scale the
+        tuned cold sigma. ``m`` rides in the sidecar (``axis_tune``).
+        """
+        leaf = int(leaf)
+        axes, sig = table
+        try:
+            sig = np.asarray(asnumpy(sig), dtype=float)
+            d = sig.shape[-1]
+            acc_min, acc_max, f = self._eigen_axis_acc_bounds()
+            ctrl = self._leaf_tally("_eigen_axis_ctrl", leaf, (2, d))
+            t = None if not report else report.get("axis")
+            if t is not None and t.shape[-1] == d:
+                ctrl[0] += t[0, 0]
+                ctrl[1] += t[0, 1]
+            m = self._eigen_axis_tune_dict().get(leaf)
+            m = np.ones(d) if m is None or np.size(m) != d else np.array(m, dtype=float)
+            floor = sig
+            if adapted:
+                fl = self._eigen_fisher_dict().get(leaf)
+                if fl is not None and np.shape(fl) == sig.shape:
+                    floor = np.asarray(fl, dtype=float)
+            if adapted:
+                upper = sig
+            else:
+                upper = eigen_refresh.axis_caps(
+                    np.asarray(asnumpy(axes), dtype=float),
+                    eigen_refresh.prior_box_widths(self.priors[self.branch_name], self.ndim))
+                upper = np.maximum(upper, sig)
+            ready = ctrl[0] >= EIGEN_AXIS_ACC_MIN_PROPOSALS
+            acc = self._rates(ctrl[0], ctrl[1])
+            m_old = m.copy()
+            m[ready & (acc < acc_min)] /= f
+            m[ready & (acc > acc_max)] *= f
+            with np.errstate(divide="ignore", invalid="ignore"):
+                lo_m = np.nanmin(np.where(sig > 0, floor / sig, 1.0).reshape(-1, d), axis=0)
+                hi_m = np.nanmax(np.where(sig > 0, upper / sig, 1.0).reshape(-1, d), axis=0)
+            m = np.clip(m, lo_m, np.maximum(hi_m, lo_m))
+            # what actually changed (a step already at its floor / ceiling
+            # does not count)
+            down = m < m_old * (1.0 - 1e-12)
+            up = m > m_old * (1.0 + 1e-12)
+            ctrl[:, ready] = 0.0
+            self._eigen_axis_tune_dict()[leaf] = m
+            new = np.maximum(floor, np.minimum(sig * m, upper))
+            if not np.all(np.isfinite(new)):
+                raise ValueError("non-finite tuned sigmas")
+            if np.any(down) or np.any(up):
+                def _list(mask):
+                    ks = np.flatnonzero(mask)
+                    if not ks.size:
+                        return "none"
+                    return (",".join(str(k) for k in ks)
+                            + f" (cold acc {np.nanmin(acc[mask]):.2f}-{np.nanmax(acc[mask]):.2f})")
+                logger.info(
+                    "[%s_EIGEN] leaf %d (%s): acceptance-tuned step: shrunk axes %s, widened "
+                    "%s (band %.2f-%.2f, factor %g); step now x%.2f..x%.2f of the %s sigma",
+                    str(self.branch_name).upper(), leaf, self._walker_label(), _list(down),
+                    _list(up), acc_min, acc_max, f, float(np.min(m)), float(np.max(m)),
+                    "adapted" if adapted else "information-matrix")
+            return (axes, new)
+        except Exception as exc:  # noqa: BLE001 -- never crash the sampler
+            logger.warning(
+                "[%s_EIGEN] leaf %d: acceptance-tuned step failed (%r); using the "
+                "untuned table", str(self.branch_name).upper(), leaf, exc)
+            return table
+
+    # ------------------------------------------------------------------
+    # the cross-walker difference jump (B3; lisatools.sampling.moves.
+    # walkerdiffjump.WalkerDifferenceJumpMove in the inner-move stack)
+    # ------------------------------------------------------------------
+
+    def _de_moves(self):
+        """The stack's :class:`WalkerDifferenceJumpMove` instances."""
+        return [m for m in getattr(self, "moves", ()) if isinstance(m, WalkerDifferenceJumpMove)]
+
+    def _de_next_parity(self):
+        """This propose's walker-group parity (deterministic, state-free).
+
+        The ``k``-th distinct global iteration (``gf_iteration``, the stage
+        combine's stamp) in which this move proposes has parity ``k mod 2``;
+        without a stamp (a move run outside a recipe) every propose counts as
+        a new one. When the move proposes every iteration (full_pe,
+        source_search) this is ``gf_iteration mod 2`` up to the job's
+        starting offset; under an EVEN source cadence (a gb_search stage
+        with ``GB_SEARCH_{N}_SOURCE_EVERY`` = 2, 4, ...) ``gf_iteration mod
+        2`` would pin one group, this still alternates. Like
+        ``gf_iteration`` it restarts with each process; it reads nothing
+        from the chain, so the schedule adds no state dependence.
+        """
+        it = getattr(self, "gf_iteration", None)
+        ticks = int(getattr(self, "_de_propose_ticks", 0))
+        self._de_propose_ticks = ticks + 1
+        key = ("iteration", int(it)) if it is not None else ("propose", ticks)
+        if key != getattr(self, "_de_last_key", None):
+            self._de_iter_count = int(getattr(self, "_de_iter_count", 0)) + 1
+            self._de_last_key = key
+        return int(self._de_iter_count) % 2
+
+    def _set_de_pool(self, pool, parity):
+        self._de_pool = pool
+        self._de_parity = None if parity is None else int(parity)
+        self._de_pool_token = int(getattr(self, "_de_pool_token", 0)) + 1
+
+    def _note_de_partner_sample(self, state, reuse=None):
+        """Head / single process, top of propose: every walker's rung ensemble.
+
+        The start-of-propose ``coords[:ntemps, :, leaf]`` of EVERY walker per
+        alive leaf (taken before the cold -> hot rotation edits a hot rung)
+        and this propose's group parity (:meth:`_de_next_parity`). The body
+        reads them from ``_de_pool`` (single process, the flat replica
+        body); the walker-block head also ships them (``de_pool`` /
+        ``de_parity`` in the payload). ``reuse`` is the pooled-adaptation
+        sample of the same state (:meth:`_note_eigen_pool_sample`): its
+        arrays are reused, so the pickled payload carries them once. No-op
+        without a :class:`WalkerDifferenceJumpMove` in the stack.
+        """
+        self._de_pool_outgoing = None
+        if not self._de_moves():
+            self._set_de_pool(None, None)
+            return
+        try:
+            sub = (getattr(state, "sub_states", None) or {}).get(self.branch_name)
+            if sub is None or not getattr(sub, "tempered_initialized", False):
+                self._set_de_pool(None, None)
+                return
+            if reuse:
+                out = {int(leaf): x for leaf, (x, _b) in reuse.items()}
+            else:
+                coords = np.asarray(asnumpy(sub.coords), dtype=float)
+                inds = np.asarray(asnumpy(sub.inds), dtype=bool)
+                nt = min(int(self.ntemps), int(coords.shape[0]))
+                out = {int(leaf): np.array(coords[:nt, :, leaf], copy=True)
+                       for leaf in range(int(coords.shape[2])) if inds[0, 0, leaf]}
+            self._set_de_pool(out or None, self._de_next_parity())
+            if self._eigen_pool_block_head() and out:
+                self._de_pool_outgoing = (out, self._de_parity)
+        except Exception as exc:  # noqa: BLE001 -- never crash the sampler
+            self._set_de_pool(None, None)
+            logger.warning(
+                "[%s_DE] cross-walker partner pool not taken (%r); every walker runs "
+                "its ordinary stack this propose", str(self.branch_name).upper(), exc)
+
+    def _de_leaf_spec(self, leaf):
+        """``(active walkers (nwalkers_local,), partners (P, ndim))`` or ``None``.
+
+        Active: the body's walkers whose GLOBAL index ``g`` has ``(g +
+        parity) % 2 == 1``; partners: every rung of every walker of the
+        OTHER parity, from the start-of-propose pool (unique rows, finite
+        only). ``None`` (every walker runs its ordinary stack) without a
+        pool, without an active walker here, or with fewer than two distinct
+        partner states. Cached per (leaf, pool); each new pool counts one
+        visit in the window tally.
+        """
+        key = (int(leaf), int(getattr(self, "_de_pool_token", 0)))
+        cache = getattr(self, "_de_spec_cache", None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        spec = None
+        pool = (getattr(self, "_de_pool", None) or {}).get(int(leaf))
+        parity = getattr(self, "_de_parity", None)
+        if pool is not None and parity is not None:
+            pool = np.asarray(pool, dtype=float)
+            nw_glob = int(pool.shape[1])
+            w0 = self._walker_offset()
+            g = w0 + np.arange(int(self.nwalkers))
+            active = ((g + int(parity)) % 2) == 1
+            partner_w = [w for w in range(nw_glob) if (w + int(parity)) % 2 == 0]
+            if partner_w and np.any(active):
+                P = pool[:, partner_w, :].reshape(-1, pool.shape[-1])
+                P = P[np.all(np.isfinite(P), axis=1)]
+                P = np.unique(P, axis=0) if P.size else P
+                if P.shape[0] >= 2:
+                    spec = (active, P)
+            vt = self._leaf_tally("_de_visit_tally", leaf, (2,))
+            vt[0] += 1.0 if spec is not None else 0.0
+            vt[1] += 1.0
+        self._de_spec_cache = (key, spec)
+        return spec
+
+    def _install_de_split(self, move_here, leaf, split_mask):
+        """Per split: the jump's active rows and partners; the fallback's table.
+
+        No-op unless ``move_here`` is a :class:`WalkerDifferenceJumpMove`.
+        The fallback eigen move gets this split's table rows first (the
+        same seam the eigen move itself uses), then the jump its spec
+        (:meth:`_de_leaf_spec`) mapped onto the split's ``(temperature,
+        walker)`` rows; no spec clears it, so every row takes the fallback.
+        """
+        if not isinstance(move_here, WalkerDifferenceJumpMove):
+            return
+        self._install_eigen_split_table(move_here.fallback, leaf, split_mask)
+        name = self.branch_name
+        try:
+            spec = self._de_leaf_spec(leaf)
+            if spec is None:
+                move_here.clear_partners(name)
+                return
+            active_w, partners = spec
+            S1 = np.asarray(split_mask, dtype=bool)
+            nt = int(S1.shape[0])
+            n_here = int(np.count_nonzero(S1)) // max(nt, 1)
+            walker_of_row = np.nonzero(S1)[1].reshape(nt, n_here)
+            active = np.asarray(active_w, dtype=bool)[walker_of_row]
+            if not np.any(active):
+                move_here.clear_partners(name)
+                return
+            move_here.set_partners(name, active, partners)
+        except Exception as exc:  # noqa: BLE001 -- never crash the sampler
+            move_here.clear_partners(name)
+            if not getattr(self, "_de_install_warned", False):
+                self._de_install_warned = True
+                logger.warning("[%s_DE] leaf %d: cross-walker jump not installed (%r); "
+                               "the fallback proposes", str(name).upper(), int(leaf), exc)
+
+    # ------------------------------------------------------------------
     # eigen table persistence (the sidecar next to the run's store)
     # ------------------------------------------------------------------
 
@@ -1217,7 +1805,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             return False
         try:
             got = eigen_table_persist.load_entry(
-                path, self.branch_name, leaf, return_fisher=True,
+                path, self.branch_name, leaf, return_fisher=True, return_tune=True,
                 **self._eigen_persist_guards()
             )
         except Exception as exc:  # never fail a run over its own cache
@@ -1228,7 +1816,13 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             return False
         if got is None:
             return False
-        axes, sigmas, visits, fisher = got
+        axes, sigmas, visits, fisher, tune = got
+        # the acceptance controller's multiplier ({BRANCH}_EIGEN_AXIS_ACC_TUNE,
+        # 2026-10-18): restored, and divided out of the scale carried into
+        # the next refresh, which re-applies it (no double application)
+        tune = tune if self._eigen_axis_acc_tune() else None
+        if tune is not None:
+            self._eigen_axis_tune_dict()[leaf] = np.array(tune, dtype=float)
         if (getattr(self, "eigen_store_readonly", False)
                 and np.asarray(axes).ndim >= 4):
             # a compute rank reading the head's sidecar: a per-(temp, walker)
@@ -1261,8 +1855,11 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             if fisher is not None and not np.array_equal(fisher, sigmas):
                 # carried over the restart: maps onto the next refresh's
                 # axes while the (unpersisted) ring buffer refills
+                carried = np.array(sigmas, dtype=float, copy=True)
+                if tune is not None:
+                    carried = carried / np.asarray(tune, dtype=float)
                 self._eigen_carried_dict()[leaf] = (
-                    np.array(axes, copy=True), np.array(sigmas, copy=True))
+                    np.array(axes, copy=True), carried)
         elif fisher is not None:
             # the adaptation is OFF now: run the information-matrix table,
             # never a scale adapted by an earlier process
@@ -1294,12 +1891,15 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             # step-scale adaptation is on (off: the pre-adaptation entry)
             fisher = (getattr(self, "_eigen_fisher_sigmas", {}).get(int(leaf))
                       if self._eigen_axis_adapt() else None)
+            # the controller's multiplier rides along only while it is on
+            tune = (self._eigen_axis_tune_dict().get(int(leaf))
+                    if self._eigen_axis_acc_tune() else None)
             entry = eigen_table_persist.make_entry(
                 axes, sigmas,
                 self._eigen_visit_count.get(int(leaf), 0),
                 x0=getattr(self, "_eigen_x0", {}).get(int(leaf)),
                 store_iteration=getattr(self, "_dbg_step", None),
-                sigmas_fisher=fisher,
+                sigmas_fisher=fisher, axis_tune=tune,
                 **self._eigen_persist_guards(),
             )
             eigen_table_persist.save_entry(
@@ -2592,8 +3192,12 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
 
         The pooled adaptation sample is taken FIRST (block head only,
         :meth:`_note_eigen_pool_sample`): the rotation below edits a hot rung.
+        The cross-walker jump's partner pool (:meth:`_note_de_partner_sample`,
+        every layout, the same arrays when both are on) likewise.
         """
         self._note_eigen_pool_sample(state)
+        self._note_de_partner_sample(
+            state, reuse=getattr(self, "_eigen_pool_outgoing", None))
         self._maybe_rotate_cold_into_hot(state)
 
     def _maybe_rotate_cold_into_hot(self, state) -> bool:
@@ -3243,6 +3847,13 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                 "%d rungs x %d walkers (%d floats)", str(self.branch_name).upper(),
                 len(pool), int(x0.shape[0]), int(x0.shape[1]),
                 int(sum(np.size(x) + np.size(b) for x, b in pool.values())))
+        # the cross-walker jump (a WalkerDifferenceJumpMove in the stack): the
+        # start-of-propose rung ensembles of every walker + this propose's
+        # group parity (absent otherwise: the payload is unchanged)
+        de = getattr(self, "_de_pool_outgoing", None)
+        if de:
+            extra["de_pool"], extra["de_parity"] = de[0], int(de[1])
+            self._de_pool_outgoing = None
         return extra
 
     def fanout_apply_extra(self, extra):
@@ -3253,6 +3864,9 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         if extra.get("eigen_pool"):
             # every rank, the head's own body included, buffers the union
             self._push_eigen_pool(extra["eigen_pool"])
+        if "de_pool" in extra:
+            # every rank, the head's own body included: the jump's partners
+            self._set_de_pool(extra["de_pool"], extra.get("de_parity"))
 
     def fanout_reply_extra(self, part):
         return {
@@ -3571,6 +4185,9 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                     # per-(temp, walker) eigen tables are sliced to THIS
                     # split's rows (no-op for shared tables / other moves)
                     self._install_eigen_split_table(move_here, leaf, S1)
+                    # the cross-walker jump: its fallback's rows and this
+                    # visit's active rows + partners (no-op for other moves)
+                    self._install_de_split(move_here, leaf, S1)
 
                     # Get the move-specific proposal.
                     if isinstance(move_here, StretchMove):
@@ -3637,6 +4254,12 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                     lnpdiff = factors + logP - prev_logP_here
 
                     keep = lnpdiff > np.log(model.random.rand(self.ntemps, nwalkers_here))
+
+                    # per-axis / cross-walker acceptance tallies (no-op with
+                    # {BRANCH}_EIGEN_AXIS_ACC_LOG / _TUNE off and no jump in
+                    # the stack; draws no random numbers)
+                    self._note_inner_outcome(move_here, leaf, temp_inds_here, keep,
+                                             old_points, new_points, S1)
 
                     temp_inds_update = temp_inds_here[keep.flatten()]
                     walker_inds_update = walker_inds_here[keep.flatten()]

@@ -35,6 +35,8 @@ without an attached lookup table GBGPU raises, so it always goes with
 | SOBBH / EMRI / MBH step SCALE (after either route above) | the information-matrix sigma | **adapted from the chain**: per-axis robust width of the leaf's rung ensemble, floor = the matrix sigma, axes kept (2026-10-14) | `{BRANCH}_EIGEN_AXIS_ADAPT=1` | adaptation error: the information-matrix table | Code default OFF; CPU-tested only, no run yet |
 | SOBBH / EMRI / MBH adaptation buffer (walker-block fan-out) | the rank's own walkers | **pooled**: the union of every walker's rung ensemble, shipped by the head per propose (2026-10-15) | `{BRANCH}_EIGEN_ADAPT_POOL=1` (with `{BRANCH}_EIGEN_AXIS_ADAPT=1`) | no shipped sample yet: the own buffer | Code default OFF; CPU-tested only, no run yet |
 | SOBBH / EMRI / MBH step per RUNG | the cold sigma at every rung | **tempered**: rung `k` steps `sigma / sqrt(beta_k)`, capped (2026-10-15) | `{BRANCH}_EIGEN_TEMPER_SIGMAS=1` | no ladder: the cold sigma | Code default OFF; CPU-tested only, no run yet |
+| SOBBH / EMRI / MBH step per AXIS from its acceptance | the adapted (or information-matrix) sigma | **acceptance-tuned**: an axis with cold acceptance < 0.1 over a refresh window is halved (floor = the matrix sigma), > 0.5 doubled (ceiling = the adapted width) (2026-10-18) | `{BRANCH}_EIGEN_AXIS_ACC_TUNE=1` (`_ACC_LOG=1` for the per-axis log alone) | controller error: the untuned table | Code default OFF; launchers: EMRI tune + log, MBH / SOBBH log only; CPU-tested only |
+| SOBBH / EMRI / MBH cross-walker jump | none (the walkers never exchange states in PE) | **difference jump** `x + gamma (x_a - x_b)`, partners = the other walker group's start-of-propose states, groups alternating by iteration (2026-10-18) | `{BRANCH}_DE_JUMP_MIX` (stack weight), `_DE_JUMP_MODE_FRAC` | no pool / no partner: the eigen move | Code default 0; launchers: EMRI 0.2; CPU-tested only |
 | PSD / galfor (/ sgwb) eigen tables | `"ll"`: likelihood second differences | `"fisher"`: expected Fisher of the noise covariance | `{PSD,GALFOR,SGWB}_EIGEN_INFO=fisher` | Fisher error: the ll route | **Launcher default** (`fisher` for PSD and GALFOR) in the 6mo / 1yr / 9mo v9 launchers since 2026-10-07 (V9-30); CPU-validated, first GPU run = the first launch on those defaults |
 
 ## GB in-model factors: the lookup Gram and `GB_CHOL_CACHE`
@@ -465,6 +467,83 @@ sidecar, the log lines, the real EMRI move single-process, under the 4-rank
 block fan-out and under the 4 x 2 routed layout, the knobs, and the golden
 bit-identity with both off), `tests/test_eigen_axis_adapt.py::PooledRidgeTest`.
 
+## Add/remove source branches: per-axis acceptance, the acceptance controller, the cross-walker jump (2026-10-18)
+
+Added by the EMRI sampling audit (user ruling 2026-10-18; the audit itself,
+with the 9mo numbers, is [`docs/emri-sampling-audit.md`](emri-sampling-audit.md)).
+The finding behind the three: the loud EMRIs' posteriors are combs of
+discrete islands along the intrinsic degeneracy (EMRI 3: p0 12.3307 / 12.3310
+/ 12.3329 / 12.3346 / 12.3371 with a, logm1, m2, e0 sliding). Each walker's
+ladder holds one or two islands. The pooled adaptation sized the narrow
+intrinsic axes to the between-island offsets, x14-100, where the walkers'
+own spread is 0.04-0.2 of the step. Nothing in PE exchanges states between
+walkers.
+
+```
+route -> (axes, sigma_fisher) -> [ADAPT] -> [ACC_TUNE: x m_k per axis] -> EigenAxisMove (1 - DE_JUMP_MIX)
+                                                  ^ cold acceptance per axis      + WalkerDifferenceJumpMove (DE_JUMP_MIX)
+                                                    over the refresh window             ^ the other walker group's
+                                                    (_note_inner_outcome)                 start-of-propose states
+```
+
+* **Per-axis accounting** (`{BRANCH}_EIGEN_AXIS_ACC_LOG`, telemetry only;
+  `ResidualAddOneRemoveOneMove._note_inner_outcome`). Proposals and
+  acceptances per table axis, cold rung vs hot rungs, counting eigen draws at
+  the table width. The jump mixture's wide draws and the cross-walker jumps
+  are tallied apart. The axis is `EigenAxisJumpMixMove.last_pick`, or for
+  the plain eryn move it is derived from the displacement (`A^-1 dy`,
+  periodic columns wrapped). No random numbers are drawn: the stream is
+  bit-identical
+  (`tests/test_emri_sampling_audit.py::TelemetryGoldenTest`).
+* **The controller** (`{BRANCH}_EIGEN_AXIS_ACC_TUNE`, `_ACC_MIN` 0.1,
+  `_ACC_MAX` 0.5, `_ACC_FACTOR` 2; `_eigen_axis_tune_table`). A
+  per-leaf, per-axis multiplier `m_k` acts on the table's sigma, decided at
+  each refresh from the cold acceptance accumulated since its last decision
+  (at least 8 proposals; fewer carry over). The installed sigma is
+  `max(fisher, min(m_k x sigma, ceiling))`, with the ceiling the adapted
+  sigma (adaptation on) or the box cap (off). It is fixed between refreshes,
+  the status of the table refresh. The tempered rungs scale the tuned cold
+  sigma. The sidecar entry carries `axis_tune` (written only with the switch
+  on), and an adopted carried scale has it divided back out, so the next
+  refresh does not apply it twice.
+* **The cross-walker jump** (`{BRANCH}_DE_JUMP_MIX` = its stack weight,
+  `_DE_JUMP_MODE_FRAC`; `lisatools/sampling/moves/walkerdiffjump.py`, built
+  by `stock.erebor.common.make_default_inner_moves` with the eigen move as
+  its fallback). For the active walker group's rows it proposes `x' = x +
+  gamma (x_a - x_b)`: an ordered pair of distinct partner states (all rungs
+  of the OTHER group's start-of-propose ensembles), with `gamma` = 1 w.p.
+  `MODE_FRAC`, else `2.38 / sqrt(2 d) x N(1, 0.1)`, and periodic differences
+  wrapped. The groups are the parity of the global walker index. They
+  alternate per distinct `gf_iteration` the move proposes in
+  (`_de_next_parity`). The pool is taken in `fanout_prepare_state`, before
+  the cold -> hot rotation, and the walker-block head ships it as
+  `de_pool` / `de_parity`, sharing arrays with `eigen_pool`. The proposal is
+  symmetric and the joint kernel is `K_A(. | x_B start) K_B`, so the product
+  target is invariant. With ONE rung the all-in-one-island configurations
+  are unreachable, so the chain samples the target restricted to the rest:
+  measured 0.62-0.63 against the exact 0.612 for a 0.7 / 0.3 pair. With a
+  ladder the cold weight is the target's (0.700-0.705). See
+  `tests/test_emri_sampling_audit.py::JumpExactnessTest`, with the negative
+  controls.
+
+Log lines (each once per refresh and rank):
+
+```
+[EMRI_EIGEN] leaf 3 (walker 1): axis acceptance over the last 10 visits, cold 0.45 ... (n 14-25 per axis), hot ...; jump-mix draws cold a/b hot c/d
+[EMRI_EIGEN] leaf 3 (walker 1): acceptance-tuned step: shrunk axes 8,9,10,11 (cold acc 0.00-0.06), widened none (band 0.10-0.50, factor 2); step now x0.50..x1.00 of the adapted sigma
+[EMRI_DE] leaf 3 (walker 1): cross-walker jumps over the last 10 visits (active on 5 of 10): mode cold a/b hot c/d, scaled cold e/f hot g/h
+```
+
+The adaptation line gains `, cold acceptance of the widened axes 8:0.00
+9:0.04 ...`.
+
+Synthetic comb (`tests/test_emri_sampling_audit.py::CombRidgeHarnessTest`,
+two islands joined by a curved bridge 45 nats down, 4 walkers x 8 rungs, 200
+visits), cold island switches per walker visit to visit: today 0; + the
+controller 0, with the dead axes' cold acceptance 0.06 / 0.15 -> 0.32 /
+0.38; + the jump 70-98, each walker 39-60 % of the time in the second
+island.
+
 ## Noise branches: `{PSD,GALFOR}_EIGEN_INFO=fisher`
 
 `PSDMove._refresh_eigen_tables` expands at the points `{P}_EIGEN_SCOPE` picks
@@ -526,6 +605,11 @@ lines use them: `{BRANCH}_EIGEN_REFRESH` seeds `eigen_refresh_every` and
 | `{SOBBH,EMRI,MBH}_EIGEN_ADAPT_MAX_FACTOR` | Settings field + move `eigen_adapt_max_factor` | `100` (inert unless `_EIGEN_AXIS_ADAPT` is on; `<= 0` / `inf` = no cap) | not set as of 2026-10-15 (the coordinator adds the exports) |
 | `{SOBBH,EMRI,MBH}_EIGEN_ADAPT_POOL` | Settings field + move `eigen_adapt_pool` | `False` (per-rank buffer, bit-identical) | not set as of 2026-10-15 (the coordinator adds the exports) |
 | `{SOBBH,EMRI,MBH}_EIGEN_TEMPER_SIGMAS` | Settings field + move `eigen_temper_sigmas` | `False` (cold sigma at every rung, bit-identical) | not set as of 2026-10-15 (the coordinator adds the exports) |
+| `{SOBBH,EMRI,MBH}_EIGEN_AXIS_ACC_LOG` | Settings field + move `eigen_axis_acc_log` | `False` (telemetry only) | `1` for all three (2026-10-18) |
+| `{SOBBH,EMRI,MBH}_EIGEN_AXIS_ACC_TUNE` | Settings field + move `eigen_axis_acc_tune` | `False` (bit-identical) | EMRI / MBH / SOBBH `1` (2026-10-18; MBH and SOBBH the same day, "do this for the other sources": MBH's pooled adaptation had dropped its cold acceptance to 0.07-0.21) |
+| `{SOBBH,EMRI,MBH}_EIGEN_AXIS_ACC_MIN` / `_MAX` / `_FACTOR` | Settings fields + move `eigen_axis_acc_min` / `_max` / `_factor` | `0.1` / `0.5` / `2` | EMRI `0.1` / `0.5` / `2` |
+| `{SOBBH,EMRI,MBH}_DE_JUMP_MIX` | Settings field `de_jump_mix` -> the inner-move stack | `0` (not in the stack) | EMRI `0.2`, SOBBH `0.2` (bimodal masses on leaves 0/1), MBH `0.1` (2026-10-18) |
+| `{SOBBH,EMRI,MBH}_DE_JUMP_MODE_FRAC` | Settings field `de_jump_mode_frac` | `0.5` | EMRI `0.5` |
 | `{PSD,GALFOR,SGWB}_EIGEN_INFO` | PSDMove `eigen_info` | `ll` | `fisher` for PSD and GALFOR (default since 2026-10-07, V9-30; `${K:-fisher}`); SGWB not set |
 | `{PSD,GALFOR,SGWB}_EIGEN_EPS_REL` | Settings / PSDMove `eigen_eps_rel` | `1e-4` | not set |
 
@@ -536,7 +620,10 @@ an attribute set on a live move wins. Unlike `eigen_eps_rel` /
 line (env) or on the built move. The same holds for `eigen_adapt_visits` /
 `eigen_adapt_min_visits`. `eigen_axis_adapt` is also a field of the
 EMRI / MBH / SOBBH Settings, handed to the move by `SingleSourcePEBuilder`
-like `eigen_table_scope`. `eigen_adapt_pool`, `eigen_temper_sigmas` and
-`eigen_adapt_max_factor` are Settings fields too, stamped onto the built move by
-`stock/erebor/source_runtime.py::build_source_moves`
+like `eigen_table_scope`. `eigen_adapt_pool`, `eigen_temper_sigmas`,
+`eigen_adapt_max_factor` and (2026-10-18) `eigen_axis_acc_log` / `_tune` /
+`_min` / `_max` / `_factor` are Settings fields too, stamped onto the built
+move by `stock/erebor/source_runtime.py::build_source_moves`
 (`stamp_source_move_settings`; a value the builder already set wins).
+`de_jump_mix` / `de_jump_mode_frac` act at construction instead: they shape
+the inner-move stack (`common.inner_move_kwargs`).

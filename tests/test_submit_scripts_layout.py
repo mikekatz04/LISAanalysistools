@@ -110,6 +110,29 @@ EIGEN_POOL_TEMPER_LINE = {
     **{f"{b}_EIGEN_ADAPT_MAX_FACTOR": "100" for b in ("EMRI", "MBH", "SOBBH")},
 }
 EIGEN_POOL_TEMPER_KNOBS = tuple(EIGEN_POOL_TEMPER_LINE)
+# 2026-10-18 (Mike, "do a fully audited and adjusted EMRI setup", and "we do
+# not have enough walkers for the stretch move, so we need to improve what we
+# have"; docs/emri-sampling-audit.md): the per-axis acceptance log (all three
+# source branches; telemetry only), the acceptance-driven per-axis step
+# controller and the cross-walker difference jump (EMRI only) -- ON in the
+# launchers (code defaults off / off / 0).
+EMRI_AUDIT_LINE = {
+    **{f"{b}_EIGEN_AXIS_ACC_LOG": "1" for b in ("EMRI", "MBH", "SOBBH")},
+    "EMRI_EIGEN_AXIS_ACC_TUNE": "1", "EMRI_EIGEN_AXIS_ACC_MIN": "0.1",
+    "EMRI_EIGEN_AXIS_ACC_MAX": "0.5", "EMRI_EIGEN_AXIS_ACC_FACTOR": "2",
+    "EMRI_DE_JUMP_MIX": "0.2", "EMRI_DE_JUMP_MODE_FRAC": "0.5",
+    # 2026-10-18 (Mike, "do this for the other sources"): the controller on
+    # for MBH / SOBBH (MBH's pooled adaptation had dropped its acceptance to
+    # 0.07-0.21), the jump at 0.1 for MBH and 0.2 for the bimodal SOBBH leaves
+    "MBH_EIGEN_AXIS_ACC_TUNE": "1", "SOBBH_EIGEN_AXIS_ACC_TUNE": "1",
+    "MBH_DE_JUMP_MIX": "0.1", "SOBBH_DE_JUMP_MIX": "0.2",
+}
+EMRI_AUDIT_KNOBS = tuple(EMRI_AUDIT_LINE)
+#: what the launchers leave at the CODE defaults on the MBH / SOBBH lines (the
+#: knobs exist): the controller band / factor and the jump's mode fraction
+EMRI_AUDIT_NOT_EXPORTED = tuple(f"{b}_{k}" for b in ("MBH", "SOBBH") for k in (
+    "EIGEN_AXIS_ACC_MIN", "EIGEN_AXIS_ACC_MAX", "EIGEN_AXIS_ACC_FACTOR",
+    "DE_JUMP_MODE_FRAC"))
 # 2026-10-13 (Mike): the GB warm-start SELF refit -- the saver rebuilds the
 # mixture from the run's own last 50 rows x every cold walker every 5 rows in
 # gb_search_2 and every 250 in full_pe; the warm moves draw 75 % of their
@@ -921,6 +944,10 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             *EIGEN_AXIS_ADAPT_KNOBS,
             # 2026-10-15: pooled / tempered / factor-capped adaptation, same block
             *EIGEN_POOL_TEMPER_KNOBS,
+            # 2026-10-18: the EMRI sampling audit (per-axis acceptance log,
+            # the acceptance controller, the cross-walker jump); code defaults
+            # off / off / 0. EigenJumpMixLauncherTest pins the block.
+            *EMRI_AUDIT_KNOBS,
             # 2026-10-13: the ladder caps (first ruling: EMRI T_max 100; second
             # ruling the same day: main-mode tempering -- EMRI T_max 6, MBH
             # T_max 10, the MBH lost-rung guard off, the EMRI guard at 50 nats);
@@ -1908,6 +1935,9 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             *EIGEN_AXIS_ADAPT_KNOBS,
             # 2026-10-15: pooled / tempered / factor-capped adaptation, same block
             *EIGEN_POOL_TEMPER_KNOBS,
+            # 2026-10-18: the EMRI sampling audit block, same reason (no source
+            # branch is armed in the 3mo v9 twin, which carries no EMRI export)
+            *EMRI_AUDIT_KNOBS,
             # 2026-10-13: the ladder cap exports, mirrored in the 3mo twin
             "EMRI_LADDER_TMAX", "EMRI_LADDER_REANCHOR_NATS",
             "MBH_LADDER_TMAX", "MBH_LADDER_REANCHOR_NATS",
@@ -3185,9 +3215,12 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
 
     Of the per-leaf ladder knobs of the same day, ``{BRANCH}_LADDER_RESET_ON_RESUME``
     is a one-off launch-line knob (a standing export would reset the ladders
-    at every relaunch), ``SOBBH_LADDER_REANCHOR_NATS`` is exported at 20
+    at every relaunch), ``SOBBH_LADDER_REANCHOR_NATS`` is exported at 60 (20
+    from 2026-10-15 to 2026-10-18, when the 9mo's bimodal leaves showed the
+    guard re-anchoring the other mass mode)
     (since 2026-10-15; the code default 200 before), ``MBH_LADDER_REANCHOR_NATS`` is exported OFF (0) and
-    ``EMRI_LADDER_REANCHOR_NATS`` at 50: the second ruling of 2026-10-13
+    ``EMRI_LADDER_REANCHOR_NATS`` at 50 (100 since 2026-10-18, the EMRI
+    sampling audit): the second ruling of 2026-10-13
     ("focus on sampling the main modes (+ the sky move for MBHs) in terms of
     tempering") after the guard was measured re-anchoring MBHB hot rungs that
     merely sat in a secondary sky mode, while 200 missed the lost rungs of
@@ -3225,13 +3258,20 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
         down, 72-1150; 200 only caught the two loudest); SOBBH joined on
         2026-10-15 (T_max 6, guard 20). Exported in every v9 production
         launcher, overridable on the line."""
-        want = {"EMRI_LADDER_TMAX": "6", "EMRI_LADDER_REANCHOR_NATS": "50",
+        # 2026-10-18 (the EMRI sampling audit, item 6): EMRI guard 50 -> 100 --
+        # the 9mo job 773 firings were the top rungs' own tail (72-100 nats on
+        # leaves lost at 118-1262), not lost rungs
+        want = {"EMRI_LADDER_TMAX": "6", "EMRI_LADDER_REANCHOR_NATS": "100",
                 "MBH_LADDER_TMAX": "10", "MBH_LADDER_REANCHOR_NATS": "0",
                 # 2026-10-15 (Mike, "update the SOBHBs"): the SOBBH ladder
                 # capped like the EMRI one (its default make_ladder spacing
                 # reached beta 0.007; hot pairs swapped at 0.8-0.95 = prior
                 # sampling on the 1yr), guard 20 nats (a lost SNR-10 source).
-                "SOBBH_LADDER_TMAX": "6", "SOBBH_LADDER_REANCHOR_NATS": "20"}
+                # 2026-10-18 (Mike, "do this for the other sources"): SOBBH
+                # guard 20 -> 60 -- on the 9mo job 773 it fired 60 times on
+                # the bimodal leaves 0/1, re-anchoring hot rungs in the OTHER
+                # mass mode (45-55 nats below cold), not lost sources
+                "SOBBH_LADDER_TMAX": "6", "SOBBH_LADDER_REANCHOR_NATS": "60"}
         for path in V9_PRODUCTION:
             exports = _exports(path)
             src = open(path).read()
@@ -3270,6 +3310,28 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
                     self.assertEqual(exports.get(knob), want)
                     self.assertRegex(
                         src, rf"(?m)^export {knob}=\$\{{{knob}:-{want}\}}$")
+
+    def test_the_emri_audit_block_is_on_in_every_v9_production_launcher(self):
+        """2026-10-18 (Mike, the EMRI sampling audit; docs/emri-sampling-audit.md):
+        the per-axis acceptance log ({BRANCH}_EIGEN_AXIS_ACC_LOG=1, all three
+        source branches), the acceptance-driven per-axis step controller
+        (EMRI_EIGEN_AXIS_ACC_TUNE=1, band 0.1-0.5, factor 2) and the
+        cross-walker difference jump (EMRI_DE_JUMP_MIX=0.2, mode frac 0.5) in
+        every v9 production launcher, overridable on the line. 2026-10-18
+        (Mike, "do this for the other sources"): MBH / SOBBH get the
+        controller too and the jump at 0.1 / 0.2, with the controller band and
+        the mode fraction left at the code defaults (not exported)."""
+        for path in V9_PRODUCTION:
+            exports = _exports(path)
+            src = open(path).read()
+            for knob, want in EMRI_AUDIT_LINE.items():
+                with self.subTest(script=os.path.basename(path), knob=knob):
+                    self.assertEqual(exports.get(knob), want)
+                    self.assertRegex(
+                        src, rf"(?m)^export {knob}=\$\{{{knob}:-{want}\}}$")
+            for knob in EMRI_AUDIT_NOT_EXPORTED:
+                with self.subTest(script=os.path.basename(path), knob=knob):
+                    self.assertNotIn(knob, exports)
 
     def test_the_warm_self_refit_block_is_on_in_every_v9_production_launcher(self):
         """2026-10-13 (Mike): the GB warm-start SELF refit -- every v9

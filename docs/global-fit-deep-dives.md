@@ -510,6 +510,19 @@ runs inside `rj_fstat_search`):
   `full_pe`. A stuck walker that survives several events is a different
   problem (the copied point scored worse on that walker's residual: look
   at its GB / noise state, not the ladder).
+- **The comb signature (2026-10-18, `docs/emri-sampling-audit.md`):**
+  histogram every (row, rung, walker) sample of a leaf in p0. Disjoint
+  islands with empty gaps between them, each held by one or two walkers' whole
+  ladders and within ~10 nats of each other (9mo EMRI 3: p0 12.3307 /
+  12.3310 / 12.3329 / 12.3346 / 12.3371; EMRI 0: seven islands in (p0, e0,
+  Phi_r0)), mean a cycle-count degeneracy, not a ridge the walkers fail to
+  traverse. A hot rung that "spans the ridge" usually holds two islands. In
+  `full_pe` the only cross-walker channel is the difference jump
+  (`EMRI_DE_JUMP_MIX`): read `[EMRI_DE] ... mode cold a/b hot c/d`. The
+  walker-permuting swap never fires at one walker per rank. The adaptation
+  sizes the narrow intrinsic axes to the island offsets: an `axis acceptance
+  ... cold ... 0.00` on axes 8-11 is that, and the acceptance controller's
+  `shrunk axes` line its repair.
 - `at walker w` in the `[eigen_refresh]` lines and in the Gram non-finite
   errors is the RANK-LOCAL walker index (one walker per rank); map it to the
   global walker through the line's rank prefix (`[r<k>/c<i>]`; the head's

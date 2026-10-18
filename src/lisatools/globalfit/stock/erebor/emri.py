@@ -152,6 +152,41 @@ class EMRISettings(Settings):
     eigen_adapt_max_factor: float = dataclasses.field(
         default_factory=env_default("EMRI_EIGEN_ADAPT_MAX_FACTOR", 100.0, float)
     )
+    # ---- the EMRI sampling audit (user ruling 2026-10-18; docs/emri-sampling-audit.md)
+    # Per-axis acceptance accounting of the eigen inner move (cold vs hot
+    # rungs, per table axis), logged once per table refresh. Telemetry only:
+    # no proposal changes. See ResidualAddOneRemoveOneMove._note_inner_outcome.
+    eigen_axis_acc_log: bool = dataclasses.field(
+        default_factory=env_default("EMRI_EIGEN_AXIS_ACC_LOG", False, bool)
+    )
+    # Acceptance-driven per-axis step controller on top of the adaptation:
+    # after each refresh window an axis whose COLD acceptance fell below
+    # eigen_axis_acc_min has its step divided by eigen_axis_acc_factor
+    # (never below the Fisher sigma), one above eigen_axis_acc_max multiplied
+    # by it (never above the adapted width / the box cap). Fixed between
+    # refreshes (each repeat sweep stays a frozen symmetric kernel). Off =
+    # bit-identical. See ResidualAddOneRemoveOneMove._eigen_axis_tune_table.
+    eigen_axis_acc_tune: bool = dataclasses.field(
+        default_factory=env_default("EMRI_EIGEN_AXIS_ACC_TUNE", False, bool)
+    )
+    eigen_axis_acc_min: float = dataclasses.field(
+        default_factory=env_default("EMRI_EIGEN_AXIS_ACC_MIN", 0.1, float)
+    )
+    eigen_axis_acc_max: float = dataclasses.field(
+        default_factory=env_default("EMRI_EIGEN_AXIS_ACC_MAX", 0.5, float)
+    )
+    eigen_axis_acc_factor: float = dataclasses.field(
+        default_factory=env_default("EMRI_EIGEN_AXIS_ACC_FACTOR", 2.0, float)
+    )
+    # Cross-walker difference-vector jump in the inner-move stack (stack
+    # weight; 0 = not in the stack, bit-identical) and its share of gamma = 1
+    # mode jumps. See lisatools.sampling.moves.walkerdiffjump.
+    de_jump_mix: float = dataclasses.field(
+        default_factory=env_default("EMRI_DE_JUMP_MIX", 0.0, float)
+    )
+    de_jump_mode_frac: float = dataclasses.field(
+        default_factory=env_default("EMRI_DE_JUMP_MODE_FRAC", 0.5, float)
+    )
 
 
 class EMRISetup(Setup):
