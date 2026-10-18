@@ -15,6 +15,52 @@ from lisatools.utils.utility import AET
 
 from .parallelbase import FastLISAResponseParallelModule
 
+# Stock combinations of channel X in single-link measurements y_ij, each delayed by the links in
+# links_for_delay; Y and Z follow by cyclic permutation. TDI 2.0 is TDI 1.0 plus the extra terms.
+TDI_FIRST_GENERATION = [
+    {"link": 13, "links_for_delay": [], "sign": +1},
+    {"link": 31, "links_for_delay": [13], "sign": +1},
+    {"link": 12, "links_for_delay": [13, 31], "sign": +1},
+    {"link": 21, "links_for_delay": [13, 31, 12], "sign": +1},
+    {"link": 12, "links_for_delay": [], "sign": -1},
+    {"link": 21, "links_for_delay": [12], "sign": -1},
+    {"link": 13, "links_for_delay": [12, 21], "sign": -1},
+    {"link": 31, "links_for_delay": [12, 21, 13], "sign": -1},
+]
+TDI_SECOND_GENERATION_EXTRA = [
+    {"link": 12, "links_for_delay": [13, 31, 12, 21], "sign": +1},
+    {"link": 21, "links_for_delay": [13, 31, 12, 21, 12], "sign": +1},
+    {"link": 13, "links_for_delay": [13, 31, 12, 21, 12, 21], "sign": +1},
+    {"link": 31, "links_for_delay": [13, 31, 12, 21, 12, 21, 13], "sign": +1},
+    {"link": 13, "links_for_delay": [12, 21, 13, 31], "sign": -1},
+    {"link": 31, "links_for_delay": [12, 21, 13, 31, 13], "sign": -1},
+    {"link": 12, "links_for_delay": [12, 21, 13, 31, 13, 31], "sign": -1},
+    {"link": 21, "links_for_delay": [12, 21, 13, 31, 13, 31, 12], "sign": -1},
+]
+TDI_SECOND_GENERATION = TDI_FIRST_GENERATION + TDI_SECOND_GENERATION_EXTRA
+
+
+def _tdi_unit_key(unit: dict) -> tuple:
+    """A TDI unit in a form that compares equal for equal contributions."""
+    return (
+        int(unit["link"]),
+        tuple(int(link) for link in unit["links_for_delay"]),
+        float(unit["sign"]),
+        unit.get("type", "delay"),
+    )
+
+
+def tdi_generation(tdi_combinations: List[dict]) -> Optional[int]:
+    """1 or 2 when the combinations are those of the stock 1st or 2nd generation, else None.
+
+    The order of the units does not matter, since a combination is their sum.
+    """
+    units = sorted(_tdi_unit_key(unit) for unit in tdi_combinations)
+    for generation, stock in ((1, TDI_FIRST_GENERATION), (2, TDI_SECOND_GENERATION)):
+        if units == sorted(_tdi_unit_key(unit) for unit in stock):
+            return generation
+    return None
+
 
 class TDIConfig(FastLISAResponseParallelModule):
     """
@@ -43,47 +89,10 @@ class TDIConfig(FastLISAResponseParallelModule):
         super().__init__(force_backend=force_backend)
 
         # setup the actual TDI combination
-        if tdi in ["1st generation", "2nd generation"]:
-            # tdi 1.0
-            tdi_combinations = [
-                {"link": 13, "links_for_delay": [], "sign": +1},
-                {"link": 31, "links_for_delay": [13], "sign": +1},
-                {"link": 12, "links_for_delay": [13, 31], "sign": +1},
-                {"link": 21, "links_for_delay": [13, 31, 12], "sign": +1},
-                {"link": 12, "links_for_delay": [], "sign": -1},
-                {"link": 21, "links_for_delay": [12], "sign": -1},
-                {"link": 13, "links_for_delay": [12, 21], "sign": -1},
-                {"link": 31, "links_for_delay": [12, 21, 13], "sign": -1},
-            ]
-
-            if tdi == "2nd generation":
-                # tdi 2.0 is tdi 1.0 + additional terms
-                tdi_combinations += [
-                    {"link": 12, "links_for_delay": [13, 31, 12, 21], "sign": +1},
-                    {"link": 21, "links_for_delay": [13, 31, 12, 21, 12], "sign": +1},
-                    {
-                        "link": 13,
-                        "links_for_delay": [13, 31, 12, 21, 12, 21],
-                        "sign": +1,
-                    },
-                    {
-                        "link": 31,
-                        "links_for_delay": [13, 31, 12, 21, 12, 21, 13],
-                        "sign": +1,
-                    },
-                    {"link": 13, "links_for_delay": [12, 21, 13, 31], "sign": -1},
-                    {"link": 31, "links_for_delay": [12, 21, 13, 31, 13], "sign": -1},
-                    {
-                        "link": 12,
-                        "links_for_delay": [12, 21, 13, 31, 13, 31],
-                        "sign": -1,
-                    },
-                    {
-                        "link": 21,
-                        "links_for_delay": [12, 21, 13, 31, 13, 31, 12],
-                        "sign": -1,
-                    },
-                ]
+        if tdi == "1st generation":
+            tdi_combinations = deepcopy(TDI_FIRST_GENERATION)
+        elif tdi == "2nd generation":
+            tdi_combinations = deepcopy(TDI_SECOND_GENERATION)
 
         elif isinstance(tdi, list):
             tdi_combinations = tdi
@@ -126,6 +135,14 @@ class TDIConfig(FastLISAResponseParallelModule):
     def pytdiconfig_args(self, pytdiconfig_args: tuple) -> None:
         self._pytdiconfig_args = pytdiconfig_args
         
+    @property
+    def generation(self) -> Optional[int]:
+        """1 or 2 when the combinations are those of the stock 1st or 2nd generation, else None.
+
+        The DFFR response has closed forms for these two and raises on any other combination.
+        """
+        return tdi_generation(self.tdi_combinations)
+
     @property
     def tdi_combinations(self) -> List:
         """TDI Combination setup"""

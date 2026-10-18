@@ -128,6 +128,16 @@ if(LISATOOLS_WITH_CPU)
     VERBATIM
     )
 
+  # DFFR integration: the source-independent DFFR diagnostics, compiled into LAT's module only.
+  add_custom_command(
+    OUTPUT "lat_dffr_diagnostics.cxx"
+    COMMENT "Copy lat_dffr_diagnostics.cu to lat_dffr_diagnostics.cxx"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/lat_dffr_diagnostics.cu"
+            "${CMAKE_CURRENT_BINARY_DIR}/lat_dffr_diagnostics.cxx"
+    DEPENDS "lat_dffr_diagnostics.cu"
+    VERBATIM
+    )
+
   # Phase 3E adds LISAResponse.cxx to the detector static library so all
   # LISA-side C++ symbols live in one .so per backend wheel.
   # Phase 3L.5+3L.6 add lat_tdi_on_the_fly.cxx + lat_spline_tdi_waveform.cxx
@@ -137,7 +147,7 @@ if(LISATOOLS_WITH_CPU)
   # files into their own .so under the per-backend alias).
   # stft_tof merge adds galactic_response.cxx + domains.cxx (XYZ sensitivity
   # matrix backend + STFT/FD domain likelihood kernels).
-  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx PSD.cxx LISAResponse.cxx lat_tdi_on_the_fly.cxx lat_spline_tdi_waveform.cxx galactic_response.cxx domains.cxx)
+  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx PSD.cxx LISAResponse.cxx lat_tdi_on_the_fly.cxx lat_spline_tdi_waveform.cxx galactic_response.cxx domains.cxx lat_dffr_diagnostics.cxx)
   apply_cpu_backend_common_options(detector lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_cpu_detector_static PUBLIC ${GBT_CUTILS})
 
@@ -163,7 +173,7 @@ if(LISATOOLS_WITH_GPU)
   # FDSpline/TDSpline (LAT is the nanobind registrant).
   # stft_tof merge adds galactic_response.cu + domains.cu (XYZ sensitivity
   # matrix backend + STFT/FD domain likelihood kernels).
-  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu PSD.cu LISAResponse.cu lat_tdi_on_the_fly.cu lat_spline_tdi_waveform.cu galactic_response.cu domains.cu)
+  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu PSD.cu LISAResponse.cu lat_tdi_on_the_fly.cu lat_spline_tdi_waveform.cu galactic_response.cu domains.cu lat_dffr_diagnostics.cu)
   apply_gpu_backend_common_options(detector_gpu lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_gpu_detector_gpu_static PUBLIC ${GBT_CUTILS})
   target_include_directories(lisaanalysistools_gpu_detector_gpu_static SYSTEM PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
