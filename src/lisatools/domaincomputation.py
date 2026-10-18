@@ -503,6 +503,59 @@ class STFTComputationGroup(DomainKernelStrategy):
         finally:
             self._cpp_fresnel = saved
 
+    def cpp_kinematics(self, cpp_orbits):
+        """Kinematics table at this group's segment midpoints, built from ``cpp_orbits``.
+
+        The table holds the spacecraft states, light travel times and link vectors that the
+        DFFR response reads; it does not depend on the source. It is built on the group's
+        device on the first call and kept; a call with another orbits object rebuilds it.
+
+        Args:
+            cpp_orbits: ``OrbitsWrap`` of the response, with its arrays on this group's device.
+
+        Returns:
+            The backend's ``KinematicsTableWrap``.
+
+        Raises:
+            ValueError: If the segment midpoints, widened by the derivative stencils, leave
+                the position or light-travel-time grid of the orbits.
+        """
+        cached = getattr(self, "_kinematics", None)
+        if cached is not None and cached[0] is cpp_orbits:
+            return cached[2]
+
+        num_times = int(self.settings.NT)
+        with self.group_device_context():
+            arrays = {
+                name: self.xp.zeros(int(np.prod(shape)) * num_times, dtype=self.xp.float64)
+                for name, shape in KINEMATICS_TABLE_FIELDS
+            }
+            # * Midpoints of the windows whose starts the STFT kernels place at t0 + i dt.
+            table = self.backend.KinematicsTableWrap(
+                float(self.settings.t0) + 0.5 * float(self.settings.dt),
+                float(self.settings.dt),
+                num_times,
+                *arrays.values(),
+            )
+            table.build(cpp_orbits)
+        # ! The orbits object stays referenced, so the identity check above cannot match a new
+        # ! object that reuses its id.
+        self._kinematics = (cpp_orbits, arrays, table)
+        return table
+
+    def kinematics_fields(self, cpp_orbits) -> dict:
+        """The kinematics table of :meth:`cpp_kinematics` as arrays of shape ``(..., NT)``.
+
+        The arrays stay on the group's device; see ``KINEMATICS_TABLE_FIELDS`` for the
+        leading shape of each field.
+        """
+        self.cpp_kinematics(cpp_orbits)
+        num_times = int(self.settings.NT)
+        return {
+            name: self._kinematics[1][name].reshape(shape + (num_times,))
+            for name, shape in KINEMATICS_TABLE_FIELDS
+        }
+
     def compute_signal_likelihood_terms(
         self,
         data_index: NDArrayLike,

@@ -13,8 +13,8 @@ and at the emission times of the links (senders).
 * The table against a NumPy mirror of the same interpolation, stencils and link vectors, within
   a rounding bound per field.
 * ``ESAOrbits``: receiver velocities against the velocities of the orbit file.
-* Coverage errors, argument checks, and the CUDA backend against the CPU backend (skipped
-  without a usable GPU).
+* Coverage errors, argument checks, the cache of ``STFTComputationGroup.cpp_kinematics``, and the
+  CUDA backend against the CPU backend (skipped without a usable GPU).
 """
 
 from __future__ import annotations
@@ -580,6 +580,58 @@ class ESAOrbitsKinematicsTest(unittest.TestCase):
             error = np.abs(table["velocity_receiver"][index] - file_velocity).max()
             relative_error = error / np.abs(file_velocity).max()
             self.assertLess(relative_error, ESA_VELOCITY_RELATIVE_BOUND, msg=f"sc {index + 1}")
+
+
+class STFTComputationGroupKinematicsTest(unittest.TestCase):
+    """STFTComputationGroup.cpp_kinematics builds once per orbits object and keeps the table."""
+
+    def test_cache_and_fields(self):
+        from lisatools.analysiscontainer import AnalysisContainer, AnalysisContainerArray
+        from lisatools.detector import EqualArmlengthOrbits
+        from lisatools.domains import STFTSettings
+        from lisatools.sensitivity import XYZSensitivityBackend
+
+        segment_time, num_times = 86400.0, 4
+        settings = STFTSettings(
+            t0=10.0 * segment_time,
+            dt=segment_time,
+            df=1.0 / segment_time,
+            NT=num_times,
+            NF=64,
+            min_freq=20.0 / segment_time,
+            max_freq=40.0 / segment_time,
+            force_backend="cpu",
+        )
+        orbits = EqualArmlengthOrbits(force_backend="cpu")
+        shape = (3, num_times, settings.NF_active)
+        sensitivity = XYZSensitivityBackend(orbits=orbits, settings=settings, force_backend="cpu")
+        sensitivity.sens_mat = np.zeros((3,) + shape, dtype=np.complex128)
+        sensitivity.invC = np.ones((3,) + shape, dtype=np.complex128)
+        sensitivity.detC = np.ones(shape[1:])
+        sensitivity.channel_shape = (3, 3)
+        container = AnalysisContainer(
+            settings.associated_class(np.zeros(shape, dtype=np.complex128), settings), sensitivity
+        )
+        group = AnalysisContainerArray(
+            [container], domain_group_kwargs=dict(tdi_type="XYZ")
+        ).cpp_splits[0]
+
+        cpp_orbits = orbits.pycppdetector
+        table = group.cpp_kinematics(cpp_orbits)
+        self.assertIs(group.cpp_kinematics(cpp_orbits), table)
+        self.assertEqual(table.num_time_segments, num_times)
+        self.assertEqual(table.first_segment_midpoint, 10.5 * segment_time)
+        fields = group.kinematics_fields(cpp_orbits)
+        direct = build_table(
+            lisatools.get_backend("cpu"), cpp_orbits, 10.0 * segment_time, segment_time, num_times
+        )
+        for name, field_shape in KINEMATICS_TABLE_FIELDS:
+            self.assertEqual(fields[name].shape, field_shape + (num_times,))
+            np.testing.assert_array_equal(fields[name], direct[name], err_msg=name)
+
+        # * Another orbits object, even with the same content, gets its own table.
+        other = orbits.pycppdetector
+        self.assertIsNot(group.cpp_kinematics(other), table)
 
 
 if __name__ == "__main__":
