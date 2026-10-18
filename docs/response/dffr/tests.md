@@ -347,13 +347,19 @@ fixture. Inner products and templates change by at most 6e-11. Gradients and Fis
 finite differences of templates and change more, up to 2e-9 and 2e-8.
 
 Within the Fisher matrix on the TDI track, the change of each entry divided by its own scale,
-the square root of F_ii F_jj, is largest in the row and column of f̈ (fddot): up to 8e-6 on the
-four-day equal-arm fixtures (`rect`, `tukey_mid`) and up to 1e-7 on the 32-day ESA fixtures. All
-other entries change by at most 1.5e-8 and 4e-10 of their scale. The f̈ derivative is a finite
-difference of templates that f̈ barely changes over four days (its phase grows as T^3), so
-changes at the level of rounding in the templates are enlarged; the ratio of the two cases, about
-160, is of the order of (32 / 4)^3. On the equal-arm fixtures the f0 and ḟ entries change by
-1e-8, the size of the removed truncation error. Once the author has reviewed these changes, the
+the square root of F_ii F_jj, is largest in the row and column of f̈ (fddot): up to 1.9e-5 on the
+four-day equal-arm fixtures (`rect`, `tukey_mid`) and up to 7.9e-7 on the 32-day fixtures
+(`l1_tdi2_envelope`; at most 2.9e-7 on the ESA orbits). All other entries change by at most
+1.5e-8 (four days) and 3.6e-9 (32 days) of their scale. The f̈ derivative is a finite difference
+of templates that f̈ barely changes over four days (its phase grows as T^3), so changes at the
+level of rounding in the templates are enlarged, more on the short fixtures than on the long
+ones. On the equal-arm fixtures the f0 and ḟ entries change by up to 1.5e-8, the size of the
+removed truncation error. Each number is the largest over the four sources of an array:
+`scripts/dffr/fisher_entry_changes.py $OUT/regression/step0/golden_cpu.npz
+$OUT/regression/step1/golden_cpu.npz`, and the same for `golden_cpu_l1.npz` (files
+`golden_cpu{,_l1}_fisher_vs_step0.txt`). Corrected on 2026-10-18: the first version of this
+paragraph gave the values of the first source only (8e-6, 1e-7 and 4e-10) and left out the
+`L1Orbits` fixture. Once the author has reviewed these changes, the
 step 1 captures `$OUT/regression/step1/golden_cpu.npz` and `golden_cpu_l1.npz` become the new
 baseline.
 
@@ -477,19 +483,206 @@ None in this step.
 
 ### Pending on the GPU
 
-From the shared environment, on a GPU node:
-`PYTHON=$PYTHON BASE_ENV=$OUT/base_env MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step1.sh --device gpu $OUT environment unit golden golden_l1 dffr l1 tests benchmarks benchmarks_l1`,
+The shared environment holds the step 2 code since 2026-10-18, so these runs come from the frozen
+environment of the step 1 code, `$OUT/step1_env`, which reproduces the step 1 CPU golden outputs
+bit for bit (step 2 records how it was built and checked). On a GPU node, with `S1=$OUT/step1_env`:
+`PYTHON=$S1/.venv/bin/python BASE_ENV=$OUT/base_env DFFR_REPOSITORY=<dffr clone> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" $S1/lisa-analysis-tools/scripts/dffr/run_step1.sh --device gpu $OUT environment unit golden golden_l1 dffr l1 tests benchmarks benchmarks_l1`,
 after the GPU baseline of step 0, so that `golden_gpu*.npz` of step 0 exist for the comparison.
 
 ## Step 2: Fresnel split
 
-Not started.
+Code: LAT `feat-dffr` at 2863df4e with the step 2 changes uncommitted (`cutils/lat_fresnel.hh`,
+`domains.{hpp,cu}`, `binding_domains.hpp`, `binding_detector.cxx`, `tests/test_fresnel.py`,
+`scripts/dffr/`); GBGPU `feat-dffr` at 62c8d4c, unchanged. GBGPU compiles LAT's `domains.cu`, so
+its kernels use the new functions. Rebuilt on 2026-10-18 into the shared environment with
+`ONLY="lisa-analysis-tools GBGPU" ./install_erebor_spider.sh`, CPU and CUDA backends.
+
+CPU node: `wn-la-01` (AMD EPYC 9754, Bergamo), Slurm job 41562944, 16 CPUs, 2026-10-18. The
+regressions ran inside that allocation as
+`srun --jobid=<job> --overlap -n 1 -c 16 env PYTHON=$PYTHON BASE_ENV=$OUT/step1_env MOJITO_L1=<file> scripts/dffr/run_step2.sh --device cpu $OUT <part>`:
+the parts `environment unit golden accuracy`, `golden_l1` and `tests` side by side, then
+`benchmarks benchmarks_l1` alone, so that nothing else ran during the timings
+(`$OUT/regression/step2/step2_cpu_chain.sh`); `fd_steps fd_steps_l1` ran afterwards. The GPU
+runs are pending.
+
+Numbers are read as in step 1. A value relative to an array's peak is the largest absolute
+difference over the array divided by the largest absolute value of the reference array. A bound
+is the threshold a test asserts. From this step on, the CPU captures and benchmarks leave out the
+two swap kernels (`--without-swap`): they are built from the same column evaluation as
+`get_ll_stft` and `get_ll_grad_stft`, `GBGPU/tests/test_stft_gb.py` keeps checking their own
+parts on the CPU, and they took about 70 % of a CPU benchmark run. The GPU runs keep them.
+
+### Frozen environment of the step 1 code
+
+The GPU runs of step 1, and the step 1 GPU baseline that step 2 is compared with, must come from
+the step 1 code, but this step rebuilds the shared environment and every GPU node is still down.
+`scripts/dffr/build_base_env.sh` therefore built `$OUT/step1_env` from LAT 2863df4e and GBGPU
+62c8d4c, the committed step 1, with GPUBackendTools b07bd18, Eryn 26dd14a and BBHx b7b0ae5 plus
+the uncommitted changes of the shared clones (for BBHx, its earlier patch and the line that passes
+`KinematicsTableWrap`), and the third-party versions of the shared environment.
+
+Criterion: the environment must recompute the step 1 CPU golden outputs bit for bit. Result: 144
+of 144 arrays of `golden_cpu.npz`, the swap kernels included, and 26 of 26 of `golden_cpu_l1.npz`
+are bit-identical, pass (`$OUT/regression/step1/step1_env_recheck_cpu{,_l1}.log`). Commands:
+`LAT_COMMIT=2863df4e GBGPU_COMMIT=62c8d4c JAX_PLATFORMS=cpu scripts/dffr/build_base_env.sh $OUT/step1_env`,
+then, with `S1=$OUT/step1_env`,
+`$S1/.venv/bin/python $S1/lisa-analysis-tools/scripts/dffr/stft_golden_outputs.py --compare $OUT/regression/step1/golden_cpu.npz --device cpu --configs rect tukey_mid astro esa_tdi2_envelope esa_tdi1_const esa_aet_diag`
+(and the same with `--configs l1_tdi2_envelope --mojito-l1 <file>` against `golden_cpu_l1.npz`).
 
 ### Unit tests
 
+`tests/test_fresnel.py`, run as `python -m unittest tests.test_fresnel -v` (part `unit`): 9
+tests, 4 pass on the CPU and the 5 CUDA cases are skipped without a GPU (`unit_tests_cpu.log`).
+`scripts/dffr/fresnel_unit_numbers.py --device cpu` prints each measured value next to the bound
+its test asserts (`unit_numbers_cpu.txt`).
+
+The tests reach the functions through two diagnostic methods of `STFTFresnelWrap`:
+`compute_fresnel_functions` (C, S, f, g and the derivatives of f and g, through the two
+`STFTFresnel` members that delegate to the header) and `compute_phase_kernel_moments` (the
+single-interval kernel and its moment, which call the header directly). The references are
+`scipy.special.fresnel` for C and S; quadrature of the integral representations of f and g
+(DLMF 7.7) for f, g and their derivatives, chosen because their integrands are smooth and
+positive; and adaptive quadrature (`scipy.integrate.quad`, 1e-13 requested, own error estimates
+at most 1.1e-14 of the normalisations) for the phase kernel. The errors of the rational fits and
+the truncation of the asymptotic series are deterministic, so their bounds sit 1.15 to 2.1 times
+above the measured values; the bounds on rounding sit 2 to 3 times above.
+
+| Test | Quantity | Bound | Measured | Result |
+| --- | --- | --- | --- | --- |
+| C and S against scipy, 24 806 arguments with \|x\| <= 1000 | absolute error, per branch | series 1e-15; rational fits 2e-10 (C) and 1e-10 (S); asymptotic series 2e-13 | series 4.4e-16 and 3.3e-16; rational fits 1.6e-10 and 7.0e-11, at the seam; asymptotic series 1.0e-13 and 8.5e-14, at \|x\| = 1000, from the rounding of the phase pi x^2 / 2 | pass |
+| Odd symmetry | C(-x) + C(x) and S(-x) + S(x) | 0 | 0 (bit for bit) | pass |
+| f, g and their derivatives against quadrature, 882 arguments from the first double above 1.6 to 1e8 | relative error; for g' on the rational branch absolute, because g' falls to -7.5e-5 near \|x\| = 8 | rational fits: f 1e-9, g and f' 2.5e-9, g' 1e-9; asymptotic series: f 1e-14, g and f' 2.5e-13, g' 2e-12 | rational fits: 8.6e-10, 2.2e-9, 2.2e-9 and 8.4e-10, all at the seam; asymptotic series: 5.8e-15, 1.3e-13, 1.3e-13 and 9.6e-13, at \|x\| = 8 | pass |
+| Phase kernel and moment, the 16 cases of dffr's `tests/test_fresnel.py` (chirp rates +-4e-13, 1e-20 and -1e-22 Hz/s; 0, 0.3, 7 and -18.5 bins from the carrier; one day) | error of the integral as a fraction of the segment length, and of its moment as a fraction of the half-length squared | 2e-10 and 5e-8, dffr's bounds | 7.2e-11 and 2.9e-8, both 0.3 bins from the carrier at \|alpha\| = 4e-13, where an endpoint falls next to the seam; at most 3.9e-14 and 9.5e-12 in the other 14 cases | pass |
+| CUDA against CPU | absolute difference for C, S and g', relative for f, g and f'; the phase kernel as a fraction of dffr's normalisation | 8 roundings; 1e-13, provisional | pending | pending |
+
 ### Regression tests
 
+**Golden outputs against step 1** (parts `golden` and `golden_l1`, without the swap kernels).
+Two captures in separate processes are bit-identical, 84 of 84 and 15 of 15 arrays: the step 2
+outputs are reproducible (criterion: bit identity; pass). The changes against step 1 are expected
+at the level of rounding, since the series and the rational fits are the same and only the order
+of the arithmetic changed. The plan set the gate at 1e-12 of each array's peak
+(`golden_cpu{,_l1}_vs_step1.txt`).
+
+Largest change relative to the array's peak, per fixture and kind of output (gate 1e-12):
+
+| Fixture | Log-likelihood, (d\|h), (h\|h), templates | F-statistic | Gradients | Fisher matrices |
+| --- | --- | --- | --- | --- |
+| `rect` | 5.6e-15 | 1.0e-14 | 6.2e-10 | 9.6e-9 |
+| `tukey_mid` | 4.7e-15 | 1.6e-14 | 1.1e-9 | 3.5e-9 |
+| `astro` | 5.5e-15 | 3.8e-15 | 1.8e-9 | 1.8e-9 |
+| `esa_tdi2_envelope` | 1.1e-14 | 7.0e-16 | 1.7e-10 | 4.9e-10 |
+| `esa_tdi1_const` | 8.2e-15 | 6.1e-16 | 5.6e-11 | 4.7e-10 |
+| `esa_aet_diag` | 5.4e-15 | 1.8e-15 | 2.3e-11 | 1.6e-10 |
+| `l1_tdi2_envelope` | 5.5e-15 | 6.2e-15 | 6.0e-11 | 3.9e-10 |
+
+Every output computed directly from templates passes, by a factor of 90 or more. The 36 gradient
+and Fisher arrays do not. These are central differences of templates, which divide any change in
+rounding by their steps. Measured against the peak of a whole array, the numbers also hide how
+large the changes are per parameter, because the arrays mix parameters whose scales differ by
+many orders of magnitude and the amplitude terms set the peak. Per gradient component, relative
+to its largest value over the sources, the changes are up to 1.0e-5 in f0, 1.5e-4 in ḟ, 4.0e-4
+in f̈ and 8.3e-6 in φ0, below 1e-8 in the angles and below 1e-12 in the amplitude (envelope
+gradients included). Per Fisher entry, relative to sqrt(F_ii F_jj),
+they are up to 1.1e-5 in the row and column of f̈ on the four-day fixtures and 2.7e-7 on the
+32-day fixtures, and at most 1.1e-8 and 1.6e-9 elsewhere (`fisher_entry_changes.py`, files
+`golden_cpu{,_l1}_fisher_vs_step1.txt`).
+
+**Criterion for gradients and Fisher matrices** (parts `fd_steps` and `fd_steps_l1`, decided by
+the author on 2026-10-18 in place of the 1e-12 gate for these outputs). At the default steps
+these derivatives carry their own noise, the same in the step 1 and the step 2 code: per gradient
+component, relative to its scale, about 1e-2 to 0.25 in f0, 0.2 to 1.8 in ḟ and 0.6 to 13 in f̈
+on these fixtures; per Fisher entry, relative to sqrt(F_ii F_jj), up to 18 in the f̈ entries and
+at most 5.2e-4 elsewhere. GBGPU's `information_matrix` already notes the cause: roundoff in the
+Fresnel phase, which this step does not touch, would leave the f0 and ḟ diagonals 2 % and 13 %
+high at the shared steps, so it widens those two steps 10 and 100 times. The criterion is that the change between the two codes stays
+within that noise. `scripts/dffr/finite_difference_steps.py` evaluates `get_ll_grad_stft` and
+`information_matrix` (defaults and TDI track) at 1, 10 and 100 times their default steps with
+both codes; at factor 1 its outputs equal the golden outputs bit for bit. The noise of a code is
+the difference between its values at the default and the tenfold step; the change is the
+difference between the codes at the default step. Both are taken per gradient component (largest
+over sources) and per Fisher entry, relative to the step 1 values at the tenfold step.
+
+| Output | Within the larger of the two noises | Largest change, relative | Largest ratio change / noise |
+| --- | --- | --- | --- |
+| Gradients, 7 fixtures | 62 of 63 components | 2.8e-4 (f̈, `astro`) | 1.10 |
+| Fisher matrices, defaults and TDI track, 7 fixtures | 4526 of 4536 entries | 5.7e-5 (f̈ diagonal, `tukey_mid`) | 2.47 |
+
+Accepted. The 11 components and entries above the noise are terms that both codes compute almost
+exactly, so their noise is itself at the level of rounding: the ι component of the
+`esa_aet_diag` gradient (change 9.0e-11 against noise 8.2e-11) and ten entries of the TDI-track
+Fisher in amplitude, ι and ψ (changes 1.3e-12 to 4.0e-10 of their scale, at most 2.5 times the
+noise). The changes also fall as the steps grow: from the default to the hundredfold step, by
+factors of 20 to 1300 relative to the array peaks. As a control, step 1's change against step 0,
+which the step 1 review accepted, shows the same picture with 28 terms above the noise and
+ratios up to 1.9. Files: `fd_steps_step{0,1,2}_cpu{,_l1}.npz`,
+`fd_steps_step2_vs_step1_cpu{,_l1}.txt`, `fd_steps_step1_vs_step0_cpu{,_l1}.txt`. The captures
+were first made by `$OUT/regression/step2/fd_steps_chain.sh`, which also ran the step 0 code for
+the control (`--compare` of the step 0 and step 1 captures gives the control files); the parts
+`fd_steps` and `fd_steps_l1` reproduced the step 1 and step 2 captures bit for bit. The swap gradients follow the
+same rule; the GPU runs, which keep them, check it there.
+
+The step 2 captures `$OUT/regression/step2/golden_cpu.npz` and `golden_cpu_l1.npz` are the new
+baseline, without the swap kernels.
+
+**Accuracy before and after** (part `accuracy`). `GBGPU/tests/test_stft_gb_accuracy.py` gives the
+same numbers in the frozen step 1 environment and after step 2, to every printed digit: end-to-end
+mismatch 9.049e-3 at 10 side bins (3.950e-3 at 20), on-bin mismatch 1.409e-5. The tests pass in
+both environments. Files: `accuracy_base_cpu.log`, `accuracy_cpu.log`.
+
+**Test suites** (part `tests`). Criterion: the same outcomes as step 1. GBGPU: 39 passed, 1 failed
+and 1 module not importable, the same two GPU-only cases. LAT: 291 tests, the 282 of step 1 plus
+the 9 new ones, with the same 2 failures and 15 errors and 58 skipped (53 plus the 5 new CUDA
+cases). Comparing the outcome of every test name between the step 1 and step 2 logs shows only
+the new tests. Pass. Files: `gbgpu_tests_cpu.{log,xml}`, `lat_tests_cpu.log`.
+
+### Benchmarks
+
+**CPU** (parts `benchmarks` and `benchmarks_l1`), alone in the allocation, with the fixtures and
+settings of steps 0 and 1 and without the swap kernels: one warm-up call and five timed calls per
+point, three runs in separate processes. Compared with step 1 by `compare_benchmarks.py`, as in
+step 1. These runs are the timing baseline of step 3. Files:
+`$OUT/benchmarks/step2/cpu_{esa,l1}_run{1,2,3}.json`, `compare_cpu_{esa,l1}.txt`.
+
+ESA fixture (`esa_tdi2_envelope`):
+
+| Method | Batch 1 [ms] | Batch 8 [ms] | Batch 64 [ms] | Ratio to step 1, three batches | Largest spread of the step 2 runs |
+| --- | --- | --- | --- | --- | --- |
+| `get_ll_stft` | 5.32 | 49.35 | 449.32 | 0.993 to 1.005 | 0.43 % |
+| `get_fstat_ll_stft` | 80.39 | 758.09 | 7027.45 | 0.997 to 1.009 | 1.06 % |
+| `fill_global_stft` | 5.18 | 48.15 | 438.61 | 0.994 to 1.005 | 0.38 % |
+| `get_ll_grad_stft` | 83.98 | 767.86 | 6909.32 | 0.985 to 0.992 | 0.43 % |
+| `information_matrix` | 42.44 | 361.03 | 3060.61 | 0.996 to 0.998 | 0.60 % |
+
+`L1Orbits` fixture (`l1_tdi2_envelope`):
+
+| Method | Batch 1 [ms] | Batch 8 [ms] | Batch 64 [ms] | Ratio to step 1, three batches | Largest spread of the step 2 runs |
+| --- | --- | --- | --- | --- | --- |
+| `get_ll_stft` | 5.31 | 49.62 | 449.54 | 1.000 to 1.005 | 0.29 % |
+| `get_fstat_ll_stft` | 80.21 | 762.45 | 7025.15 | 1.000 to 1.010 | 1.58 % |
+| `fill_global_stft` | 5.16 | 48.31 | 437.27 | 0.996 to 1.006 | 0.23 % |
+| `get_ll_grad_stft` | 83.76 | 773.44 | 6937.35 | 0.996 to 1.002 | 1.04 % |
+| `information_matrix` | 42.23 | 360.42 | 3052.90 | 0.995 to 0.997 | 0.22 % |
+
+No threshold applies in this step. Over the 15 points of each fixture the ratio lies between 0.985
+and 1.009 (median 0.997) on the ESA fixture and between 0.995 and 1.010 (median 1.000) on the
+`L1Orbits` fixture, against run-to-run spreads of up to 2.94 % (ESA) and 1.74 % (`L1Orbits`) in
+step 1. Only the gradient on the ESA fixture is faster in all three batches, by 0.8 % to 1.5 %;
+on the `L1Orbits` fixture it is not. The cheaper special functions thus cost or save nothing
+measurable on the CPU, where the TDI sampling and the seven windowed terms of each pixel
+dominate. Their effect on the GPU is measured with the GPU runs.
+
 ### Validation runs
+
+None in this step.
+
+### Pending on the GPU
+
+After the step 1 GPU runs, so that `golden_gpu*.npz` of step 1 exist for the comparison, from the
+shared environment on a GPU node:
+`PYTHON=$PYTHON BASE_ENV=$OUT/step1_env MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step2.sh --device gpu $OUT environment unit golden golden_l1 fd_steps fd_steps_l1 tests benchmarks benchmarks_l1`.
+The GPU order is therefore: step 0 from `$OUT/base_env`, step 1 from `$OUT/step1_env`, then step
+2 from the shared environment.
 
 ## Step 3: tile seam
 

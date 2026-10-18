@@ -46,7 +46,7 @@ TDI-on-the-fly family does.
 
 ## Where the pieces will live
 
-The pieces of step 1 exist on `feat-dffr`; the others are planned. The final layout is recorded
+The pieces of steps 1 and 2 exist on `feat-dffr`; the others are planned. The final layout is recorded
 here once the steps in `plan.md` are done.
 
 | Repository | Piece | Content | Status |
@@ -54,7 +54,7 @@ here once the steps in `plan.md` are done.
 | LAT | `cutils/Detector.{hpp,cu}` | Five-point derivatives of the orbit tables (`get_velocity`, `get_acceleration`, `get_ltt_rate`, `get_ltt_acceleration`) and `Orbits::get_kinematics_table`, which fills the source-independent kinematics table at the segment midpoints. The existing response takes its spacecraft acceleration from `get_acceleration`. | built (step 1) |
 | LAT | `cutils/binding_detector.{hpp,cxx}` | `KinematicsTableWrap`, the table over arrays owned by Python. | built (step 1) |
 | LAT | `domaincomputation.py` | `STFTComputationGroup.cpp_kinematics`: builds the table on the group's device on first use and keeps it. | built (step 1) |
-| LAT | `cutils/lat_fresnel.hh` | The Fresnel integrals, their auxiliary functions and slopes, shared by `STFTFresnel` and DFFR. | planned |
+| LAT | `cutils/lat_fresnel.hh` | The Fresnel integrals, their auxiliary functions and the derivatives of these, with DFFR's numerics, shared by `STFTFresnel` and DFFR. The header records its branches, their accuracy and its assumptions. `STFTFresnelWrap.compute_fresnel_functions` evaluates it for tests. | built (step 2) |
 | LAT | `cutils/lat_stft_kernels.hh` | Likelihood kernels written against a tile of pixels, so that both responses feed the same consumers. | planned |
 | LAT | `cutils/lat_dffr_*.hh` | DFFR settings, source-model contract, segment table, TDI weights, windowed transform, DFFR tile and Fisher kernel. | planned |
 | GBGPU | `cutils/gb_dffr_source.hh` | The galactic-binary source model of DFFR, sharing its phase and amplitude formulas with `GBTDIonTheFly`. | planned |

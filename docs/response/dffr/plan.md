@@ -11,7 +11,7 @@ branch `feat-dffr` in both repositories.
 | --- | --- | --- | --- | --- |
 | 0 | Branches, documents, baseline of the existing response | CPU part done, `L1Orbits` included; GPU part pending | 2026-10-17 | The GPU part runs from a frozen environment of the step 0 code, which reproduces every CPU golden output bit for bit; every GPU node of SURF Spider has been down since 2026-10-16. Results in `tests.md`. |
 | 1 | Orbits cache | CPU part done; GPU part pending | 2026-10-17 | Existing outputs change by at most 6e-11 (templates, inner products), 2e-9 (gradients) and 2e-8 (Fisher on the TDI track, whose f̈ entries change by up to 8e-6); the step 1 captures are the new baseline. Results in `tests.md`. |
-| 2 | Fresnel split | Not started | | |
+| 2 | Fresnel split | CPU part done; GPU part pending | 2026-10-18 | Templates, inner products and the F-statistic change by at most 1.1e-14 of their peaks (gate 1e-12). Gradients and Fisher matrices change within the finite-difference noise that both codes carry, the criterion the author set for them in place of the gate. The step 2 captures are the new baseline; the pending step 1 GPU runs come from a frozen environment of the step 1 code. Results in `tests.md`. |
 | 3 | Tile seam | Not started | | |
 | 4 | DFFR kernels | Not started | | |
 | 5 | Wiring into `STFTGBComputations` | Not started | | |
@@ -218,11 +218,42 @@ Done on the CPU on 2026-10-17; the GPU runs are pending.
 
 ### Step 2: Fresnel split
 
-- `lat_fresnel.hh` with DFFR's series, auxiliary functions and slopes; `STFTFresnel`'s
-  `get_fresnel_integrals` and `get_fresnel_aux` keep their signatures and delegate.
-- Tests: C and S against `scipy.special.fresnel`, f and g and their slopes against references,
-  the phase kernel and its moment against quadrature (ported from dffr `tests/test_fresnel.py`).
-- Regression: existing outputs agree with the step-1 baseline to 1e-12 relative; new baseline.
+Done on the CPU on 2026-10-18; the GPU runs are pending.
+
+- `cutils/lat_fresnel.hh` (new), with the numerics of dffr's `fresnel.hh` at 01530a5:
+  `lat_fresnel_series` (the Maclaurin series of C and S for |x| <= 1.6, 17 terms in x^4 summed by
+  Horner, its coefficients in the constant bank on the GPU), `lat_fresnel_aux` (the auxiliary
+  functions f and g and their derivatives: minimax rational fits for 1.6 < |x| < 8, a five-term
+  asymptotic series above) and `lat_fresnel_integrals` (C and S for any x). The header records
+  the definitions, references, the accuracy of each branch, its assumptions and its costs.
+- The former evaluator of `domains.cu` used the same series and the same rational fits, so the
+  accuracy is unchanged and the values differ by rounding only. DFFR's evaluation is cheaper: two
+  divisions instead of five on the rational branch, one instead of two and no separate derivative
+  polynomials on the asymptotic branch, and a fixed Horner sum instead of a loop with four
+  divisions per term in the series.
+- `STFTFresnel::get_fresnel_integrals` and `get_fresnel_aux` keep their signatures and delegate
+  to the header. `get_phase_kernel_core` calls `lat_fresnel_series` and `lat_fresnel_aux`
+  directly: it has already tested the seam |v| > 1.6, and the full integral would test it again
+  and carry the auxiliary branch into the series branch.
+- `STFTFresnelWrap.compute_fresnel_functions` (new diagnostic): C, S, f, g and the derivatives of
+  f and g at given arguments, through the two members. It is a method of an existing wrap class,
+  so `LISAToolsBackendMethods` and the GBGPU and BBHx loaders are unchanged.
+- The step 1 GPU runs, and the step 1 GPU baseline that step 2 is compared with, need the step 1
+  code after the rebuild, so they come from a frozen environment of it (`build_base_env.sh` with
+  LAT 2863df4e and GBGPU 62c8d4c). It reproduces the step 1 CPU golden outputs bit for bit.
+- Deviations: the gate of 1e-12 of each array's peak holds for every output computed directly
+  from templates (at most 1.1e-14), but not for gradients and Fisher matrices (up to 1.8e-9 and
+  9.6e-9). These are central differences of templates, which divide a change in rounding by
+  their steps, and at their default steps they already carry noise, the same in both codes: up
+  to 0.25 (f0), 1.8 (ḟ) and 13 (f̈) of each gradient component's scale, and up to 18 of
+  sqrt(F_ii F_jj) in the f̈ entries of the Fisher matrix. On 2026-10-18 the author set their
+  criterion instead: the change
+  must stay within each code's own finite-difference noise, per gradient component and Fisher
+  entry (`scripts/dffr/finite_difference_steps.py`). The references of f, g and their
+  derivatives are quadratures of their integral representations (DLMF 7.7), which have smooth,
+  positive integrands; `scipy` has no f and g.
+- Tests: `tests/test_fresnel.py`; regressions and benchmarks in `scripts/dffr/run_step2.sh`.
+  Results in `tests.md`.
 
 ### Step 3: tile seam
 
@@ -315,9 +346,15 @@ Done on the CPU on 2026-10-17; the GPU runs are pending.
   rebuild, comes from a frozen environment of that code (`scripts/dffr/build_base_env.sh`). Such
   an environment is accepted only if it reproduces the CPU golden outputs of that code bit for
   bit.
+- When a step changes rounding on purpose, gradients and Fisher matrices are judged by
+  `scripts/dffr/finite_difference_steps.py` against the frozen environment of the previous code:
+  per gradient component and Fisher entry, the change must stay within each code's own
+  finite-difference noise. Outputs computed directly from templates keep the tolerance of the
+  step. Steps that must leave the existing response bit-identical (3 and 4) ask bit identity of
+  every output.
 - CPU tests: `python -m pytest GBGPU/tests/test_stft_gb.py GBGPU/tests/test_stft_gb_accuracy.py
-  GBGPU/tests/test_stft_gb_crossdomain.py` and `python -m unittest tests.test_orbit_kinematics`
-  from the LAT root.
+  GBGPU/tests/test_stft_gb_crossdomain.py` and
+  `python -m unittest tests.test_orbit_kinematics tests.test_fresnel` from the LAT root.
 - GPU tests and benchmarks with `force_backend="gpu"`, on one A100 MIG slice or a full A100 node.
 - dffr environment: `cd direct-fast-fresnel-response && uv sync --extra compare`; the regression
   scripts in `scripts/dffr/` exchange arrays as `.npz` files in the output folder's
@@ -357,6 +394,14 @@ Done on the CPU on 2026-10-17; the GPU runs are pending.
   time-domain truth.
 - GBT `CubicSplineSegment` derivative helpers return `c1 + c2 dx + c3 dx^2` and `c2 + c3 dx`,
   not the power-basis derivatives. Nothing calls them; noted only.
+- At their default steps, the gradients and Fisher matrices of the existing response carry
+  finite-difference noise, measured on the step 2 fixtures as the difference between the default
+  and the tenfold step. Per gradient component, relative to its scale: about 1e-2 to 0.25 in f0,
+  0.2 to 1.8 in ḟ and 0.6 to 13 in f̈. `information_matrix` notes the cause, roundoff in the
+  Fresnel phase, and widens its f0 and ḟ steps 10 and 100 times for it; per Fisher entry,
+  relative to sqrt(F_ii F_jj), the noise is then at most 5.2e-4 except in the row and column of
+  f̈: up to 18 on its diagonal and 0.2 to 0.4 elsewhere. Step 4 plans the same estimator and
+  steps for the DFFR Fisher; the steps are to be reviewed there. Noted, not changed.
 - Shared memory: two segment tables for swap exceed 48 kB at 32 rows; the Fisher needs the
   reception-state sharing to fit. Blackwell (sm_120) allows less dynamic shared memory than A100.
 - MIG slices have no peer access; multi-split tests use slices of one job and host-routed checks.
