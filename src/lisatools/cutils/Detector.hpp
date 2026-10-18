@@ -15,6 +15,10 @@
 
 #define Clight 299792458.
 
+// * Target step of the five-point orbit derivatives [s]; each grid uses the whole number of its
+// * cells closest to it, so that the five samples share one position within their cells.
+#define ORBIT_STENCIL_STEP 2000.0
+
 class Vec {
  public:
   double x;
@@ -174,6 +178,12 @@ class Orbits {
   CUDA_DEVICE Vec get_pos(double t, int sc);
   CUDA_DEVICE void get_normal_unit_vec_ptr(Vec* vec, double t, int link);
   CUDA_DEVICE void get_pos_ptr(Vec* vec, double t, int sc);
+  // Five-point central differences of the linearly interpolated tables, with the step set by
+  // ORBIT_STENCIL_STEP; near a table edge, the derivative at the nearest time the stencil fits.
+  CUDA_DEVICE Vec get_velocity(double t, int sc);
+  CUDA_DEVICE Vec get_acceleration(double t, int sc);
+  CUDA_DEVICE double get_ltt_rate(double t, int link);
+  CUDA_DEVICE double get_ltt_acceleration(double t, int link);
   void get_light_travel_time_arr(double* ltt, double* t, int* link, int num);
   void get_pos_arr(double* pos_x, double* pos_y, double* pos_z, double* t,
                    int* sc, int num);

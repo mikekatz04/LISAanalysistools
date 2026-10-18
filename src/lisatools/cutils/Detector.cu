@@ -179,6 +179,96 @@ void Orbits::get_pos_ptr(Vec* vec, double t, int sc) {
   vec->z = _tmp.z;
 }
 
+// ============================================================================
+// Five-point derivatives of the orbit tables
+// ============================================================================
+
+// * A step of whole cells puts the five samples at one position within their cells, so the
+// * linear-interpolation error of the table cancels in the difference.
+CUDA_CALLABLE_MEMBER
+static inline double orbit_stencil_step(double dt) {
+  double cells = floor(ORBIT_STENCIL_STEP / dt + 0.5);
+  if (cells < 1.0) cells = 1.0;
+  return cells * dt;
+}
+
+// Stencil centre clamped so that all five samples lie in [t0, t0 + (N - 2) dt]; false when the
+// table is shorter than the stencil. The last cell is left out, as the base classes put the
+// file's last sample there, off the grid.
+CUDA_DEVICE
+static inline bool orbit_stencil_centre(double* centre, double t, double t0, double dt, int N,
+                                        double step) {
+  const double lower = t0 + 2.0 * step;
+  const double upper = t0 + ((double)(N - 2)) * dt - 2.0 * step;
+  if (upper < lower) return false;
+  *centre = (t < lower) ? lower : ((t > upper) ? upper : t);
+  return true;
+}
+
+CUDA_DEVICE
+Vec Orbits::get_velocity(double t, int sc) {
+  const double step = orbit_stencil_step(sc_dt);
+  double centre;
+  if (!orbit_stencil_centre(&centre, t, sc_t0, sc_dt, sc_N, step)) return Vec(0.0, 0.0, 0.0);
+
+  const Vec plus_two = get_pos(centre + 2.0 * step, sc);
+  const Vec plus_one = get_pos(centre + step, sc);
+  const Vec minus_one = get_pos(centre - step, sc);
+  const Vec minus_two = get_pos(centre - 2.0 * step, sc);
+  const double rate_scale = 1.0 / (12.0 * step);
+  return Vec((-plus_two.x + 8.0 * plus_one.x - 8.0 * minus_one.x + minus_two.x) * rate_scale,
+             (-plus_two.y + 8.0 * plus_one.y - 8.0 * minus_one.y + minus_two.y) * rate_scale,
+             (-plus_two.z + 8.0 * plus_one.z - 8.0 * minus_one.z + minus_two.z) * rate_scale);
+}
+
+CUDA_DEVICE
+Vec Orbits::get_acceleration(double t, int sc) {
+  const double step = orbit_stencil_step(sc_dt);
+  double centre;
+  if (!orbit_stencil_centre(&centre, t, sc_t0, sc_dt, sc_N, step)) return Vec(0.0, 0.0, 0.0);
+
+  const Vec plus_two = get_pos(centre + 2.0 * step, sc);
+  const Vec plus_one = get_pos(centre + step, sc);
+  const Vec at_centre = get_pos(centre, sc);
+  const Vec minus_one = get_pos(centre - step, sc);
+  const Vec minus_two = get_pos(centre - 2.0 * step, sc);
+  const double acceleration_scale = 1.0 / (12.0 * step * step);
+  return Vec((-plus_two.x + 16.0 * plus_one.x - 30.0 * at_centre.x + 16.0 * minus_one.x -
+              minus_two.x) * acceleration_scale,
+             (-plus_two.y + 16.0 * plus_one.y - 30.0 * at_centre.y + 16.0 * minus_one.y -
+              minus_two.y) * acceleration_scale,
+             (-plus_two.z + 16.0 * plus_one.z - 30.0 * at_centre.z + 16.0 * minus_one.z -
+              minus_two.z) * acceleration_scale);
+}
+
+CUDA_DEVICE
+double Orbits::get_ltt_rate(double t, int link) {
+  const double step = orbit_stencil_step(ltt_dt);
+  double centre;
+  if (!orbit_stencil_centre(&centre, t, ltt_t0, ltt_dt, ltt_N, step)) return 0.0;
+
+  const double plus_two = get_light_travel_time(centre + 2.0 * step, link);
+  const double plus_one = get_light_travel_time(centre + step, link);
+  const double minus_one = get_light_travel_time(centre - step, link);
+  const double minus_two = get_light_travel_time(centre - 2.0 * step, link);
+  return (-plus_two + 8.0 * plus_one - 8.0 * minus_one + minus_two) / (12.0 * step);
+}
+
+CUDA_DEVICE
+double Orbits::get_ltt_acceleration(double t, int link) {
+  const double step = orbit_stencil_step(ltt_dt);
+  double centre;
+  if (!orbit_stencil_centre(&centre, t, ltt_t0, ltt_dt, ltt_N, step)) return 0.0;
+
+  const double plus_two = get_light_travel_time(centre + 2.0 * step, link);
+  const double plus_one = get_light_travel_time(centre + step, link);
+  const double at_centre = get_light_travel_time(centre, link);
+  const double minus_one = get_light_travel_time(centre - step, link);
+  const double minus_two = get_light_travel_time(centre - 2.0 * step, link);
+  return (-plus_two + 16.0 * plus_one - 30.0 * at_centre + 16.0 * minus_one - minus_two) /
+         (12.0 * step * step);
+}
+
 CUDA_KERNEL
 void get_light_travel_time_kernel(double* ltt, double* t, int* link, int num,
                                   Orbits& orbits) {
