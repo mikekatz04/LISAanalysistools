@@ -12,7 +12,7 @@ branch `feat-dffr` in both repositories.
 | 0 | Branches, documents, baseline of the existing response | CPU part done, `L1Orbits` included; GPU part pending | 2026-10-17 | The GPU part runs from a frozen environment of the step 0 code, which reproduces every CPU golden output bit for bit; every GPU node of SURF Spider has been down since 2026-10-16. Results in `tests.md`. |
 | 1 | Orbits cache | CPU part done; GPU part pending | 2026-10-17 | Existing outputs change by at most 6e-11 (templates, inner products), 2e-9 (gradients) and 2e-8 (Fisher on the TDI track, whose f̈ entries change by up to 8e-6); the step 1 captures are the new baseline. Results in `tests.md`. |
 | 2 | Fresnel split | CPU part done; GPU part pending | 2026-10-18 | Templates, inner products and the F-statistic change by at most 1.1e-14 of their peaks (gate 1e-12). Gradients and Fisher matrices change within the finite-difference noise that both codes carry, the criterion the author set for them in place of the gate. The step 2 captures are the new baseline; the pending step 1 GPU runs come from a frozen environment of the step 1 code. Results in `tests.md`. |
-| 3 | Tile seam | Not started | | |
+| 3 | Tile seam | CPU part done; GPU part pending | 2026-10-18 | Every output of the seven kernels, swap included, is bit-identical to the step 2 code on the CPU (144 and 26 arrays, against a frozen environment of the step 2 code), with the same test outcomes. CPU timings lie within run-to-run noise at 27 of 30 points; the other three differ by at most 0.7 %, within the drift between runs of identical code. ptxas gives every kernel at least the blocks per SM of step 2 on the A100 (sm_80) and the H100 (sm_90). The pending step 2 GPU runs come from the frozen step 2 environment. Results in `tests.md`. |
 | 4 | DFFR kernels | Not started | | |
 | 5 | Wiring into `STFTGBComputations` | Not started | | |
 | 6 | Validation | Not started | | |
@@ -141,7 +141,8 @@ row; the pixel mapping (one row per thread, or band bin first); and `values` ret
 channels of one pixel. `ColumnTile<FresnelColumn>` reproduces today's mapping (thread `tid` owns
 rows `tid, tid + 128, ...`, all side bins, same summation order), so the existing outputs stay
 bit-identical. `DFFRTile` holds 32-row segment tables in shared memory and maps a warp to one
-band bin. `get_ll`, `fill_global`, `swap_ll`, the F-statistic and both gradients become
+band bin. The 32 is the warp size, so that the 32 threads of a warp take the 32 segments of one
+band bin; 32 rows of 1012 bytes also fit the 48 kB of shared memory a launch gets by default. `get_ll`, `fill_global`, `swap_ll`, the F-statistic and both gradients become
 tile-generic; the existing Fisher kernel stays as it is for FresnelColumn, and DFFR gets its own.
 
 ### Source-model contract (modes)
@@ -158,7 +159,7 @@ but here the components of one source are summed per pixel, so `(h|h)` keeps the
 `comp.get_ll_stft` -> `self.stft_comps.cpp_kinematics(self.cpp_orbits)` ->
 `GBComputationGroupWrap().gb_dffr_get_ll(..., kinematics, cpp_fresnel, cpp_domain,
 tdi_generation, n_side_bins, linear_envelope, first_order_delays, ...)` ->
-`stft_get_ll_impl<DFFRTile<GBDFFRSource>>`. Window settings come from the bound `STFTFresnel`,
+`stft_get_ll_launch<DFFRTile<GBDFFRSource>>`. Window settings come from the bound `STFTFresnel`,
 the grid and data from `STFTDomain`, window starts from `start_freq_inds` as today.
 
 ## Steps
@@ -257,14 +258,61 @@ Done on the CPU on 2026-10-18; the GPU runs are pending.
 
 ### Step 3: tile seam
 
-- Tile contract, `ColumnTile`, tile-generic consumers and launchers with dynamic shared memory;
-  the `*_impl<SourceT>` entry points keep their signatures through a default tile, so GBGPU's
-  `gb_stft_*` wraps compile unchanged.
-- Gate: bit-identical outputs on CPU and GPU against the step-2 baseline
-  (`scripts/validation/stft_column_policy_oracle.py`, golden files, GBGPU STFT tests), and
-  timings within run-to-run noise of the baseline. The swap kernels, which this step rewrites
-  for two tables per tile, are left out of the CPU captures from step 2 on, so the gate covers
-  them on the GPU, plus the swap checks of `test_stft_gb.py` on the CPU.
+Done on the CPU on 2026-10-18; the GPU runs are pending.
+
+- Only `cutils/lat_stft_kernels.hh` changes; GBGPU is rebuilt, not changed. The consumers
+  `get_ll`, `fill_global`, `swap_ll`, the F-statistic and both gradients are templates on one tile
+  type and are launched by `stft_*_launch<TileT>`. They no longer name the source object, the link
+  tables, the sky vectors, `T`, `t_ref`, the window factor or the frequency track. The contract
+  (`Inputs`, `BlockShared`, `table_bytes`, `Map`, `Context`, `Template`) is listed at the seam in
+  the header and explained in `README.md`.
+- `ColumnTile<ColumnT>` adapts the column policy. A pass holds one segment per thread
+  (`rows_per_pass` is the block size), and its pixel map, `StftRowPerThreadMap`, gives each thread
+  the band of its own segment in increasing frequency. The column states stay in registers, so a
+  launch reserves no dynamic shared memory. `FresnelColumn` only gains the alias `Source`.
+- The seven `stft_*_impl<SourceT, ColumnT = FresnelColumn<SourceT>>` keep their signatures. Six
+  resolve the device copies of the structs as before (`stft_column_tile_inputs`) and call the
+  launchers with `ColumnTile`; `stft_information_matrix_impl` and its kernel are unchanged. The
+  launchers pass the tile's dynamic shared memory, `table_bytes()` per template, to the launch,
+  and on the CPU a host buffer of that size.
+- Why the outputs stay bit-identical: each thread evaluates the same segments, side bins and
+  channels in the same order as before, with the same calls and arguments, and the consumers keep
+  the form of every floating-point expression (`t0 + time_i * dt`, `f_min + freq_j_here * df`,
+  the factors 0.5 and `factor * 0.5`, the scaling by 4 df, the gradient differences). The Fresnel
+  values and the inner-product sums are functions of `domains.cu`, which GBGPU compiles as a
+  separate translation unit on both backends (separate compilation without device link-time
+  optimisation on the GPU, no link-time optimisation on the CPU), so the restructured callers
+  cannot change their rounding.
+- Resources. Three choices keep the kernels at the cost of step 2, as the first version of the
+  seam did not. The templates are locals of the evaluation functions, as the column states were,
+  so their state is dead between the repeated evaluations of the gradient and F-statistic
+  kernels; held in the kernels, they raised the two gradient kernels from 128 and 168 to 170 and
+  232 registers (ptxas, sm_80). For the same reason the fill kernel constructs its template once
+  per source: held for the whole kernel, it needed 129 registers on the H100 (sm_90), one above
+  the 128 that allow 4 blocks of 128 threads per SM. The launch settings reach `Template::build`
+  as arguments, not as members of the context; as members, the gradient kernel of `get_ll` needed
+  129 registers, which on sm_80 allows 3 blocks of 128 threads per SM instead of 4. On the CPU,
+  `Template::values` is forced inline (`STFT_TILE_PIXEL_INLINE`): GBGPU's CPU module compiles
+  with `-Os`, where GCC kept it out of line, one more call per pixel, which made `get_ll_stft`
+  0.5 % to 1.1 % slower.
+- Deviations, decided by the author on 2026-10-18. The band-bin-first pixel map and the launch
+  path for more than 48 kB of dynamic shared memory move to step 4, with the DFFR tile as their
+  first user, so that every line of this step runs in its tests. The swap kernels, which this step
+  rewrites, are part of the CPU gate after all: the frozen step 2 code captures them again on the
+  CPU (`run_step3.sh`, part `reference`), because the GPU nodes are still down. The timing
+  criterion is per point: the ratio of the median times must lie within the larger run-to-run
+  spread of the step 2 and step 3 runs, read against the step 2 runs of 2026-10-18. Two smaller
+  ones: the contract asks for the carrier bin of each row (`carrier_bin`), not the band start,
+  because the consumers build both the single band and the union band of `swap_ll` from the
+  carriers, as before; and the DFFR entry points of step 4 call `stft_*_launch<DFFRTile<...>>`,
+  not `stft_*_impl`.
+- Tests: no new unit tests, since the step adds no numerics. The gate is the bit identity of every
+  output of the seven kernels against the frozen step 2 code, the swap kernels included, plus the
+  column-policy oracle, the accuracy test and both test suites, and the CPU timings. The registers
+  of every kernel for the A100 (sm_80) and the H100 (sm_90) come from ptxas
+  (`scripts/dffr/kernel_resources.py`), since the GPU timings depend on them and no GPU node is
+  up. Results in `tests.md`;
+  `scripts/dffr/run_step3.sh`.
 
 ### Step 4: DFFR kernels
 
@@ -276,6 +324,10 @@ Done on the CPU on 2026-10-18; the GPU runs are pending.
   polarisation perturbations, which do not change them); compact-template and segment-table
   diagnostics. Swap holds two tables per tile, so its row count (or the dynamic shared-memory
   limit) follows the budget.
+- Moved here from step 3: the band-bin-first pixel map of the DFFR tile, which puts the 32
+  segments of one band bin on the 32 threads of a warp, and the launch path for more than 48 kB of
+  dynamic shared memory (32 rows of 1012 bytes per table: 32.4 kB for one table, 64.8 kB for the
+  two of swap).
 - GBGPU: shared GB formulas, `GBDFFRSource`, `gb_dffr_*` wraps and bindings; the TDI generation
   is detected in Python from the comp's TDIConfig.
 - Tests: against standalone dffr on the same table (compact templates, band starts, global fill,
@@ -341,7 +393,9 @@ Done on the CPU on 2026-10-18; the GPU runs are pending.
   `GBGPU/tests/test_stft_gb.py` keeps checking their own parts on the CPU: swap(A, A) against
   get_ll(A), the add and remove symmetry with the conjugated cross term, and the swap gradient
   against central differences. The two swap kernels took about 70 % of a CPU benchmark run. The
-  GPU runs keep both kernels.
+  GPU runs keep both kernels. Step 3, which rewrites the swap kernels, keeps them in its CPU
+  golden captures and compares them with a capture of the frozen step 2 code; its CPU benchmarks
+  still leave them out.
 - A baseline that must come from the code before a step, but cannot be captured before the
   rebuild, comes from a frozen environment of that code (`scripts/dffr/build_base_env.sh`). Such
   an environment is accepted only if it reproduces the CPU golden outputs of that code bit for
@@ -403,5 +457,43 @@ Done on the CPU on 2026-10-18; the GPU runs are pending.
   f̈: up to 18 on its diagonal and 0.2 to 0.4 elsewhere. Step 4 plans the same estimator and
   steps for the DFFR Fisher; the steps are to be reviewed there. Noted, not changed.
 - Shared memory: two segment tables for swap exceed 48 kB at 32 rows; the Fisher needs the
-  reception-state sharing to fit. Blackwell (sm_120) allows less dynamic shared memory than A100.
+  reception-state sharing to fit. Without the opt-in a block gets 48 kB on an A100 and on an
+  H100; with it, an A100 allows 163 kB per block and 164 kB per SM, an H100 227 kB and 228 kB.
+- Newer devices than the A100, the H100 (sm_90) in particular. The timing gate of this effort is
+  measured on A100s, the GPUs of SURF Spider, while the standalone DFFR timings in the README were
+  measured on an H100 NVL. Both devices have 65 536 registers per SM and at most 255 per thread,
+  so their steps in occupancy fall at the same register counts (4 blocks of 128 threads up to 128
+  registers, 3 blocks up to 168), and both have warps of 32 threads, so the 32 rows of the DFFR
+  tile suit both. After step 3, ptxas gives every STFT kernel at least the blocks per SM of step
+  2 on both. What should change for H100 nodes:
+  - The build. The install script of SURF Spider compiles machine code for its own GPUs and PTX of
+    the A100 generation. An H100 would run code that its driver translates from that PTX when the
+    module loads. A build for H100 nodes adds 90 to `CUDA_ARCH`, so that the code comes from PTX
+    of its own generation, the code that the ptxas check describes.
+  - The checks. The same source gives different register counts on the two devices: in step 2
+    already, `get_ll` used 120 registers on the A100 and 128 on the H100, and the gradient of
+    `get_ll` 128 and 144. A change of the kernels is therefore checked with
+    `kernel_resources.py --arch 90` as well as `--arch 80`. Claims of speed on an H100 need the
+    benchmarks repeated on one (`--device gpu`).
+
+  What could change, to use what an H100 has more of:
+  - Shared memory: with the two segment tables of the DFFR swap (64.8 kB at 32 rows), an H100
+    fits 3 blocks per SM where an A100 fits 2. The launch path of step 4 for more than 48 kB
+    should take its limit from the device (`cudaDevAttrMaxSharedMemoryPerBlockOptin`), not from a
+    constant.
+  - Double precision: an H100 SM has 64 FP64 units against 32 on an A100, and the Fresnel and TDI
+    arithmetic is all in double precision, so an H100 needs more work in flight per SM to keep
+    those units busy. A launch bound that trades registers for blocks, or a block size other than
+    the 128 threads of `NUM_THREADS_HERE`, which is one value for every device today, may pay on
+    an H100 and not on an A100; to be measured.
+  - The grid: one block per source, and 132 SMs on an H100 SXM against 108 on an A100, so at 4
+    blocks per SM a batch needs about 530 sources instead of about 430 to occupy every SM.
+  - H100 features that the kernels do not use: clusters of blocks with distributed shared memory
+    would let the blocks of a cluster read each other's segment tables, for example the add and
+    remove tables of swap.
 - MIG slices have no peer access; multi-split tests use slices of one job and host-routed checks.
+- GBGPU's CPU module, which holds the STFT kernels of the CPU backend, compiles with `-Os`:
+  `nanobind_add_module` optimises a module's sources for size unless it is given `NOMINSIZE`,
+  and GCC applies the last `-O` option, so the `-O3` of the release build has no effect there.
+  The GPU code is compiled by nvcc at `-O3`. Noted, not changed: a change would move the CPU
+  timings and could change rounding through other inlining.

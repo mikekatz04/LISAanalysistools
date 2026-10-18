@@ -678,21 +678,194 @@ None in this step.
 
 ### Pending on the GPU
 
-After the step 1 GPU runs, so that `golden_gpu*.npz` of step 1 exist for the comparison, from the
-shared environment on a GPU node:
-`PYTHON=$PYTHON BASE_ENV=$OUT/step1_env MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step2.sh --device gpu $OUT environment unit golden golden_l1 fd_steps fd_steps_l1 tests benchmarks benchmarks_l1`.
-The GPU order is therefore: step 0 from `$OUT/base_env`, step 1 from `$OUT/step1_env`, then step
-2 from the shared environment.
+After the step 1 GPU runs, so that `golden_gpu*.npz` of step 1 exist for the comparison. The
+shared environment holds the step 3 code since 2026-10-18, so these runs come from the frozen
+environment of the step 2 code, `$OUT/step2_env`, which reproduces the step 2 CPU golden outputs
+bit for bit (step 3 records how it was built and checked). On a GPU node, with `S2=$OUT/step2_env`:
+`PYTHON=$S2/.venv/bin/python BASE_ENV=$OUT/step1_env MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" $S2/lisa-analysis-tools/scripts/dffr/run_step2.sh --device gpu $OUT environment unit golden golden_l1 fd_steps fd_steps_l1 tests benchmarks benchmarks_l1`.
+The GPU order is therefore: step 0 from `$OUT/base_env`, step 1 from `$OUT/step1_env`, step 2
+from `$OUT/step2_env`, then step 3 from the shared environment.
 
 ## Step 3: tile seam
 
-Not started.
+Code: LAT `feat-dffr` at 732ecf42 with the step 3 changes uncommitted (`cutils/lat_stft_kernels.hh`,
+`scripts/dffr/`); GBGPU `feat-dffr` at 62c8d4c, unchanged. GBGPU instantiates the kernel templates
+of the header, so its kernels are the new ones. Rebuilt on 2026-10-18 into the shared environment
+with `JAX_PLATFORMS=cpu ONLY="lisa-analysis-tools GBGPU" ./install_erebor_spider.sh`, CPU and CUDA
+backends. Without `JAX_PLATFORMS=cpu` the build completes but its smoke test crashes at
+`import phentax`, whose JAX CUDA plugin fails on a node without an NVIDIA driver
+(`$OUT/regression/step3/rebuild_main_env_first.log`); the step 3 code plays no part in it.
+
+CPU node: `wn-la-01` (AMD EPYC 9754, Bergamo), Slurm job 41563985, 16 CPUs, 2026-10-18. The parts
+ran inside that allocation as
+`srun --jobid=<job> --overlap -n 1 -c 16 env PYTHON=$PYTHON BASE_ENV=$OUT/step2_env MOJITO_L1=<file> scripts/dffr/run_step3.sh --device cpu $OUT <part>`:
+`environment reference` first, then `golden oracle accuracy`, `golden_l1` and `tests` side by
+side, then `benchmarks benchmarks_l1` alone, and `resources` last
+(`$OUT/regression/step3/step3_cpu_chain.sh`). The GPU runs are pending.
+
+The gate of this step is bit identity (`numpy.array_equal`) of every output against the step 2
+code, and timings within run-to-run noise. Unlike step 2, the CPU captures keep the two swap
+kernels, because this step rewrites them and the GPU nodes are still down.
+
+The last change of the code, the fill kernel constructing its template once per source instead of
+once per kernel (two registers fewer on the H100, GPU resources below), came after a first full
+CPU run. It changes no arithmetic and no sequence of calls, and the CPU runs were repeated for it
+after a rebuild (`$OUT/regression/step3/rerun_after_fill_change.sh`). The results below are those
+of the repeat, the final code; the run before the change gave the same bit identity and test
+outcomes (`$OUT/regression/step3/before_fill_change/`).
+
+### Frozen environment of the step 2 code
+
+The pending GPU runs of step 2 must come from the step 2 code, and so must the step 2 outputs that
+this step is compared with but that the step 2 files do not hold (the swap kernels on the CPU).
+`scripts/dffr/build_base_env.sh` built `$OUT/step2_env` from LAT 732ecf42 and GBGPU 62c8d4c, the
+committed step 2, with GPUBackendTools b07bd18, Eryn 26dd14a and BBHx b7b0ae5 plus the uncommitted
+changes of the shared clones, and the third-party versions of the shared environment: 16 minutes
+in job 41563985, 6.1 GB. Command:
+`LAT_COMMIT=732ecf42 GBGPU_COMMIT=62c8d4c JAX_PLATFORMS=cpu scripts/dffr/build_base_env.sh $OUT/step2_env`.
+
+Criterion: the environment must recompute the step 2 CPU golden outputs bit for bit. Result: 84 of
+84 arrays of `golden_cpu.npz` and 15 of 15 of `golden_cpu_l1.npz` are bit-identical, pass
+(`$OUT/regression/step2/step2_env_recheck_cpu{,_l1}.txt`). The check is part of the part
+`reference` below.
+
+### Step 2 references on the CPU
+
+The part `reference` captures the step 2 outputs again in `$OUT/step2_env`, the swap kernels
+included: 144 arrays on the six single-grid fixtures, 60 of them from the swap kernels, and 26 on
+`l1_tdi2_envelope`, 11 from the swap kernels
+(`$OUT/regression/step2/golden_cpu{,_l1}_with_swap.npz`), and the 54 arrays of
+`scripts/validation/stft_column_policy_oracle.py` (`$OUT/regression/step2/column_oracle_cpu.npz`).
+The arrays that the step 2 files also hold come back bit for bit (above).
 
 ### Unit tests
 
+None: the step adds no numerics. The bit-identity regression below is the test of the seam.
+
 ### Regression tests
 
+**Golden outputs against step 2** (parts `golden` and `golden_l1`, swap kernels included).
+Criterion: bit identity of every array against the step 2 references, and of two captures in
+separate processes. Result: 144 of 144 and 26 of 26 arrays bit-identical to step 2, and the
+repeats bit-identical to the first captures, pass. Files:
+`$OUT/regression/step3/golden_cpu{,_l1}_vs_step2.txt` and `golden_cpu{,_l1}_repeat_compare.txt`.
+
+**Column-policy oracle** (part `oracle`). `stft_column_policy_oracle.py --compare` of the step 3
+code against its capture in `$OUT/step2_env`: all 54 arrays bit-identical, pass
+(`column_oracle_vs_step2_cpu.txt`).
+
+**Accuracy before and after** (part `accuracy`). `GBGPU/tests/test_stft_gb_accuracy.py` gives the
+same numbers in `$OUT/step2_env` and after step 3, to every printed digit: end-to-end mismatch
+9.049e-3 at 10 side bins (3.950e-3 at 20), on-bin mismatch 1.409e-5. The tests pass in both
+environments. Files: `accuracy_base_cpu.log`, `accuracy_cpu.log`.
+
+**Test suites** (part `tests`). Criterion: the same outcomes as step 2. GBGPU: 39 passed, 1 failed
+and 1 module not importable, the same two GPU-only cases; the outcome of each of the 41 test cases
+is the same as in step 2. LAT: 291 tests with the same 2 failures, 15 errors and 58 skips as in
+step 2; the 289 tests that the comparison pairs by name between the two logs have the same
+outcomes. Pass. Files: `gbgpu_tests_cpu.{log,xml}`, `lat_tests_cpu.log`.
+
+**GPU resources, without a GPU** (part `resources`). `scripts/dffr/kernel_resources.py` compiles
+GBGPU's `gb_tdi_on_the_fly.cu`, which instantiates every STFT kernel, with the command of the build
+tree and ptxas statistics, once with the step 2 header (from the clone in `$OUT/step2_env`) and
+once with the step 3 header, for the A100 (sm_80, the GPU of the timing gate) and the H100 (sm_90).
+Both have 65 536 registers per SM, allocated in steps of 8 per thread, so 4 blocks of 128 threads
+fit at up to 128 registers per thread and 3 blocks at up to 168. The GPU timings depend on how
+many blocks run at once. No threshold; compared with step 2. Files:
+`$OUT/regression/step3/kernel_resources_sm{80,90}.txt`.
+
+| Kernel | Registers, sm_80, step 2 / step 3 | Blocks per SM, sm_80 | Registers, sm_90 | Blocks per SM, sm_90 |
+| --- | --- | --- | --- | --- |
+| `stft_get_ll_kernel` | 120 / 120 | 4 / 4 | 128 / 122 | 4 / 4 |
+| `stft_fill_global_kernel` | 128 / 120 | 4 / 4 | 128 / 127 | 4 / 4 |
+| `stft_swap_ll_kernel` | 113 / 120 | 4 / 4 | 105 / 128 | 4 / 4 |
+| `stft_get_fstat_ll_kernel` | 152 / 145 | 3 / 3 | 122 / 122 | 4 / 4 |
+| `stft_get_ll_grad_kernel` | 128 / 127 | 4 / 4 | 144 / 122 | 3 / 4 |
+| `stft_swap_ll_grad_kernel` | 168 / 162 | 3 / 3 | 144 / 122 | 3 / 4 |
+| `stft_information_matrix_kernel` (unchanged) | 162 / 162 | 3 / 3 | 128 / 128 | 4 / 4 |
+
+On both devices every kernel keeps at least the blocks per SM of step 2, without spills; on the
+H100 the two gradient kernels gain one. The same source gives different register counts on the
+two devices, in step 2 already, because each is compiled for its own instruction set, so the
+check has to be made per device. The stack frame grows by 32 to 48 bytes per thread, mostly the
+domain pointer and the two link-table pointers of the column context, and by 112 bytes in the
+F-statistic kernel, whose two evaluation sites hold their templates apart. The fill kernel reaches
+127 registers on sm_90 only with its template constructed per source: held for the whole kernel,
+it needed 129, one above the 128 that allow 4 blocks, while sm_80 stayed at 120 either way.
+
+### Benchmarks
+
+**CPU** (parts `benchmarks` and `benchmarks_l1`), alone in the allocation, with the fixtures and
+settings of steps 0 to 2 and without the swap kernels, as the step 2 runs they are compared with:
+one warm-up call and five timed calls per point, three runs in separate processes. Criterion
+(set by the author on 2026-10-18): at each point, the ratio of the median times of step 3 and step
+2 lies within the larger run-to-run spread of the two steps at that point, (largest - smallest) /
+median of the three run medians. Reference: the step 2 runs of 2026-10-18 morning. Files:
+`$OUT/benchmarks/step3/cpu_{esa,l1}_run{1,2,3}.json`, `compare_cpu_{esa,l1}.txt`.
+
+ESA fixture (`esa_tdi2_envelope`):
+
+| Method | Batch 1 [ms] | Batch 8 [ms] | Batch 64 [ms] | Ratio to step 2, three batches | Largest spread of the step 3 runs | Within noise |
+| --- | --- | --- | --- | --- | --- | --- |
+| `get_ll_stft` | 5.33 | 49.44 | 450.18 | 1.002 | 0.35 % | 3 of 3 |
+| `get_fstat_ll_stft` | 80.31 | 755.26 | 6996.82 | 0.996 to 0.999 | 0.67 % | 3 of 3 |
+| `fill_global_stft` | 5.18 | 48.09 | 436.64 | 0.996 to 0.999 | 0.39 % | 2 of 3 |
+| `get_ll_grad_stft` | 84.15 | 771.03 | 6945.12 | 1.002 to 1.005 | 0.23 % | 2 of 3 |
+| `information_matrix` | 42.34 | 361.66 | 3059.33 | 0.998 to 1.002 | 0.24 % | 3 of 3 |
+
+`L1Orbits` fixture (`l1_tdi2_envelope`):
+
+| Method | Batch 1 [ms] | Batch 8 [ms] | Batch 64 [ms] | Ratio to step 2, three batches | Largest spread of the step 3 runs | Within noise |
+| --- | --- | --- | --- | --- | --- | --- |
+| `get_ll_stft` | 5.31 | 49.78 | 450.87 | 0.999 to 1.003 | 1.68 % | 3 of 3 |
+| `get_fstat_ll_stft` | 80.59 | 765.79 | 7045.75 | 1.003 to 1.005 | 0.53 % | 3 of 3 |
+| `fill_global_stft` | 5.17 | 48.55 | 438.17 | 1.001 to 1.005 | 0.99 % | 3 of 3 |
+| `get_ll_grad_stft` | 83.86 | 779.23 | 6959.95 | 1.001 to 1.007 | 0.70 % | 2 of 3 |
+| `information_matrix` | 42.15 | 360.81 | 3054.67 | 0.998 to 1.001 | 0.41 % | 3 of 3 |
+
+27 of the 30 points lie within the noise. Of the three outside, one is faster, `fill_global_stft`
+at batch 64 on the ESA fixture (ratio 0.996, spreads 0.35 % in step 2 and 0.21 % in step 3), and
+two are slower, both `get_ll_grad_stft`: batch 64 on the ESA fixture (ratio 1.005, spreads 0.18 %
+and 0.20 %) and batch 8 on `L1Orbits` (ratio 1.007, spreads 0.74 % and 0.70 %). The ratios lie
+between 0.996 and 1.005 (median 1.000) on the ESA fixture and between 0.998 and 1.007 (median
+1.003) on the `L1Orbits` fixture. The two slower points are drift between runs of the same code,
+not a cost of this step: the CPU machine code of `stft_get_ll_grad_kernel` and of
+`stft_eval_block_ll` is identical, instruction for instruction, before and after the last change
+of the fill kernel (`objdump -d` of the two CPU objects, `$OUT/regression/step3/compile_check/`),
+and in the run before that change the same two points came out at 0.996 and 0.993, inside the
+noise (`$OUT/benchmarks/step3/before_fill_change/`). Runs of identical code an hour apart thus
+differ by up to 1 %, more than the spreads within one run (0.2 % to 0.7 % at these points), so a
+comparison with runs of another day cannot resolve changes below about 1 %. The kernel of
+`information_matrix` did not change in this step, and its ratios, 0.998 to 1.002, show the same
+drift. This reading of the three points goes to the author's review of the step.
+
+**A first version of the seam**, kept in `$OUT/regression/step3/first_version/` and
+`$OUT/benchmarks/step3/first_version/`, was already bit-identical (144 of 144 and 26 of 26 arrays,
+the same test outcomes), but cost time and registers. On the CPU, `Template::values` stayed out of
+line under `-Os`, one more call per pixel: `get_ll_stft` was 1.1 % and 0.5 % slower at batches 1
+and 8 on the ESA fixture, outside the spreads of 0.56 % and 0.44 %. On sm_80 its templates lived in
+the kernels and its launch settings in the column context, which raised the gradient kernels to 170
+and 232 registers, and the `get_ll` gradient to 129 once the templates had moved. Three changes
+removed these costs, none of which touches the arithmetic: `values()` is forced inline on the CPU,
+the templates are locals of the evaluation functions, and the launch settings reach
+`Template::build` as arguments instead of members of the column context. The results above are
+those of the final code. That run also showed the drift between days: the unchanged
+`information_matrix` came out at 1.005 on `L1Orbits` at batch 8, outside its spreads of 0.22 % and
+0.19 %.
+
 ### Validation runs
+
+None in this step.
+
+### Pending on the GPU
+
+After the step 2 GPU runs, so that `golden_gpu*.npz` and the GPU benchmarks of step 2 exist for the
+comparison. On a GPU node, from the shared environment:
+`PYTHON=$PYTHON BASE_ENV=$OUT/step2_env MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step3.sh --device gpu $OUT environment golden golden_l1 tests benchmarks benchmarks_l1`.
+On the GPU the captures and the benchmarks keep the swap kernels, and the reference is the step 2
+GPU capture itself. `fill_global_stft` adds into its template rows with `atomicAdd`, so the GPU
+captures of steps 0 to 2 first show whether that output is reproducible from run to run; bit
+identity against step 2 can only be asked of it if it is.
 
 ## Step 4: DFFR kernels
 
