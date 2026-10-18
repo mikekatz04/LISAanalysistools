@@ -167,6 +167,18 @@ from ...analysiscontainer import AnalysisContainerArray
 from ...domaincomputation import DomainComputationGroupArray
 from ...domains import DomainBase, DomainBaseArray, WDMSignal
 from ...sampling.moves.walkerdiffjump import KIND_MODE, KIND_SCALED, WalkerDifferenceJumpMove
+from ...sampling.snrladder import (
+    LADDER_TMAX_MIN_DEFAULT,
+    ceiling_tmax,
+    check_clip,
+    describe_leaf,
+    leaf_alive,
+    snr_changed,
+    snr_keyed_ladder,
+    snr_tmax,
+    substate_leaf_snrs,
+    top_snr_value,
+)
 from ...utils.device import sensitivity_to_current_device
 from ...utils.utility import asnumpy, get_array_module
 from .. import midit_checkpoint
@@ -339,6 +351,22 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         ladder_reanchor_nats: the lost-rung guard's threshold in lnL nats
             (:meth:`_reanchor_lost_rungs`); ``0`` disables the guard.
             ``None`` reads ``{BRANCH}_LADDER_REANCHOR_NATS``, then 200.
+        ladder_top_snr: SNR-keyed per-leaf ladders (user ruling 2026-10-18,
+            default off): ``> 0`` makes each leaf's ladder
+            ``make_ladder(ndim, ntemps, Tmax=clip((SNR_leaf / top)^2,
+            ladder_tmax_min, ladder_tmax))``. ``None`` reads
+            ``{BRANCH}_LADDER_TOP_SNR``, then 0 (off). See
+            :meth:`_maybe_update_snr_ladders` and
+            :mod:`lisatools.sampling.snrladder`.
+        ladder_tmax / ladder_tmax_min: the clip's ceiling / floor (``None``
+            reads ``{BRANCH}_LADDER_TMAX`` / ``{BRANCH}_LADDER_TMAX_MIN``, then
+            the uncapped make_ladder top / 4). Inert with the knob off.
+        ladder_top_snr_refresh: every N proposes, rebuild the ladder of a leaf
+            whose SNR moved more than 20 % since its ladder was built (0 =
+            never; ``None`` reads ``{BRANCH}_LADDER_TOP_SNR_REFRESH``).
+        ladder_top_snr_refresh_pe: allow that refresh in PE stages too
+            (``None`` reads ``{BRANCH}_LADDER_TOP_SNR_REFRESH_PE``, then off:
+            search stages only).
         **kwargs: additional keyword arguments for the Move class.
     """
 
@@ -382,6 +410,11 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         eigen_axis_acc_factor: float = None,
         ladder_reanchor_nats: float = None,
         cold_to_hot_every: int = None,
+        ladder_top_snr: float = None,
+        ladder_tmax: float = None,
+        ladder_tmax_min: float = None,
+        ladder_top_snr_refresh: int = None,
+        ladder_top_snr_refresh_pe: bool = None,
         **kwargs,
     ):
 
@@ -494,6 +527,15 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         # lost-rung guard threshold (kwarg > env > 200 at USE time, like the
         # eigen knobs above; see _ladder_reanchor_nats)
         self.ladder_reanchor_nats = ladder_reanchor_nats
+        # SNR-keyed per-leaf ladders (ruling 2026-10-18; kwarg > env > off at
+        # USE time; _maybe_update_snr_ladders). ``snr_ladder_plan`` is what
+        # the builder resolved at construction (recipe.resolve_snr_keyed_ladders);
+        # None = nothing resolved (a move built outside the builder).
+        self.ladder_top_snr = ladder_top_snr
+        self.ladder_tmax = ladder_tmax
+        self.ladder_tmax_min = ladder_tmax_min
+        self.ladder_top_snr_refresh = ladder_top_snr_refresh
+        self.ladder_top_snr_refresh_pe = ladder_top_snr_refresh_pe
 
         self._setup_debug()
 
@@ -3193,12 +3235,19 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         The pooled adaptation sample is taken FIRST (block head only,
         :meth:`_note_eigen_pool_sample`): the rotation below edits a hot rung.
         The cross-walker jump's partner pool (:meth:`_note_de_partner_sample`,
-        every layout, the same arrays when both are on) likewise.
+        every layout, the same arrays when both are on) likewise. The
+        SNR-keyed ladder update (:meth:`_maybe_update_snr_ladders`) runs LAST,
+        so a rebuilt ladder applies from this propose on and never inside
+        one.
         """
         self._note_eigen_pool_sample(state)
         self._note_de_partner_sample(
             state, reuse=getattr(self, "_eigen_pool_outgoing", None))
         self._maybe_rotate_cold_into_hot(state)
+        # LAST: the samples above were drawn at the ladders they carry; a
+        # rebuilt ladder applies from this propose on ({BRANCH}_LADDER_TOP_SNR;
+        # a no-op with the knob off)
+        self._maybe_update_snr_ladders(state)
 
     def _maybe_rotate_cold_into_hot(self, state) -> bool:
         """Every ``cold_to_hot_every`` proposals in a SEARCH stage, copy each
@@ -3272,6 +3321,184 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             str(self.branch_name).upper(), event + 1, kind, cadence, offset, nw, n, hot,
         )
         return True
+
+    # ---- SNR-keyed per-leaf ladders (user ruling 2026-10-18) ------------------
+    #: what the builder resolved (``recipe.resolve_snr_keyed_ladders``):
+    #: ``{"ref": {leaf: SNR the leaf's ladder was built at (or its first
+    #: measured SNR after a plain resume)}, "pending": {leaves whose SNR was
+    #: unknown at construction}}``. ``None`` = nothing resolved (a move built
+    #: outside the builder): every alive leaf is then pending.
+    snr_ladder_plan = None
+
+    def _ladder_top_snr(self) -> float:
+        """kwarg > ``{BRANCH}_LADDER_TOP_SNR`` env > 0 (off); on/true/yes = 2.0."""
+        val = getattr(self, "ladder_top_snr", None)
+        if val is None:
+            val = os.environ.get(f"{str(self.branch_name).upper()}_LADDER_TOP_SNR", None)
+        return top_snr_value(val)
+
+    def _ladder_tmax_min(self) -> float:
+        """kwarg > ``{BRANCH}_LADDER_TMAX_MIN`` env > 4 (the floor of a leaf's T_max)."""
+        return self._eigen_float_knob("ladder_tmax_min", "LADDER_TMAX_MIN",
+                                      LADDER_TMAX_MIN_DEFAULT)
+
+    def _ladder_tmax_ceiling(self, ntemps) -> float:
+        """kwarg > ``{BRANCH}_LADDER_TMAX`` env > the uncapped make_ladder top."""
+        val = getattr(self, "ladder_tmax", None)
+        if val is None:
+            env = os.environ.get(f"{str(self.branch_name).upper()}_LADDER_TMAX", None)
+            val = None if (env is None or not env.strip()) else float(env)
+        return ceiling_tmax(self.ndim, ntemps, val)
+
+    def _ladder_top_snr_refresh(self) -> int:
+        """kwarg > ``{BRANCH}_LADDER_TOP_SNR_REFRESH`` env > 0 (never), in proposes."""
+        val = getattr(self, "ladder_top_snr_refresh", None)
+        if val is None:
+            val = os.environ.get(
+                f"{str(self.branch_name).upper()}_LADDER_TOP_SNR_REFRESH", None)
+        if val is None or (isinstance(val, str) and not val.strip()):
+            return 0
+        return max(0, int(val))
+
+    def _ladder_top_snr_refresh_pe(self) -> bool:
+        """kwarg > ``{BRANCH}_LADDER_TOP_SNR_REFRESH_PE`` env > off."""
+        return self._eigen_switch("ladder_top_snr_refresh_pe", "LADDER_TOP_SNR_REFRESH_PE")
+
+    def _maybe_update_snr_ladders(self, state):
+        """Build / refresh SNR-keyed per-leaf ladders BETWEEN proposes (head side).
+
+        User ruling 2026-10-18: with ``{BRANCH}_LADDER_TOP_SNR`` > 0 each
+        leaf's ladder is ``make_ladder(ndim, ntemps, Tmax=T_leaf)``, ``T_leaf
+        = clip((SNR_leaf / top)^2, {BRANCH}_LADDER_TMAX_MIN,
+        {BRANCH}_LADDER_TMAX)`` (:mod:`lisatools.sampling.snrladder`).
+        ``SNR_leaf`` is ``sqrt(<h|h>)`` at the max-lnL cold walker, read off
+        the sub-state's per-leaf inner products (``d_h`` / ``h_h``, recorded
+        at the end of every leaf visit; under the walker-block fan-out the
+        head's merged state carries every walker's).
+
+        Runs from :meth:`fanout_prepare_state`, on the process that owns the
+        whole ensemble (single process, the flat head, the block head before
+        it slices), so a ladder only ever changes BETWEEN proposes: inside a
+        propose the swaps, the lost-rung guard and the tempered eigen steps
+        use the visit's ladder, exactly as before. The new row is written to
+        ``sub.betas_all[leaf]`` of the state being proposed from: the visit
+        reads it, the block slices carry it by value, the head's pooled
+        adaptation starts from it, and the saver persists it with the row
+        (``PerLeafLadderState.storage_arrays``). The rung STATES are left
+        where they are; a rung the new temperatures orphan is re-anchored by
+        the lost-rung guard at its next visit (the reset-on-resume path's
+        behaviour).
+
+        Per alive leaf:
+
+        * PENDING (its SNR was unknown when the ladder was constructed: a
+          fresh store, or a reset store that never recorded ``<h|h>``): the
+          ladder is built at the first propose that finds a recorded SNR.
+          This is the construction itself, deferred, so it happens once per
+          leaf in any stage;
+        * no baseline (a plain resume kept the stored ladder): the first
+          measured SNR becomes the refresh baseline, nothing is rebuilt;
+        * REFRESH (``{BRANCH}_LADDER_TOP_SNR_REFRESH`` = N > 0, every N
+          proposes of the move, i.e. of every alive leaf): a leaf whose SNR
+          moved more than 20 % from the SNR its ladder was built at gets
+          its ladder rebuilt (a copy's SNR jump, a lost source). An ADAPTIVE
+          change -- the kernel is not detailed-balance exact while it
+          happens -- so it runs in the search stages only (``gf_stage_kind``
+          search / rj) unless ``{BRANCH}_LADDER_TOP_SNR_REFRESH_PE=1``
+          (Mike's rule: no adaptive tricks in PE unless ruled); an unknown
+          stage never refreshes. A rebuild whose ``T_leaf`` equals the
+          current top (both at the clip) only moves the baseline.
+
+        Off (the default): returns at once, no state touched, no RNG drawn.
+        Returns ``[(leaf, snr, T_leaf), ...]`` of the rebuilt ladders.
+        """
+        top = self._ladder_top_snr()
+        if not top > 0.0:
+            return []
+        sub = (getattr(state, "sub_states", None) or {}).get(self.branch_name)
+        if sub is None or not getattr(sub, "tempered_initialized", False):
+            return []
+        betas_all = getattr(sub, "betas_all", None)
+        if betas_all is None or np.ndim(betas_all) != 2:
+            return []
+        nt = int(np.shape(betas_all)[-1])
+        nl = min(int(self.nleaves_max), int(np.shape(betas_all)[0]))
+        if nt < 2:
+            return []
+        lo, hi = check_clip(self._ladder_tmax_min(), self._ladder_tmax_ceiling(nt))
+        plan = getattr(self, "snr_ladder_plan", None)
+        if plan is None:
+            plan = self.snr_ladder_plan = {"ref": {}, "pending": set(range(nl))}
+        ref = plan.setdefault("ref", {})
+        pending = plan.setdefault("pending", set())
+        self._snr_ladder_clock = int(getattr(self, "_snr_ladder_clock", 0)) + 1
+        every = self._ladder_top_snr_refresh()
+        kind = getattr(self, "gf_stage_kind", None)
+        stage_ok = kind in COLD_TO_HOT_STAGE_KINDS or (
+            kind == "pe" and self._ladder_top_snr_refresh_pe())
+        due = every > 0 and self._snr_ladder_clock % every == 0 and stage_ok
+        measured = substate_leaf_snrs(sub, nl)
+        tag = f"[{str(self.branch_name).upper()}_LADDER]"
+        inds = getattr(sub, "inds", None)
+        changes, unmeasured = [], []
+        for leaf in range(nl):
+            if not leaf_alive(inds, leaf):
+                continue
+            snr, walker, skind = measured[leaf]
+            finite = snr is not None and bool(np.isfinite(snr))
+            built = ref.get(leaf)
+            if leaf in pending:
+                if not finite:
+                    unmeasured.append(leaf)
+                    continue
+                why = "construction, deferred to the leaf's first recorded SNR"
+            elif built is None:
+                if finite:
+                    ref[leaf] = float(snr)
+                    logger.info(
+                        "%s leaf %d: refresh baseline SNR %.1f (the stored ladder is kept, "
+                        "T_max %.1f)", tag, leaf, float(snr),
+                        float(1.0 / np.asarray(betas_all[leaf], dtype=float)[-1]))
+                continue
+            elif due and finite and snr_changed(snr, built):
+                why = (f"refresh: SNR {float(built):.1f} at the last build, "
+                       f"{100.0 * (float(snr) / float(built) - 1.0):+.0f} %, stage kind {kind}")
+            else:
+                continue
+            t_leaf, raw, clip = snr_tmax(snr, top, lo, hi)
+            row = np.asarray(betas_all[leaf], dtype=float)
+            current = float(1.0 / row[-1]) if row[-1] > 0.0 else float("inf")
+            if leaf not in pending and np.isclose(t_leaf, current, rtol=1e-9, atol=0.0):
+                ref[leaf] = float(snr)
+                logger.info(
+                    "%s leaf %d: SNR %.1f -> %.1f (%+.0f %%) but T_max stays %.1f (%s); "
+                    "ladder kept, baseline moved", tag, leaf, float(built), float(snr),
+                    100.0 * (float(snr) / float(built) - 1.0), t_leaf,
+                    "clipped" if clip else "unchanged")
+                continue
+            new = snr_keyed_ladder(self.ndim, nt, t_leaf)
+            sub.betas_all[leaf][:nt] = new
+            tcs = getattr(self, "temperature_controls", None) or []
+            if leaf < len(tcs) and tcs[leaf] is not None:
+                try:
+                    if np.size(tcs[leaf].betas) == nt:
+                        tcs[leaf].betas[:] = new
+                except Exception:  # noqa: BLE001 -- the visit reloads it from betas_all
+                    pass
+            ref[leaf] = float(snr)
+            pending.discard(leaf)
+            changes.append((leaf, float(snr), float(t_leaf)))
+            logger.info(describe_leaf(tag, leaf, snr, t_leaf, raw, clip, top, lo, hi, new, why,
+                                      kind=skind, walker=walker))
+        if unmeasured and self._snr_ladder_clock >= 2 and not getattr(
+                self, "_snr_ladder_warned", False):
+            self._snr_ladder_warned = True
+            logger.warning(
+                "%s %s_LADDER_TOP_SNR=%g: leaves %s have no recorded <h|h> yet (is "
+                "%s_RECORD_DH on?); they keep their configured ladder until one is recorded",
+                tag, str(self.branch_name).upper(), top, self._int_runs(unmeasured),
+                str(self.branch_name).upper())
+        return changes
 
     def _fancy_swap_fires(self, repeat):
         """Walker-permuting swap cadence; never with one walker (identity permutation)."""

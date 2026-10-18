@@ -7049,6 +7049,109 @@ def resolve_resumed_ladders(branch_name, info, sub, betas, ntemps, configured_be
     return out
 
 
+def _branch_knob(info, attr, branch_name, knob, default, cast):
+    """Settings field ``attr`` > ``{BRANCH}_<knob>`` env > ``default`` (``cast``-ed)."""
+    val = getattr(info, attr, None)
+    if val is None:
+        env = os.environ.get(f"{str(branch_name).upper()}_{knob}", None)
+        val = None if (env is None or not str(env).strip()) else env
+    if val is None:
+        return default
+    return cast(val)
+
+
+def resolve_snr_keyed_ladders(branch_name, info, sub, betas_all, ntemps, *, fresh):
+    """SNR-keyed per-leaf ladders at construction (user ruling 2026-10-18; default OFF).
+
+    With ``{BRANCH}_LADDER_TOP_SNR`` (settings field ``ladder_top_snr``) > 0,
+    every leaf's ladder is ``make_ladder(ndim, ntemps, Tmax=T_leaf)`` with
+    ``T_leaf = clip((SNR_leaf / top)^2, {BRANCH}_LADDER_TMAX_MIN,
+    {BRANCH}_LADDER_TMAX)`` (:mod:`lisatools.sampling.snrladder`; the
+    existing ``{BRANCH}_LADDER_TMAX`` is the CEILING then, its absence the
+    uncapped make_ladder top). The rung count is the store's / the
+    configuration's ``ntemps``, so a leaf below the ceiling gets a denser
+    ladder than make_ladder's ~25 % spacing.
+
+    * FRESH store (``fresh``) and a RESUMED store with
+      ``{BRANCH}_LADDER_RESET_ON_RESUME=1``: each alive leaf with a recorded
+      SNR on the sub-state (``d_h`` / ``h_h`` / ``log_like``, loaded from
+      the store's last row on a resume) gets its SNR-keyed ladder now; a
+      dead leaf (no source on any cold walker) gets the floor; an alive
+      leaf without a recorded SNR keeps ``betas_all``'s (configured) row
+      and is PENDING -- the move builds its ladder at the first propose
+      that finds one (``ResidualAddOneRemoveOneMove._maybe_update_snr_ladders``).
+    * Plain RESUME: the stored ladders stand (``resolve_resumed_ladders``
+      already logged that); each leaf's refresh baseline becomes its first
+      measured SNR.
+
+    Returns ``(betas_all, plan)``: ``plan`` is ``None`` with the knob off
+    (``betas_all`` returned untouched, bit-identical) or the move's
+    ``snr_ladder_plan`` (``{"ref": {leaf: SNR built at}, "pending": {...}}``).
+    """
+    from ..sampling.snrladder import (
+        LADDER_TMAX_MIN_DEFAULT,
+        ceiling_tmax,
+        check_clip,
+        describe_leaf,
+        leaf_alive,
+        snr_keyed_ladder,
+        snr_tmax,
+        substate_leaf_snrs,
+        top_snr_value,
+    )
+
+    top = _branch_knob(info, "ladder_top_snr", branch_name, "LADDER_TOP_SNR", 0.0, top_snr_value)
+    if not top > 0.0:
+        return betas_all, None
+    B = str(branch_name).upper()
+    tag = f"[{B}_LADDER]"
+    ntemps = int(ntemps)
+    nleaves = int(info.nleaves_max)
+    if ntemps < 2:
+        logger.info("%s %s_LADDER_TOP_SNR=%g: a %d-rung ladder has no temperatures to key; "
+                    "nothing to do", tag, B, top, ntemps)
+        return betas_all, None
+    lo = _branch_knob(info, "ladder_tmax_min", branch_name, "LADDER_TMAX_MIN",
+                      LADDER_TMAX_MIN_DEFAULT, float)
+    cap = _branch_knob(info, "ladder_tmax", branch_name, "LADDER_TMAX", None, float)
+    lo, hi = check_clip(lo, ceiling_tmax(int(info.ndim), ntemps, cap))
+    plan = {"ref": {}, "pending": set()}
+    reset = bool(getattr(info, "ladder_reset_on_resume", False))
+    if not fresh and not reset:
+        logger.info(
+            "%s %s_LADDER_TOP_SNR=%g (floor %g, ceiling %g): the resume keeps the stored "
+            "ladders; each leaf's refresh baseline is its first measured SNR "
+            "(%s_LADDER_RESET_ON_RESUME=1 rebuilds them from the store's SNRs)",
+            tag, B, top, lo, hi, B)
+        return betas_all, plan
+    why = "fresh store" if fresh else f"{B}_LADDER_RESET_ON_RESUME=1"
+    out = np.array(betas_all, dtype=float, copy=True)
+    measured = substate_leaf_snrs(sub, nleaves) if sub is not None else (
+        [(float("nan"), None, None)] * nleaves)
+    inds = None if sub is None else getattr(sub, "inds", None)
+    logger.info("%s %s_LADDER_TOP_SNR=%g: per-leaf ladders from each leaf's SNR "
+                "(T_max = clip((SNR / %g)^2, %g, %g), %d rungs, %s)",
+                tag, B, top, top, lo, hi, ntemps, why)
+    for leaf in range(nleaves):
+        snr, walker, kind = measured[leaf]
+        alive = leaf_alive(inds, leaf)
+        if alive and not (snr is not None and np.isfinite(snr)):
+            plan["pending"].add(leaf)
+            logger.info(
+                "%s leaf %d: no SNR recorded yet -> the configured ladder (T_max %.1f) until "
+                "its first measurement (%s)", tag, leaf, float(1.0 / out[leaf, -1]), why)
+            continue
+        if not alive:
+            snr, walker, kind = float("nan"), None, None
+        t_leaf, raw, clip = snr_tmax(snr, top, lo, hi)
+        out[leaf] = snr_keyed_ladder(int(info.ndim), ntemps, t_leaf)
+        if alive:
+            plan["ref"][leaf] = float(snr)
+        logger.info(describe_leaf(tag, leaf, snr, t_leaf, raw, clip, top, lo, hi, out[leaf],
+                                  why, kind=kind or "optimal", walker=walker))
+    return out, plan
+
+
 class SingleSourcePEBuilder(SourceMoveBuilder):
     """Build a :class:`ResidualAddOneRemoveOneMove` PE move for one branch.
 
@@ -7204,9 +7307,15 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
         # Side effects (parity with the old build_mbh_moves_phenom): stash the
         # ladder on the source info and the per-leaf ladders on the sub-state.
         info.betas = betas
+        _sub_in = state.sub_states.get(self.branch_name)
+        _fresh = _stored_per_leaf_ladders(_sub_in, int(info.nleaves_max), int(ntemps)) is None
         betas_all = resolve_resumed_ladders(
-            self.branch_name, info, state.sub_states.get(self.branch_name),
+            self.branch_name, info, _sub_in,
             betas, ntemps, _configured_betas,
+        )
+        # {BRANCH}_LADDER_TOP_SNR (default off: betas_all untouched, plan None)
+        betas_all, _snr_plan = resolve_snr_keyed_ladders(
+            self.branch_name, info, _sub_in, betas_all, ntemps, fresh=_fresh,
         )
         state.sub_states[self.branch_name].betas_all = betas_all
         logger.debug(f"{self.branch_name} betas: {betas}")
@@ -7266,6 +7375,11 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
             "ladder_reanchor_nats",
             getattr(info, "ladder_reanchor_nats", None),
         )
+        # the SNR-keyed per-leaf ladders ({BRANCH}_LADDER_TOP_SNR & co. via
+        # the settings fields; None lets the move read the env / its default)
+        for _attr in ("ladder_top_snr", "ladder_tmax", "ladder_tmax_min",
+                      "ladder_top_snr_refresh", "ladder_top_snr_refresh_pe"):
+            _extra_kwargs.setdefault(_attr, getattr(info, _attr, None))
         move = self.move_class(
             self.branch_name,
             coords_shape,
@@ -7284,6 +7398,9 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
             **_extra_kwargs,
         )
         move.fanout_branches = [self.branch_name]
+        if _snr_plan is not None:
+            # what the construction resolved: per-leaf build SNRs + pending leaves
+            move.snr_ladder_plan = _snr_plan
         if getattr(info, "info_matrix_gen", None) is not None:
             move.eigen_table_builder = info.info_matrix_gen
         # where the eigen tables persist to: the same store path the

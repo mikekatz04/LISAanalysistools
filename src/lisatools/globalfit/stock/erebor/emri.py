@@ -13,6 +13,7 @@ from eryn.moves.tempering import make_ladder
 from eryn.prior import ProbDistContainer, uniform_dist
 
 from ....sampling.prior import EMRIKerrDomainPrior
+from ....sampling.snrladder import top_snr_value
 
 from ...engine import Settings, Setup
 from ...hdfbackend import EMRIHDFBackend
@@ -105,6 +106,34 @@ class EMRISettings(Settings):
     # for why a loud source wants ~10. Ignored when ``betas`` is explicit.
     ladder_tmax: Optional[float] = dataclasses.field(
         default_factory=env_default("EMRI_LADDER_TMAX", None, float)
+    )
+    # ---- SNR-keyed per-leaf ladders (user ruling 2026-10-18; default OFF) ---
+    # > 0: each leaf's ladder is make_ladder(ndim, ntemps, Tmax=T_leaf) with
+    # T_leaf = clip((SNR_leaf / ladder_top_snr)^2, ladder_tmax_min,
+    # ladder_tmax) -- ladder_tmax is the CEILING then -- so the top rung sees
+    # every leaf at effective SNR ~ladder_top_snr. SNR_leaf = sqrt(<h|h>) at the
+    # max-lnL cold walker. Acts at a fresh store's ladder construction (deferred
+    # to the leaf's first recorded SNR when the store has none) and at
+    # EMRI_LADDER_RESET_ON_RESUME=1; a plain resume keeps the stored ladders.
+    # 0 = off (bit-identical); on / true / yes = 2.0. See
+    # lisatools.sampling.snrladder and recipe.resolve_snr_keyed_ladders.
+    ladder_top_snr: float = dataclasses.field(
+        default_factory=env_default("EMRI_LADDER_TOP_SNR", 0.0, top_snr_value)
+    )
+    # the floor of a leaf's SNR-keyed top temperature (prior-only leaves sit here)
+    ladder_tmax_min: float = dataclasses.field(
+        default_factory=env_default("EMRI_LADDER_TMAX_MIN", 4.0, float)
+    )
+    # every N proposes, rebuild (on the head, between proposes) the ladder of a
+    # leaf whose SNR moved > 20 % since its ladder was built; 0 = never. An
+    # ADAPTIVE change (not detailed-balance exact while it happens): search
+    # stages only unless ladder_top_snr_refresh_pe. See
+    # ResidualAddOneRemoveOneMove._maybe_update_snr_ladders.
+    ladder_top_snr_refresh: int = dataclasses.field(
+        default_factory=env_default("EMRI_LADDER_TOP_SNR_REFRESH", 0, int)
+    )
+    ladder_top_snr_refresh_pe: bool = dataclasses.field(
+        default_factory=env_default("EMRI_LADDER_TOP_SNR_REFRESH_PE", False, bool)
     )
     # Eigen inner move: this fraction of the proposals draws its axis step at
     # eigen_jump_factor x the table width (0 = every draw bit-identical to the

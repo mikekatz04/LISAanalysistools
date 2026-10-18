@@ -155,6 +155,12 @@ def default_source_ladder(ndim, input_basis, ntemps, tmax=None):
     ~10 keeps every rung on the source (hot-rung width ~3 sigma, enough to
     bridge sigma-spaced islands) at the price of a lower per-rung swap
     acceptance. Left unset by default so the ruling's ladder is the default.
+
+    With ``{BRANCH}_LADDER_TOP_SNR`` > 0 (ruling 2026-10-18, default off)
+    this uniform ladder is only the fallback of a leaf whose SNR is not yet
+    known: each leaf gets ``make_ladder(ndim, ntemps, Tmax=clip((SNR /
+    top)^2, {BRANCH}_LADDER_TMAX_MIN, tmax))``, ``tmax`` its CEILING
+    (``recipe.resolve_snr_keyed_ladders``, :mod:`lisatools.sampling.snrladder`).
     """
     from eryn.moves.tempering import make_ladder
 

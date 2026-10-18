@@ -13,6 +13,7 @@ from eryn.moves.tempering import make_ladder
 from eryn.prior import ProbDistContainer, uniform_dist
 
 from ....sampling.prior import LogUniformLinear
+from ....sampling.snrladder import top_snr_value
 from ...engine import Settings, Setup
 from ...hdfbackend import MBHHDFBackend
 from ...loginfo import init_logger
@@ -81,6 +82,21 @@ class MBHSettings(Settings):
     # ~25 % spacing, T ~ 150 at 8 rungs). See common.default_source_ladder.
     ladder_tmax: Optional[float] = dataclasses.field(
         default_factory=env_default("MBH_LADDER_TMAX", None, float)
+    )
+    # SNR-keyed per-leaf ladders (ruling 2026-10-18; default OFF): same meaning
+    # as the EMRISettings fields of the same names (MBH_LADDER_TOP_SNR /
+    # _TMAX_MIN / _TOP_SNR_REFRESH / _TOP_SNR_REFRESH_PE).
+    ladder_top_snr: float = dataclasses.field(
+        default_factory=env_default("MBH_LADDER_TOP_SNR", 0.0, top_snr_value)
+    )
+    ladder_tmax_min: float = dataclasses.field(
+        default_factory=env_default("MBH_LADDER_TMAX_MIN", 4.0, float)
+    )
+    ladder_top_snr_refresh: int = dataclasses.field(
+        default_factory=env_default("MBH_LADDER_TOP_SNR_REFRESH", 0, int)
+    )
+    ladder_top_snr_refresh_pe: bool = dataclasses.field(
+        default_factory=env_default("MBH_LADDER_TOP_SNR_REFRESH_PE", False, bool)
     )
     eigen_jump_mix: float = dataclasses.field(
         default_factory=env_default("MBH_EIGEN_JUMP_MIX", 0.0, float)

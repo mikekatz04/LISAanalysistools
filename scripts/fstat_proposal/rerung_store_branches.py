@@ -57,6 +57,31 @@ runs ``lisatools``' own resume-readability check. Afterwards launch with
 ``MBH_NTEMPS=12 EMRI_NTEMPS=12`` (the stored ladder would win anyway; matching
 knobs keep the resume warning quiet).
 
+SNR-keyed per-leaf ladders (``--top-snr S``, user ruling 2026-10-18)
+-------------------------------------------------------------------
+Per-leaf branches only (mbh / emri / sobbh). Instead of one ladder for every
+leaf, leaf ``k`` gets ``make_ladder(ndim, N, Tmax=T_k)`` with ``T_k =
+clip((SNR_k / S)^2, --ladder-tmax-min (4), --ladder-tmax)`` -- the run's
+``{BRANCH}_LADDER_TOP_SNR`` rule (``lisatools.sampling.snrladder``).
+``SNR_k`` is ``sqrt(h_h)`` at the max-lnL cold walker of the store's LAST
+row (``d_h`` / ``h_h`` / ``log_like``; an earlier row when the last one has
+no record for that leaf). ``--ladder-tmax`` is the ceiling (unset: the
+uncapped make_ladder top at N rungs); ``--top-snr`` alone means 2.0. A dead
+leaf gets the floor; a leaf with no recorded SNR on any row keeps the ladder
+the tool would otherwise write. The per-leaf table is printed in the dry
+run, and the ladders are written on EVERY stored row (the tool's ladder
+rule; the backup keeps the history). ``--set B=N`` may keep the count, so
+only ``betas_all`` is rewritten. ``--ntemps-from-tmax`` sets N to
+make_ladder's own count for the CEILING (``make_ladder(ndim,
+Tmax=--ladder-tmax)``, its ~25 % swap spacing; EMRI at 625: 11 rungs) --
+pass ``--set emri=auto``. A leaf below the ceiling then gets a denser
+ladder (smaller ratio, more swaps), since the count is per branch. Launch
+afterwards with ``{BRANCH}_LADDER_TOP_SNR=S`` (and the same TMAX): a plain
+resume keeps the migrated ladders.
+
+    python scripts/fstat_proposal/rerung_store_branches.py STORE \
+        --set emri=auto --ntemps-from-tmax --top-snr 2 --ladder-tmax 625
+
 Sidecars: ``--reset-backup`` moves the saver's ``<base>_running_backup_copy.h5``
 aside (it still has the OLD rung count; the saver rewrites it on its first
 save, but ``promote_backup_if_store_unreadable`` could otherwise hand a
@@ -186,21 +211,101 @@ class BranchPlan:
     def __init__(self, branch, old_nt, new_nt, per_leaf, fill, ladder_mode, ladder):
         self.branch, self.old_nt, self.new_nt = branch, int(old_nt), int(new_nt)
         self.per_leaf, self.fill, self.ladder_mode = per_leaf, fill, ladder_mode
-        self.ladder = ladder                     # None = keep the stored (shrink, 'keep')
+        # (new_nt,) one ladder for every leaf, (nleaves, new_nt) per leaf
+        # (--top-snr), or None = keep the stored (shrink, 'keep')
+        self.ladder = ladder
         self.datasets = []
         self.src = fill_map(new_nt, old_nt, fill)
+        # --top-snr: the per-leaf table and the clip; ladder_only = the count is
+        # kept and only betas_all is rewritten
+        self.snr_table = None
+        self.top_snr = None
+        self.clip = None
+        self.ladder_only = False
+        self.ntemps_note = None
 
     @property
     def unchanged(self):
-        return self.old_nt == self.new_nt
+        return self.old_nt == self.new_nt and not self.ladder_only
 
 
 def _group_datasets(grp):
     return [k for k in grp if isinstance(grp[k], h5py.Dataset)]
 
 
-def plan_branch(root, branch, new_nt, fill, ladder_mode, ratio, betas):
-    """Validate one branch against the layout table and describe the rewrite."""
+def _last_row(root, grp):
+    """Index of the store's last WRITTEN row (``iteration - 1``, inside the allocation)."""
+    n = int(grp["chain"].shape[0]) if "chain" in grp else 0
+    it = int(root.attrs.get("iteration", n) or n)
+    return max(0, min(it, n) - 1)
+
+
+def store_leaf_snrs(root, grp, nleaves):
+    """``[(snr, walker, kind, row, alive), ...]`` per leaf from the stored records.
+
+    The run's rule (``lisatools.sampling.snrladder.leaf_snr``): ``sqrt(h_h)``
+    at the max-lnL cold walker (``log_like[row, leaf, 0, :]``) of the LAST
+    written row; a leaf with no usable record there takes the latest earlier
+    row that has one (``row`` names it; ``None`` when no row does). ``alive``
+    is whether any cold walker carries the leaf on the last row.
+    """
+    from lisatools.sampling.snrladder import leaf_snr
+
+    last = _last_row(root, grp)
+    d_h, h_h = grp["d_h"], grp["h_h"]
+    ll = grp["log_like"] if "log_like" in grp else None
+    inds_last = np.asarray(grp["inds"][last]) if "inds" in grp else None
+    out = []
+    for leaf in range(int(nleaves)):
+        alive = True if inds_last is None else bool(np.any(inds_last[0, :, leaf]))
+        found = (float("nan"), None, None, None)
+        for r in range(last, -1, -1):
+            cold = None if ll is None else np.asarray(ll[r, leaf, 0, :], dtype=float)
+            snr, w, kind = leaf_snr(np.asarray(d_h[r, :, leaf]), np.asarray(h_h[r, :, leaf]), cold)
+            if kind is not None:
+                found = (snr, w, kind, r)
+                break
+        out.append(found + (alive,))
+    return out
+
+
+def snr_keyed_ladders(root, grp, ndim, nleaves, new_nt, fallback, top_snr, tmax_min, tmax):
+    """``(ladders (nleaves, new_nt), table, (floor, ceiling))`` for ``--top-snr``.
+
+    ``fallback`` ``(nleaves, new_nt)``: the row a leaf with no recorded SNR
+    keeps (the ladder the tool would write without ``--top-snr``).
+    """
+    from lisatools.sampling.snrladder import (
+        ceiling_tmax, check_clip, rung_ratio, snr_keyed_ladder, snr_tmax)
+
+    lo, hi = check_clip(tmax_min, ceiling_tmax(int(ndim), int(new_nt), tmax))
+    ladders = np.array(fallback, dtype=float, copy=True)
+    table = []
+    for leaf, (snr, w, kind, row, alive) in enumerate(store_leaf_snrs(root, grp, nleaves)):
+        if alive and kind is None:
+            table.append(dict(leaf=leaf, row=None, walker=None, snr=float("nan"), kind="-",
+                              raw=float("nan"), tmax=float(1.0 / ladders[leaf, -1]), clip="",
+                              ratio=rung_ratio(ladders[leaf]),
+                              note="no SNR recorded: the ladder without --top-snr"))
+            continue
+        if not alive:
+            snr, w, kind, row = float("nan"), None, "-", row
+        t_leaf, raw, clip = snr_tmax(snr, top_snr, lo, hi)
+        ladders[leaf] = snr_keyed_ladder(int(ndim), int(new_nt), t_leaf)
+        table.append(dict(leaf=leaf, row=row, walker=w, snr=snr, kind=kind, raw=raw, tmax=t_leaf,
+                          clip=clip, ratio=rung_ratio(ladders[leaf]),
+                          note="" if alive else "dead leaf (no source): the floor"))
+    return ladders, table, (lo, hi)
+
+
+def plan_branch(root, branch, new_nt, fill, ladder_mode, ratio, betas, top_snr=None,
+                ladder_tmax=None, tmax_min=4.0, ntemps_from_tmax=False):
+    """Validate one branch against the layout table and describe the rewrite.
+
+    ``top_snr`` (> 0): SNR-keyed per-leaf ladders (module docstring);
+    ``ntemps_from_tmax``: ``new_nt`` is make_ladder's count for
+    ``ladder_tmax`` (``new_nt`` itself is then ignored and may be ``None``).
+    """
     if branch in BANDED_REFUSAL:
         raise ValueError(
             f"{branch!r}: its ladder is per band (band_temps, band_num_* per rung) "
@@ -219,6 +324,22 @@ def plan_branch(root, branch, new_nt, fill, ladder_mode, ratio, betas):
         raise ValueError(f"{branch!r}: neither betas_all nor betas in the group -- not a tempered branch")
     table = layout_for(attrs)
     old_nt = int(attrs["ntemps"])
+    use_snr = top_snr is not None and float(top_snr) > 0.0
+    if (use_snr or ntemps_from_tmax) and not per_leaf:
+        raise ValueError(
+            f"{branch!r}: --top-snr / --ntemps-from-tmax need a per-leaf ladder (betas_all); "
+            "this branch has one flat ladder.")
+    ntemps_note = None
+    if ntemps_from_tmax:
+        if ladder_tmax is None:
+            raise ValueError("--ntemps-from-tmax needs --ladder-tmax (the ceiling it counts for)")
+        from lisatools.sampling.snrladder import make_ladder_count
+
+        new_nt = make_ladder_count(int(attrs["ndim"]), float(ladder_tmax))
+        ntemps_note = (f"rung count from make_ladder(ndim={int(attrs['ndim'])}, "
+                       f"Tmax={float(ladder_tmax):g}) = {new_nt} (its ~25 % swap spacing)")
+    if new_nt is None:
+        raise ValueError(f"{branch!r}: --set {branch}=auto needs --ntemps-from-tmax")
     new_nt = int(new_nt)
     if new_nt < 1:
         raise ValueError(f"{branch!r}: --set {new_nt} must be >= 1")
@@ -229,9 +350,29 @@ def plan_branch(root, branch, new_nt, fill, ladder_mode, ratio, betas):
             "refusing to guess which axis is the temperature axis.")
     if new_nt < old_nt and ladder_mode == "keep":
         ladder = None
+    elif new_nt == old_nt and use_snr:
+        ladder = None                            # count kept: the stored ladder is the fallback
     else:
         ladder = new_ladder(new_nt, per_leaf, attrs["ndim"], ratio=ratio, betas=betas)
+    snr_plan = None
+    if use_snr:
+        nl = int(attrs["nleaves_max"])
+        if ladder is None:                       # the stored last row, truncated to new_nt
+            stored = np.asarray(grp["betas_all"][_last_row(root, grp)], dtype=float)
+            fallback = np.ascontiguousarray(stored[:, :new_nt])
+        else:
+            fallback = np.tile(np.asarray(ladder, dtype=float), (nl, 1))
+        ladders, snr_table, clip = snr_keyed_ladders(
+            root, grp, attrs["ndim"], nl, new_nt, fallback, float(top_snr), tmax_min,
+            ladder_tmax)
+        ladder = ladders
+        snr_plan = (snr_table, clip)
     bp = BranchPlan(branch, old_nt, new_nt, per_leaf, fill, ladder_mode, ladder)
+    bp.ntemps_note = ntemps_note
+    if snr_plan is not None:
+        bp.snr_table, bp.clip = snr_plan
+        bp.top_snr = float(top_snr)
+        bp.ladder_only = new_nt == old_nt
     for name in names:
         ds = grp[name]
         family, trailing, axis = table[name]
@@ -241,6 +382,8 @@ def plan_branch(root, branch, new_nt, fill, ladder_mode, ratio, betas):
                 f"(steps,) + {trailing} for ntemps={old_nt}; refusing.")
         if family == "none":
             continue
+        if bp.ladder_only and family != "ladder":
+            continue                             # --top-snr at the same count: betas_all only
         new_shape = list(ds.shape)
         new_shape[axis] = (max(new_nt - 1, 0) if family == "swaps" else new_nt)
         bp.datasets.append(DatasetPlan(name, family, axis, tuple(ds.shape), tuple(new_shape),
@@ -249,15 +392,20 @@ def plan_branch(root, branch, new_nt, fill, ladder_mode, ratio, betas):
 
 
 def plan(path, targets, group="global_fit", fill="cycle", ladder_mode="keep",
-         ratio=None, betas=None):
+         ratio=None, betas=None, top_snr=None, ladder_tmax=None, tmax_min=4.0,
+         ntemps_from_tmax=False):
     """One :class:`BranchPlan` per ``targets`` entry (``{branch: new_ntemps}``).
 
     ``ladder_mode`` matters only when SHRINKING: ``keep`` (default) truncates
     the stored ladder, ``fresh`` rebuilds it; growing always rebuilds.
+    ``top_snr`` / ``ladder_tmax`` / ``tmax_min`` / ``ntemps_from_tmax``: the
+    SNR-keyed per-leaf ladders (module docstring).
     """
     with h5py.File(path, "r") as f:
         root = f[group]
-        return [plan_branch(root, b, n, fill, ladder_mode, ratio, betas)
+        return [plan_branch(root, b, n, fill, ladder_mode, ratio, betas, top_snr=top_snr,
+                            ladder_tmax=ladder_tmax, tmax_min=tmax_min,
+                            ntemps_from_tmax=ntemps_from_tmax)
                 for b, n in targets.items()]
 
 
@@ -298,9 +446,15 @@ def _transform(arr, dplan, bplan):
         out_shape = list(arr.shape)
         out_shape[ax] = new_nt
         out = np.empty(out_shape, dtype=arr.dtype)
+        lad = np.asarray(bplan.ladder, dtype=arr.dtype)
+        if lad.ndim == 2:
+            # per leaf (--top-snr): (nleaves, new_nt) on the trailing two axes,
+            # the same rows on every stored step
+            out[...] = lad.reshape((1,) * (arr.ndim - 2) + lad.shape)
+            return out
         shape = [1] * arr.ndim
         shape[ax] = new_nt
-        out[...] = np.asarray(bplan.ladder, dtype=arr.dtype).reshape(shape)
+        out[...] = lad.reshape(shape)
         return out
     raise ValueError(dplan.family)
 
@@ -411,14 +565,25 @@ def repair_unlimited(path, branches, group="global_fit", log=print):
     return done
 
 
-def verify(path, targets, group="global_fit"):
+def verify(path, targets, group="global_fit", plans=None):
     """Re-plan at the new counts: every selected branch must read as unchanged,
-    and every dataset of the selected branches must still be growable."""
+    and every dataset of the selected branches must still be growable.
+    ``plans`` with per-leaf (``--top-snr``) ladders: every stored row of
+    ``betas_all`` must read back as the planned per-leaf ladders."""
     again = plan(path, targets, group=group)
     bad = [bp.branch for bp in again if not bp.unchanged]
     if bad:
         raise RuntimeError(f"after the rewrite these branches still do not read at the "
                            f"requested count: {bad}")
+    for bp in plans or ():
+        lad = None if bp.ladder is None else np.asarray(bp.ladder, dtype=float)
+        if lad is None or lad.ndim != 2:
+            continue
+        with h5py.File(path, "r") as f:
+            stored = f[group]["sub_backend"][bp.branch]["betas_all"][...]
+        if not np.allclose(stored, lad[None], rtol=1e-12, atol=0.0):
+            raise RuntimeError(f"{bp.branch}: the stored betas_all does not read back as the "
+                               "planned per-leaf SNR-keyed ladders")
     stuck = fixed_axis0(path, sorted(targets), group=group)
     if stuck:
         raise RuntimeError(f"these datasets have a FINITE iteration axis (the store could "
@@ -453,10 +618,29 @@ def _parse_targets(items):
         if "=" not in it:
             raise ValueError(f"--set expects BRANCH=N, got {it!r}")
         b, n = it.split("=", 1)
-        out[b.strip()] = int(n)
+        n = n.strip()
+        # "auto": the count --ntemps-from-tmax picks (refused without it)
+        out[b.strip()] = None if n.lower() == "auto" else int(n)
     if not out:
         raise ValueError("nothing to do: pass at least one --set BRANCH=N")
     return out
+
+
+def _report_snr_table(bp):
+    """The ``--top-snr`` per-leaf T_max table (dry run and apply)."""
+    lo, hi = bp.clip
+    print(f"     per-leaf SNR-keyed ladders (betas_all, every stored row): T_max = "
+          f"clip((SNR / {bp.top_snr:g})^2, {lo:g}, {hi:g}), {bp.new_nt} rungs; SNR = "
+          "sqrt(h_h) at the max-lnL cold walker of the last row")
+    print(f"     {'leaf':>4} {'row':>6} {'walker':>6} {'SNR':>7} {'kind':<9} {'(SNR/top)^2':>11} "
+          f"{'T_max':>8} {'clip':<8} {'ratio':>6}  note")
+    for r in bp.snr_table:
+        row = "-" if r["row"] is None else str(r["row"])
+        walker = "-" if r["walker"] is None else str(r["walker"])
+        snr = "-" if not np.isfinite(r["snr"]) else f"{r['snr']:.1f}"
+        raw = "-" if not np.isfinite(r["raw"]) else f"{r['raw']:.1f}"
+        print(f"     {r['leaf']:>4} {row:>6} {walker:>6} {snr:>7} {r['kind']:<9} {raw:>11} "
+              f"{r['tmax']:>8.1f} {r['clip'] or '-':<8} {r['ratio']:>6.2f}  {r['note']}")
 
 
 def _report(path, plans):
@@ -466,14 +650,21 @@ def _report(path, plans):
     print(f"  stored iteration: {it}   file on disk: {os.path.getsize(path) / MB:.1f} MB")
     for bp in plans:
         print(f"\n  == {bp.branch}: {bp.old_nt} -> {bp.new_nt} rung(s)"
-              + ("   (UNCHANGED: nothing to do)" if bp.unchanged else ""))
+              + ("   (UNCHANGED: nothing to do)" if bp.unchanged else "")
+              + ("   (count kept: betas_all only)" if bp.ladder_only else ""))
+        if bp.ntemps_note:
+            print(f"     {bp.ntemps_note}")
         if bp.unchanged:
             continue
-        if bp.new_nt > bp.old_nt:
+        if bp.ladder_only:
+            pass
+        elif bp.new_nt > bp.old_nt:
             print(f"     fill = {bp.fill}: new rung j <- old rung {bp.src}")
         else:
             print(f"     shrink: keeping the coldest {bp.new_nt} rung(s) {bp.src}")
-        if bp.ladder is None:
+        if bp.snr_table is not None:
+            _report_snr_table(bp)
+        elif bp.ladder is None:
             print("     ladder: the stored (adapted) ladder, truncated")
         else:
             print(f"     ladder ({'per leaf, betas_all' if bp.per_leaf else 'flat, betas'}, "
@@ -500,6 +691,18 @@ def main(argv=None):
                     help="geometric ladder 1/ratio^k instead of the branch's construction rule")
     ap.add_argument("--betas", default=None,
                     help="explicit comma-separated ladder (must have N values, start at 1, decrease)")
+    ap.add_argument("--top-snr", type=float, nargs="?", default=None, const=2.0, metavar="S",
+                    help="per-leaf SNR-keyed ladders (per-leaf branches): leaf k gets "
+                         "make_ladder(ndim, N, Tmax=clip((SNR_k / S)^2, --ladder-tmax-min, "
+                         "--ladder-tmax)), SNR_k from the store's last row; S defaults to 2")
+    ap.add_argument("--ladder-tmax", type=float, default=None, metavar="T",
+                    help="--top-snr: the ceiling of a leaf's T_max (the run's {BRANCH}_LADDER_TMAX; "
+                         "default the uncapped make_ladder top at N rungs)")
+    ap.add_argument("--ladder-tmax-min", type=float, default=4.0, metavar="T",
+                    help="--top-snr: the floor of a leaf's T_max (default 4)")
+    ap.add_argument("--ntemps-from-tmax", action="store_true",
+                    help="the rung count N = make_ladder(ndim, Tmax=--ladder-tmax)'s own count "
+                         "(its ~25 %% swap spacing); use with --set BRANCH=auto")
     ap.add_argument("--group", default="global_fit")
     ap.add_argument("--apply", action="store_true", help="write (default: dry run)")
     ap.add_argument("--no-backup", action="store_true",
@@ -566,16 +769,31 @@ def main(argv=None):
     ladder_mode = args.ladder
     try:
         plans = plan(args.store, targets, group=args.group, fill=args.fill,
-                     ladder_mode=ladder_mode, ratio=args.ratio, betas=betas)
+                     ladder_mode=ladder_mode, ratio=args.ratio, betas=betas,
+                     top_snr=args.top_snr, ladder_tmax=args.ladder_tmax,
+                     tmax_min=args.ladder_tmax_min, ntemps_from_tmax=args.ntemps_from_tmax)
     except Exception as exc:  # noqa: BLE001 -- reported, not traced
         print(f"REFUSING: {exc}")
         return 2
+    # the resolved counts (an "auto" entry is make_ladder's count now)
+    targets = {bp.branch: bp.new_nt for bp in plans}
     _report(args.store, plans)
     todo = [bp for bp in plans if not bp.unchanged]
     if not todo:
         print("\n  nothing to do.")
         return 0
-    knobs = " ".join(f"{bp.branch.upper()}_NTEMPS={bp.new_nt}" for bp in todo)
+
+    def _knobs(bp):
+        out = [f"{bp.branch.upper()}_NTEMPS={bp.new_nt}"]
+        if bp.snr_table is not None:
+            out.append(f"{bp.branch.upper()}_LADDER_TOP_SNR={bp.top_snr:g}")
+            if args.ladder_tmax is not None:
+                out.append(f"{bp.branch.upper()}_LADDER_TMAX={args.ladder_tmax:g}")
+            if args.ladder_tmax_min != 4.0:
+                out.append(f"{bp.branch.upper()}_LADDER_TMAX_MIN={args.ladder_tmax_min:g}")
+        return " ".join(out)
+
+    knobs = " ".join(_knobs(bp) for bp in todo)
     if not args.apply:
         print("\n  DRY RUN -- nothing written. Re-run with --apply to rewrite in place.")
         print(f"  afterwards launch with: {knobs}")
@@ -596,10 +814,13 @@ def main(argv=None):
             os.rename(side[key], dest)
             print(f"  moved aside: {side[key]} -> {dest}")
     print("  verifying ...")
-    msg = verify(args.store, targets, group=args.group)
+    msg = verify(args.store, targets, group=args.group, plans=todo)
     print(f"  {msg}")
     print(f"  DONE. file on disk: {os.path.getsize(args.store) / MB:.1f} MB")
     print(f"  launch with: {knobs}")
+    if any(bp.snr_table is not None for bp in todo):
+        print("  (a plain resume keeps the migrated per-leaf ladders; the run's refresh "
+              "baselines are the first SNRs it measures)")
     return 0
 
 

@@ -455,3 +455,212 @@ of the same function is caught.
   chain visits more than one island.
 * Rollback: `EMRI_DE_JUMP_MIX=0 EMRI_EIGEN_AXIS_ACC_TUNE=0
   EMRI_LADDER_REANCHOR_NATS=50` on the launch line.
+
+## SNR-keyed per-leaf ladders (`{BRANCH}_LADDER_TOP_SNR`, 2026-10-18, default off)
+
+User ruling (Mike, 2026-10-18). The uniform EMRI ladder moved to T_max 64,
+then to 625 ("let's go until it is at SNR ~2"), and the rung count to 11
+("we want swaps ideally at 25 %": `make_ladder(12, Tmax=625)` is 11 rungs
+at ratio 1.90). The aim is that the LOUDEST leaf (EMRI 3, SNR 50) sees an
+effective SNR ~2 at the top rung. The valleys between the islands of item 1
+scale with SNR^2, so a hot rung can hop them only once the valley is down to
+a few nats. A uniform T_max is right for one SNR only: at 625 the SNR 12-15
+leaves have prior-like top rungs and the SNR 20-35 leaves run hotter than
+they need. Mike: "While that runs, you can add an option (default off) to
+set the ladder by SNR." This section describes that option. The launchers
+do not set it.
+
+### The rule
+
+For leaf `k` of an MBH / EMRI / SOBBH branch:
+
+```
+T_k = clip((SNR_k / TOP_SNR)^2, {BRANCH}_LADDER_TMAX_MIN, {BRANCH}_LADDER_TMAX)
+betas_all[k] = make_ladder(ndim, ntemps, Tmax=T_k)
+```
+
+The top rung then sees the leaf at effective SNR `SNR_k / sqrt(T_k) =
+TOP_SNR`, unless the clip bites. With the knob on, the existing
+`{BRANCH}_LADDER_TMAX` is the CEILING; unset, the ceiling is the top of the
+uncapped `make_ladder(ndim, ntemps)`. The floor `{BRANCH}_LADDER_TMAX_MIN`
+defaults to 4. `{BRANCH}_LADDER_TOP_SNR` is a number (0 = off); the words
+on / true / yes mean 2.0, the code default. At top SNR 2, floor 4 and
+ceiling 625, on the 9mo EMRI leaves:
+
+| leaf | SNR | (SNR / 2)^2 | T_max | ratio over 11 rungs |
+|---|---|---|---|---|
+| 3 | 50.2 | 630 | 625 (ceiling) | 1.90 |
+| 6 | 34.3 | 294 | 294 | 1.77 |
+| 4 | 25.2 | 159 | 159 | 1.66 |
+| 0 | 21.6 | 117 | 117 | 1.61 |
+| 1 | 20.3 | 103 | 103 | 1.59 |
+| 7 | 17.9 | 80 | 80 | 1.55 |
+| 5 | 15.4 | 59 | 59 | 1.50 |
+| 2 | 12.8 | 41 | 41 | 1.45 |
+| a prior-only leaf | < 4 | < 4 | 4 (floor) | 1.15 |
+
+The rung COUNT stays per branch: the store fixes the `ntemps` axis of
+`betas_all`. The spacing therefore varies per leaf. The ceiling's leaf gets
+make_ladder's ~25 % swap spacing at the launcher count. A leaf below the
+ceiling gets a DENSER ladder: a smaller ratio, more swaps accepted, no
+extra cost. Every log line names the leaf's ratio.
+
+`SNR_k` is the leaf's optimal SNR `sqrt(<h|h>)` at the max-lnL cold walker,
+the same point the `walker_max` eigen table is built at. It is read from
+the sub-state's per-walker, per-leaf inner products: `d_h` / `h_h`, written
+by the move at the end of every leaf visit, stored per row under
+`sub_backend/<branch>`, and on by default on the fast EMRI / MBH / SOBBH
+moves through `{BRANCH}_RECORD_DH`. The walker is chosen on the cold rung of
+`log_like[leaf]`. Only when that walker's `<h|h>` is unusable does the code
+fall back to the detection SNR at the maximum, `sqrt(<d|h>)`, because
+`<d|h> = <h|h>` there. The helpers are pure functions in
+`src/lisatools/sampling/snrladder.py`.
+
+### When a ladder is built
+
+* **Fresh store** (`recipe.resolve_snr_keyed_ladders`, from
+  `SingleSourcePEBuilder.build`). A leaf with a recorded SNR on the
+  sub-state gets its ladder at build. A dead leaf (no source on any cold
+  walker) gets the floor. An alive leaf with no record yet, which is the
+  normal fresh case, keeps the configured ladder and is PENDING: the move
+  builds its ladder at the first propose that finds a record, which is
+  propose 2. That is the construction, deferred, so it happens once per leaf
+  in any stage.
+* **`{BRANCH}_LADDER_RESET_ON_RESUME=1`**. The stored ladders are replaced
+  as today (the old -> new reset lines still print), but by the SNR-keyed
+  ladders, built from the SNRs of the store's last row (`d_h` / `h_h` /
+  `log_like` are loaded with the state).
+* **Plain resume**. The stored ladders stand. Each leaf's refresh baseline
+  becomes its first measured SNR.
+* **Refresh** (`{BRANCH}_LADDER_TOP_SNR_REFRESH` = N, default 0 = never).
+  Every N proposes of the move (every alive leaf is visited once per
+  propose), a leaf whose SNR has moved more than 20 % since its ladder was
+  built gets its ladder rebuilt. Examples are a copy's SNR jump or a lost
+  source. If the new T_max equals the current top (both at the clip), only
+  the baseline moves.
+
+All of this runs in `ResidualAddOneRemoveOneMove._maybe_update_snr_ladders`,
+the last step of `fanout_prepare_state`. It runs on the process that owns
+the whole ensemble: single process, the flat head, or the block head before
+it slices. A ladder therefore changes only BETWEEN proposes. Inside a
+propose the swaps, the lost-rung guard and the tempered eigen steps all use
+the visit's ladder, exactly as before. The new row is written to
+`sub.betas_all[leaf]` of the state being proposed from, and from there:
+
+* the visit reads it;
+* the walker-block slices carry it by value;
+* the head's pooled adaptation (`fanout_merge_extra`) starts from it;
+* the saver persists it with the row (`PerLeafLadderState.storage_arrays`).
+
+The rung STATES are not moved. A rung that the new temperatures orphan is
+re-anchored by the lost-rung guard at its next visit, which is what the
+reset path does today. The guard's expected tempering drop `(ndim/2)(1/beta_k
+- 1)` already uses the visited leaf's own row: `propose_local` loads
+`temperature_controls[leaf].betas` from `betas_all[leaf]` and passes it to
+`_reanchor_lost_rungs`. This is pinned in
+`GuardPerLeafLadderTest`. At T_max 625 the top-rung margin is
+`6 x 624 = 3744` nats (EMRI, ndim 12), so a loud leaf's top rung is
+practically never re-anchored.
+
+**A refresh is an adaptive change.** While it happens the kernel is not
+detailed-balance exact: the ladder depends on the chain's recent SNR. The
+refresh therefore runs only in the search stages (`gf_stage_kind` search /
+rj). It runs in PE only with `{BRANCH}_LADDER_TOP_SNR_REFRESH_PE=1`,
+because of Mike's rule: no adaptive tricks in PE unless ruled. It never
+runs when the stage is unknown. The deferred construction is not a refresh:
+it fires once per leaf, at the leaf's first SNR.
+
+### Migration: `rerung_store_branches.py --top-snr`
+
+```
+python scripts/fstat_proposal/rerung_store_branches.py STORE \
+    --set emri=auto --ntemps-from-tmax --top-snr 2 --ladder-tmax 625      # dry run
+... --apply
+```
+
+`--top-snr S` (2 when given without a value) writes the per-leaf
+SNR-keyed ladders, with SNRs from the store's last row. A leaf with no
+record there takes an earlier row; a leaf never recorded keeps the ladder
+the tool would otherwise write. The ladders go on every stored row (the
+tool's ladder rule), and the backup keeps the history. The dry run prints
+the per-leaf table: row, walker, SNR, kind, (SNR/top)^2, T_max, clip and
+ratio. `--set B=N` at the store's own count rewrites `betas_all` only.
+`--ntemps-from-tmax` sets the count to `make_ladder(ndim,
+Tmax=--ladder-tmax)`'s own (EMRI at 625: 11). `--ladder-tmax-min` is the
+floor. Launch afterwards with the printed knobs: a plain resume keeps the
+migrated ladders.
+
+### Knobs (code defaults; none is set in a launcher)
+
+| knob | settings field | default | meaning |
+|---|---|---|---|
+| `{EMRI,MBH,SOBBH}_LADDER_TOP_SNR` | `ladder_top_snr` | 0 (off) | the top rung's target effective SNR; on / true / yes = 2.0 |
+| `{EMRI,MBH,SOBBH}_LADDER_TMAX` | `ladder_tmax` | unset | with the knob on, the CEILING of a leaf's T_max (unset: the uncapped make_ladder top) |
+| `{EMRI,MBH,SOBBH}_LADDER_TMAX_MIN` | `ladder_tmax_min` | 4 | the floor (prior-only leaves sit here) |
+| `{EMRI,MBH,SOBBH}_LADDER_TOP_SNR_REFRESH` | `ladder_top_snr_refresh` | 0 | refresh cadence in proposes (20 % SNR change triggers) |
+| `{EMRI,MBH,SOBBH}_LADDER_TOP_SNR_REFRESH_PE` | `ladder_top_snr_refresh_pe` | off | allow the refresh in PE stages |
+
+Logs (`[EMRI_LADDER]`, also `[MBH_LADDER]` / `[SOBBH_LADDER]`):
+
+```
+[EMRI_LADDER] EMRI_LADDER_TOP_SNR=2: per-leaf ladders from each leaf's SNR (T_max = clip((SNR / 2)^2, 4, 625), 11 rungs, EMRI_LADDER_RESET_ON_RESUME=1)
+[EMRI_LADDER] leaf 3: SNR 50.2 -> T_max 630.0 (top SNR 2.0, ceiling 625 -> 625.0), ladder [1 ... 0.0016], ratio 1.90 over 11 rungs (EMRI_LADDER_RESET_ON_RESUME=1; optimal SNR at walker 1)
+[EMRI_LADDER] leaf 2: SNR 12.8 -> T_max 41.0 (top SNR 2.0, within [4, 625]), ladder [1 ... 0.0244], ratio 1.45 over 11 rungs (...)
+[EMRI_LADDER] leaf 1: no SNR recorded yet -> the configured ladder (T_max 625.0) until its first measurement (fresh store)
+[EMRI_LADDER] leaf 1: SNR 20.3 -> T_max 103.0 (...) (construction, deferred to the leaf's first recorded SNR; optimal SNR at walker 0)
+[EMRI_LADDER] leaf 5: SNR 15.4 -> T_max 59.3 (...) (refresh: SNR 21.0 at the last build, -27 %, stage kind search; ...)
+[EMRI_LADDER] leaf 3: refresh baseline SNR 50.2 (the stored ladder is kept, T_max 625.0)
+```
+
+### Turning it on (for the coordinator; not in any launcher)
+
+Once, on the relaunch that switches to it (rebuilds every leaf from the
+store's SNRs):
+
+```
+export EMRI_LADDER_TOP_SNR=2          # the top rung at effective SNR ~2 per leaf
+export EMRI_LADDER_TMAX=625           # already the launcher value: now the ceiling
+export EMRI_LADDER_TMAX_MIN=4         # code default
+export EMRI_LADDER_RESET_ON_RESUME=1  # ONE launch only
+# optional, search stages only (adaptive):
+export EMRI_LADDER_TOP_SNR_REFRESH=10
+```
+
+On later relaunches, keep `EMRI_LADDER_TOP_SNR=2` (and the refresh, if
+used) and drop `RESET_ON_RESUME`. To get there without a reset, migrate the
+store with `rerung_store_branches.py --top-snr` instead. Rollback:
+`EMRI_LADDER_TOP_SNR=0` plus `EMRI_LADDER_RESET_ON_RESUME=1` once, which
+restores the uniform ladder.
+
+### Tests
+
+`tests/test_snr_keyed_ladder.py` (CPU):
+
+* the formula, the clip, the prior-only case and the knob casts;
+* the per-leaf SNR and its walker;
+* one ladder per leaf with the right rung count and spacing;
+* construction through the real `SingleSourcePEBuilder`: fresh, pending,
+  dead leaf, reset-on-resume, plain resume, rung-count mismatch, knob off,
+  env, kwargs, refusal;
+* the move's update: off, the deferred construction, the 20 % refresh,
+  the PE gate, the cadence, the clipped no-op, the baseline, the knobs;
+* the real `EMRIDirectLikeMove`: the deferred construction single process,
+  with the 4-rank walker-block fan-out equal to it, `betas_all` persisted
+  through `GFHDFBackend`, and the guard reading each leaf's own row;
+* rerung `--top-snr`: dry-run table, apply, `--ntemps-from-tmax`, the
+  never-recorded leaf, refusals, unchanged without the flag;
+* settings and env;
+* the knob at 0 equal to the golden stream (single process and the 4-rank
+  fan-out). The unset case is `tests/test_eigen_pool_temper.py::GoldenStreamTest`.
+
+### Unverified
+
+* No GPU and no real-data run. The code is host-side (`betas_all` is host
+  numpy) and reads only the inner products the fast moves already record.
+* Whether per-leaf T_max mixes the islands better than the uniform 625 has
+  not been measured. The quiet leaves' denser ladders are the expected
+  gain; read the per-leaf swap acceptance (it should be flat over the
+  pairs) and the island histogram on the first tar.
+* The SNR the ladder is built from is one cold walker's. A walker on
+  another island has a slightly different `<h|h>`, which is immaterial for
+  a temperature.
