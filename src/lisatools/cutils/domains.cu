@@ -54,9 +54,10 @@
  * chirp analytically. Three nested layers, each with one shared body that also
  * returns a first moment when the caller asks for one:
  *
- *   get_fresnel_aux            – the auxiliary functions f, g (and df, dg)
- *   get_phase_kernel_core      – one integration interval, demodulated
- *   get_windowed_fourier_core  – the seven Tukey terms of one STFT window
+ *   lat_fresnel.hh             : the Fresnel series and the auxiliary functions
+ *                                f, g (and df, dg), shared with the DFFR kernels
+ *   get_phase_kernel_core      : one integration interval, demodulated
+ *   get_windowed_fourier_core  : the seven Tukey terms of one STFT window
  *
  * The public entry points sit on top: get_fourier_value, and its factorised
  * pair get_fourier_prefactor * get_fourier_kernel. Only the prefactor depends
@@ -69,6 +70,7 @@
 
 #include <iostream>
 #include "domains.hpp"
+#include "lat_fresnel.hh"
 
 #ifdef __CUDACC__
 #include <cub/cub.cuh>  // CUB block-level primitives for efficient intra-block reductions
@@ -636,164 +638,19 @@ double STFTFresnel::get_zeta(double f, double f0, double fdot0) {
   return zeta;
 }
 
-/**
- * Evaluate the Fresnel integrals C(x) and S(x).
- *
- * NOTE ON ACCURACY: high-accuracy evaluation, <=2e-9 absolute per value vs
- * scipy.special.fresnel over |x| in [0, 1000] (validated in a NumPy mirror;
- * measured max |dC|=1.6e-10, |dS|=7.0e-11). Three branches on ax = |x| (the
- * final x < 0 sign flip uses that C, S are odd):
- *   1. ax <= 1.6 : Maclaurin series with term recurrences, essentially exact
- *      (~1e-16); stops when |term| < 1e-17*|sum|.
- *   2. 1.6 < ax < 8 : auxiliary form C = 0.5 + f*sin(arg) - g*cos(arg),
- *      S = 0.5 - f*cos(arg) - g*sin(arg), arg = 0.5*pi*ax^2, with degree-5/5
- *      (f) and degree-6/6 (g) minimax rational fits in u = 1/ax^2 (max rel err
- *      8.7e-10 f / 2.2e-9 g).
- *   3. ax >= 8 : 5-term asymptotic series in w = 1/(pi*ax^2) (truncation
- *      ~1e-13 at ax=8).
- * The two auxiliary branches share the C/S assembly. The series/rational seam
- * at ax=1.6 has a ~1.6e-10 jump -- the minimax fit's local error at its domain
- * edge -- which is negligible: it is <= the 2e-9 per-value budget and its
- * mismatch impact is ~eps^2/2 ~ 1e-20. The analytic linear-chirp Fourier
- * identity built on top (get_fourier_value) is itself exact, so this <=2e-9
- * evaluation now sets the Fresnel Fourier-value floor (was ~2e-3 with the old
- * Abramowitz & Stegun 7.3.27/7.3.28 rational fits).
- */
+// The Fresnel integrals C(x) and S(x), from the shared functions of lat_fresnel.hh. The phase
+// kernel below calls the series directly instead, since it has already tested the seam.
 CUDA_DEVICE
 void STFTFresnel::get_fresnel_integrals(double* C, double* S, double x) {
-  double abs_x = std::abs(x);
-  double S_val, C_val;
-
-  if (abs_x <= 1.6) {
-    // Branch 1: Maclaurin series with term recurrences.
-    //   C = sum (-1)^n (pi/2)^{2n}   ax^{4n+1} / ((2n)!   (4n+1))
-    //   S = sum (-1)^n (pi/2)^{2n+1} ax^{4n+3} / ((2n+1)! (4n+3))
-    double x2 = abs_x * abs_x;
-    double x4 = x2 * x2;
-    double fac = -(0.5 * M_PI) * (0.5 * M_PI) * x4;  // -(pi/2)^2 * ax^4
-    double b = abs_x;                      // base term b_0 = ax
-    C_val = b / 1.0;                       // /(4*0+1)
-    double d = (0.5 * M_PI) * abs_x * x2;  // d_0 = (pi/2) * ax^3
-    S_val = d / 3.0;                       // /(4*0+3)
-    for (int n = 1; n <= 100; n++) {       // caps at 100; converges ~n=25
-      b = b * fac / ((2 * n - 1) * (2 * n));
-      double cterm = b / (4 * n + 1);
-      C_val += cterm;
-      d = d * fac / ((2 * n) * (2 * n + 1));
-      double sterm = d / (4 * n + 3);
-      S_val += sterm;
-      if (std::abs(cterm) < 1e-17 * std::abs(C_val) &&
-          std::abs(sterm) < 1e-17 * std::abs(S_val)) {
-        break;
-      }
-    }
-  } else {
-    // ? Only the auxiliary branches need cos/sin(0.5*pi*ax^2); the series above does not,
-    // ? so the sincos sits here rather than at the top of the function.
-    double half_pi_x2 = 0.5 * (M_PI * abs_x) * abs_x;  // arg = 0.5 * pi * ax^2
-    double c_halfpix2 = std::cos(half_pi_x2);
-    double s_halfpix2 = std::sin(half_pi_x2);
-    double f_x, g_x;
-    get_fresnel_aux(&f_x, &g_x, abs_x);
-    S_val = 0.5 - f_x * c_halfpix2 - g_x * s_halfpix2;
-    C_val = 0.5 + f_x * s_halfpix2 - g_x * c_halfpix2;
-  }
-
-  // Complex conjugate when fdot < 0
-  if (x < 0) { 
-    *C = -C_val;  // Fresnel C integral
-    *S = -S_val;  // Fresnel S integral
-  } else {
-    *C = C_val;  // Fresnel C integral
-    *S = S_val;  // Fresnel S integral
-  }
+  lat_fresnel_integrals(C, S, x);
 }
 
-// Auxiliary Fresnel functions f and g for |x| > 1.6, the form branches 2 and 3 are built from:
-//   C + iS = sign(x) [ (1+i)/2 - (g + i f)(|x|) e^{i pi x^2 / 2} ].
-// Held apart from get_fresnel_integrals so get_phase_kernel_core can use f and g directly,
-// without ever forming e^{i pi x^2 / 2}.
-//
-// df_out and dg_out are the derivatives in |x|, needed only by the envelope moment; pass nullptr
-// for either to skip them. Differentiating C = 0.5 + f sin(theta) - g cos(theta) at
-// theta = pi x^2 / 2 and matching the independent sin and cos parts gives the exact identities
-//   f' = -pi x g,   g' = pi x f - 1.
+// Auxiliary Fresnel functions f and g for |x| > 1.6 and their derivatives in |x|, from the shared
+// functions of lat_fresnel.hh. nullptr for df_out or dg_out skips both derivatives.
 CUDA_DEVICE
 void STFTFresnel::get_fresnel_aux(double* f_out, double* g_out, double abs_x,
                                   double* df_out, double* dg_out) {
-  double pi_x = M_PI * abs_x;
-  bool with_derivatives = (df_out != nullptr);
-  {
-    double f_x, g_x;
-    if (abs_x < 8.0) {
-      // Branch 2: auxiliary form with minimax rational fits in u = 1/ax^2
-      // (coefficients ascending in u, Horner); f = P_F/Q_F / (pi*ax),
-      // g = P_G/Q_G / (pi^2*ax^3).
-      double u = 1.0 / (abs_x * abs_x);
-      double pf = -2.8568630009945513e+00;
-      pf = pf * u - 1.2714841072845186e+01;
-      pf = pf * u + 9.9741235553347174e+00;
-      pf = pf * u + 1.6530235844406874e+01;
-      pf = pf * u + 5.6393336781284269e+00;
-      pf = pf * u + 9.9999998788975186e-01;
-      double qf = -6.5764635236542199e+00;
-      qf = qf * u - 8.5850028996594485e+00;
-      qf = qf * u + 1.1683893414197762e+01;
-      qf = qf * u + 1.6834326314502963e+01;
-      qf = qf * u + 5.6393317184256810e+00;
-      qf = qf * u + 1.0000000000000000e+00;
-      double pg = 3.2177684059265470e+00;
-      pg = pg * u + 1.1588596586401721e+01;
-      pg = pg * u - 2.1885461791121589e+01;
-      pg = pg * u + 1.4001161175318936e+01;
-      pg = pg * u + 2.2643028376343988e+01;
-      pg = pg * u + 5.6691485084817055e+00;
-      pg = pg * u + 9.9999994455231545e-01;
-      double qg = 1.9504389595032652e+01;
-      qg = qg * u - 1.9482374004004097e+01;
-      qg = qg * u + 5.8164191581105191e+00;
-      qg = qg * u + 2.2588896377169348e+01;
-      qg = qg * u + 2.4163564112837470e+01;
-      qg = qg * u + 5.6691386346869024e+00;
-      qg = qg * u + 1.0000000000000000e+00;
-      f_x = (1.0 / pi_x) * (pf / qf);
-      g_x = (1.0 / (M_PI * M_PI * abs_x * abs_x * abs_x)) * (pg / qg);
-      if (with_derivatives) {
-        *df_out = -pi_x * g_x;
-        *dg_out = pi_x * f_x - 1.0;
-      }
-    } else {
-      // Branch 3: 5-term asymptotic series, w = 1/(pi*ax^2).
-      //   f = (1/(pi*ax)) sum_{m=0}^{4} (-1)^m (4m-1)!! w^{2m}   ((-1)!!=1)
-      //   g = (1/(pi*ax)) sum_{m=0}^{4} (-1)^m (4m+1)!! w^{2m+1}
-      // Double-factorial constants printed by the NumPy mirror:
-      //   (4m-1)!! for m=0..4: 1, 3, 105, 10395, 2027025
-      //   (4m+1)!! for m=0..4: 1, 15, 945, 135135, 34459425
-      double w = 1.0 / (M_PI * abs_x * abs_x);
-      double w2 = w * w;
-      double f_sum =
-          1.0 + w2 * (-3.0 + w2 * (105.0 + w2 * (-10395.0 + w2 * 2027025.0)));
-      double g_sum =
-          w * (1.0 + w2 * (-15.0 +
-                           w2 * (945.0 + w2 * (-135135.0 + w2 * 34459425.0))));
-      f_x = (1.0 / pi_x) * f_sum;
-      g_x = (1.0 / pi_x) * g_sum;
-      if (with_derivatives) {
-        // ! Here g' by the identity above is a catastrophic cancellation once pi x f -> 1: the true
-        // ! value falls as -3 w^2 (5e-20 at x = 5e4) while the subtraction rounds at 1e-16. This
-        // ! branch's series is differentiated instead, term by term, using dw/dx = -2w/x:
-        // !   f = F(w)/(pi x)  ->  f' = -[F + 2 w F'] / (pi x^2), and likewise for g.
-        double df_sum =
-            w * (-6.0 + w2 * (420.0 + w2 * (-62370.0 + w2 * 16216200.0)));
-        double dg_sum = 1.0 + w2 * (-45.0 + w2 * (4725.0 + w2 * (-945945.0 +
-                                                                 w2 * 310134825.0)));
-        *df_out = -w * (f_sum + 2.0 * w * df_sum);
-        *dg_out = -w * (g_sum + 2.0 * w * dg_sum);
-      }
-    }
-    *f_out = f_x;
-    *g_out = g_x;
-  }
+  lat_fresnel_aux(f_out, g_out, abs_x, df_out, dg_out);
 }
 
 CUDA_DEVICE
@@ -848,12 +705,12 @@ void STFTFresnel::get_phase_kernel_core(double f_eff, double t_ref, double f0,
     double sign_v = (v >= 0.0) ? 1.0 : -1.0;
     double psi = M_PI * fdot0 * tau * tau + 2.0 * M_PI * delta_f * tau;
     if (endpoint == 0) psi_end = psi; else psi_start = psi;
-    if (abs_v > 1.6) {
+    if (abs_v > LAT_FRESNEL_SEAM) {
       double f_x, g_x, df_x = 0.0, dg_x = 0.0;
       if (with_moment)
-        get_fresnel_aux(&f_x, &g_x, abs_v, &df_x, &dg_x);
+        lat_fresnel_aux(&f_x, &g_x, abs_v, &df_x, &dg_x);
       else
-        get_fresnel_aux(&f_x, &g_x, abs_v);
+        lat_fresnel_aux(&f_x, &g_x, abs_v);
       cmplx rotation = gcmplx::polar(1.0, psi);
       cmplx aux(g_x, sign_fdot * f_x);
       oscillating = oscillating - (weight * sign_v) * rotation * aux;
@@ -871,7 +728,7 @@ void STFTFresnel::get_phase_kernel_core(double f_eff, double t_ref, double f0,
       // * The endpoint lies within 1.6 / sqrt(2 |fdot0|) of the stationary point, so |zeta| is
       // * bounded by |tau| plus that width and the stationary factor below is safe to form.
       double C_v, S_v;
-      get_fresnel_integrals(&C_v, &S_v, v);
+      lat_fresnel_series(&C_v, &S_v, v);
       series_part = series_part + weight * cmplx(C_v, sign_fdot * S_v);
       needs_stationary = true;
     }
@@ -1097,6 +954,45 @@ void STFTFresnel::compute_phase_kernel_moments_wrap(
   compute_phase_kernel_moments_kernel(kernel_out, moment_out, *this, f_effs,
                                       t_refs, f0s, fdot0s, t_starts, t_ends,
                                       t_origins, num);
+#endif
+}
+
+// * Goes through the two members, so that a test also covers their delegation to lat_fresnel.hh.
+CUDA_KERNEL
+void compute_fresnel_functions_kernel(double* cosine_out, double* sine_out,
+                                      double* aux_f_out, double* aux_g_out,
+                                      double* slope_f_out, double* slope_g_out,
+                                      STFTFresnel fresnel, double* arguments,
+                                      int num) {
+#ifdef __CUDACC__
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num) return;
+#else
+  for (int i = 0; i < num; i++) {
+#endif
+
+  fresnel.get_fresnel_integrals(&cosine_out[i], &sine_out[i], arguments[i]);
+  fresnel.get_fresnel_aux(&aux_f_out[i], &aux_g_out[i], std::abs(arguments[i]),
+                          &slope_f_out[i], &slope_g_out[i]);
+
+#ifndef __CUDACC__
+  }
+#endif
+}
+
+void STFTFresnel::compute_fresnel_functions_wrap(
+    double* cosine_out, double* sine_out, double* aux_f_out, double* aux_g_out,
+    double* slope_f_out, double* slope_g_out, double* arguments, int num) {
+#ifdef __CUDACC__
+  int num_blocks = (num + NUM_THREADS - 1) / NUM_THREADS;
+  compute_fresnel_functions_kernel<<<num_blocks, NUM_THREADS>>>(
+      cosine_out, sine_out, aux_f_out, aux_g_out, slope_f_out, slope_g_out,
+      *this, arguments, num);
+  gpuErrchk(cudaGetLastError());
+#else
+  compute_fresnel_functions_kernel(cosine_out, sine_out, aux_f_out, aux_g_out,
+                                   slope_f_out, slope_g_out, *this, arguments,
+                                   num);
 #endif
 }
 

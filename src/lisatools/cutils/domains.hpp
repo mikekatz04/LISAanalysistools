@@ -460,13 +460,12 @@ class STFTFresnel : public STFTSettings {
   void get_amp_phase(double* amp, double* phase, cmplx z);
   CUDA_DEVICE
   double get_zeta(double f, double f0, double fdot0);
+  // Fresnel integrals C(x) and S(x), and the auxiliary functions f and g at |x| > 1.6 with their
+  // derivatives in |x| (nullptr for df_out or dg_out skips both). Both members delegate to
+  // lat_fresnel.hh, which the DFFR kernels share and which documents definitions, branches,
+  // accuracy and assumptions.
   CUDA_DEVICE
-  void get_fresnel_integrals(double* C, double* S,
-                             double x);  // Fresnel integrals C(x) and S(x)
-  // Auxiliary Fresnel functions for |x| > 1.6, the form the integrals are built from:
-  //   C + iS = sign(x) [ (1+i)/2 - (g + i f)(|x|) e^{i pi x^2 / 2} ].
-  // get_phase_kernel_core consumes them directly so the large phase never forms. df_out/dg_out
-  // are their derivatives in |x|, for the demodulated first moment; nullptr skips them.
+  void get_fresnel_integrals(double* C, double* S, double x);
   CUDA_DEVICE
   void get_fresnel_aux(double* f_out, double* g_out, double abs_x,
                        double* df_out = nullptr, double* dg_out = nullptr);
@@ -519,6 +518,14 @@ class STFTFresnel : public STFTSettings {
                                          double* f0s, double* fdot0s,
                                          double* t_starts, double* t_ends,
                                          double* t_origins, int num);
+
+  // Diagnostic entry point: C, S, f, g and the derivatives of f and g at each argument, so that the
+  // shared Fresnel functions can be checked against reference values. f, g and their derivatives
+  // are taken at |x| and hold only above the seam |x| = 1.6.
+  void compute_fresnel_functions_wrap(double* cosine_out, double* sine_out,
+                                      double* aux_f_out, double* aux_g_out,
+                                      double* slope_f_out, double* slope_g_out,
+                                      double* arguments, int num);
 };
 
 /** @brief First-pass kernel: partial (d|h) and (h|h) sums per CUDA block.

@@ -684,6 +684,15 @@ void domains_part(nb::module_ &m) {
          "  moment = the same integral with an extra tau in the integrand.\n"
          "Both are the quantities the windowed evaluator sums over its seven Tukey terms, so they\n"
          "can be compared directly with the integrals rather than with another implementation.")
+    .def("compute_fresnel_functions", &STFTFresnelWrap::compute_fresnel_functions,
+         nb::arg("cosine_out"), nb::arg("sine_out"), nb::arg("aux_f_out"),
+         nb::arg("aux_g_out"), nb::arg("slope_f_out"), nb::arg("slope_g_out"),
+         nb::arg("arguments"), nb::arg("num"),
+         nb::call_guard<nb::gil_scoped_release>(),
+         "Diagnostic: the shared Fresnel functions of lat_fresnel.hh at each argument x.\n\n"
+         "cosine_out and sine_out receive C(x) and S(x); aux_f_out and aux_g_out the auxiliary\n"
+         "functions f and g at |x|, and slope_f_out and slope_g_out their derivatives in |x|.\n"
+         "f, g and their derivatives come from the auxiliary branch and hold for |x| > 1.6.")
     .def("compute_fourier_values", &STFTFresnelWrap::compute_fourier_values,
          nb::arg("output"), nb::arg("amps"), nb::arg("phase0s"),
          nb::arg("f0s"), nb::arg("fdot0s"), nb::arg("t0s"),

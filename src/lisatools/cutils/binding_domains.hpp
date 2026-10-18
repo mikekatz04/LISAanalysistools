@@ -218,6 +218,29 @@ public:
             return_pointer_and_check_length(t_origins, "t_origins", num, 1),
             num);
     }
+
+    // Diagnostic: C, S, f, g and the derivatives of f and g at each argument, so that the shared
+    // Fresnel functions can be compared with reference values.
+    void compute_fresnel_functions(
+        array_type<double> cosine_out,
+        array_type<double> sine_out,
+        array_type<double> aux_f_out,
+        array_type<double> aux_g_out,
+        array_type<double> slope_f_out,
+        array_type<double> slope_g_out,
+        array_type<double> arguments,
+        int num)
+    {
+        fresnel->compute_fresnel_functions_wrap(
+            return_pointer_and_check_length(cosine_out, "cosine_out", num, 1),
+            return_pointer_and_check_length(sine_out, "sine_out", num, 1),
+            return_pointer_and_check_length(aux_f_out, "aux_f_out", num, 1),
+            return_pointer_and_check_length(aux_g_out, "aux_g_out", num, 1),
+            return_pointer_and_check_length(slope_f_out, "slope_f_out", num, 1),
+            return_pointer_and_check_length(slope_g_out, "slope_g_out", num, 1),
+            return_pointer_and_check_length(arguments, "arguments", num, 1),
+            num);
+    }
 };
 
 #endif // __BINDING_DOMAINS_HPP__
