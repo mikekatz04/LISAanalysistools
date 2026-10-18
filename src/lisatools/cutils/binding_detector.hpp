@@ -127,6 +127,67 @@ class OrbitsWrap {
 };
 
 
+// KinematicsTableWrap: the kinematics table over arrays owned by Python, filled by build().
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+#define KinematicsTableWrap KinematicsTableWrapGPU
+using kinematics_array_type = nb::ndarray<double, nb::device::cuda, nb::c_contig>;
+#else
+#define KinematicsTableWrap KinematicsTableWrapCPU
+using kinematics_array_type = nb::ndarray<double, nb::device::cpu, nb::c_contig>;
+#endif
+
+class KinematicsTableWrap {
+  public:
+    KinematicsTable table;
+
+    KinematicsTableWrap(double first_segment_midpoint, double segment_time, int num_time_segments,
+                        kinematics_array_type position_receiver, kinematics_array_type velocity_receiver,
+                        kinematics_array_type acceleration_receiver, kinematics_array_type position_sender,
+                        kinematics_array_type velocity_sender, kinematics_array_type acceleration_sender,
+                        kinematics_array_type light_travel_time, kinematics_array_type light_travel_time_rate,
+                        kinematics_array_type light_travel_time_acceleration,
+                        kinematics_array_type unit_direction, kinematics_array_type unit_direction_rate)
+    {
+        if (num_time_segments < 1)
+            throw std::invalid_argument("num_time_segments must be at least one.");
+        if (!(segment_time > 0.0))
+            throw std::invalid_argument("segment_time must be positive.");
+        const size_t segments = static_cast<size_t>(num_time_segments);
+        table.first_segment_midpoint = first_segment_midpoint;
+        table.segment_time = segment_time;
+        table.num_time_segments = num_time_segments;
+        table.position_receiver = checked_pointer(position_receiver, "position_receiver", 9 * segments);
+        table.velocity_receiver = checked_pointer(velocity_receiver, "velocity_receiver", 9 * segments);
+        table.acceleration_receiver =
+            checked_pointer(acceleration_receiver, "acceleration_receiver", 9 * segments);
+        table.position_sender = checked_pointer(position_sender, "position_sender", 18 * segments);
+        table.velocity_sender = checked_pointer(velocity_sender, "velocity_sender", 18 * segments);
+        table.acceleration_sender =
+            checked_pointer(acceleration_sender, "acceleration_sender", 18 * segments);
+        table.light_travel_time = checked_pointer(light_travel_time, "light_travel_time", 6 * segments);
+        table.light_travel_time_rate =
+            checked_pointer(light_travel_time_rate, "light_travel_time_rate", 6 * segments);
+        table.light_travel_time_acceleration = checked_pointer(
+            light_travel_time_acceleration, "light_travel_time_acceleration", 6 * segments);
+        table.unit_direction = checked_pointer(unit_direction, "unit_direction", 18 * segments);
+        table.unit_direction_rate =
+            checked_pointer(unit_direction_rate, "unit_direction_rate", 18 * segments);
+    };
+
+    // The orbit arrays must live on the device of the table arrays.
+    void build(OrbitsWrap* orbits_wrap) { orbits_wrap->orbits->get_kinematics_table(&table); };
+
+    // ! Checked on both backends: a short array would be overwritten past its end without notice.
+    static double* checked_pointer(kinematics_array_type array, const std::string& name, size_t expected)
+    {
+        if (array.size() != expected)
+            throw std::invalid_argument(name + " has " + std::to_string(array.size()) +
+                                        " elements, expected " + std::to_string(expected) + ".");
+        return array.data();
+    };
+};
+
+
 // ============================================================================
 // GalacticGridWrap
 //

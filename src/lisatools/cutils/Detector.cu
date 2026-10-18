@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -411,6 +412,201 @@ void Orbits::get_normal_unit_vec_arr(double* normal_unit_vec_x,
 
   get_normal_unit_vec_kernel(normal_unit_vec_x, normal_unit_vec_y,
                              normal_unit_vec_z, t, link, num, *this);
+
+#endif  // __CUDACC__
+}
+
+// ============================================================================
+// Kinematics table at the segment midpoints
+// ============================================================================
+
+// * Bound on every LISA light travel time [s]; it widens the position grid needed by the senders.
+#define ORBIT_MAX_LIGHT_TRAVEL_TIME 20.0
+
+// Stage one: light travel times and their first two derivatives at the midpoints.
+CUDA_KERNEL
+void kinematics_light_travel_kernel(KinematicsTable table, Orbits& orbits) {
+  int start, increment;
+#ifdef __CUDACC__
+  start = blockIdx.x * blockDim.x + threadIdx.x;
+  increment = gridDim.x * blockDim.x;
+#else   // __CUDACC__
+  start = 0;
+  increment = 1;
+#endif  // __CUDACC__
+  const int num_time_segments = table.num_time_segments;
+  const int total = num_time_segments * orbits.nlinks;
+  for (int flat = start; flat < total; flat += increment) {
+    const int link_index = flat / num_time_segments;
+    const int segment_index = flat - link_index * num_time_segments;
+    const double midpoint = table.segment_midpoint(segment_index);
+    const int link = orbits.get_link_from_arr(link_index);
+    table.light_travel_time[flat] = orbits.get_light_travel_time(midpoint, link);
+    table.light_travel_time_rate[flat] = orbits.get_ltt_rate(midpoint, link);
+    table.light_travel_time_acceleration[flat] = orbits.get_ltt_acceleration(midpoint, link);
+  }
+}
+
+// Stage two: spacecraft position, velocity and acceleration at both ends of every link.
+CUDA_KERNEL
+void kinematics_spacecraft_state_kernel(KinematicsTable table, Orbits& orbits) {
+  int start, increment;
+#ifdef __CUDACC__
+  start = blockIdx.x * blockDim.x + threadIdx.x;
+  increment = gridDim.x * blockDim.x;
+#else   // __CUDACC__
+  start = 0;
+  increment = 1;
+#endif  // __CUDACC__
+  const int num_time_segments = table.num_time_segments;
+
+  // * Receivers: one state per spacecraft, shared by the two links that arrive there.
+  const int receiver_total = num_time_segments * orbits.nspacecraft;
+  for (int flat = start; flat < receiver_total; flat += increment) {
+    const int spacecraft_index = flat / num_time_segments;
+    const int segment_index = flat - spacecraft_index * num_time_segments;
+    const double midpoint = table.segment_midpoint(segment_index);
+    const Vec position = orbits.get_pos(midpoint, spacecraft_index + 1);
+    const Vec velocity = orbits.get_velocity(midpoint, spacecraft_index + 1);
+    const Vec acceleration = orbits.get_acceleration(midpoint, spacecraft_index + 1);
+    const int out = spacecraft_index * 3 * num_time_segments + segment_index;
+    table.position_receiver[out] = position.x;
+    table.position_receiver[out + num_time_segments] = position.y;
+    table.position_receiver[out + 2 * num_time_segments] = position.z;
+    table.velocity_receiver[out] = velocity.x;
+    table.velocity_receiver[out + num_time_segments] = velocity.y;
+    table.velocity_receiver[out + 2 * num_time_segments] = velocity.z;
+    table.acceleration_receiver[out] = acceleration.x;
+    table.acceleration_receiver[out + num_time_segments] = acceleration.y;
+    table.acceleration_receiver[out + 2 * num_time_segments] = acceleration.z;
+  }
+
+  // * Senders: at the emission time of their link, which stage one has filled.
+  const int sender_total = num_time_segments * orbits.nlinks;
+  for (int flat = start; flat < sender_total; flat += increment) {
+    const int link_index = flat / num_time_segments;
+    const int segment_index = flat - link_index * num_time_segments;
+    const double emission_time =
+        table.segment_midpoint(segment_index) - table.light_travel_time[flat];
+    const int sender = orbits.get_sc_e_from_arr(link_index);
+    const Vec position = orbits.get_pos(emission_time, sender);
+    const Vec velocity = orbits.get_velocity(emission_time, sender);
+    const Vec acceleration = orbits.get_acceleration(emission_time, sender);
+    const int out = link_index * 3 * num_time_segments + segment_index;
+    table.position_sender[out] = position.x;
+    table.position_sender[out + num_time_segments] = position.y;
+    table.position_sender[out + 2 * num_time_segments] = position.z;
+    table.velocity_sender[out] = velocity.x;
+    table.velocity_sender[out + num_time_segments] = velocity.y;
+    table.velocity_sender[out + 2 * num_time_segments] = velocity.z;
+    table.acceleration_sender[out] = acceleration.x;
+    table.acceleration_sender[out + num_time_segments] = acceleration.y;
+    table.acceleration_sender[out + 2 * num_time_segments] = acceleration.z;
+  }
+}
+
+// Stage three: unit vector from the sender at emission to the receiver at reception, and its
+// rate. The sender velocity carries (1 - dL/dt) from t_e = t - L(t), and only the part of the
+// relative velocity across the link turns the unit vector.
+CUDA_KERNEL
+void kinematics_unit_direction_kernel(KinematicsTable table, Orbits& orbits) {
+  int start, increment;
+#ifdef __CUDACC__
+  start = blockIdx.x * blockDim.x + threadIdx.x;
+  increment = gridDim.x * blockDim.x;
+#else   // __CUDACC__
+  start = 0;
+  increment = 1;
+#endif  // __CUDACC__
+  const int num_time_segments = table.num_time_segments;
+  const int total = num_time_segments * orbits.nlinks;
+  for (int flat = start; flat < total; flat += increment) {
+    const int link_index = flat / num_time_segments;
+    const int segment_index = flat - link_index * num_time_segments;
+    const int receiver_index = orbits.get_sc_r_from_arr(link_index) - 1;
+    const double emission_rate = 1.0 - table.light_travel_time_rate[flat];
+
+    double separation[3], separation_rate[3];
+    for (int xyz = 0; xyz < 3; xyz += 1) {
+      const int receiver_slot = (receiver_index * 3 + xyz) * num_time_segments + segment_index;
+      const int link_slot = (link_index * 3 + xyz) * num_time_segments + segment_index;
+      separation[xyz] = table.position_receiver[receiver_slot] - table.position_sender[link_slot];
+      separation_rate[xyz] = table.velocity_receiver[receiver_slot] -
+                             table.velocity_sender[link_slot] * emission_rate;
+    }
+
+    const double distance = sqrt(separation[0] * separation[0] + separation[1] * separation[1] +
+                                 separation[2] * separation[2]);
+    const double inverse_distance = 1.0 / distance;
+    double unit_direction[3];
+    for (int xyz = 0; xyz < 3; xyz += 1) unit_direction[xyz] = separation[xyz] * inverse_distance;
+    const double radial_rate = unit_direction[0] * separation_rate[0] +
+                               unit_direction[1] * separation_rate[1] +
+                               unit_direction[2] * separation_rate[2];
+
+    for (int xyz = 0; xyz < 3; xyz += 1) {
+      const int out = (link_index * 3 + xyz) * num_time_segments + segment_index;
+      table.unit_direction[out] = unit_direction[xyz];
+      table.unit_direction_rate[out] =
+          (separation_rate[xyz] - unit_direction[xyz] * radial_rate) * inverse_distance;
+    }
+  }
+}
+
+// Raise when the times [first, last], widened by two stencil steps, leave [t0, t0 + (N - 2) dt].
+static void check_stencil_coverage(const char* grid_name, double first, double last, double t0,
+                                   double dt, int N) {
+  const double margin = 2.0 * orbit_stencil_step(dt);
+  const double needed_start = first - margin;
+  const double needed_end = last + margin;
+  const double table_end = t0 + ((double)(N - 2)) * dt;
+  if ((needed_start < t0) || (needed_end > table_end)) {
+    std::ostringstream message;
+    message << std::fixed << std::setprecision(1) << "The kinematics table needs the "
+            << grid_name << " grid on [" << needed_start << ", " << needed_end
+            << "] s (segment midpoints plus a " << margin << " s stencil margin), but it covers ["
+            << t0 << ", " << table_end << "] s. Shorten the STFT grid or extend the orbits.";
+    throw std::invalid_argument(message.str());
+  }
+}
+
+void Orbits::get_kinematics_table(KinematicsTable* table) {
+  if (table->num_time_segments < 1)
+    throw std::invalid_argument("The kinematics table needs at least one segment.");
+  const double first = table->segment_midpoint(0);
+  const double last = table->segment_midpoint(table->num_time_segments - 1);
+  // * Senders are read at the emission time t - L(t), up to one light travel time earlier.
+  check_stencil_coverage("position", first - ORBIT_MAX_LIGHT_TRAVEL_TIME, last, sc_t0, sc_dt,
+                         sc_N);
+  check_stencil_coverage("light travel time", first, last, ltt_t0, ltt_dt, ltt_N);
+
+#ifdef __CUDACC__
+  const int total = table->num_time_segments * nlinks;
+  const int num_blocks = (total + NUM_THREADS - 1) / NUM_THREADS;
+
+  // copy self to GPU
+  Orbits* orbits_gpu;
+  gpuErrchk(cudaMalloc(&orbits_gpu, sizeof(Orbits)));
+  gpuErrchk(cudaMemcpy(orbits_gpu, this, sizeof(Orbits), cudaMemcpyHostToDevice));
+
+  // ! Each stage reads what the previous one wrote, so the launches stay in order.
+  kinematics_light_travel_kernel<<<num_blocks, NUM_THREADS>>>(*table, *orbits_gpu);
+  cudaDeviceSynchronize();
+  gpuErrchk(cudaGetLastError());
+  kinematics_spacecraft_state_kernel<<<num_blocks, NUM_THREADS>>>(*table, *orbits_gpu);
+  cudaDeviceSynchronize();
+  gpuErrchk(cudaGetLastError());
+  kinematics_unit_direction_kernel<<<num_blocks, NUM_THREADS>>>(*table, *orbits_gpu);
+  cudaDeviceSynchronize();
+  gpuErrchk(cudaGetLastError());
+
+  gpuErrchk(cudaFree(orbits_gpu));
+
+#else  // __CUDACC__
+
+  kinematics_light_travel_kernel(*table, *this);
+  kinematics_spacecraft_state_kernel(*table, *this);
+  kinematics_unit_direction_kernel(*table, *this);
 
 #endif  // __CUDACC__
 }

@@ -35,11 +35,14 @@ class LISAToolsBackendMethods(BackendMethods):
             low-level wrapper around an ``Orbits`` instance.
         Orbits: Native ``Orbits`` class providing detector geometry on the
             backend device.
+        KinematicsTableWrap: Native table of constellation kinematics at the
+            STFT segment midpoints, filled from an ``OrbitsWrap``.
         check_orbits: Native function used to validate orbit data.
     """
 
     OrbitsWrap: object
     Orbits: object
+    KinematicsTableWrap: object
     # stft_tof merge (2026-06): XYZ sensitivity backend reactivated (the
     # former "symbol issues on Linux" were the missing CPU/GPU aliases).
     SensitivityMatrixWrap: object
@@ -97,6 +100,7 @@ class LISAToolsBackend:
     # TODO: not ClassVar?
     OrbitsWrap: object
     Orbits: object
+    KinematicsTableWrap: object
     check_orbits: typing.Callable[(...), None]
     # stft_tof merge (2026-06): XYZ sensitivity backend reactivated.
     SensitivityMatrixWrap: object
@@ -128,6 +132,7 @@ class LISAToolsBackend:
         assert isinstance(lisatools_backend_methods, LISAToolsBackendMethods)
         self.OrbitsWrap = lisatools_backend_methods.OrbitsWrap
         self.Orbits = lisatools_backend_methods.Orbits
+        self.KinematicsTableWrap = lisatools_backend_methods.KinematicsTableWrap
         self.check_orbits = lisatools_backend_methods.check_orbits
         # stft_tof merge (2026-06): XYZ sensitivity backend reactivated.
         self.SensitivityMatrixWrap = lisatools_backend_methods.SensitivityMatrixWrap
@@ -185,6 +190,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
         return LISAToolsBackendMethods(
             OrbitsWrap=_lat_pd.OrbitsWrapCPU,
             Orbits=_lat_pd.OrbitsCPU,
+            KinematicsTableWrap=_lat_pd.KinematicsTableWrapCPU,
             check_orbits=_lat_pd.check_orbits,
             # stft_tof merge (2026-06): XYZ sensitivity backend reactivated.
             SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapCPU,
@@ -254,6 +260,7 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
         return LISAToolsBackendMethods(
             OrbitsWrap=_lat_pd.OrbitsWrapGPU,
             Orbits=_lat_pd.OrbitsGPU,
+            KinematicsTableWrap=_lat_pd.KinematicsTableWrapGPU,
             check_orbits=_lat_pd.check_orbits,
             # stft_tof merge (2026-06): XYZ sensitivity backend reactivated.
             SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,
@@ -320,6 +327,7 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
         return LISAToolsBackendMethods(
             OrbitsWrap=_lat_pd.OrbitsWrapGPU,
             Orbits=_lat_pd.OrbitsGPU,
+            KinematicsTableWrap=_lat_pd.KinematicsTableWrapGPU,
             check_orbits=_lat_pd.check_orbits,
             # stft_tof merge (2026-06): XYZ sensitivity backend reactivated.
             SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,
@@ -387,6 +395,7 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
         return LISAToolsBackendMethods(
             OrbitsWrap=_lat_pd.OrbitsWrapGPU,
             Orbits=_lat_pd.OrbitsGPU,
+            KinematicsTableWrap=_lat_pd.KinematicsTableWrapGPU,
             check_orbits=_lat_pd.check_orbits,
             # stft_tof merge (2026-06): XYZ sensitivity backend reactivated.
             SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,

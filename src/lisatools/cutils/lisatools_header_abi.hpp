@@ -17,6 +17,7 @@
 //   - WDMSettingsView                  (cutils/wdm_settings_view.hpp, future)
 //   - TDIConfigView                    (cutils/tdi_config_view.hpp, future)
 //   - Orbits class POD field layout    (cutils/Detector.hpp)
+//   - KinematicsTable POD field layout (cutils/Detector.hpp)
 //   - WDMSettings class POD field layout
 //   - TDIConfig class POD field layout
 //

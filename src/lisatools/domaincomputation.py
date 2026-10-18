@@ -363,6 +363,23 @@ class DomainKernelStrategy(LISAToolsParallelModule):
 BaseDomainComputationGroup = DomainKernelStrategy
 
 
+#: Fields of the kinematics table and the leading shape of each. A field is stored flat with the
+#: segment index fastest, e.g. ``position_receiver[(spacecraft * 3 + xyz) * NT + segment]``.
+KINEMATICS_TABLE_FIELDS = (
+    ("position_receiver", (3, 3)),
+    ("velocity_receiver", (3, 3)),
+    ("acceleration_receiver", (3, 3)),
+    ("position_sender", (6, 3)),
+    ("velocity_sender", (6, 3)),
+    ("acceleration_sender", (6, 3)),
+    ("light_travel_time", (6,)),
+    ("light_travel_time_rate", (6,)),
+    ("light_travel_time_acceleration", (6,)),
+    ("unit_direction", (6, 3)),
+    ("unit_direction_rate", (6, 3)),
+)
+
+
 class STFTComputationGroup(DomainKernelStrategy):
     """Wraps C++ STFTDomainWrap for batched likelihood computation."""
 
