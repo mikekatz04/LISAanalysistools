@@ -377,6 +377,19 @@ def make_production_params(rng, band_settings, num_sources):
     return params, cells
 
 
+def production_sources(band_settings, num_sources=24, tdi_type="XYZ"):
+    """The sources and the generator state of ``build_production_fixture``, without its group.
+
+    The group draws the data and inverse covariance of its store windows first, so the generator
+    makes the same draws before the sources.
+    """
+    rng = np.random.default_rng(PRODUCTION_SEED)
+    for _ in CELL_WINDOW_STARTS:
+        draw_cell_arrays(rng, band_settings.NT, CELL_WINDOW_WIDTH, tdi_type != "XYZ")
+    params, cells = make_production_params(rng, band_settings, num_sources)
+    return params, cells, rng
+
+
 def build_production_fixture(
     name, backend, mojito_l1=None, num_segments=32, num_sources=24, orbits=None
 ):
