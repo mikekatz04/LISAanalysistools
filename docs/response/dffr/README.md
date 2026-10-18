@@ -46,8 +46,8 @@ TDI-on-the-fly family does.
 
 ## Where the pieces will live
 
-The pieces of steps 1 to 3 exist on `feat-dffr`; the others are planned. The final layout is recorded
-here once the steps in `plan.md` are done.
+The pieces of steps 1 to 4 exist on `feat-dffr`; the others are planned. The final layout is
+recorded here once the steps in `plan.md` are done.
 
 | Repository | Piece | Content | Status |
 | --- | --- | --- | --- |
@@ -55,10 +55,14 @@ here once the steps in `plan.md` are done.
 | LAT | `cutils/binding_detector.{hpp,cxx}` | `KinematicsTableWrap`, the table over arrays owned by Python. | built (step 1) |
 | LAT | `domaincomputation.py` | `STFTComputationGroup.cpp_kinematics`: builds the table on the group's device on first use and keeps it. | built (step 1) |
 | LAT | `cutils/lat_fresnel.hh` | The Fresnel integrals, their auxiliary functions and the derivatives of these, with DFFR's numerics, shared by `STFTFresnel` and DFFR. The header records its branches, their accuracy and its assumptions. `STFTFresnelWrap.compute_fresnel_functions` evaluates it for tests. | built (step 2) |
-| LAT | `cutils/lat_stft_kernels.hh` | Likelihood kernels written against a tile of pixels, so that both responses feed the same consumers (see "The tile seam" below). `ColumnTile` feeds them the existing response; the Fisher kernel keeps its own loop. | built (step 3) |
-| LAT | `cutils/lat_dffr_*.hh` | DFFR settings, source-model contract, segment table, TDI weights, windowed transform, DFFR tile and Fisher kernel. | planned |
-| GBGPU | `cutils/gb_dffr_source.hh` | The galactic-binary source model of DFFR, sharing its phase and amplitude formulas with `GBTDIonTheFly`. | planned |
-| GBGPU | `gbcomps.py` | The `response` flag of `STFTGBComputations` and the dispatch to the DFFR kernels. | planned |
+| LAT | `cutils/lat_stft_kernels.hh` | Likelihood kernels written against a tile of pixels, so that both responses feed the same consumers (see "The tile seam" below). `ColumnTile` feeds them the existing response; the Fisher kernel keeps its own loop. Step 4 adds the band-bin-first pixel map and the launch path above 48 kB of shared memory. | built (steps 3 and 4) |
+| LAT | `cutils/lat_dffr_kernels.hh` | DFFR settings, source-model contract, windowed transform, closed-form TDI weights of both generations, segment table, the DFFR tile, and two diagnostics of a batch of sources (compact templates, segment table). The header records the definitions, conventions, accuracy and assumptions. | built (step 4); Fisher in step 4c |
+| LAT | `cutils/lat_dffr_diagnostics.{hh,cu}` | Three source-independent diagnostics for `tests/test_dffr.py`: the bounded sub-interval integral, the windowed transform and the closed-form TDI coefficients, as methods of `STFTFresnelWrap` and `KinematicsTableWrap`. | built (step 4); removed after step 6 |
+| LAT | `response/tdiconfig.py` | `TDIConfig.generation`: 1 or 2 for the stock combinations, `None` otherwise. | built (step 4) |
+| GBGPU | `cutils/gb_physics.hh` | The GB phase, frequency and amplitude formulas, shared by `GBTDIonTheFly` and the DFFR source model. | built (step 4) |
+| GBGPU | `cutils/gb_dffr_source.hh` | `GBDFFRSource`, the galactic-binary source model of DFFR (see "Source model and components" below). | built (step 4) |
+| GBGPU | `cutils/gb_dffr.{hh,cu}` | The DFFR entry points, bound as the `gb_dffr_*` methods of `GBComputationGroupWrap` next to the `gb_stft_*` methods of the existing response. | built (step 4) |
+| GBGPU | `gbcomps.py` | The `response` flag of `STFTGBComputations` and the dispatch to the DFFR kernels. | planned (step 5) |
 
 ## The tile seam
 
@@ -100,8 +104,27 @@ within a warp. The table fits as well: one segment row holds 1012 bytes (three r
 of five complex numbers and six doubles, six links of three complex numbers and one double,
 eighteen complex TDI weights and one integer), so 32 rows take 32.4 kB, under the 48 kB that a
 launch gets without raising its limit on dynamic shared memory. Two tables, as `swap_ll` needs,
-take 64.8 kB. That second pixel map, and the launch path for more than 48 kB, come with the DFFR
-tile in step 4.
+take 64.8 kB. Step 4 built that second pixel map, `StftBandBinMap`, and the launch path above 48
+kB, which raises a kernel's limit within what the device allows a block. One DFFR template, the
+table with the source constants and the settings, takes 32 672 bytes at 32 rows. The consumers
+that hold two templates are built for 32 rows and for 16, and the A100 benchmarks of step 6
+choose between them.
+
+## Source model and components
+
+`GBDFFRSource` (GBGPU) is the galactic-binary source model of DFFR. Per source it loads the
+constants once: the sky basis and polarisation, the amplitude, the frequency and its two
+derivatives, the initial phase, and the plus and cross weights of the inclination. Per component it
+gives the quadratic phase expansion at a retarded time, the amplitude ratio and its log-slope. The
+phase, frequency and amplitude formulas are those of `GBTDIonTheFly`, from `gb_physics.hh`.
+
+The contract speaks in components, so that a source with several harmonics fits it: each
+component would carry its own phase, amplitude and polarisation weights, and the components of
+one source would add in each pixel, so that `(h|h)` keeps their cross terms. The DFFR tile
+evaluates component 0 only and requires a source with one component. The reason is the band. A
+template covers `2 n_side_bins + 1` bins about one carrier, while the harmonics of a binary lie
+f0 / df bins apart: 86 bins at 1 mHz and 864 at 10 mHz on one-day segments. Each harmonic needs a
+band of its own, so it belongs in a template of its own.
 
 ## How it will be selected
 

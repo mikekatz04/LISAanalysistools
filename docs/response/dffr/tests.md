@@ -774,7 +774,7 @@ fit at up to 128 registers per thread and 3 blocks at up to 168. The GPU timings
 many blocks run at once. No threshold; compared with step 2. Files:
 `$OUT/regression/step3/kernel_resources_sm{80,90}.txt`.
 
-| Kernel | Registers, sm_80, step 2 / step 3 | Blocks per SM, sm_80 | Registers, sm_90 | Blocks per SM, sm_90 |
+| Kernel | Own registers, sm_80, step 2 / step 3 | Blocks per SM at those counts, sm_80 | Own registers, sm_90 | Blocks per SM at those counts, sm_90 |
 | --- | --- | --- | --- | --- |
 | `stft_get_ll_kernel` | 120 / 120 | 4 / 4 | 128 / 122 | 4 / 4 |
 | `stft_fill_global_kernel` | 128 / 120 | 4 / 4 | 128 / 127 | 4 / 4 |
@@ -792,6 +792,19 @@ domain pointer and the two link-table pointers of the column context, and by 112
 F-statistic kernel, whose two evaluation sites hold their templates apart. The fill kernel reaches
 127 registers on sm_90 only with its template constructed per source: held for the whole kernel,
 it needed 129, one above the 128 that allow 4 blocks, while sm_80 stayed at 120 either way.
+
+**Correction of 2026-10-18 (step 4).** The registers in this table are those of each kernel's own
+code, which ptxas reports for one file. GBGPU links its CUDA files with relocatable device code,
+and at the device link a kernel that calls a function of another file gets the largest count
+among itself and the functions it calls. Every kernel above calls
+`STFTFresnelGPU::get_fourier_value` of `domains.cu`, which uses 244 registers on the A100 and 222
+on the H100. In the linked module (`cuobjdump -res-usage`) every kernel has 244 registers on the
+A100 in step 2 and in step 3 (the modules of `$OUT/step2_env` and `$OUT/step3_env`), and 222 on
+the H100 in step 3 (step 4, part `resources`): 2 blocks of 128 threads per SM throughout. The
+conclusion, that no kernel loses blocks per SM, holds; the blocks per SM in the table, and the
+gains on the H100, do not describe the linked kernels. The linked stack frames grow from step 2 to
+step 3 by 32 to 112 bytes per thread, as above. `kernel_resources.py` reads the linked module from
+step 4 on.
 
 ### Benchmarks
 
@@ -860,8 +873,10 @@ None in this step.
 ### Pending on the GPU
 
 After the step 2 GPU runs, so that `golden_gpu*.npz` and the GPU benchmarks of step 2 exist for the
-comparison. On a GPU node, from the shared environment:
-`PYTHON=$PYTHON BASE_ENV=$OUT/step2_env MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step3.sh --device gpu $OUT environment golden golden_l1 tests benchmarks benchmarks_l1`.
+comparison. Since step 4 the shared environment holds step 4 code, so the step 3 runs come from
+the frozen environment of the step 3 code (step 4, below), with its own clone of the scripts. On a
+GPU node, from `$OUT/step3_env/lisa-analysis-tools`:
+`PYTHON=$OUT/step3_env/.venv/bin/python BASE_ENV=$OUT/step2_env MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step3.sh --device gpu $OUT environment golden golden_l1 tests benchmarks benchmarks_l1`.
 On the GPU the captures and the benchmarks keep the swap kernels, and the reference is the step 2
 GPU capture itself. `fill_global_stft` adds into its template rows with `atomicAdd`, so the GPU
 captures of steps 0 to 2 first show whether that output is reproducible from run to run; bit
@@ -869,13 +884,281 @@ identity against step 2 can only be asked of it if it is.
 
 ## Step 4: DFFR kernels
 
-Not started.
+Code: LAT `feat-dffr` at 7617da1a and GBGPU `feat-dffr` at 62c8d4c, with the changes of parts 4a
+and 4b uncommitted; part 4c, the DFFR Fisher, follows. Rebuilt on 2026-10-18 into the shared
+environment with `JAX_PLATFORMS=cpu ONLY="lisa-analysis-tools GBGPU" ./install_erebor_spider.sh`,
+CPU and CUDA backends. It was rebuilt again after `lat_dffr_tile.hh` was merged into
+`lat_dffr_kernels.hh`. The merge left the CPU machine code of every function unchanged in the
+DFFR unit, the unit of the existing response and the LAT diagnostics (58, 86 and 14 functions,
+`objdump -d`, `$OUT/regression/step4/compile_check/cpu_machine_code_after_merge.txt`). The DFFR
+tests and the exchange gave the same results after it.
+
+CPU node: `wn-la-01` (AMD EPYC 9754, Bergamo), Slurm job 41563985, 16 CPUs, 2026-10-18. The parts
+ran inside that allocation as
+`srun --jobid=<job> --overlap -n 1 -c 16 env PYTHON=$PYTHON BASE_ENV=$OUT/step3_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> scripts/dffr/run_step4.sh --device cpu $OUT <part>`:
+every part but the benchmarks side by side, then `benchmarks benchmarks_l1` alone
+(`$OUT/regression/step4/step4_cpu_chain.sh`). The GPU runs are pending.
+
+The existing response must stay bit-identical to the step 3 code, with timings within run-to-run
+noise. The DFFR code is checked in four ways:
+
+- against quadrature and `TDIConfig`;
+- against itself, through the identities of the consumers;
+- against standalone dffr;
+- against the existing response.
+
+### Frozen environment of the step 3 code
+
+The pending GPU runs of step 3 need the step 3 code after the rebuild, and so do the comparisons
+of this step. `scripts/dffr/build_base_env.sh` built `$OUT/step3_env` before the first rebuild with
+step 4 code: 16 minutes in job 41563985, 6.1 GB. It holds LAT 7617da1a and GBGPU 62c8d4c, the
+committed step 3, with GPUBackendTools b07bd18, Eryn 26dd14a and BBHx b7b0ae5 plus the
+uncommitted changes of the shared clones. Command:
+`LAT_COMMIT=7617da1a GBGPU_COMMIT=62c8d4c JAX_PLATFORMS=cpu scripts/dffr/build_base_env.sh $OUT/step3_env`.
+
+Criterion: the environment must recompute the step 3 CPU golden outputs bit for bit, the swap
+kernels included. Result: 144 of 144 and 26 of 26 arrays bit-identical, pass
+(`$OUT/regression/step3/step3_env_recheck_cpu{,_l1}.txt`).
 
 ### Unit tests
 
+**`tests/test_dffr.py` (LAT).** The source-independent DFFR stages, through three diagnostic
+methods on existing wraps: `STFTFresnelWrap.compute_dffr_sub_intervals` and
+`compute_dffr_windowed_kernels`, and `KinematicsTableWrap.compute_dffr_link_coefficients`. The
+measured values come from part `unit_numbers` (`scripts/dffr/dffr_unit_numbers.py`,
+`$OUT/regression/step4/unit_numbers_cpu.txt`). The transform errors are in DFFR's normalisations:
+the kernel as a fraction of the segment duration, the moment as a fraction of the square of half
+of it.
+
+| Test | Cases | Bound | Largest measured | Result |
+| --- | --- | --- | --- | --- |
+| Sub-interval integral against adaptive quadrature | 16: chirp rates ±4e-13, 1e-20 and -1e-22 Hz/s; detunings 0, 0.3, 7 and -18.5 bins | 2e-10 | 7.3e-11 | pass |
+| Its first moment | the same | 5e-8 | 2.9e-8 | pass |
+| Windowed transform against piecewise quadrature | 132: tapers 0, 0.1157 and 0.5; 4 chirp rates; 11 bins from -15 to +15 about a carrier 0.37 bins off the grid | 4e-10 | 4.5e-12 | pass |
+| Its first moment | the same | 1e-7 | 6.4e-13 | pass |
+| Closed-form TDI coefficients against the unit sums of `TDIConfig`, absolute | 64 segments; carriers 0.1 to 50 mHz; light travel times 8.33 ± 0.03 s per link and segment | 1e-13 | 2.5e-16 (1st generation), 1.1e-15 (2nd) | pass |
+| `TDIConfig.generation` | the stock combinations in any order; one unit removed | exact | 1, 2 and `None` | pass |
+| Argument checks | generation 3; a short output; a zero floor; df dt ≠ 1 | `ValueError` | raised | pass |
+
+The sub-interval bounds are those of the standalone package's `tests/test_fresnel.py`. The windowed
+bounds are twice those, since the six sub-intervals carry window weights that sum to 2. The
+largest sub-interval errors sit 0.3 bins from the carrier at the Doppler-dominated rates, where the
+rational fits of `lat_fresnel.hh` (about 2e-10) set them. The CUDA class of the file is skipped
+without a GPU: 5 tests, CUDA against CPU among them, with a provisional bound of 1e-13.
+
+**`GBGPU/tests/test_stft_gb_dffr.py`.** The `gb_dffr_*` entry points, called with the arguments
+the comp will pass in step 5. Fixture: 24 six-hour segments of 10 s samples, the band 3.9 to 4.6
+mHz, `n_side_bins = 3`, equal-arm orbits, seeded data and an identity inverse covariance. All 10
+CPU tests pass:
+
+- fill_global followed by the domain's inner product equals get_ll (rtol 1e-10), for tapers 0
+  and 0.5 and both TDI generations;
+- the compact template equals the fill_global grid bit for bit on its band;
+- swap(A, A) equals get_ll(A) term by term (rtol 1e-10);
+- exchanging add and remove exchanges the terms of swap and conjugates the cross term;
+- swap on the union band of two sources 2.6 bins apart equals the inner products of compact
+  templates on that band (rtol 1e-10);
+- the N and M of the F-statistic equal the get_ll and swap terms of its four filters (rtol 1e-9);
+- both gradients equal host central differences (rtol 1e-6), and eps ≤ 0 freezes a component;
+- DFFR against the existing response on the same fixture, both generations: overlap above 0.99
+  and norm ratio in (0.9, 1.1). These bounds were set before measuring, to catch a sign, a
+  conjugation or a factor 2;
+- rows_per_pass 24, generation 3, a kinematics table of another grid and an AET domain raise
+  `ValueError`.
+
+The CUDA class of the file is skipped without a GPU: 9 tests, among them CUDA against CPU and the
+16-row tiles against the 32-row tiles, with a provisional bound of 1e-12 of each peak.
+
 ### Regression tests
 
+**Golden outputs against step 3** (parts `golden` and `golden_l1`, swap kernels included).
+Criterion: bit identity against the step 3 captures (`$OUT/regression/step3/golden_cpu{,_l1}.npz`,
+which `$OUT/step3_env` reproduces), and between two captures in separate processes. Result: 144
+of 144 and 26 of 26 arrays bit-identical to step 3, and the repeats bit-identical to the first
+captures, pass. Files: `$OUT/regression/step4/golden_cpu{,_l1}_vs_step3.txt` and
+`golden_cpu{,_l1}_repeat_compare.txt`.
+
+**Column-policy oracle** (part `oracle`). Against its capture in `$OUT/step2_env`, as in step 3:
+all 54 arrays bit-identical, pass (`column_oracle_vs_step2_cpu.txt`).
+
+**Accuracy** (part `accuracy`). `GBGPU/tests/test_stft_gb_accuracy.py` gives the same numbers in
+`$OUT/step3_env` and after step 4, to every printed digit: end-to-end mismatch 9.049e-3 at 10 side
+bins (3.950e-3 at 20), on-bin mismatch 1.409e-5. The 4 tests pass in both. Files:
+`accuracy_base_cpu.log`, `accuracy_cpu.log`.
+
+**Test suites** (part `tests`). Criterion: every test case of step 3 keeps its outcome. Result:
+pass. Files: `gbgpu_tests_cpu.{log,xml}`, `lat_tests_cpu.log`.
+
+- GBGPU: the 41 cases of step 3 keep theirs (39 passed; 1 failed and 1 module not importable, the
+  two GPU-only cases). The 10 CPU tests of `test_stft_gb_dffr.py` pass and its 9 CUDA tests are
+  skipped: 49 passed and 9 skipped in all.
+- LAT: 301 tests. The 289 that pair by name with step 3 keep their outcomes (the same 2 failures
+  and 15 errors). The 5 CPU tests of `test_dffr.py` pass and its 5 CUDA tests are skipped: 63
+  skips in all.
+
+**Exchange with standalone dffr** (part `exchange`). Three scripts:
+
+- `dffr_exchange_lat.py --capture` stores the inputs of a DFFR evaluation and LAT's outputs on
+  them;
+- `dffr_exchange_dffr.py` recomputes the outputs in the environment of the dffr repository at
+  01530a5, from the same kinematics arrays (`OrbitKinematics.from_arrays`);
+- `dffr_exchange_lat.py --compare` reads both.
+
+Fixture: ESA orbits; 32 one-day segments from 10 days after their start; the production band (0.1
+to 29 mHz) as one domain, so that both sides read the same f_min; Tukey taper 0.1157 with the
+segment midpoints; `n_side_bins = 10`; TDI 2nd generation; linear envelope and first-order delays
+on; the 24 sources of the production fixtures; seeded data and inverse covariance. Criterion, set
+before measuring: per output, the largest difference relative to the peak of the dffr array is at
+most 1e-13, and integer arrays are equal. Result: pass.
+
+| Output | Largest difference over peak |
+| --- | --- |
+| Compact templates; fill_global grid; segment table (effective frequencies, chirp rates, reference phasors, link amplitudes, envelope slopes, emission phasors and frequencies, TDI weights) | 0, bit-identical |
+| Band starts of the compact templates and of the segment table | equal |
+| (d\|h) | 1.6e-15 |
+| (h\|h) | 6.3e-15 |
+
+The inner products differ by the order of their sums only. Files: `exchange_{lat,dffr}_cpu.npz`,
+`exchange_compare_cpu.txt`.
+
+**DFFR against the existing response** (part `against_existing`). There is no threshold: the
+numbers say how far apart the two models are, not which is closer to the truth (step 6). Per
+source, the templates of both responses over the band of the exchange fixture (fill_global, factor
+one). a is the DFFR template and b the existing one, with unit weights over the three channels. The
+settings are the two production settings of the existing response on ESA orbits and the two
+crossed ones. DFFR takes the same TDI generation and envelope, with its first-order delay terms on.
+Files: `against_existing_cpu.{txt,npz}`.
+
+| Setting | Median mismatch, 1 - Re(a\|b) / sqrt((a\|a)(b\|b)) | Largest | Largest phase of (a\|b) [rad] | Norm ratio (a\|a) / (b\|b) |
+| --- | --- | --- | --- | --- |
+| TDI 2nd generation, linear envelope (production) | 5.6e-10 | 2.6e-8 | 2.2e-5 | 0.99998 to 1.00008 |
+| TDI 1st generation, linear envelope | 5.6e-10 | 2.6e-8 | 2.2e-5 | 0.99998 to 1.00008 |
+| TDI 2nd generation, constant envelope | 8.6e-6 | 4.3e-5 | 2.7e-5 | 0.99995 to 1.00006 |
+| TDI 1st generation, constant envelope (production) | 8.6e-6 | 4.3e-5 | 1.7e-5 | 0.99997 to 1.00003 |
+
+The TDI generation changes nothing; the envelope sets the distance. With the linear envelope the
+two responses agree to a median mismatch of 5.6e-10. With a constant envelope each holds the
+amplitude constant over a segment in its own way, and they differ by about 1e-5.
+
+**GPU resources, without a GPU** (part `resources`). `scripts/dffr/kernel_resources.py`, rewritten
+in this step, works as follows:
+
+- it compiles every CUDA file of GBGPU's GPU module for one device, with the commands of the
+  build tree;
+- it links them as the build does;
+- it reads each kernel's registers, stack frame and static shared memory from the linked code
+  (`cuobjdump -res-usage`).
+
+With relocatable device code, a kernel gets at the link the largest register count among itself
+and the functions it calls. ptxas on one file, as in step 3, reports the kernel's own count only.
+A small host program, built with the flags of `gb_dffr.cu`, gives the dynamic shared memory of a
+DFFR template: 32 672 bytes at 32 rows, 16 480 at 16. Blocks of 128 threads per SM are counted two
+ways:
+
+- by registers: 65 536 per SM, allocated in steps of 8 per thread;
+- by shared memory: 164 kB per SM on the A100 and 228 kB on the H100, with the 1 kB the system
+  keeps per block.
+
+The reference is the step 3 module, compiled and linked from the build tree of `$OUT/step3_env`.
+There is no threshold. The record and the register caps and device link-time optimisation below
+come from the final code, after the merge of the headers (`$OUT/regression/step4/merge_chain.sh`);
+the forced inline was measured before it. Files:
+`$OUT/regression/step4/kernel_resources_sm{80,90}.txt`.
+
+Existing kernels: on both devices, every field equals step 3: 244 registers on the A100 and 222 on
+the H100, the same stack frames and static shared memory, 2 blocks per SM.
+
+DFFR kernels, at 32 rows unless stated; the two-template consumers hold twice the template:
+
+| Kernel | Registers, A100 / H100 | Blocks per SM by registers | Blocks per SM by shared memory, A100 / H100 |
+| --- | --- | --- | --- |
+| `stft_get_ll_kernel` | 158 / 154 | 3 | 4 / 6 |
+| `stft_fill_global_kernel` | 156 / 156 | 3 | 4 / 6 |
+| `stft_get_ll_grad_kernel` | 164 / 162 | 3 | 4 / 6 |
+| `stft_swap_ll_kernel` | 220 / 222 | 2 | 2 / 3 at 32 rows; 3 / 5 at 16 |
+| `stft_get_fstat_ll_kernel` | 220 / 222 | 2 | 2 / 3 at 32 rows; 3 / 5 at 16 |
+| `stft_swap_ll_grad_kernel` | 254 / 254 | 2 | 2 / 3 at 32 rows; 3 / 5 at 16 |
+| `dffr_fill_template_kernel`, `dffr_segment_table_kernel` | 142 / 142 | 3 | 4 / 6 |
+
+Called functions set these counts on the A100:
+
+- `STFTFresnelGPU::get_fourier_value` of `domains.cu`, 244, for every existing kernel;
+- `STFTDomainGPU::add_ip_swap_contrib`, 220, for the swap kernels and the F-statistic of both
+  responses;
+- in the DFFR swap gradient, `DFFRTile::Template::values` and `build`, which nvcc keeps out of
+  line there (254 each).
+
+The H100 code reports no registers for called functions. On both devices the registers set the
+occupancy of every DFFR kernel; at 32 rows on the A100, the shared memory of the two-template
+kernels gives the same 2 blocks. So 16 and 32 rows give the same occupancy today.
+
+Variants measured on the same module, not adopted (files in `$OUT/regression/step4/`):
+
+| Variant | Effect on the linked registers, A100 / H100 | Decision of the author |
+| --- | --- | --- |
+| `Template::values` and `build` of the DFFR tile forced inline on the GPU (`kernel_resources_forced_inline_sm*.txt`) | DFFR swap gradient 254 → 220 / 222, stack frame 1048 → 168 bytes; but the `get_ll` gradient 164 → 254, because its evaluation function then stays out of line. Forcing `values` alone gives the same. | reverted; to be timed in step 6 |
+| `domains.cu` capped at 168 registers (`-maxrregcount`; `compile_check/register_cap_168_sm*.txt`) | every existing kernel 244 / 222 → 166: 3 blocks per SM. DFFR swap → 172 / 166: 3 blocks on the H100 only, since its own code needs 172 on the A100. `get_fourier_value` spills 164 bytes per call. At 128 (`register_cap_128_sm*.txt`) the existing kernels reach 134 to 162 on the A100 and 134 on the H100, still 3 blocks, with 248 and 224 bytes of spills. | step 6, A/B timing on an A100 |
+| Device link-time optimisation, `-dlto` (`device_lto_sm*.txt`) | the DFFR kernels 128 to 168 on the A100 and 130 to 172 on the H100: 3 blocks (4 for the compact template on the A100), except the swap gradient on the H100 (172, 2 blocks). The existing kernels go to 255, still 2: once inlined, the Fresnel evaluation needs these registers. | step 6 |
+
+The `-dlto` link needs `nvvm/lib64/libnvvm.so` next to nvlink. The pip wheel of the CUDA 13
+toolkit keeps it in `lib/` as `libnvvm.so.4`, and nvlink ignores `-nvvmpath`. The measurement used a
+copy of the toolkit's `bin/` with that path linked to the library
+(`$OUT/regression/step4/device_lto/toolkit`, `kernel_resources.py --toolkit`).
+
+### Benchmarks
+
+**CPU** (parts `benchmarks` and `benchmarks_l1`), alone in the allocation, with the fixtures,
+settings and criterion of step 3, against the step 3 runs of 2026-10-18. Files:
+`$OUT/benchmarks/step4/cpu_{esa,l1}_run{1,2,3}.json`, `compare_cpu_{esa,l1}.txt`.
+
+ESA fixture (`esa_tdi2_envelope`):
+
+| Method | Batch 1 [ms] | Batch 8 [ms] | Batch 64 [ms] | Ratio to step 3, three batches | Largest spread of the step 4 runs | Within noise |
+| --- | --- | --- | --- | --- | --- | --- |
+| `get_ll_stft` | 5.36 | 49.31 | 449.98 | 0.997 to 1.006 | 1.07 % | 3 of 3 |
+| `get_fstat_ll_stft` | 80.40 | 754.11 | 6982.84 | 0.998 to 1.001 | 1.55 % | 3 of 3 |
+| `fill_global_stft` | 5.17 | 48.00 | 436.79 | 0.998 to 1.000 | 0.66 % | 2 of 3 |
+| `get_ll_grad_stft` | 84.19 | 765.62 | 6889.92 | 0.992 to 1.000 | 0.64 % | 1 of 3 |
+| `information_matrix` | 42.40 | 361.07 | 3052.65 | 0.998 to 1.001 | 0.67 % | 2 of 3 |
+
+`L1Orbits` fixture (`l1_tdi2_envelope`):
+
+| Method | Batch 1 [ms] | Batch 8 [ms] | Batch 64 [ms] | Ratio to step 3, three batches | Largest spread of the step 4 runs | Within noise |
+| --- | --- | --- | --- | --- | --- | --- |
+| `get_ll_stft` | 5.33 | 49.92 | 452.40 | 1.003 to 1.005 | 1.57 % | 3 of 3 |
+| `get_fstat_ll_stft` | 80.41 | 765.37 | 7055.05 | 0.998 to 1.001 | 1.29 % | 3 of 3 |
+| `fill_global_stft` | 5.14 | 48.64 | 439.25 | 0.994 to 1.002 | 1.14 % | 3 of 3 |
+| `get_ll_grad_stft` | 83.78 | 776.10 | 6957.79 | 0.996 to 1.000 | 1.24 % | 3 of 3 |
+| `information_matrix` | 42.10 | 360.50 | 3051.54 | 0.999 | 0.96 % | 3 of 3 |
+
+26 of the 30 points lie within the noise. The 4 outside are all faster, all on the ESA fixture:
+`fill_global_stft` at batch 8 (ratio 0.998), `get_ll_grad_stft` at batches 8 and 64 (0.993 and
+0.992) and `information_matrix` at batch 64 (0.998).
+
+The CPU machine code of the existing response is that of step 3. Of the 86 functions of GBGPU's
+CPU unit of the existing response, 84 are identical instruction for instruction. The other two,
+`ucb_f` and `ucb_phase`, now call `gb_physics.hh`. They differ only in register names and, in
+`ucb_f`, in the order of the two factors of one fused multiply-add, which gives the same bits
+(`compile_check/cpu_machine_code_vs_step3.txt`, `cpu_machine_code_changed_functions.txt`). The four
+points are therefore drift between runs, which the unchanged `information_matrix` also shows. Step
+3 saw drift of up to 1 % between runs of identical code.
+
 ### Validation runs
+
+None in this step.
+
+### Pending on the GPU
+
+After the step 3 GPU runs. On a GPU node, from the shared environment:
+`PYTHON=$PYTHON BASE_ENV=$OUT/step3_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step4.sh --device gpu $OUT environment golden golden_l1 tests unit_numbers exchange benchmarks benchmarks_l1`.
+This runs:
+
+- the CUDA classes of both test files, CUDA against CPU and 16 against 32 rows among them;
+- the exchange on the GPU backends of both packages;
+- the existing response against the step 3 GPU captures.
+
+The first GPU run also reaches code that no CPU run reaches: the launch above 48 kB, the band-bin
+map at 32 rows and the device copy of the domain.
 
 ## Step 5: wiring
 

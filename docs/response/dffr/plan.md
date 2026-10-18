@@ -12,8 +12,8 @@ branch `feat-dffr` in both repositories.
 | 0 | Branches, documents, baseline of the existing response | CPU part done, `L1Orbits` included; GPU part pending | 2026-10-17 | The GPU part runs from a frozen environment of the step 0 code, which reproduces every CPU golden output bit for bit; every GPU node of SURF Spider has been down since 2026-10-16. Results in `tests.md`. |
 | 1 | Orbits cache | CPU part done; GPU part pending | 2026-10-17 | Existing outputs change by at most 6e-11 (templates, inner products), 2e-9 (gradients) and 2e-8 (Fisher on the TDI track, whose f̈ entries change by up to 8e-6); the step 1 captures are the new baseline. Results in `tests.md`. |
 | 2 | Fresnel split | CPU part done; GPU part pending | 2026-10-18 | Templates, inner products and the F-statistic change by at most 1.1e-14 of their peaks (gate 1e-12). Gradients and Fisher matrices change within the finite-difference noise that both codes carry, the criterion the author set for them in place of the gate. The step 2 captures are the new baseline; the pending step 1 GPU runs come from a frozen environment of the step 1 code. Results in `tests.md`. |
-| 3 | Tile seam | CPU part done; GPU part pending | 2026-10-18 | Every output of the seven kernels, swap included, is bit-identical to the step 2 code on the CPU (144 and 26 arrays, against a frozen environment of the step 2 code), with the same test outcomes. CPU timings lie within run-to-run noise at 27 of 30 points; the other three differ by at most 0.7 %, within the drift between runs of identical code. ptxas gives every kernel at least the blocks per SM of step 2 on the A100 (sm_80) and the H100 (sm_90). The pending step 2 GPU runs come from the frozen step 2 environment. Results in `tests.md`. |
-| 4 | DFFR kernels | Not started | | |
+| 3 | Tile seam | CPU part done; GPU part pending | 2026-10-18 | Every output of the seven kernels, swap included, is bit-identical to the step 2 code on the CPU (144 and 26 arrays, against a frozen environment of the step 2 code), with the same test outcomes. CPU timings lie within run-to-run noise at 27 of 30 points; the other three differ by at most 0.7 %, within the drift between runs of identical code. ptxas gives every kernel at least the blocks per SM of step 2 on the A100 (sm_80) and the H100 (sm_90). The pending step 2 GPU runs come from the frozen step 2 environment. Results in `tests.md`. Corrected on 2026-10-18 in step 4: the register counts of step 3 were those of each kernel's own file; in the linked module every kernel has 244 registers on the A100 and 222 on the H100, in step 2 and step 3 alike, so 2 blocks per SM, and the conclusion holds. |
+| 4 | DFFR kernels | 4a and 4b: CPU part done; 4c (DFFR Fisher) next; GPU part pending | 2026-10-18 | The DFFR numerics, tile and galactic-binary model are built. The existing response stays bit-identical to step 3 on the CPU (144 and 26 arrays), with the same test outcomes and CPU timings within run-to-run noise or faster. Against standalone dffr on the same kinematics table, templates, global fill and segment table are bit-identical and the inner products agree to 6.3e-15. With the linear envelope of production, DFFR and the existing response differ by a median mismatch of 5.6e-10. Linked registers give the DFFR kernels 2 to 3 blocks of 128 threads per SM and the existing kernels 2; register caps and device link-time optimisation are timed in step 6. Results in `tests.md`. |
 | 5 | Wiring into `STFTGBComputations` | Not started | | |
 | 6 | Validation | Not started | | |
 | 7 | Review of documentation and scripts | Not started | | |
@@ -120,18 +120,29 @@ LAT (source-independent):
 - `cutils/lat_fresnel.hh` (new): Maclaurin series of C and S, auxiliary f and g and their
   slopes, with DFFR's numerics. `STFTFresnel` delegates to it.
 - `cutils/lat_stft_kernels.hh`: tile contract, `ColumnTile<ColumnT>` adapter, tile-generic
-  consumers.
-- `cutils/lat_dffr_*.hh` (new, names settled in step 4): DFFR settings, source-model contract,
-  segment table, closed-form TDI weights with first-order delay terms, windowed transform,
-  `DFFRTile<SourceModel>`, DFFR Fisher kernel, diagnostic kernels.
+  consumers; from step 4 also the band-bin-first pixel map (`StftBandBinMap<Rows>`) and the launch
+  path above 48 kB of dynamic shared memory.
+- `cutils/lat_dffr_kernels.hh` (step 4): DFFR settings, source-model contract, windowed
+  transform, closed-form TDI weights of both generations with first-order delay terms, segment
+  table, `DFFRTile<SourceT, Rows>` with its launch inputs, and two diagnostics of a batch of
+  sources (compact templates, segment table). The DFFR Fisher follows in step 4c.
+- `cutils/lat_dffr_diagnostics.{hh,cu}` (step 4): three source-independent diagnostics (bounded
+  sub-interval integral, windowed transform, closed-form TDI coefficients), methods of
+  `STFTFresnelWrap` and `KinematicsTableWrap` for `tests/test_dffr.py`. They leave LAT after step
+  6; a copy stays in the author's work folder.
+- `response/tdiconfig.py`: `TDIConfig.generation`, 1 or 2 for the stock combinations, `None`
+  otherwise, so that the comp can pick DFFR's closed form.
 
 GBGPU (GB-specific):
 
-- GB phase and amplitude formulas moved into inline free functions used by both
-  `GBTDIonTheFly` and the DFFR GB model, so there is one source of truth.
-- `cutils/gb_dffr_source.hh` (new): `GBDFFRSource`, the GB model (one component).
-- `GBComputationGroup::gb_dffr_*_wrap` and their bindings in `binding_gbgpu.{hpp,cxx}`.
-- `gbcomps.py`: the `response` flag and the DFFR dispatch.
+- `cutils/gb_physics.hh` (step 4): the GB phase, frequency, frequency derivative and amplitude
+  as inline free functions; `GBTDIonTheFly`'s `ucb_*` methods and the DFFR GB model both call
+  them, so there is one source of truth.
+- `cutils/gb_dffr_source.hh` (step 4): `GBDFFRSource`, the GB model (one component).
+- `cutils/gb_dffr.{hh,cu}` (step 4): the entry points `gb_dffr_*_wrap`, free functions in a
+  translation unit of their own, bound as the `gb_dffr_*` methods of `GBComputationGroupWrap` in
+  `binding_gbgpu.{hpp,cxx}`. Nothing DFFR enters `gb_tdi_on_the_fly.{hh,cu}`.
+- `gbcomps.py` (step 5): the `response` flag and the DFFR dispatch.
 
 ### Tile contract (the seam)
 
@@ -142,8 +153,10 @@ channels of one pixel. `ColumnTile<FresnelColumn>` reproduces today's mapping (t
 rows `tid, tid + 128, ...`, all side bins, same summation order), so the existing outputs stay
 bit-identical. `DFFRTile` holds 32-row segment tables in shared memory and maps a warp to one
 band bin. The 32 is the warp size, so that the 32 threads of a warp take the 32 segments of one
-band bin; 32 rows of 1012 bytes also fit the 48 kB of shared memory a launch gets by default. `get_ll`, `fill_global`, `swap_ll`, the F-statistic and both gradients become
-tile-generic; the existing Fisher kernel stays as it is for FresnelColumn, and DFFR gets its own.
+band bin; 32 rows of 1012 bytes also fit the 48 kB of shared memory a launch gets by default.
+`get_ll`, `fill_global`, `swap_ll`, the F-statistic and both gradients become tile-generic; the
+existing Fisher kernel stays as it is for FresnelColumn. The DFFR Fisher (step 4c) generalises it
+with the amplitude and grid split of step 4.
 
 ### Source-model contract (modes)
 
@@ -154,13 +167,22 @@ segment table and the pixel loop run over the components; a GB has one and pays 
 mirrors TDI-on-the-fly, where each mode is a sub-source with its own amplitude, phase and angles,
 but here the components of one source are summed per pixel, so `(h|h)` keeps the cross terms.
 
+As built in step 4 (author's decision of 2026-10-18), the axis is in the contract only:
+`GBDFFRSource` speaks in components (`num_components = 1`, component 0), while the segment table
+and the pixel loop evaluate one component, and `DFFRTile` asserts `num_components == 1`. The
+harmonics of a source lie hundreds of bins apart, outside one band of `2 n_side_bins + 1` bins, so
+they belong in separate templates rather than in one table (`README.md`).
+
 ### Call path of a DFFR likelihood call
 
 `comp.get_ll_stft` -> `self.stft_comps.cpp_kinematics(self.cpp_orbits)` ->
-`GBComputationGroupWrap().gb_dffr_get_ll(..., kinematics, cpp_fresnel, cpp_domain,
-tdi_generation, n_side_bins, linear_envelope, first_order_delays, ...)` ->
-`stft_get_ll_launch<DFFRTile<GBDFFRSource>>`. Window settings come from the bound `STFTFresnel`,
-the grid and data from `STFTDomain`, window starts from `start_freq_inds` as today.
+`GBComputationGroupWrap().gb_dffr_get_ll(d_h, h_h, kinematics, cpp_fresnel, cpp_domain, params,
+data_index, noise_index, num_bin, nparams, t_ref, n_side_bins, tdi_generation, linear_envelope,
+first_order_delays, chirp_rate_floor, start_freq_inds)` ->
+`stft_get_ll_launch<DFFRTile<GBDFFRSource, 32>>` (one row on the CPU). Window settings come from
+the bound `STFTFresnel`, the grid and data from `STFTDomain`, window starts from
+`start_freq_inds` as today. The comp's part of this path, the dispatch in `get_ll_stft`, comes in
+step 5; until then the tests call the entry points directly.
 
 ## Steps
 
@@ -295,6 +317,15 @@ Done on the CPU on 2026-10-18; the GPU runs are pending.
   `Template::values` is forced inline (`STFT_TILE_PIXEL_INLINE`): GBGPU's CPU module compiles
   with `-Os`, where GCC kept it out of line, one more call per pixel, which made `get_ll_stft`
   0.5 % to 1.1 % slower.
+  Correction of 2026-10-18 (step 4): the register counts above are those of each kernel's own
+  file, as ptxas reports them. With separate compilation, a kernel that calls a function of another
+  file gets, at the device link, the largest count among itself and the functions it calls. Every
+  kernel of the existing response calls `STFTFresnelGPU::get_fourier_value` of `domains.cu`, which
+  uses 244 registers on the A100 and 222 on the H100. In the linked module every kernel has those
+  counts, in step 2 and step 3 alike, and runs 2 blocks of 128 threads per SM. The three choices
+  therefore did not change the occupancy of step 3. They keep the kernels' own counts low, which
+  matters once the count of the Fresnel function drops (step 6). `kernel_resources.py` now reads
+  the linked module (`tests.md`, step 4).
 - Deviations, decided by the author on 2026-10-18. The band-bin-first pixel map and the launch
   path for more than 48 kB of dynamic shared memory move to step 4, with the DFFR tile as their
   first user, so that every line of this step runs in its tests. The swap kernels, which this step
@@ -316,26 +347,77 @@ Done on the CPU on 2026-10-18; the GPU runs are pending.
 
 ### Step 4: DFFR kernels
 
-- LAT DFFR headers: settings from `STFTFresnel`, `STFTDomain` and the knobs; segment table
-  (reception and emission states, link amplitudes and slopes, carrier and band start, closed-form
-  TDI weights, first-order delay terms, endpoint anchors); windowed transform on `lat_fresnel.hh`;
-  `DFFRTile`; DFFR Fisher (same estimator, steps and support rules as the existing Fisher,
-  reusing the reception-state Fresnel kernels across amplitude, phase, inclination and
-  polarisation perturbations, which do not change them); compact-template and segment-table
-  diagnostics. Swap holds two tables per tile, so its row count (or the dynamic shared-memory
-  limit) follows the budget.
-- Moved here from step 3: the band-bin-first pixel map of the DFFR tile, which puts the 32
-  segments of one band bin on the 32 threads of a warp, and the launch path for more than 48 kB of
-  dynamic shared memory (32 rows of 1012 bytes per table: 32.4 kB for one table, 64.8 kB for the
-  two of swap).
-- GBGPU: shared GB formulas, `GBDFFRSource`, `gb_dffr_*` wraps and bindings; the TDI generation
-  is detected in Python from the comp's TDIConfig.
-- Tests: against standalone dffr on the same table (compact templates, band starts, global fill,
-  `(d|h)`, `(h|h)` to about 1e-14 of the peak; segment-table stages); closed forms against the
-  TDIConfig units; the self-consistency suite of `test_stft_gb.py` for DFFR (fill then domain
-  inner product equals `get_ll`, swap identities, F-statistic against `get_ll` and swap, gradients
-  against host central differences, Fisher against a Python reference built from `fill_global`);
-  CPU against GPU. The existing response stays bit-identical.
+Parts 4a and 4b done on the CPU on 2026-10-18; part 4c, the DFFR Fisher, follows; the GPU runs
+are pending. The author split the step into 4a (LAT core), 4b (pixel map, launch path, tile and
+galactic-binary model), 4c (Fisher) and 4d (documents, scripts, commits), with a review after
+each.
+
+- 4a, in `cutils/lat_dffr_kernels.hh`, ported from dffr 01530a5 with the same operations in the
+  same order:
+  - settings from `STFTFresnel` and the knobs, with host checks: `df dt = 1` to 1e-12, a taper in
+    [0, 1], generation 1 or 2, a positive chirp-rate floor;
+  - a check of the kinematics table against the grid: segment count, first midpoint t0 + dt/2 to
+    1e-6 s, spacing;
+  - the bounded sub-interval integral and the windowed transform, on `lat_fresnel.hh`;
+  - the closed-form TDI coefficients of both generations, with first-order delay terms; the 2nd
+    generation multiplies each channel pair by 1 - R R;
+  - the segment table, 1012 bytes per row, and the pixel.
+
+  `TDIConfig.generation` names the stock combinations. Three diagnostics on the existing wraps
+  (`lat_dffr_diagnostics.{hh,cu}`) feed `tests/test_dffr.py`.
+- 4b, three pieces:
+  - In `lat_stft_kernels.hh`: the band-bin-first pixel map `StftBandBinMap<Rows>`;
+    `stft_prepare_dynamic_shared`, which raises a kernel's limit on dynamic shared memory above
+    48 kB within the device's opt-in limit (`cudaDevAttrMaxSharedMemoryPerBlockOptin`) and raises
+    `std::runtime_error` beyond it; and `stft_device_domain`, the device copy of a domain for
+    tiles that read no other struct.
+  - In `lat_dffr_kernels.hh`: `DFFRTile<SourceT, Rows>`; `dffr_tile_inputs`, which raises
+    `std::invalid_argument` for a domain other than XYZ, or for a Fresnel object and a domain of
+    different grids; and the two diagnostics of a batch of sources.
+  - In GBGPU: `gb_physics.hh`, `GBDFFRSource` and the `gb_dffr_*` entry points.
+
+  One template takes 32 672 bytes at 32 rows. The two-template consumers (swap, its gradient and
+  the F-statistic) are built for 32 and for 16 rows (65 344 and 32 960 bytes) and take
+  `rows_per_pass`. `get_ll`, `fill_global` and the `get_ll` gradient use 32 rows.
+- Deviations, decided by the author on 2026-10-18:
+  - The DFFR Fisher moves to 4c. It generalises the existing Fisher kernel instead of copying it.
+    The derivative of a template splits into two parts:
+    - a grid part, the three reception kernels and moments, which only f0, ḟ, f̈, λ and β change;
+    - an amplitude part, the eighteen coefficients (TDI weights times reference phasors), which A,
+      φ0, ι and ψ change.
+
+    Those four parameters share the grid slot of the central template, so 21 grid slots replace
+    36. The column Fisher must stay bit-identical.
+  - Components: in the contract only (see Source-model contract above).
+  - File layout:
+    - one LAT header, `lat_dffr_kernels.hh`, holds the numerics, the tile and the batch
+      diagnostics; at the author's request it absorbed a first `lat_dffr_tile.hh`;
+    - GBGPU's entry points are free functions in `gb_dffr.{hh,cu}`;
+    - the shared GB formulas are in `gb_physics.hh`.
+  - The three LAT diagnostics stay until step 6, then leave LAT; a copy stays in the author's
+    work folder.
+  - Splitting `GBComputationGroup` out of `gb_tdi_on_the_fly.{hh,cu}` is left to the GBGPU
+    maintainers (see Risks and observations).
+  - At the author's request, `Template::values` and `build` were forced inline on the GPU. That
+    cost the `get_ll` gradient one block per SM and gained none elsewhere (`tests.md`), so it was
+    reverted.
+- Resources (linked module, A100 and H100; details in `tests.md`):
+  - the one-template DFFR kernels use 154 to 164 registers: 3 blocks of 128 threads per SM;
+  - swap and the F-statistic use 220 and 222, set by `STFTDomainGPU::add_ip_swap_contrib` of
+    `domains.cu`: 2 blocks;
+  - the swap gradient uses 254, because nvcc keeps `values` and `build` out of line there: 2
+    blocks;
+  - the existing kernels use 244 and 222: 2 blocks.
+
+  Two remedies, measured without a GPU, go to step 6:
+  - capping the registers of `domains.cu` at 168 lifts every existing kernel to 3 blocks, with
+    164 bytes of spills per Fresnel evaluation, and the DFFR swap on the H100;
+  - device link-time optimisation lifts the DFFR kernels to 3 blocks, except the swap gradient on
+    the H100, but leaves the existing kernels at 2 (255 registers).
+- Tests: `tests/test_dffr.py` (LAT) and `tests/test_stft_gb_dffr.py` (GBGPU); the exchange with
+  standalone dffr; DFFR against the existing response; and the bit identity of the existing
+  response against the frozen step 3 code. Driver: `scripts/dffr/run_step4.sh`. The Fisher
+  against a Python reference comes with 4c. Results in `tests.md`.
 
 ### Step 5: wiring
 
@@ -361,6 +443,17 @@ Done on the CPU on 2026-10-18; the GPU runs are pending.
 - Benchmarks per method and batch size, both responses, on a full A100 and one A100 MIG slice,
   and on the CPU. Gate: DFFR is not slower than the existing response for any method the global
   fit calls.
+- Occupancy, from the linked registers of step 4 (author's decisions of 2026-10-18). A/B timings
+  on an A100, for both responses; the faster settings go in:
+  - `domains.cu` without a register cap, and capped at 168 and at 128. The cap changes the
+    register allocation, not the arithmetic, so the outputs must stay bit-identical;
+  - device link-time optimisation (`-dlto`). It needs `nvvm/lib64/libnvvm.so` next to nvlink,
+    which the pip wheel of the CUDA toolkit does not hold (`tests.md`, step 4);
+  - 16 against 32 rows for the two-template DFFR consumers;
+  - `Template::values` and `build` of the DFFR tile forced inline on the GPU, or not.
+- The three source-independent diagnostics of step 4 (`lat_dffr_diagnostics.{hh,cu}`, their wrap
+  methods and `tests/test_dffr.py`) leave LAT after this step. A copy stays in the author's work
+  folder.
 - Global-fit smoke run on the Mojito STFT settings with `response="dffr"`: resolved-GB
   subtraction and log-likelihoods against the existing response; optionally, a short GB
   parameter-estimation comparison with trace and corner plots and a convergence table.
@@ -454,33 +547,36 @@ Done on the CPU on 2026-10-18; the GPU runs are pending.
   0.2 to 1.8 in ḟ and 0.6 to 13 in f̈. `information_matrix` notes the cause, roundoff in the
   Fresnel phase, and widens its f0 and ḟ steps 10 and 100 times for it; per Fisher entry,
   relative to sqrt(F_ii F_jj), the noise is then at most 5.2e-4 except in the row and column of
-  f̈: up to 18 on its diagonal and 0.2 to 0.4 elsewhere. Step 4 plans the same estimator and
+  f̈: up to 18 on its diagonal and 0.2 to 0.4 elsewhere. Step 4c plans the same estimator and
   steps for the DFFR Fisher; the steps are to be reviewed there. Noted, not changed.
-- Shared memory: two segment tables for swap exceed 48 kB at 32 rows; the Fisher needs the
-  reception-state sharing to fit. Without the opt-in a block gets 48 kB on an A100 and on an
-  H100; with it, an A100 allows 163 kB per block and 164 kB per SM, an H100 227 kB and 228 kB.
+- Shared memory: one DFFR template takes 32 672 bytes at 32 rows, so the two of swap (65 344
+  bytes) exceed the 48 kB a launch gets on an A100 and on an H100; the Fisher needs the
+  reception-state sharing to fit. With the opt-in of step 4, which takes its limit from the
+  device, an A100 allows 163 kB per block and 164 kB per SM, an H100 227 kB and 228 kB.
 - Newer devices than the A100, the H100 (sm_90) in particular. The timing gate of this effort is
   measured on A100s, the GPUs of SURF Spider, while the standalone DFFR timings in the README were
   measured on an H100 NVL. Both devices have 65 536 registers per SM and at most 255 per thread,
   so their steps in occupancy fall at the same register counts (4 blocks of 128 threads up to 128
   registers, 3 blocks up to 168), and both have warps of 32 threads, so the 32 rows of the DFFR
-  tile suit both. After step 3, ptxas gives every STFT kernel at least the blocks per SM of step
-  2 on both. What should change for H100 nodes:
+  tile suit both. In the linked module, every STFT kernel of the existing response has 244
+  registers on the A100 and 222 on the H100, in steps 2 to 4 alike, so 2 blocks per SM on both
+  (step 3, correction). What should change for H100 nodes:
   - The build. The install script of SURF Spider compiles machine code for its own GPUs and PTX of
     the A100 generation. An H100 would run code that its driver translates from that PTX when the
     module loads. A build for H100 nodes adds 90 to `CUDA_ARCH`, so that the code comes from PTX
     of its own generation, the code that the ptxas check describes.
   - The checks. The same source gives different register counts on the two devices: in step 2
-    already, `get_ll` used 120 registers on the A100 and 128 on the H100, and the gradient of
-    `get_ll` 128 and 144. A change of the kernels is therefore checked with
-    `kernel_resources.py --arch 90` as well as `--arch 80`. Claims of speed on an H100 need the
-    benchmarks repeated on one (`--device gpu`).
+    already, the own code of `get_ll` used 120 registers on the A100 and 128 on the H100, and the
+    linked kernel 244 and 222. A change of the kernels is therefore checked with
+    `kernel_resources.py --arch 90` as well as `--arch 80`, which since step 4 compiles and links
+    the whole module for that device. Claims of speed on an H100 need the benchmarks repeated on
+    one (`--device gpu`).
 
   What could change, to use what an H100 has more of:
-  - Shared memory: with the two segment tables of the DFFR swap (64.8 kB at 32 rows), an H100
-    fits 3 blocks per SM where an A100 fits 2. The launch path of step 4 for more than 48 kB
-    should take its limit from the device (`cudaDevAttrMaxSharedMemoryPerBlockOptin`), not from a
-    constant.
+  - Shared memory: with the two templates of the DFFR swap at 32 rows (65 344 bytes, and about
+    11 kB of static shared memory), an H100 fits 3 blocks per SM by shared memory where an A100
+    fits 2; today the registers hold both at 2. The launch path of step 4 takes its limit from
+    the device (`cudaDevAttrMaxSharedMemoryPerBlockOptin`).
   - Double precision: an H100 SM has 64 FP64 units against 32 on an A100, and the Fresnel and TDI
     arithmetic is all in double precision, so an H100 needs more work in flight per SM to keep
     those units busy. A launch bound that trades registers for blocks, or a block size other than
@@ -492,6 +588,12 @@ Done on the CPU on 2026-10-18; the GPU runs are pending.
     would let the blocks of a cluster read each other's segment tables, for example the add and
     remove tables of swap.
 - MIG slices have no peer access; multi-split tests use slices of one job and host-routed checks.
+- Proposal for the GBGPU maintainers, recorded at the author's request (2026-10-18), not done:
+  `GBComputationGroup`, whose 23 method definitions sit among the kernels of the existing response
+  in `gb_tdi_on_the_fly.cu`, could move to a file of its own, generic over the response. The
+  `gb_stft_*` and `gb_dffr_*` methods would then live in one group without either response's file
+  holding the other's code. The class is under active development by others, so this effort binds
+  the DFFR entry points as methods of the existing wrap and leaves the class where it is.
 - GBGPU's CPU module, which holds the STFT kernels of the CPU backend, compiles with `-Os`:
   `nanobind_add_module` optimises a module's sources for size unless it is given `NOMINSIZE`,
   and GCC applies the last `-O` option, so the `-O3` of the release build has no effect there.
