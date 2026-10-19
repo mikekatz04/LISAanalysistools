@@ -569,9 +569,12 @@ class STFTEngineNumericTest(unittest.TestCase):
       rebinding ``stft_comps`` (refactor-equivalence);
     * degenerate swap ``(A, A)`` collapses to ``ll_diff == 0`` with
       ``opt_snr = sqrt(h_h)``.
+
+    The same checks run for both responses of ``STFTGBComputations``; for DFFR
+    they also cover the kinematics table that the ACA's group builds.
     """
 
-    def _build_setup(self):
+    def _build_setup(self, **comp_options):
         import numpy as np
 
         from gbgpu.gbcomps import STFTGBComputations
@@ -632,6 +635,7 @@ class STFTEngineNumericTest(unittest.TestCase):
             n_side_bins=3,
             window_factor=1.0,
             freq_from_tdi_phase=False,
+            **comp_options,
         )
         engine = STFTBandLikelihoodEngine(
             gb_stft_comp=gb,
@@ -647,9 +651,17 @@ class STFTEngineNumericTest(unittest.TestCase):
         return aca, gb, engine, params
 
     def test_fill_get_ll_and_swap_self_consistency(self):
+        self._check_self_consistency()
+
+    def test_fill_get_ll_and_swap_self_consistency_dffr(self):
+        aca, gb = self._check_self_consistency(response="dffr")
+        # * The group built its table once, from the comp's own orbits.
+        self.assertIs(aca.cpp_splits[0]._kinematics[0], gb.cpp_orbits)
+
+    def _check_self_consistency(self, **comp_options):
         import numpy as np
 
-        aca, gb, engine, params = self._build_setup()
+        aca, gb, engine, params = self._build_setup(**comp_options)
 
         # Fill band 0 with the source (factor +1). Band 1 stays empty.
         engine.fill_template(
@@ -710,6 +722,7 @@ class STFTEngineNumericTest(unittest.TestCase):
         self.assertLess(
             float(np.abs(aca.linear_data_arr[0]).max()), 1e-30
         )
+        return aca, gb
 
     def test_build_stft_band_aca_smoke(self):
         """Real ``SubBandBuffer._build_band_ac_list`` STFT run (partial init).
