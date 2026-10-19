@@ -1,13 +1,19 @@
 """Gradients and Fisher matrices of the golden fixtures at several finite-difference steps.
 
     python finite_difference_steps.py --capture OUT.npz --device cpu [--configs ...]
+        [--response dffr] [--envelope-variants]
     python finite_difference_steps.py --compare REF.npz NEW.npz
+    python finite_difference_steps.py --noise OUT.npz
 
 The gradients and Fisher matrices of STFTGBComputations are central differences of templates. A
 change of the code that moves only rounding enters them as noise divided by the step, so its
 effect falls with the step; a change of the modelled signal does not depend on the step.
 --capture evaluates ``get_ll_grad_stft`` and ``information_matrix`` (defaults and the TDI track)
-with each method's default steps multiplied by 1, 10 and 100. --compare prints two tables:
+with each method's default steps multiplied by 1, 10 and 100; ``--response dffr`` evaluates the
+DFFR response, which has no Fisher matrix yet, and ``--envelope-variants`` adds the gradient with
+the linear envelope forced on and forced off. --noise prints each code's own noise per gradient
+component (defined below) for every gradient of a capture, and the ratio of the envelope-on to
+the envelope-off noise. --compare prints two tables:
 
 * per array and factor, the largest change relative to the array's peak, and the ratio between
   factors;
@@ -43,7 +49,7 @@ NUM_PARAMETERS = 9
 PARAMETER_NAMES = ("amp", "f0", "fdot", "fddot", "phi0", "iota", "psi", "lam", "beta")
 
 
-def evaluate(fixture):
+def evaluate(fixture, envelope_variants=False):
     """{array@factor: host array} for the gradient and two Fisher variants at every factor."""
     comp = fixture.comp
     xp = comp.xp
@@ -56,15 +62,25 @@ def evaluate(fixture):
     # * Each method's own default steps, so factor 1 reproduces the golden outputs.
     gradient_steps = comp._default_param_eps(NUM_PARAMETERS)
     fisher_steps, _ = comp._information_matrix_steps(NUM_PARAMETERS, None, None, 1.0e-6)
+    gradient_variants = {"grad": dict()}
+    if envelope_variants:
+        gradient_variants.update(
+            grad_envelope_on=dict(linear_envelope=True),
+            grad_envelope_off=dict(linear_envelope=False),
+        )
     outputs = {}
     for factor in STEP_FACTORS:
-        outputs[f"grad@{factor}"] = comp.get_ll_grad_stft(
-            params,
-            param_eps=gradient_steps * factor,
-            data_index=cells,
-            noise_index=cells,
-            start_freq_inds=starts,
-        )
+        for name, options in gradient_variants.items():
+            outputs[f"{name}@{factor}"] = comp.get_ll_grad_stft(
+                params,
+                param_eps=gradient_steps * factor,
+                data_index=cells,
+                noise_index=cells,
+                start_freq_inds=starts,
+                **options,
+            )
+        if comp.response == "dffr":
+            continue
         for name, options in (("fisher", dict()), ("fisher_tdi_track", dict(astro_track=False))):
             outputs[f"{name}@{factor}"] = comp.information_matrix(
                 fisher_params,
@@ -77,17 +93,51 @@ def evaluate(fixture):
     return {key: fixtures.to_host(value) for key, value in outputs.items()}
 
 
-def capture(path, backend, config_names, mojito_l1):
+def capture(path, backend, config_names, mojito_l1, response, envelope_variants):
     orbits_cache = {}
     blob = {}
     for name in config_names:
-        fixture = fixtures.build_fixture(name, backend, mojito_l1, orbits_cache)
+        fixture = fixtures.build_fixture(name, backend, mojito_l1, orbits_cache, response)
         fixture.description["backend"] = backend
-        for key, value in evaluate(fixture).items():
+        for key, value in evaluate(fixture, envelope_variants).items():
             blob[f"{name}/{key}"] = value
         print(f"[capture] {name}", flush=True)
     np.savez(path, **blob)
     print(f"[capture] wrote {path} ({len(blob)} arrays)")
+
+
+def own_noise(blob, stem):
+    """Per gradient component, a code's own noise: the difference between its values at the
+    default and the tenfold step, largest over sources, over the component's largest value at the
+    tenfold step."""
+    measure = scaled_measure(stem, blob[f"{stem}@10"])
+    return measure(blob[f"{stem}@1"] - blob[f"{stem}@10"])
+
+
+def noise_table(path):
+    """Own noise of every gradient of a capture, and the envelope-on over envelope-off ratio."""
+    blob = load_blob(path)
+    stems = sorted(
+        {
+            key.rsplit("@", 1)[0]
+            for key in blob
+            if "@" in key and key.rsplit("@", 1)[0].rsplit("/", 1)[-1].startswith("grad")
+        }
+    )
+    header = " ".join(f"{name:>9s}" for name in PARAMETER_NAMES)
+    print(f"{'gradient':38s} {header}")
+    noises = {}
+    for stem in stems:
+        noises[stem] = own_noise(blob, stem)
+        print(f"{stem:38s} " + " ".join(f"{value:9.2e}" for value in noises[stem]))
+    print(f"\n{'envelope on / off':38s} {header}")
+    for config in sorted({stem.split("/", 1)[0] for stem in stems}):
+        on, off = f"{config}/grad_envelope_on", f"{config}/grad_envelope_off"
+        if on in noises and off in noises:
+            ratio = np.divide(
+                noises[on], noises[off], out=np.full(NUM_PARAMETERS, np.inf), where=noises[off] > 0
+            )
+            print(f"{config:38s} " + " ".join(f"{value:9.2f}" for value in ratio))
 
 
 def peak_changes(reference, candidate, stems):
@@ -173,12 +223,31 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--capture", metavar="OUT_NPZ")
     mode.add_argument("--compare", nargs=2, metavar=("REF_NPZ", "NEW_NPZ"))
+    mode.add_argument("--noise", metavar="CAPTURE_NPZ")
     parser.add_argument("--device", choices=["cpu", "gpu"], default="cpu")
-    parser.add_argument("--configs", nargs="+", default=list(DEFAULT_CONFIGS))
+    parser.add_argument("--configs", nargs="+", default=None)
     parser.add_argument("--mojito-l1", default=None, help="Mojito L1 .h5 file (l1 fixtures)")
+    parser.add_argument("--response", choices=fixtures.RESPONSES, default=fixtures.RESPONSES[0])
+    parser.add_argument(
+        "--envelope-variants",
+        action="store_true",
+        help="also capture the gradient with the linear envelope forced on and forced off",
+    )
     args = parser.parse_args(argv)
     if args.capture:
-        capture(args.capture, args.device, args.configs, args.mojito_l1)
+        default_configs = (
+            DEFAULT_CONFIGS if args.response == fixtures.RESPONSES[0] else fixtures.DFFR_CONFIGS
+        )
+        capture(
+            args.capture,
+            args.device,
+            args.configs or list(default_configs),
+            args.mojito_l1,
+            args.response,
+            args.envelope_variants,
+        )
+    elif args.noise:
+        noise_table(args.noise)
     else:
         compare(*args.compare)
     return 0

@@ -68,6 +68,13 @@ PRODUCTION_CONFIGS = {
 }
 
 ALL_CONFIGS = tuple(ORACLE_CONFIGS) + tuple(PRODUCTION_CONFIGS)
+#: Responses of STFTGBComputations; the first is the default.
+RESPONSES = ("tdi_on_the_fly", "dffr")
+#: Configurations the DFFR response runs on: the production ones with XYZ channels. The oracle
+#: configurations reproduce the column policy of the TDI-on-the-fly response.
+DFFR_CONFIGS = tuple(
+    name for name, config in PRODUCTION_CONFIGS.items() if config["tdi_type"] == "XYZ"
+)
 
 
 @dataclass
@@ -90,15 +97,30 @@ class Fixture:
 
 
 class ShimGroup:
-    """Stand-in for ``STFTComputationGroup`` with only what ``STFTGBComputations`` reads."""
+    """Stand-in for ``STFTComputationGroup`` with only what ``STFTGBComputations`` reads.
 
-    def __init__(self, cpp_fresnel, cpp_domain, num_noise, buffers):
+    For the DFFR response it also carries the group's ``linear_envelope`` and a kinematics table
+    built by the caller, which ``cpp_kinematics`` returns.
+    """
+
+    def __init__(
+        self, cpp_fresnel, cpp_domain, num_noise, buffers, linear_envelope=None, kinematics=None
+    ):
         self.cpp_fresnel = cpp_fresnel
         self.cpp_domain = cpp_domain
         self.d_d = None
         self.num_noise = num_noise
         # ! The domain wrap holds raw pointers into these buffers.
         self._keepalive = buffers
+        # * Set only when given, so the TDI-on-the-fly response sees the shim it saw before.
+        if linear_envelope is not None:
+            self.linear_envelope = linear_envelope
+        self._kinematics = kinematics
+
+    def cpp_kinematics(self, cpp_orbits):
+        if self._kinematics is None:
+            raise TypeError("this shim holds no kinematics table")
+        return self._kinematics
 
 
 def array_module(backend):
@@ -391,12 +413,19 @@ def production_sources(band_settings, num_sources=24, tdi_type="XYZ"):
 
 
 def build_production_fixture(
-    name, backend, mojito_l1=None, num_segments=32, num_sources=24, orbits=None
+    name,
+    backend,
+    mojito_l1=None,
+    num_segments=32,
+    num_sources=24,
+    orbits=None,
+    response=RESPONSES[0],
 ):
     """One production-like configuration on a real computation group with two store windows.
 
     ``orbits`` may pass an already loaded ``(orbits, start)`` pair, so a large orbit file is read
-    once per process.
+    once per process. ``response`` selects the response of the comp; DFFR builds its kinematics
+    table through the group, as in a global-fit run.
     """
     config = PRODUCTION_CONFIGS[name]
     if orbits is None:
@@ -423,6 +452,7 @@ def build_production_fixture(
         window_alpha=PRODUCTION_WINDOW_ALPHA,
         use_midpoint=True,
         linear_envelope=config["linear_envelope"],
+        response=response,
     )
     params, cells = make_production_params(rng, band_settings, num_sources)
     xp = array_module(backend)
@@ -448,6 +478,7 @@ def build_production_fixture(
         t_ref=t_ref,
         orbits_start=orbits_start,
         domain="STFTComputationGroup",
+        response=response,
     )
     return Fixture(
         name=name,
@@ -462,8 +493,10 @@ def build_production_fixture(
     )
 
 
-def build_fixture(name, backend, mojito_l1=None, orbits_cache=None):
+def build_fixture(name, backend, mojito_l1=None, orbits_cache=None, response=RESPONSES[0]):
     """Build any configuration by name; ``orbits_cache`` maps an orbits kind to a loaded pair."""
+    if response != RESPONSES[0] and name not in DFFR_CONFIGS:
+        raise ValueError(f"{name} is not a configuration of the DFFR response: {DFFR_CONFIGS}")
     if name in ORACLE_CONFIGS:
         return build_oracle_fixture(name, backend)
     kind = PRODUCTION_CONFIGS[name]["orbits"]
@@ -472,7 +505,9 @@ def build_fixture(name, backend, mojito_l1=None, orbits_cache=None):
         if kind not in orbits_cache:
             orbits_cache[kind] = load_orbits(kind, backend, mojito_l1)
         orbits = orbits_cache[kind]
-    return build_production_fixture(name, backend, mojito_l1=mojito_l1, orbits=orbits)
+    return build_production_fixture(
+        name, backend, mojito_l1=mojito_l1, orbits=orbits, response=response
+    )
 
 
 def _git_state(repo_root):

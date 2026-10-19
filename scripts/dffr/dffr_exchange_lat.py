@@ -6,10 +6,12 @@
 
 ``--capture`` stores the inputs of a DFFR evaluation (the kinematics table of the grid, the grid,
 the settings, the sources, the data and the inverse covariance) and LAT's outputs on them: the
-segment table, the compact templates and their band starts, the fill_global grid, and (d|h) and
-(h|h). ``dffr_exchange_dffr.py`` recomputes the same outputs with the standalone package from the
-same inputs, and ``--compare`` prints, per output, the largest difference relative to the peak of
-the dffr array, against the gate of 1e-13; the band starts must agree exactly.
+segment table, the compact templates and their band starts (diagnostic entry points), and the
+fill_global grid, (d|h) and (h|h) (``STFTGBComputations(response="dffr")``, so the comparison
+covers the comp's wiring). ``dffr_exchange_dffr.py`` recomputes the same outputs with the
+standalone package from the same inputs, and ``--compare`` prints, per output, the largest
+difference relative to the peak of the dffr array, against the gate of 1e-13; the band starts must
+agree exactly.
 
 Fixture: the ESA orbits that LAT ships, 32 one-day segments from 10 days after their start, the
 production band (0.1 to 29 mHz) as one domain, the Tukey taper 0.1157, n_side_bins = 10, TDI 2nd
@@ -34,6 +36,7 @@ from stft_fixtures import (  # noqa: E402
     DATA_START_OFFSET,
     PRODUCTION_N_SIDE_BINS,
     PRODUCTION_WINDOW_ALPHA,
+    ShimGroup,
     array_module,
     draw_cell_arrays,
     load_orbits,
@@ -85,6 +88,9 @@ def capture(path: str, device: str) -> None:
         tdi_config="2nd generation",
         force_backend=device,
         n_side_bins=PRODUCTION_N_SIDE_BINS,
+        response="dffr",
+        first_order_delays=FIRST_ORDER_DELAYS,
+        chirp_rate_floor=CHIRP_RATE_FLOOR,
     )
     backend = comp.backend
     data_device = xp.asarray(data[None])
@@ -111,6 +117,15 @@ def capture(path: str, device: str) -> None:
         band.t0 + 0.5 * band.dt, band.dt, band.NT, *table_arrays.values()
     )
     table.build(comp.cpp_orbits)
+    # * fill_global and get_ll run through the comp; the group stand-in hands it this table.
+    comp.stft_comps = ShimGroup(
+        fresnel,
+        domain,
+        num_noise=1,
+        buffers=(data_device, inverse_covariance_device),
+        linear_envelope=LINEAR_ENVELOPE,
+        kinematics=table,
+    )
 
     wrap = backend.GBComputationGroupWrap()
     knobs = (
@@ -123,7 +138,6 @@ def capture(path: str, device: str) -> None:
     )
     params_device = xp.asarray(np.ascontiguousarray(params))
     num_sources = params.shape[0]
-    no_cells = xp.zeros(0, dtype=np.int32)
     indices = xp.zeros(num_sources, dtype=np.int32)
 
     outputs = {}
@@ -168,39 +182,14 @@ def capture(path: str, device: str) -> None:
     outputs["compact_start"] = to_host(compact_starts).reshape(num_sources, band.NT)
 
     grid_template = xp.zeros((1, 3, band.NT, band.NF_active), dtype=np.complex128)
-    wrap.gb_dffr_fill_global(
-        grid_template.reshape(-1),
-        table,
-        fresnel,
-        domain,
-        params_device.reshape(-1),
-        indices,
-        xp.ones(num_sources),
-        num_sources,
-        9,
-        *knobs,
-        no_cells,
+    comp.fill_global_stft(
+        params_device, grid_template, data_index=indices, factors=xp.ones(num_sources)
     )
     outputs["fill_global"] = to_host(grid_template)
 
-    d_h = xp.zeros(num_sources, dtype=np.complex128)
-    h_h = xp.zeros(num_sources, dtype=np.complex128)
-    wrap.gb_dffr_get_ll(
-        d_h,
-        h_h,
-        table,
-        fresnel,
-        domain,
-        params_device.reshape(-1),
-        indices,
-        indices,
-        num_sources,
-        9,
-        *knobs,
-        no_cells,
-    )
-    outputs["d_h"] = to_host(d_h)
-    outputs["h_h"] = to_host(h_h)
+    comp.get_ll_stft(params_device, data_index=indices, noise_index=indices)
+    outputs["d_h"] = to_host(comp.d_h_out)
+    outputs["h_h"] = to_host(comp.h_h_out)
 
     num_times = band.NT
     kinematics = {

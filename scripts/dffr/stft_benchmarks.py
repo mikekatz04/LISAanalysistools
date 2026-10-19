@@ -4,7 +4,8 @@ Times ``get_ll_stft``, ``get_swap_ll_stft``, ``get_fstat_ll_stft``, ``fill_globa
 ``get_ll_grad_stft``, ``get_swap_ll_grad_stft`` and ``information_matrix`` against batch size on
 a production fixture of ``stft_fixtures.py``. Each point is one warm-up call followed by
 ``--repeats`` timed calls; on the GPU the device is synchronised before each clock reading. The
-times include the Python work of each method, which the global fit pays as well.
+times include the Python work of each method, which the global fit pays as well. ``--response``
+selects the response; DFFR has no ``information_matrix`` yet, so it is left out.
 
 Usage:
     python stft_benchmarks.py --device cpu --mojito-l1 FILE.h5 --output OUT.json
@@ -101,10 +102,14 @@ def main(argv=None):
         action="store_true",
         help="leave out get_swap_ll_stft and get_swap_ll_grad_stft (CPU runs from step 2 on)",
     )
+    parser.add_argument("--response", choices=fixtures.RESPONSES, default=fixtures.RESPONSES[0])
     parser.add_argument("--output", required=True, metavar="OUT_JSON")
     args = parser.parse_args(argv)
     if args.without_swap:
         args.methods = [method for method in args.methods if "swap" not in method]
+    if args.response == "dffr":
+        # * The DFFR response has no Fisher matrix yet.
+        args.methods = [method for method in args.methods if method != "information_matrix"]
 
     fixture = fixtures.build_production_fixture(
         args.config,
@@ -112,6 +117,7 @@ def main(argv=None):
         mojito_l1=args.mojito_l1,
         num_segments=args.num_segments,
         num_sources=max(args.batch_sizes),
+        response=args.response,
     )
     results = []
     for batch_size in args.batch_sizes:
@@ -138,6 +144,7 @@ def main(argv=None):
     record = dict(
         metadata=fixtures.run_metadata(args.backend, args.mojito_l1),
         config=args.config,
+        response=args.response,
         fixture=fixture.description,
         repeats=args.repeats,
         results=results,

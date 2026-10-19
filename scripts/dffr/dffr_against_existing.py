@@ -2,7 +2,8 @@
 
     python dffr_against_existing.py --device cpu [--output RESULTS.npz]
 
-Both responses evaluate the same sources on the same grid. Per source, the script fills the
+Both responses evaluate the same sources on the same grid, each through ``STFTGBComputations``
+(``response="tdi_on_the_fly"`` and ``"dffr"``). Per source, the script fills the
 template of each over the whole band (fill_global, factor one) and prints, with a the DFFR
 template and b the existing one, summed over the three channels with unit weights:
 
@@ -36,6 +37,7 @@ from stft_fixtures import (  # noqa: E402
     PRODUCTION_N_SIDE_BINS,
     PRODUCTION_WINDOW_ALPHA,
     SEGMENT_DURATION,
+    ShimGroup,
     array_module,
     draw_cell_arrays,
     load_orbits,
@@ -58,15 +60,6 @@ SETTINGS = (
 )
 
 
-class _ShimGroup:
-    """Stand-in for STFTComputationGroup with what fill_global_stft reads."""
-
-    def __init__(self, cpp_fresnel, cpp_domain):
-        self.cpp_fresnel = cpp_fresnel
-        self.cpp_domain = cpp_domain
-        self.d_d = None
-
-
 def templates_of_both(device, orbits, band, params, data, generation, linear_envelope):
     """(DFFR, existing) templates (num_sources, 3, NT, NF_active), one per source, host arrays."""
     from gbgpu.gbcomps import STFTGBComputations
@@ -75,20 +68,27 @@ def templates_of_both(device, orbits, band, params, data, generation, linear_env
 
     xp = array_module(device)
     orbits_object, orbits_start = orbits
-    comp = STFTGBComputations(
-        stft_comps=None,
-        T=NUM_SEGMENTS * SEGMENT_DURATION,
-        t_ref=orbits_start,
-        orbits=orbits_object,
-        tdi_config=f"{'1st' if generation == 1 else '2nd'} generation",
-        force_backend=device,
-        n_side_bins=PRODUCTION_N_SIDE_BINS,
-        window_factor=1.0,
-        freq_from_tdi_phase=True,
-        window_alpha=PRODUCTION_WINDOW_ALPHA,
-        use_midpoint=True,
-        linear_envelope=linear_envelope,
-    )
+
+    def comp_of(response):
+        return STFTGBComputations(
+            stft_comps=None,
+            T=NUM_SEGMENTS * SEGMENT_DURATION,
+            t_ref=orbits_start,
+            orbits=orbits_object,
+            tdi_config=f"{'1st' if generation == 1 else '2nd'} generation",
+            force_backend=device,
+            n_side_bins=PRODUCTION_N_SIDE_BINS,
+            window_factor=1.0,
+            freq_from_tdi_phase=True,
+            window_alpha=PRODUCTION_WINDOW_ALPHA,
+            use_midpoint=True,
+            linear_envelope=linear_envelope,
+            response=response,
+            first_order_delays=FIRST_ORDER_DELAYS,
+            chirp_rate_floor=CHIRP_RATE_FLOOR,
+        )
+
+    comp, dffr_comp = comp_of("tdi_on_the_fly"), comp_of("dffr")
     backend = comp.backend
     # ! The domain wrap holds raw pointers into these arrays; fill_global does not read them.
     data_device = xp.asarray(data[0][None])
@@ -108,14 +108,23 @@ def templates_of_both(device, orbits, band, params, data, generation, linear_env
         use_midpoint=True,
         linear_envelope=linear_envelope,
     )
-    comp.stft_comps = _ShimGroup(fresnel, domain)
     table_arrays = {
         name: xp.zeros(int(np.prod(shape)) * band.NT) for name, shape in KINEMATICS_TABLE_FIELDS
     }
     table = backend.KinematicsTableWrap(
         band.t0 + 0.5 * band.dt, band.dt, band.NT, *table_arrays.values()
     )
-    table.build(comp.cpp_orbits)
+    table.build(dffr_comp.cpp_orbits)
+    buffers = (data_device, inverse_covariance_device)
+    comp.stft_comps = ShimGroup(fresnel, domain, num_noise=1, buffers=buffers)
+    dffr_comp.stft_comps = ShimGroup(
+        fresnel,
+        domain,
+        num_noise=1,
+        buffers=buffers,
+        linear_envelope=linear_envelope,
+        kinematics=table,
+    )
 
     num_sources = params.shape[0]
     shape = (num_sources, 3, band.NT, band.NF_active)
@@ -123,24 +132,7 @@ def templates_of_both(device, orbits, band, params, data, generation, linear_env
     indices = xp.arange(num_sources, dtype=np.int32)
     factors = xp.ones(num_sources)
     dffr = xp.zeros(shape, dtype=np.complex128)
-    backend.GBComputationGroupWrap().gb_dffr_fill_global(
-        dffr.reshape(-1),
-        table,
-        fresnel,
-        domain,
-        xp.asarray(np.ascontiguousarray(params)).reshape(-1),
-        indices,
-        factors,
-        num_sources,
-        9,
-        orbits_start,
-        PRODUCTION_N_SIDE_BINS,
-        generation,
-        linear_envelope,
-        FIRST_ORDER_DELAYS,
-        CHIRP_RATE_FLOOR,
-        xp.zeros(0, dtype=np.int32),
-    )
+    dffr_comp.fill_global_stft(params, dffr, data_index=indices, factors=factors)
     existing = xp.zeros(shape, dtype=np.complex128)
     comp.fill_global_stft(params, existing, data_index=indices, factors=factors)
     return to_host(dffr), to_host(existing)

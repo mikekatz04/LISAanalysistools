@@ -14,7 +14,9 @@ Usage:
 Comparisons ask for bit identity unless ``--rtol`` is given; differences are then normalised by
 the largest absolute value of each reference array. The exit status is 1 when any array fails.
 ``--without-swap`` leaves out the two swap kernels, in captures and comparisons; the CPU runs use
-it from step 2 on. Fixtures, tolerances and results are recorded in ``docs/response/dffr/tests.md``.
+it from step 2 on. ``--response dffr`` evaluates the DFFR response on its configurations
+(``stft_fixtures.DFFR_CONFIGS``), without the Fisher matrices, which it does not have yet.
+Fixtures, tolerances and results are recorded in ``docs/response/dffr/tests.md``.
 """
 
 import argparse
@@ -148,6 +150,9 @@ def evaluate(fixture, with_swap=True):
     outputs["fstat_N_cmplx"] = comp.N_arr_cmplx
     outputs["fstat_M_cmplx"] = comp.M_mat_cmplx
 
+    if comp.response == "dffr":
+        fixtures.synchronize(backend)
+        return {key: fixtures.to_host(value) for key, value in outputs.items()}
     fisher_sources = first_sources(fixture.cells, NUM_FISHER_SOURCES)
     fisher_params = params[fisher_sources]
     fisher_cells = xp.asarray(fixture.cells[fisher_sources])
@@ -173,12 +178,12 @@ def evaluate(fixture, with_swap=True):
     return {key: fixtures.to_host(value) for key, value in outputs.items()}
 
 
-def capture(path, backend, config_names, mojito_l1, with_swap=True):
+def capture(path, backend, config_names, mojito_l1, with_swap=True, response="tdi_on_the_fly"):
     orbits_cache = {}
     blob = {}
     descriptions = {}
     for name in config_names:
-        fixture = fixtures.build_fixture(name, backend, mojito_l1, orbits_cache)
+        fixture = fixtures.build_fixture(name, backend, mojito_l1, orbits_cache, response)
         fixture.description["backend"] = backend
         outputs = evaluate(fixture, with_swap)
         for key, value in outputs.items():
@@ -191,6 +196,7 @@ def capture(path, backend, config_names, mojito_l1, with_swap=True):
     metadata = fixtures.run_metadata(backend, mojito_l1)
     metadata["configs"] = descriptions
     metadata["with_swap"] = with_swap
+    metadata["response"] = response
     blob[METADATA_KEY] = np.array(json.dumps(metadata))
     np.savez(path, **blob)
     print(f"[capture] wrote {path} ({len(blob) - 1} arrays)")
@@ -309,16 +315,20 @@ def main(argv=None):
         action="store_true",
         help="leave out get_swap_ll_stft and get_swap_ll_grad_stft, in captures and comparisons",
     )
+    parser.add_argument("--response", choices=fixtures.RESPONSES, default=fixtures.RESPONSES[0])
     args = parser.parse_args(argv)
     with_swap = not args.without_swap
+    default_configs = (
+        fixtures.ALL_CONFIGS if args.response == fixtures.RESPONSES[0] else fixtures.DFFR_CONFIGS
+    )
 
     def without_swap(blob):
         # * A reference that holds swap arrays still serves a run without them.
         return {key: value for key, value in blob.items() if with_swap or not is_swap_output(key)}
 
     if args.capture:
-        config_names = args.configs or list(fixtures.ALL_CONFIGS)
-        capture(args.capture, args.backend, config_names, args.mojito_l1, with_swap)
+        config_names = args.configs or list(default_configs)
+        capture(args.capture, args.backend, config_names, args.mojito_l1, with_swap, args.response)
         return 0
     if args.compare_files:
         reference_blob, candidate_blob = (load_blob(path) for path in args.compare_files)
@@ -331,7 +341,9 @@ def main(argv=None):
     candidate_blob = {}
     orbits_cache = {}
     for name in config_names:
-        fixture = fixtures.build_fixture(name, args.backend, args.mojito_l1, orbits_cache)
+        fixture = fixtures.build_fixture(
+            name, args.backend, args.mojito_l1, orbits_cache, args.response
+        )
         fixture.description["backend"] = args.backend
         for key, value in evaluate(fixture, with_swap).items():
             candidate_blob[f"{name}/{key}"] = value
