@@ -15,8 +15,9 @@ Comparisons ask for bit identity unless ``--rtol`` is given; differences are the
 the largest absolute value of each reference array. The exit status is 1 when any array fails.
 ``--without-swap`` leaves out the two swap kernels, in captures and comparisons; the CPU runs use
 it from step 2 on. ``--response dffr`` evaluates the DFFR response on its configurations
-(``stft_fixtures.DFFR_CONFIGS``), without the Fisher matrices, which it does not have yet.
-Fixtures, tolerances and results are recorded in ``docs/response/dffr/tests.md``.
+(``stft_fixtures.DFFR_CONFIGS``); its Fisher matrices have no TDI-track variant, since DFFR has
+one chirp model. Fixtures, tolerances and results are recorded in
+``docs/response/dffr/tests.md``.
 """
 
 import argparse
@@ -150,9 +151,6 @@ def evaluate(fixture, with_swap=True):
     outputs["fstat_N_cmplx"] = comp.N_arr_cmplx
     outputs["fstat_M_cmplx"] = comp.M_mat_cmplx
 
-    if comp.response == "dffr":
-        fixtures.synchronize(backend)
-        return {key: fixtures.to_host(value) for key, value in outputs.items()}
     fisher_sources = first_sources(fixture.cells, NUM_FISHER_SOURCES)
     fisher_params = params[fisher_sources]
     fisher_cells = xp.asarray(fixture.cells[fisher_sources])
@@ -162,6 +160,9 @@ def evaluate(fixture, with_swap=True):
         "fisher_tdi_track": dict(astro_track=False),
         "fisher_subset": dict(inds=FISHER_SUBSET),
     }
+    if comp.response == "dffr":
+        # ? One chirp model: the TDI track would repeat the default Fisher.
+        del fisher_variants["fisher_tdi_track"]
     for key, options in fisher_variants.items():
         outputs[key] = comp.information_matrix(
             fisher_params, noise_index=fisher_cells, start_freq_inds=starts, **options

@@ -26,7 +26,9 @@ Blocks of 128 threads per SM follow from the registers (64 K per SM, allocated p
 of 8 per thread) and from the shared memory. The shared memory of a block is the static part, the
 dynamic part of the tile's templates and 1 kB the system keeps per block. The SM holds 164 kB on
 the A100 (sm_80) and 228 kB on the H100 (sm_90). The dynamic part of the DFFR tile is the size of
-its template arena. A small host program built with the flags of gb_dffr.cu prints it.
+its template arena. A small host program built with the flags of gb_dffr.cu prints it, and a
+second one the dynamic shared memory of the DFFR Fisher matrix, which depends on the parameters
+it differences: the kernel table shows the 8 of the global fit, a list both 8 and 9.
 
 Two properties of the sm_90 code: its static shared memory already holds the 1 kB the system
 keeps (cuobjdump reports ptxas's figure plus 1024 bytes), and it reports registers for kernels
@@ -72,6 +74,27 @@ int main() {
   return 0;
 }
 """
+# * The dynamic shared memory of the DFFR Fisher matrix depends on the parameters it differences:
+# * the 8 of the global fit (fddot filled) and all 9, at 4 and 8 rows per pass.
+DFFR_FISHER_PROBE = """#include <cstdio>
+#include "gb_dffr_source.hh"
+#include "lat_dffr_kernels.hh"
+int main() {
+  const int all_params[9] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+  const int test_inds[8] = {0, 1, 2, 4, 5, 6, 7, 8};
+  const double steps[9] = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
+  const DFFRFisherLayout nine = dffr_information_layout<GBDFFRSource>(all_params, steps, 9, 9, false);
+  const DFFRFisherLayout eight = dffr_information_layout<GBDFFRSource>(test_inds, steps, 9, 8, false);
+  std::printf("8 4 %zu\\n", dffr_information_bytes<GBDFFRSource, 4>(eight));
+  std::printf("8 8 %zu\\n", dffr_information_bytes<GBDFFRSource, 8>(eight));
+  std::printf("9 4 %zu\\n", dffr_information_bytes<GBDFFRSource, 4>(nine));
+  std::printf("9 8 %zu\\n", dffr_information_bytes<GBDFFRSource, 8>(nine));
+  return 0;
+}
+"""
+FISHER_KERNEL = "dffr_information_matrix_kernel"
+#: Parameters of the Fisher figure in the kernel table: the 8 of the global fit.
+FISHER_TABLE_PARAMETERS = 8
 
 
 def recorded_command(build_dir, ninja, target, toolkit=None):
@@ -158,11 +181,12 @@ def link_module(
     return linked, "\n".join(log for _, log in compiled), objects
 
 
-def dffr_template_bytes(build_dir, ninja, arch, work_dir, objects, toolkit=None):
-    """{rows: bytes of one DFFR template}, or {} for a module without gb_dffr.cu."""
-    dffr_objects = [name for name in objects if name.endswith(DFFR_OBJECT_SUFFIX)]
+def run_probe(build_dir, ninja, arch, work_dir, objects, toolkit, name, text, required=True):
+    """Lines a host program prints, built with the flags of gb_dffr.cu; None for a module without
+    gb_dffr.cu, or when an optional probe does not compile against this tree."""
+    dffr_objects = [entry for entry in objects if entry.endswith(DFFR_OBJECT_SUFFIX)]
     if not dffr_objects:
-        return {}
+        return None
     command = single_architecture(
         recorded_command(build_dir, ninja, dffr_objects[0], toolkit), arch
     )
@@ -171,12 +195,59 @@ def dffr_template_bytes(build_dir, ninja, arch, work_dir, objects, toolkit=None)
         for argument in command
         if argument not in ("-c", "-rdc=true") and not argument.endswith("gb_dffr.cu")
     ]
-    source = work_dir / "dffr_template_bytes.cu"
-    source.write_text(DFFR_TEMPLATE_PROBE)
-    program = work_dir / "dffr_template_bytes"
-    run_logged(command + [str(source), "-o", str(program)], build_dir, work_dir / "probe.log")
-    printed = subprocess.run([str(program)], check=True, capture_output=True, text=True).stdout
+    source = work_dir / f"{name}.cu"
+    source.write_text(text)
+    program = work_dir / name
+    full_command = command + [str(source), "-o", str(program)]
+    if required:
+        run_logged(full_command, build_dir, work_dir / f"{name}.log")
+    else:
+        # ? A tree from before the DFFR Fisher has no dffr_information_bytes to call.
+        result = subprocess.run(full_command, cwd=build_dir, capture_output=True, text=True)
+        (work_dir / f"{name}.log").write_text(
+            shlex.join(full_command) + "\n" + result.stdout + result.stderr
+        )
+        if result.returncode != 0:
+            return None
+    return subprocess.run([str(program)], check=True, capture_output=True, text=True).stdout
+
+
+def dffr_template_bytes(build_dir, ninja, arch, work_dir, objects, toolkit=None):
+    """{rows: bytes of one DFFR template}, or {} for a module without gb_dffr.cu."""
+    printed = run_probe(
+        build_dir,
+        ninja,
+        arch,
+        work_dir,
+        objects,
+        toolkit,
+        "dffr_template_bytes",
+        DFFR_TEMPLATE_PROBE,
+    )
+    if printed is None:
+        return {}
     return {int(rows): int(size) for rows, size in (line.split() for line in printed.splitlines())}
+
+
+def dffr_fisher_bytes(build_dir, ninja, arch, work_dir, objects, toolkit=None):
+    """{(parameters, rows): dynamic shared bytes of the DFFR Fisher}, or {} without it."""
+    printed = run_probe(
+        build_dir,
+        ninja,
+        arch,
+        work_dir,
+        objects,
+        toolkit,
+        "dffr_fisher_bytes",
+        DFFR_FISHER_PROBE,
+        required=False,
+    )
+    if printed is None:
+        return {}
+    return {
+        (int(parameters), int(rows)): int(size)
+        for parameters, rows, size in (line.split() for line in printed.splitlines())
+    }
 
 
 def demangle(names):
@@ -252,6 +323,7 @@ def module_report(
     resources = linked_resources(str(Path(nvcc).with_name("cuobjdump")), linked)
     own = own_resources(ptxas_log, arch)
     template_bytes = dffr_template_bytes(build_dir, ninja, arch, work_dir, objects, toolkit)
+    fisher_bytes = dffr_fisher_bytes(build_dir, ninja, arch, work_dir, objects, toolkit)
 
     kernels, callees = {}, {}
     names = list(resources)
@@ -261,15 +333,22 @@ def module_report(
         base = kernel.split(" ")[0]
         if KERNEL_NAME.match(base):
             rows = re.search(r"(\d+) rows", kernel)
-            per_template = template_bytes.get(int(rows.group(1)), 0) if rows else 0
-            stats["dynamic_shared"] = TEMPLATES_PER_KERNEL.get(base, 1) * per_template
+            if base == FISHER_KERNEL:
+                stats["dynamic_shared"] = (
+                    fisher_bytes.get((FISHER_TABLE_PARAMETERS, int(rows.group(1))), 0)
+                    if rows
+                    else 0
+                )
+            else:
+                per_template = template_bytes.get(int(rows.group(1)), 0) if rows else 0
+                stats["dynamic_shared"] = TEMPLATES_PER_KERNEL.get(base, 1) * per_template
             stats["blocks"] = blocks_per_sm(
                 stats["registers"], stats["static_shared"] + stats["dynamic_shared"], arch
             )
             kernels[kernel] = stats
         elif stats["registers"] >= CALLEE_REGISTER_FLOOR and re.search(r"(?i)stft|dffr", plain):
             callees[re.sub(r"\(.*", "", plain)] = stats["registers"]
-    return kernels, callees, template_bytes
+    return kernels, callees, (template_bytes, fisher_bytes)
 
 
 def cell(stats, field):
@@ -351,7 +430,7 @@ def main(argv=None):
             reference_kernels, _, _ = module_report(
                 build_dir, ninja, args.arch, output_dir / "reference", include_dir, args.jobs
             )
-    kernels, callees, template_bytes = module_report(
+    kernels, callees, (template_bytes, fisher_bytes) = module_report(
         build_dir,
         ninja,
         args.arch,
@@ -377,6 +456,21 @@ def main(argv=None):
                 f"{size} B for {rows} rows" for rows, size in sorted(template_bytes.items())
             )
         )
+    if fisher_bytes:
+        print(
+            f"DFFR Fisher matrix, dynamic shared memory (the table shows {FISHER_TABLE_PARAMETERS} "
+            "parameters) and blocks per SM by registers and by shared memory:"
+        )
+        for (parameters, rows), size in sorted(fisher_bytes.items()):
+            stats = kernels.get(f"{FISHER_KERNEL} (DFFR, {rows} rows)")
+            blocks = (
+                "{}, {}".format(
+                    *blocks_per_sm(stats["registers"], stats["static_shared"] + size, args.arch)
+                )
+                if stats
+                else "-"
+            )
+            print(f"  {parameters} parameters, {rows} rows: {size} B; blocks per SM {blocks}")
     if reference_kernels is None:
         print_table("Kernels", kernels)
     else:

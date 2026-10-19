@@ -1,19 +1,23 @@
 """Gradients and Fisher matrices of the golden fixtures at several finite-difference steps.
 
     python finite_difference_steps.py --capture OUT.npz --device cpu [--configs ...]
-        [--response dffr] [--envelope-variants]
+        [--response dffr] [--envelope-variants] [--all-sources]
     python finite_difference_steps.py --compare REF.npz NEW.npz
     python finite_difference_steps.py --noise OUT.npz
+    python finite_difference_steps.py --plateau OUT.npz
 
 The gradients and Fisher matrices of STFTGBComputations are central differences of templates. A
 change of the code that moves only rounding enters them as noise divided by the step, so its
 effect falls with the step; a change of the modelled signal does not depend on the step.
---capture evaluates ``get_ll_grad_stft`` and ``information_matrix`` (defaults and the TDI track)
-with each method's default steps multiplied by 1, 10 and 100; ``--response dffr`` evaluates the
-DFFR response, which has no Fisher matrix yet, and ``--envelope-variants`` adds the gradient with
-the linear envelope forced on and forced off. --noise prints each code's own noise per gradient
-component (defined below) for every gradient of a capture, and the ratio of the envelope-on to
-the envelope-off noise. --compare prints two tables:
+--capture evaluates ``get_ll_grad_stft`` and ``information_matrix`` (defaults, and the TDI track
+of the existing response) with each method's default steps multiplied by 1, 10, 100 and 1000;
+``--response dffr`` evaluates the DFFR response, ``--envelope-variants`` adds the gradient with
+the linear envelope forced on and forced off, and ``--all-sources`` takes the Fisher matrices of
+every source instead of the four of the golden captures. --noise prints each code's own noise per
+gradient component (defined below) for every gradient of a capture, and the ratio of the
+envelope-on to the envelope-off noise. --plateau prints, per Fisher and parameter, the change
+between each factor and the tenfold one against PLATEAU_BOUND, the criterion that sets the Fisher
+steps. --compare prints two tables:
 
 * per array and factor, the largest change relative to the array's peak, and the ratio between
   factors;
@@ -35,7 +39,11 @@ import numpy as np
 import stft_fixtures as fixtures
 from stft_golden_outputs import NUM_FISHER_SOURCES, first_sources, load_blob
 
-STEP_FACTORS = (1, 10, 100)
+STEP_FACTORS = (1, 10, 100, 1000)
+# * The plateau criterion of the Fisher steps (part 4c): per entry, the change between a step and
+# * the tenfold step, relative to sqrt(F_ii F_jj), outside the row and column of fddot.
+PLATEAU_BOUND = 1e-3
+FDDOT_INDEX = 3
 DEFAULT_CONFIGS = (
     "rect",
     "tukey_mid",
@@ -49,14 +57,18 @@ NUM_PARAMETERS = 9
 PARAMETER_NAMES = ("amp", "f0", "fdot", "fddot", "phi0", "iota", "psi", "lam", "beta")
 
 
-def evaluate(fixture, envelope_variants=False):
-    """{array@factor: host array} for the gradient and two Fisher variants at every factor."""
+def evaluate(fixture, envelope_variants=False, all_sources=False):
+    """{array@factor: host array} for the gradient and the Fisher variants at every factor: the
+    default Fisher and, for the existing response, the one on the TDI track."""
     comp = fixture.comp
     xp = comp.xp
     params = fixture.params
     cells = xp.asarray(fixture.cells)
     starts = fixture.window_starts
-    fisher_sources = first_sources(fixture.cells, NUM_FISHER_SOURCES)
+    if all_sources:
+        fisher_sources = np.arange(len(fixture.cells))
+    else:
+        fisher_sources = first_sources(fixture.cells, NUM_FISHER_SOURCES)
     fisher_params = params[fisher_sources]
     fisher_cells = xp.asarray(fixture.cells[fisher_sources])
     # * Each method's own default steps, so factor 1 reproduces the golden outputs.
@@ -68,6 +80,10 @@ def evaluate(fixture, envelope_variants=False):
             grad_envelope_on=dict(linear_envelope=True),
             grad_envelope_off=dict(linear_envelope=False),
         )
+    fisher_variants = [("fisher", dict())]
+    # ? DFFR has one chirp model, so the TDI track is a variant of the existing response only.
+    if comp.response != "dffr":
+        fisher_variants.append(("fisher_tdi_track", dict(astro_track=False)))
     outputs = {}
     for factor in STEP_FACTORS:
         for name, options in gradient_variants.items():
@@ -79,9 +95,7 @@ def evaluate(fixture, envelope_variants=False):
                 start_freq_inds=starts,
                 **options,
             )
-        if comp.response == "dffr":
-            continue
-        for name, options in (("fisher", dict()), ("fisher_tdi_track", dict(astro_track=False))):
+        for name, options in fisher_variants:
             outputs[f"{name}@{factor}"] = comp.information_matrix(
                 fisher_params,
                 param_eps=fisher_steps * factor,
@@ -93,13 +107,13 @@ def evaluate(fixture, envelope_variants=False):
     return {key: fixtures.to_host(value) for key, value in outputs.items()}
 
 
-def capture(path, backend, config_names, mojito_l1, response, envelope_variants):
+def capture(path, backend, config_names, mojito_l1, response, envelope_variants, all_sources):
     orbits_cache = {}
     blob = {}
     for name in config_names:
         fixture = fixtures.build_fixture(name, backend, mojito_l1, orbits_cache, response)
         fixture.description["backend"] = backend
-        for key, value in evaluate(fixture, envelope_variants).items():
+        for key, value in evaluate(fixture, envelope_variants, all_sources).items():
             blob[f"{name}/{key}"] = value
         print(f"[capture] {name}", flush=True)
     np.savez(path, **blob)
@@ -209,6 +223,52 @@ def entry_label(index):
     return f"source {source} ({PARAMETER_NAMES[row]}, {PARAMETER_NAMES[column]})"
 
 
+def plateau_table(path):
+    """For every Fisher of a capture, parameter (fddot apart) and factor f, the largest change
+    |F(f) - F(10 f)| / sqrt(F_ii F_jj) over the sources and the parameter's row outside fddot, and
+    over the sources on its diagonal alone. All steps scale together, so a row entry carries the
+    noise of two steps while the diagonal shows the parameter's own."""
+    blob = load_blob(path)
+    stems = sorted(
+        {
+            key.rsplit("@", 1)[0]
+            for key in blob
+            if "@" in key and key.rsplit("@", 1)[0].rsplit("/", 1)[-1].startswith("fisher")
+        }
+    )
+    kept = [index for index in range(NUM_PARAMETERS) if index != FDDOT_INDEX]
+    pairs = list(zip(STEP_FACTORS[:-1], STEP_FACTORS[1:]))
+    header = " ".join(f"{f'x{low} vs x{high}':>15s}" for low, high in pairs)
+    for stem in stems:
+        print(f"\n{stem}: largest |F(f) - F(10 f)| / sqrt(F_ii F_jj), over sources and row")
+        print(f"{'parameter':12s} {header}")
+        row_changes, diagonal_changes, fddot_changes = [], [], []
+        for low, high in pairs:
+            measure = scaled_measure(stem, blob[f"{stem}@{high}"])
+            relative = measure(blob[f"{stem}@{low}"] - blob[f"{stem}@{high}"])
+            row_changes.append(relative[:, kept][:, :, kept].max(axis=(0, 2)))
+            diagonal_changes.append(np.diagonal(relative, axis1=1, axis2=2)[:, kept].max(axis=0))
+            fddot_changes.append(relative[:, FDDOT_INDEX, FDDOT_INDEX].max())
+        for row, index in enumerate(kept):
+            print(
+                f"{PARAMETER_NAMES[index]:12s} "
+                + " ".join(f"{changes[row]:15.2e}" for changes in row_changes)
+                + "   diagonal: "
+                + " ".join(f"{changes[row]:9.2e}" for changes in diagonal_changes)
+            )
+        overall = [changes.max() for changes in row_changes]
+        print(f"{'all':12s} " + " ".join(f"{value:15.2e}" for value in overall))
+        print(
+            f"{'fddot diag':12s} "
+            + " ".join(f"{value:15.2e}" for value in fddot_changes)
+            + "   (recorded, outside the criterion)"
+        )
+        passing = [f"x{low}" for (low, _), value in zip(pairs, overall) if value <= PLATEAU_BOUND]
+        print(
+            f"factors on the plateau, all entries <= {PLATEAU_BOUND:g}: {', '.join(passing) or 'none'}"
+        )
+
+
 def compare(reference_path, candidate_path):
     reference, candidate = load_blob(reference_path), load_blob(candidate_path)
     stems = sorted({key.rsplit("@", 1)[0] for key in reference if key in candidate})
@@ -224,6 +284,7 @@ def main(argv=None):
     mode.add_argument("--capture", metavar="OUT_NPZ")
     mode.add_argument("--compare", nargs=2, metavar=("REF_NPZ", "NEW_NPZ"))
     mode.add_argument("--noise", metavar="CAPTURE_NPZ")
+    mode.add_argument("--plateau", metavar="CAPTURE_NPZ")
     parser.add_argument("--device", choices=["cpu", "gpu"], default="cpu")
     parser.add_argument("--configs", nargs="+", default=None)
     parser.add_argument("--mojito-l1", default=None, help="Mojito L1 .h5 file (l1 fixtures)")
@@ -232,6 +293,11 @@ def main(argv=None):
         "--envelope-variants",
         action="store_true",
         help="also capture the gradient with the linear envelope forced on and forced off",
+    )
+    parser.add_argument(
+        "--all-sources",
+        action="store_true",
+        help="Fisher matrices of every source of a fixture, not the four of the golden captures",
     )
     args = parser.parse_args(argv)
     if args.capture:
@@ -245,9 +311,12 @@ def main(argv=None):
             args.mojito_l1,
             args.response,
             args.envelope_variants,
+            args.all_sources,
         )
     elif args.noise:
         noise_table(args.noise)
+    elif args.plateau:
+        plateau_table(args.plateau)
     else:
         compare(*args.compare)
     return 0

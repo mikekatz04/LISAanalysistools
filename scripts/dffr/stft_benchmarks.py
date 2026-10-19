@@ -2,10 +2,11 @@
 
 Times ``get_ll_stft``, ``get_swap_ll_stft``, ``get_fstat_ll_stft``, ``fill_global_stft``,
 ``get_ll_grad_stft``, ``get_swap_ll_grad_stft`` and ``information_matrix`` against batch size on
-a production fixture of ``stft_fixtures.py``. Each point is one warm-up call followed by
-``--repeats`` timed calls; on the GPU the device is synchronised before each clock reading. The
-times include the Python work of each method, which the global fit pays as well. ``--response``
-selects the response; DFFR has no ``information_matrix`` yet, so it is left out.
+a production fixture of ``stft_fixtures.py``; ``information_matrix`` on all nine parameters, and
+as ``information_matrix_test_inds`` on the eight that the GB proposal of the global fit asks for.
+Each point is one warm-up call followed by ``--repeats`` timed calls; on the GPU the device is
+synchronised before each clock reading. The times include the Python work of each method, which
+the global fit pays as well. ``--response`` selects the response.
 
 Usage:
     python stft_benchmarks.py --device cpu --mojito-l1 FILE.h5 --output OUT.json
@@ -33,7 +34,11 @@ METHODS = (
     "get_ll_grad_stft",
     "get_swap_ll_grad_stft",
     "information_matrix",
+    "information_matrix_test_inds",
 )
+#: The parameters the GB proposal of the global fit samples (``test_inds`` of its transform):
+#: every parameter but fddot, which is filled.
+TEST_INDS = [0, 1, 2, 4, 5, 6, 7, 8]
 
 
 def method_calls(fixture, batch_size):
@@ -61,6 +66,9 @@ def method_calls(fixture, batch_size):
         ),
         "information_matrix": lambda: comp.information_matrix(
             params, noise_index=cells, start_freq_inds=starts
+        ),
+        "information_matrix_test_inds": lambda: comp.information_matrix(
+            params, inds=TEST_INDS, noise_index=cells, start_freq_inds=starts
         ),
     }
 
@@ -107,9 +115,6 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.without_swap:
         args.methods = [method for method in args.methods if "swap" not in method]
-    if args.response == "dffr":
-        # * The DFFR response has no Fisher matrix yet.
-        args.methods = [method for method in args.methods if method != "information_matrix"]
 
     fixture = fixtures.build_production_fixture(
         args.config,
