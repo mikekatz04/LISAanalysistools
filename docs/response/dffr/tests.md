@@ -1162,13 +1162,266 @@ map at 32 rows and the device copy of the domain.
 
 ## Step 5: wiring
 
-Not started.
+Code: LAT `feat-dffr` at de526e1b and GBGPU `feat-dffr` at e6fb653, the committed step 4, with the
+changes of step 5 uncommitted. Step 5 changes Python only: `gbcomps.py` in GBGPU, `recipe.py` in
+LAT, tests and scripts. The editable builds of the step 4 code load Python from the source trees,
+so nothing was rebuilt.
+
+CPU node: `wn-la-01` (AMD EPYC 9754, Bergamo), Slurm job 41576984, 16 CPUs, 2026-10-19. The parts
+ran inside that allocation as
+`srun --jobid=<job> --overlap -n 1 -c 16 env PYTHON=$PYTHON BASE_ENV=$OUT/step4_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> scripts/dffr/run_step5.sh --device cpu $OUT <part>`:
+every part but the benchmarks side by side, then `benchmarks benchmarks_l1` alone
+(`$OUT/regression/step5/step5_cpu_chain.sh`). The GPU runs are pending.
+
+The existing response must stay bit-identical to the step 4 code, with timings within run-to-run
+noise. The DFFR response, called through `STFTGBComputations`, must give the outputs of its entry
+points bit for bit.
+
+### Frozen environment of the step 4 code
+
+The pending GPU runs of step 4 need the step 4 tests and scripts, which step 5 changes in the
+trees of the shared environment. `scripts/dffr/build_base_env.sh` built `$OUT/step4_env` before
+the first change: 14 minutes in job 41576984, 6.1 GB. It holds LAT de526e1b and GBGPU e6fb653, the
+committed step 4, with GPUBackendTools, Eryn and BBHx as in the shared clones, with their
+uncommitted changes. Command:
+`LAT_COMMIT=de526e1b GBGPU_COMMIT=e6fb653 JAX_PLATFORMS=cpu scripts/dffr/build_base_env.sh $OUT/step4_env`
+(chain: `$OUT/regression/step5/step4_env_chain.sh`).
+
+Criterion: the environment must recompute the step 4 CPU captures bit for bit: the golden outputs
+of the existing response, swap kernels included, and the LAT side of the exchange with dffr.
+Result: 144 of 144 and 26 of 26 arrays, and 29 of 29 exchange entries, bit-identical, pass
+(`$OUT/regression/step5/step4_env_recheck_cpu{,_l1}.txt`, `step4_env_recheck_exchange_cpu.txt`).
 
 ### Unit tests
 
+**`GBGPU/tests/test_stft_gb_dffr.py`.** `_DFFRCase` now calls the methods of
+`STFTGBComputations(response="dffr")`, bound to a stand-in group that carries the domain, the
+Fresnel object, `linear_envelope` and the kinematics table. The step 4 identities therefore test
+the dispatch. The entry points are still called directly for three things: to compare them with
+the comp, for their own argument checks, and for the 16-row tiles on the GPU. All 17 CPU tests
+pass; the 10 CUDA tests are skipped without a GPU. New in this step:
+
+- Wiring. Each of the six methods equals its entry point called with the expected arguments, bit
+  for bit, for two sources per call, in two settings that differ in every argument the comp
+  passes:
+  - TDI generation 1 and 2;
+  - envelope off and on, first-order delays off and on;
+  - chirp-rate floor 1e-15 and 1e-22 Hz/s;
+  - `t_ref` 1234.5 s and 0;
+  - taper 0 and 0.5;
+  - a window start of 2 bins and none.
+
+  The floor of 1e-15 Hz/s moves (d|h) and (h|h) of these sources by 6.3e-9 of their peak
+  (`$OUT/regression/step5/floor_check.py`), so a misplaced floor would show. The test also checks
+  that the comp asks the group for the table with its own orbits.
+- Envelope. `get_ll` follows the group's `linear_envelope`. Both gradients follow it by default.
+  `linear_envelope=False` on a group with the envelope on equals a group without it, bit for bit,
+  and `True` the other way round.
+- Replicas. A comp rebuilt from its recorded arguments, directly and through LAT's replica builder
+  (`devicereplicas._build_gb_comp_replica`, which takes its multi-GPU path for device 1 against
+  primary 0), keeps the response, the delays, the floor and the TDI generation. Its outputs equal
+  those of the original bit for bit.
+- Arguments. A custom `TDIConfig` (one unit removed), a floor of 0 and a group of AET channels
+  raise `ValueError` at construction. A custom `TDIConfig` set later on a DFFR comp raises as well,
+  while the default response still takes one. A group without `cpp_kinematics` raises
+  `TypeError`, and `information_matrix` raises `NotImplementedError`.
+
+**`GBGPU/tests/test_stft_gb.py`.** Three tests of the default response, all pass:
+
+- `response="tdi_on_the_fly"` given explicitly, with DFFR settings it must ignore, gives every
+  output of the seven methods bit for bit, the Fisher matrix included;
+- on a group whose evaluator has the envelope on, the default gradients equal
+  `linear_envelope=False`, and `None` gives other values;
+- an unknown response raises `ValueError`.
+
+**`tests/test_gb_likelihood_engine.py` (LAT).** `STFTEngineNumericTest` runs for both responses on
+a real container of two bands. It fills band 0 through the engine, then runs `get_ll` on both
+bands in one call, the degenerate swap, and the removal. For DFFR it also checks that the group
+built its table from the comp's orbits. Both pass. The stand-in container of
+`test_engine_calls_bind_to_STFTGBComputations_signatures` gained the per-split routing tables that
+the engine reads (`split_map_by_split`, `ac_to_intra_by_split`). The test had failed since step 0;
+it passes now.
+
 ### Regression tests
 
+**Golden outputs of the existing response against step 4** (parts `golden` and `golden_l1`, swap
+kernels included). Criterion: bit identity against the step 4 captures, and between two captures
+in separate processes. Result: 144 of 144 and 26 of 26 arrays bit-identical to step 4, and the
+repeats bit-identical, pass. Files: `$OUT/regression/step5/golden_cpu{,_l1}_vs_step4.txt` and
+`golden_cpu{,_l1}_repeat_compare.txt`.
+
+**Column-policy oracle** (part `oracle`). Against its capture in `$OUT/step2_env`: all arrays
+bit-identical, pass (`column_oracle_vs_step2_cpu.txt`).
+
+**Accuracy** (part `accuracy`). `GBGPU/tests/test_stft_gb_accuracy.py` gives the same numbers in
+`$OUT/step4_env` and after step 5, to every printed digit: end-to-end mismatch 9.049e-3 at 10 side
+bins (3.950e-3 at 20), on-bin mismatch 1.409e-5. The tests pass in both. Files:
+`accuracy_base_cpu.log`, `accuracy_cpu.log`.
+
+**Test suites** (part `tests`). Criterion: every test case of step 4 keeps its outcome. Result:
+pass. Files: `gbgpu_tests_cpu.{log,xml}`, `lat_tests_cpu.log`.
+
+- GBGPU: the 60 cases of step 4 keep their outcomes. 11 cases are new: 10 pass, and the CUDA
+  wiring test is skipped. In all: 59 passed and 10 skipped, plus the failure and the error of step
+  4, the two cases that need a GPU (`test_thirdbody.py`, and `test_gbgpu.py`, which does not
+  collect).
+- LAT: 302 tests. Every test that pairs by name with step 4 keeps its outcome, except
+  `test_engine_calls_bind_to_STFTGBComputations_signatures`, which went from error to pass. The
+  DFFR engine test is new and passes. In all: 2 failures and 14 errors (15 in step 4), 63 skips.
+
+**DFFR through the comp: first golden capture** (parts `golden_dffr` and `golden_dffr_l1`). The
+outputs of `stft_golden_outputs.py --response dffr` on the production configurations with XYZ
+channels (`esa_tdi2_envelope`, `esa_tdi1_const`, `l1_tdi2_envelope`): 21 arrays per
+configuration, every output of the seven methods but the Fisher matrix. Two captures in separate
+processes are bit-identical, 42 of 42 and 21 of 21. They are the reference of the DFFR response
+for step 6 (`$OUT/regression/step5/golden_dffr_cpu{,_l1}.npz`).
+
+**Exchange with standalone dffr, through the comp** (part `exchange`). As in step 4, but the
+fill_global grid, (d|h) and (h|h) of the LAT side now come from `STFTGBComputations`. Criteria: per
+output at most 1e-13 of the peak of the dffr array, as in step 4; and bit identity of the LAT
+capture against that of step 4, which called the entry points. Result: 14 outputs within the gate,
+and 29 of 29 entries bit-identical to step 4, pass (`exchange_compare_cpu.txt`,
+`exchange_lat_cpu_vs_step4.txt`).
+
+**DFFR against the existing response** (part `against_existing`), with both templates now from
+the comp. Criterion: bit identity against the step 4 results. Result: 13 of 13 entries
+bit-identical, pass (`against_existing_cpu_vs_step4.txt`), so the numbers of step 4 stand: median
+mismatch 5.6e-10 with the linear envelope.
+
+**Finite-difference noise of the gradients, with the envelope on and off** (part
+`envelope_noise`). This measurement backs the default `linear_envelope` of the gradients of DFFR,
+the group's setting. `finite_difference_steps.py --envelope-variants` evaluates `get_ll_grad_stft`
+on the three XYZ production configurations at the default steps times 1, 10 and 100. It does so
+with the envelope forced on, forced off, and at the default, for both responses. A response's own
+noise per component is the difference between its gradients at the default and the tenfold step,
+largest over the 24 sources, over the component's largest value at the tenfold step, the measure
+of step 2. There is no threshold: the question is whether the envelope raises the noise. Files:
+`envelope_noise_{tdi_on_the_fly,dffr}_cpu.{npz,txt}`.
+
+Ratio of the noise with the envelope on to the noise with it off, per component:
+
+| Response, configuration | amp | f0 | ḟ | f̈ | φ0 | ι | ψ | λ | β |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| DFFR, `esa_tdi1_const` | 0.31 | 1.00 | 1.00 | 1.00 | 1.00 | 0.48 | 1.25 | 1.00 | 1.00 |
+| DFFR, `esa_tdi2_envelope` | 0.72 | 1.00 | 1.00 | 1.00 | 1.00 | 1.61 | 4.57 | 1.00 | 1.00 |
+| DFFR, `l1_tdi2_envelope` | 1.52 | 1.00 | 1.00 | 1.00 | 1.00 | 1.23 | 1.10 | 1.00 | 1.00 |
+| existing, `esa_tdi1_const` | 2.18 | 1.01 | 1.00 | 1.02 | 0.81 | 1.24 | 1.63 | 0.99 | 1.15 |
+| existing, `esa_tdi2_envelope` | 0.70 | 1.03 | 1.10 | 0.99 | 1.03 | 0.43 | 0.70 | 0.96 | 1.18 |
+| existing, `l1_tdi2_envelope` | 1.31 | 0.90 | 1.01 | 1.00 | 0.97 | 1.79 | 1.44 | 1.40 | 1.11 |
+
+- DFFR: the envelope leaves the noise of f0, ḟ, f̈, φ0, λ and β unchanged to two digits. It
+  changes that of the amplitude, ι and ψ by factors from 0.31 to 4.57, on noise levels of at most
+  1.5e-8 of their scale. The largest noise of any component is 1.8 in f̈. Result: the envelope does
+  not raise the noise that matters, so the default stays as designed.
+- The default gradient of DFFR equals the forced-on gradient bit for bit on the two configurations
+  whose group has the envelope on, and the forced-off one on `esa_tdi1_const`, whose group has it
+  off.
+- Observation 1, the existing response. Its envelope changes the noise by factors from 0.43 to
+  2.18 here. The f0, ḟ and f̈ components, whose noise is largest, change by at most 10 %. The
+  reason its derivatives default to the envelope off, a noise four to seven times higher
+  (`STFTComputationGroup.envelope_override`), does not show in this measure on these fixtures.
+  Nothing changes in this step.
+- Observation 2, both responses. At the default steps, DFFR's noise is larger than the existing
+  response's on the same fixture and envelope (`esa_tdi2_envelope`, envelope off):
+
+  | Component | DFFR | existing |
+  | --- | --- | --- |
+  | f0 | 4.6e-2 | 2.0e-2 |
+  | ḟ | 0.43 | 0.24 |
+  | f̈ | 1.8 | 0.63 |
+  | φ0 | 6.6e-2 | 9.4e-3 |
+
+  In both responses the difference between the tenfold and the hundredfold step is about ten
+  times smaller than that between the default and the tenfold step. The noise therefore falls as
+  1/step: it is rounding in the evaluation, not a difference of the modelled signal. In DFFR's
+  log-likelihood it amounts to a few 1e-12 of (h|h): for f0, ḟ and φ0, a median over the sources
+  of 3e-12 to 6e-12 and at most 2.2e-11, for sources whose sqrt((h|h)) is 0.6 to 221. The steps of
+  the DFFR Fisher matrix are reviewed in step 4c.
+
+**Kinematics table** (`$OUT/regression/step5/kinematics_table_timing.py`). On the CPU, a group's
+first DFFR call builds the table in 0.35 ms at 32 one-day segments and 2.4 ms at 365. Later calls
+find it in 2 to 3 µs. For comparison, a `get_ll_stft` call of one source of the existing response
+takes 5.4 ms on the ESA fixture (step 4 benchmarks).
+
+### Benchmarks
+
+**CPU** (parts `benchmarks` and `benchmarks_l1`), alone in the allocation, with the fixtures,
+settings and criterion of step 3. The existing response is read against the step 4 runs; DFFR runs
+through the comp, without a threshold, since the timing gate of DFFR is step 6 on an A100. Files:
+`$OUT/benchmarks/step5/cpu_{esa,l1}{,_dffr}_run{1,2,3}.json`, `compare_cpu_{esa,l1}.txt`,
+`compare_cpu_{esa,l1}_dffr_vs_existing.txt`.
+
+The existing response against the step 4 runs of 2026-10-18, with the criterion of step 3: each
+point within the larger run-to-run spread of the two sets.
+
+| Fixture | Ratio step 5 / step 4, all points | Median | Within noise |
+| --- | --- | --- | --- |
+| ESA | 1.006 to 1.023 | 1.010 | 6 of 15 |
+| `L1Orbits` | 0.998 to 1.010 | 1.005 | 14 of 15 |
+
+Step 5 changes no compiled code. To tell a change of the code from drift of the node, two more
+measurements ran alone in the same allocation (`$OUT/regression/step5/benchmark_ab_chain.sh` and
+`python_only_ab.sh`; files `compare_cpu_{esa,l1}_ab_step4_vs_step4.txt`,
+`compare_cpu_{esa,l1}_ab.txt`, `compare_cpu_l1_python_only.txt`):
+
+| Measurement | ESA: ratio range, median, within noise | `L1Orbits`: ratio range, median, within noise |
+| --- | --- | --- |
+| The step 4 code (`$OUT/step4_env`) today, against its runs of 2026-10-18 | 1.003 to 1.012, 1.006, 7 of 15 | 0.997 to 1.009, 1.001, 14 of 15 |
+| Step 5 against the step 4 code, the two environments in turn, three runs each | 0.998 to 1.008, 1.003, 14 of 15 | 1.004 to 1.013, 1.007, 13 of 15 |
+| The step 5 Python against the step 4 Python, both on the binaries of `$OUT/step4_env`, in turn, four runs each (`get_ll_stft`, `fill_global_stft`, `get_ll_grad_stft` and `information_matrix` at batches 1 and 8) | not run | 0.994 to 1.002, 1.000, 8 of 8 |
+
+- The step 4 code itself is 0.6 % slower on the ESA fixture than on 2026-10-18. This is drift of
+  the node between the two days, and it explains most of the points outside the noise in the
+  first table.
+- Run in turn, the two environments differ by 0.3 % (ESA) and 0.7 % (`L1Orbits`). 29 of the 30
+  ratios exceed 1, and 27 of the 30 points lie within the spread. The two environments hold
+  separately compiled binaries of the same code: the shared environment was built from the
+  step 4 working tree, `$OUT/step4_env` from its commits.
+- On the same binaries, the step 5 Python changes nothing measurable: every point lies within the
+  spread, with a median ratio of 1.000. In the last row, the second arm imports a copy of the
+  frozen environment's `gbgpu` package that holds the step 5 `gbcomps.py`.
+
+Result: pass. The step 5 code leaves the timings of the existing response unchanged. The
+differences in the first two tables come from drift of the node and from the two builds.
+
+DFFR through the comp against the existing response, the median of three runs of each, on the
+same fixture, with one CPU thread (32 one-day segments, 10 side bins, so 21 bins per segment,
+production taper; the CPU backend uses one segment row per pass). There is no threshold: the timing
+gate of DFFR is the A100 of step 6.
+
+ESA fixture (`esa_tdi2_envelope`):
+
+| Method | Existing, batch 1 / 8 / 64 [ms] | DFFR, batch 1 / 8 / 64 [ms] | DFFR / existing |
+| --- | --- | --- | --- |
+| `get_ll_stft` | 5.40 / 49.90 / 452.91 | 1.61 / 15.88 / 156.00 | 0.299 to 0.344 |
+| `fill_global_stft` | 5.28 / 48.54 / 442.18 | 1.47 / 14.51 / 142.49 | 0.278 to 0.322 |
+| `get_ll_grad_stft` | 84.95 / 774.91 / 6977.06 | 27.66 / 282.02 / 2779.99 | 0.326 to 0.398 |
+| `get_fstat_ll_stft` | 80.87 / 763.32 / 7049.87 | 25.19 / 257.15 / 2542.80 | 0.312 to 0.361 |
+
+`L1Orbits` fixture (`l1_tdi2_envelope`):
+
+| Method | Existing, batch 1 / 8 / 64 [ms] | DFFR, batch 1 / 8 / 64 [ms] | DFFR / existing |
+| --- | --- | --- | --- |
+| `get_ll_stft` | 5.36 / 50.10 / 452.86 | 1.61 / 15.81 / 155.92 | 0.300 to 0.344 |
+| `fill_global_stft` | 5.19 / 48.72 / 441.36 | 1.45 / 14.49 / 142.69 | 0.280 to 0.323 |
+| `get_ll_grad_stft` | 84.50 / 782.80 / 6999.16 | 27.85 / 283.19 / 2801.94 | 0.330 to 0.400 |
+| `get_fstat_ll_stft` | 80.25 / 766.86 / 7071.30 | 25.21 / 256.54 / 2540.67 | 0.314 to 0.359 |
+
+On the CPU, DFFR takes 0.28 to 0.40 of the time of the existing response, for every method and
+batch size on both fixtures. The swap kernels are left out, as in the CPU runs of steps 2 to 4,
+and so is the Fisher matrix, which DFFR does not have yet.
+
 ### Validation runs
+
+None in this step.
+
+### Pending on the GPU
+
+After the step 4 GPU runs, which come from `$OUT/step4_env`. On a GPU node, from the shared
+environment:
+`PYTHON=$PYTHON BASE_ENV=$OUT/step4_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step5.sh --device gpu $OUT environment golden golden_l1 golden_dffr golden_dffr_l1 tests exchange against_existing envelope_noise benchmarks benchmarks_l1`.
+This runs the CUDA classes of the test files, the CUDA wiring test among them, and the first GPU
+captures and timings of DFFR through the comp.
 
 ## Step 6: validation
 

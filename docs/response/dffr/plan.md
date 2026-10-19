@@ -13,8 +13,8 @@ branch `feat-dffr` in both repositories.
 | 1 | Orbits cache | CPU part done; GPU part pending | 2026-10-17 | Existing outputs change by at most 6e-11 (templates, inner products), 2e-9 (gradients) and 2e-8 (Fisher on the TDI track, whose f̈ entries change by up to 8e-6); the step 1 captures are the new baseline. Results in `tests.md`. |
 | 2 | Fresnel split | CPU part done; GPU part pending | 2026-10-18 | Templates, inner products and the F-statistic change by at most 1.1e-14 of their peaks (gate 1e-12). Gradients and Fisher matrices change within the finite-difference noise that both codes carry, the criterion the author set for them in place of the gate. The step 2 captures are the new baseline; the pending step 1 GPU runs come from a frozen environment of the step 1 code. Results in `tests.md`. |
 | 3 | Tile seam | CPU part done; GPU part pending | 2026-10-18 | Every output of the seven kernels, swap included, is bit-identical to the step 2 code on the CPU (144 and 26 arrays, against a frozen environment of the step 2 code), with the same test outcomes. CPU timings lie within run-to-run noise at 27 of 30 points; the other three differ by at most 0.7 %, within the drift between runs of identical code. ptxas gives every kernel at least the blocks per SM of step 2 on the A100 (sm_80) and the H100 (sm_90). The pending step 2 GPU runs come from the frozen step 2 environment. Results in `tests.md`. Corrected on 2026-10-18 in step 4: the register counts of step 3 were those of each kernel's own file; in the linked module every kernel has 244 registers on the A100 and 222 on the H100, in step 2 and step 3 alike, so 2 blocks per SM, and the conclusion holds. |
-| 4 | DFFR kernels | 4a and 4b: CPU part done; 4c (DFFR Fisher) next; GPU part pending | 2026-10-18 | The DFFR numerics, tile and galactic-binary model are built. The existing response stays bit-identical to step 3 on the CPU (144 and 26 arrays), with the same test outcomes and CPU timings within run-to-run noise or faster. Against standalone dffr on the same kinematics table, templates, global fill and segment table are bit-identical and the inner products agree to 6.3e-15. With the linear envelope of production, DFFR and the existing response differ by a median mismatch of 5.6e-10. Linked registers give the DFFR kernels 2 to 3 blocks of 128 threads per SM and the existing kernels 2; register caps and device link-time optimisation are timed in step 6. Results in `tests.md`. |
-| 5 | Wiring into `STFTGBComputations` | Not started | | |
+| 4 | DFFR kernels | 4a and 4b: CPU part done; 4c (DFFR Fisher) after step 5; GPU part pending | 2026-10-18 | The DFFR numerics, tile and galactic-binary model are built. The existing response stays bit-identical to step 3 on the CPU (144 and 26 arrays), with the same test outcomes and CPU timings within run-to-run noise or faster. Against standalone dffr on the same kinematics table, templates, global fill and segment table are bit-identical and the inner products agree to 6.3e-15. With the linear envelope of production, DFFR and the existing response differ by a median mismatch of 5.6e-10. Linked registers give the DFFR kernels 2 to 3 blocks of 128 threads per SM and the existing kernels 2; register caps and device link-time optimisation are timed in step 6. Results in `tests.md`. |
+| 5 | Wiring into `STFTGBComputations` | CPU part done, without the Fisher matrix of DFFR (4c); GPU part pending | 2026-10-19 | `STFTGBComputations(response="dffr")` runs DFFR in its six likelihood methods and gives the outputs of the DFFR entry points bit for bit; through it, the exchange with standalone dffr is bit-identical to step 4. The existing response stays bit-identical to step 4 (144 and 26 arrays), with the same test outcomes, and keeps its CPU timings: on the same binaries, the step 5 Python changes none of them measurably. With the envelope on, DFFR's gradient noise is unchanged in f0, ḟ, f̈, φ0, λ and β, so its gradients follow the group's envelope. On the CPU, DFFR takes 0.28 to 0.40 of the time of the existing response. The pending step 4 GPU runs come from a frozen environment of the step 4 code. Results in `tests.md`. |
 | 6 | Validation | Not started | | |
 | 7 | Review of documentation and scripts | Not started | | |
 
@@ -181,8 +181,8 @@ data_index, noise_index, num_bin, nparams, t_ref, n_side_bins, tdi_generation, l
 first_order_delays, chirp_rate_floor, start_freq_inds)` ->
 `stft_get_ll_launch<DFFRTile<GBDFFRSource, 32>>` (one row on the CPU). Window settings come from
 the bound `STFTFresnel`, the grid and data from `STFTDomain`, window starts from
-`start_freq_inds` as today. The comp's part of this path, the dispatch in `get_ll_stft`, comes in
-step 5; until then the tests call the entry points directly.
+`start_freq_inds` as today, and `linear_envelope` from the computation group. The dispatch in the
+comp was built in step 5.
 
 ## Steps
 
@@ -421,16 +421,50 @@ each.
 
 ### Step 5: wiring
 
-- `STFTGBComputations`: `response`, `first_order_delays`, `chirp_rate_floor` in `_ctor_kwargs`;
-  dispatch per method; the `linear_envelope` sentinel for gradients and Fisher; `window_factor`,
-  `freq_from_tdi_phase` and `astro_track` documented as unused by DFFR; AET raises.
-- `recipe.py`: optional `gb_stft_kwargs["response"]`, default unchanged.
-- Tests: `test_stft_gb.py` over both responses; a replica keeps the response; engine smoke test
-  (`fill_template`, `get_ll`, `get_swap_ll`) with `response="dffr"`.
-- Docs: a usage section in `docs/response/dffr/README.md` (the flag, the DFFR knobs, what is
-  ignored);
-  the `STFTGBComputations` docstring points to it. Long explanations go in these docs, not in
-  code comments.
+Done on the CPU on 2026-10-19; the GPU runs are pending. On 2026-10-19 the author moved the wiring
+before part 4c, the DFFR Fisher. Until 4c, `information_matrix` raises for DFFR.
+
+- `STFTGBComputations` (`gbcomps.py`):
+  - Constructor arguments `response` (`"tdi_on_the_fly"`, the default, or `"dffr"`),
+    `first_order_delays` (default `True`) and `chirp_rate_floor` (default 1e-22 Hz/s). They are
+    part of the recorded constructor arguments, from which the per-device replicas are rebuilt,
+    so a replica keeps them.
+  - Checks at construction, which raise `ValueError`: an unknown response; for DFFR, a
+    `TDIConfig` with combinations other than the stock 1st or 2nd generation (also when the
+    `TDIConfig` is set later), a bound group of another TDI set, and a floor that is not positive.
+    The kernels keep their own checks on every call. The TDI generation is kept when the
+    `TDIConfig` is set, because `TDIConfig.generation` compares the combinations on every read.
+  - The six likelihood methods (`get_ll_stft`, `get_swap_ll_stft`, `get_fstat_ll_stft`,
+    `fill_global_stft` and both gradients) call the `gb_dffr_*` entry points with the group's
+    kinematics table (`cpp_kinematics(cpp_orbits)`), `t_ref`, `n_side_bins`, the TDI generation,
+    the envelope, the delays, the floor and `start_freq_inds`. Their outputs and the attributes
+    they store are those of the existing response, so the band engine is unchanged.
+  - The envelope of a DFFR call is the group's `linear_envelope`, read as the existing response
+    reads it: the group's attribute, else the comp's own argument. The comp cannot read it from
+    the Fresnel object, because `STFTFresnelWrap` exposes none of its settings to Python. The
+    envelope is an argument of the DFFR kernels, so a value given per call applies exactly,
+    without the evaluator swap that the existing response needs.
+  - `RESPONSE_DEFAULT` is the default `linear_envelope` of both gradients and the Fisher. It
+    means `False` for the existing response, as before, and the group's setting for DFFR, as the
+    design decided. `True`, `False` and `None` keep their meaning for both.
+  - `information_matrix` raises `NotImplementedError` for DFFR.
+- `recipe.py`: the optional keys `response`, `first_order_delays` and `chirp_rate_floor` of
+  `gb_stft_kwargs`; without them the comp's defaults hold.
+- Usage, settings, what DFFR does not read and its limits: `README.md`, "How to select it". The
+  `STFTGBComputations` docstring points there.
+- Deviations, decided by the author on 2026-10-19:
+  - Tests. `test_stft_gb_dffr.py` calls the comp's methods, so the identities of step 4 now test
+    the dispatch, and a new test compares every comp method with its entry point called with the
+    expected arguments, bit for bit. `test_stft_gb.py` tests that the default response is
+    unchanged. The plan had `test_stft_gb.py` run over both responses, which would have checked
+    the DFFR identities twice.
+  - Rows per pass. The comp passes 32 rows to the two-template DFFR kernels, as a class constant,
+    not a setting: the choice matters on the GPU only, and only to the timing of step 6, which
+    calls the entry points with 16 and 32 rows.
+  - `window_factor` is not read by DFFR, as planned. `README.md` says what it does and when the
+    two responses then differ. `use_midpoint` joins the settings DFFR does not read.
+  - The pending step 4 GPU runs come from a frozen environment of the step 4 code, because step
+    5 changes tests and scripts in the trees of the shared environment.
 
 ### Step 6: validation
 

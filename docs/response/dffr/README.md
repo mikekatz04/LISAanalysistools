@@ -2,12 +2,13 @@
 
 This folder documents the integration of the Direct Fast Fresnel Response (DFFR) into the
 short-time Fourier transform (STFT) likelihood of galactic binaries in lisaanalysistools (LAT)
-and GBGPU. The work is in progress on the branch `feat-dffr` of both repositories. Nothing
-described here can be selected yet.
+and GBGPU. The work is in progress on the branch `feat-dffr` of both repositories. Since step 5,
+`STFTGBComputations(..., response="dffr")` selects DFFR (see "How to select it" below). Its Fisher
+matrix, its first runs on a GPU and the validation of step 6 are still to come.
 
 | Document | Content |
 | --- | --- |
-| `README.md` | What DFFR is, why it is integrated, where its pieces will live and how it will be selected. |
+| `README.md` | What DFFR is, why it is integrated, where its pieces live and how to select it. |
 | [`plan.md`](plan.md) | The plan, with the status of each step. |
 | [`tests.md`](tests.md) | The tests, regression tests and validation runs of each step, with their results and the commands that reproduce them. |
 
@@ -44,10 +45,10 @@ per-GPU replicas and the likelihood kernels. It must lose neither accuracy nor s
 today's response, and its source model must be able to carry higher-order modes, as the
 TDI-on-the-fly family does.
 
-## Where the pieces will live
+## Where the pieces live
 
-The pieces of steps 1 to 4 exist on `feat-dffr`; the others are planned. The final layout is
-recorded here once the steps in `plan.md` are done.
+The pieces of steps 1 to 5 exist on `feat-dffr`; the DFFR Fisher matrix is planned. The final
+layout is recorded here once the steps in `plan.md` are done.
 
 | Repository | Piece | Content | Status |
 | --- | --- | --- | --- |
@@ -62,7 +63,8 @@ recorded here once the steps in `plan.md` are done.
 | GBGPU | `cutils/gb_physics.hh` | The GB phase, frequency and amplitude formulas, shared by `GBTDIonTheFly` and the DFFR source model. | built (step 4) |
 | GBGPU | `cutils/gb_dffr_source.hh` | `GBDFFRSource`, the galactic-binary source model of DFFR (see "Source model and components" below). | built (step 4) |
 | GBGPU | `cutils/gb_dffr.{hh,cu}` | The DFFR entry points, bound as the `gb_dffr_*` methods of `GBComputationGroupWrap` next to the `gb_stft_*` methods of the existing response. | built (step 4) |
-| GBGPU | `gbcomps.py` | The `response` flag of `STFTGBComputations` and the dispatch to the DFFR kernels. | planned (step 5) |
+| GBGPU | `gbcomps.py` | The `response` flag of `STFTGBComputations`, the DFFR settings and the dispatch of its six likelihood methods to the DFFR kernels. | built (step 5); Fisher in step 4c |
+| LAT | `globalfit/recipe.py` | Optional `response`, `first_order_delays` and `chirp_rate_floor` in `gb_stft_kwargs`. | built (step 5) |
 
 ## The tile seam
 
@@ -107,8 +109,8 @@ launch gets without raising its limit on dynamic shared memory. Two tables, as `
 take 64.8 kB. Step 4 built that second pixel map, `StftBandBinMap`, and the launch path above 48
 kB, which raises a kernel's limit within what the device allows a block. One DFFR template, the
 table with the source constants and the settings, takes 32 672 bytes at 32 rows. The consumers
-that hold two templates are built for 32 rows and for 16, and the A100 benchmarks of step 6
-choose between them.
+that hold two templates are built for 32 rows and for 16. `STFTGBComputations` uses 32, and the
+A100 benchmarks of step 6 choose between them.
 
 ## Source model and components
 
@@ -126,17 +128,66 @@ template covers `2 n_side_bins + 1` bins about one carrier, while the harmonics 
 f0 / df bins apart: 86 bins at 1 mHz and 864 at 10 mHz on one-day segments. Each harmonic needs a
 band of its own, so it belongs in a template of its own.
 
-## How it will be selected
-
-Planned for step 5 of `plan.md`:
+## How to select it
 
 ```python
-comp = STFTGBComputations(stft_comps, T, ..., response="dffr")  # default: "tdi_on_the_fly"
+from gbgpu.gbcomps import STFTGBComputations
+
+comp = STFTGBComputations(
+    stft_comps, T, t_ref=t_ref, orbits=orbits, tdi_config="2nd generation",
+    n_side_bins=10, response="dffr",  # default: "tdi_on_the_fly"
+)
 ```
 
-DFFR adds two settings, `first_order_delays` and `chirp_rate_floor`. It supports the XYZ channels
-only and raises on an AET domain. Its gradients and Fisher matrix follow the `linear_envelope`
-setting of the computation group.
+In a global-fit recipe, `gb_stft_kwargs` takes the same three optional keys, `response`,
+`first_order_delays` and `chirp_rate_floor`. Without them the existing response runs, as before.
+The comp's methods, outputs and attributes are the same for both responses, so the band engine
+and the device replicas need no change; a replica keeps the response and its settings.
+
+| Setting | Default | Meaning for DFFR |
+| --- | --- | --- |
+| `response` | `"tdi_on_the_fly"` | `"dffr"` selects DFFR. |
+| `first_order_delays` | `True` | Carries every light travel time to first order across a segment. |
+| `chirp_rate_floor` | `1e-22` Hz/s | Sign-preserving floor on the local chirp rate of a reception state; the default is the floor of the existing response. It changes the phase by at most π floor (dt / 2)²: 6e-13 rad on a one-day segment at the default. |
+
+What DFFR reads from the bound computation group:
+
+- the taper `window_alpha` of its `STFTFresnel`, and the grid, data and inverse covariance of its
+  `STFTDomain`;
+- its `linear_envelope`;
+- its kinematics table. The group builds the table from the comp's orbits on the first DFFR call
+  and keeps it (`STFTComputationGroup.cpp_kinematics`). Every GPU split of the residual container
+  and of each band buffer has a group of its own, so each builds its table once.
+
+Settings that DFFR does not read:
+
+- `T`;
+- `freq_from_tdi_phase`, which picks how the existing response estimates its chirp;
+- `use_midpoint`: DFFR always expands the signal about the segment midpoint;
+- `window_factor`. This setting scales the existing response's templates when `window_alpha` is
+  0, that is, when its model assumes a boxcar segment. It approximates the power that a taper of
+  the data removes, by the mean window weight. DFFR models the window exactly through
+  `window_alpha`, so tapered data need `window_alpha`, not this factor. With `window_alpha` 0 and
+  a `window_factor` other than 1, the two responses differ by that factor.
+
+Limits:
+
+- XYZ channels only: a group or domain of another TDI set raises `ValueError`.
+- The combinations of `TDIConfig("1st generation")` or `("2nd generation")` only, in any order;
+  others raise `ValueError`.
+- No Fisher matrix yet: `information_matrix` raises `NotImplementedError`. The GB special move of
+  the global fit calls it for its proposal covariance, so a global-fit run with DFFR needs step 4c.
+- The two-template kernels (swap, its gradient, the F-statistic) use 32 segment rows per pass on
+  the GPU; the CPU uses one.
+
+The linear envelope. The likelihood, swap, F-statistic and fill methods follow the group's
+`linear_envelope`. The gradients take `linear_envelope=RESPONSE_DEFAULT`: the group's setting for
+DFFR, and `False` for the existing response, as before. The existing response turns the envelope
+off in its derivatives because its slope comes from its TDI stencil, whose rounding would enter
+the differences; DFFR's slopes are closed forms in the source parameters. Measured in step 5 on
+three production fixtures: with the envelope on, DFFR's finite-difference noise in f0, ḟ, f̈, φ0,
+λ and β is unchanged, to two digits (`tests.md`). `True`, `False` and `None` (the group's
+setting) apply to both responses.
 
 ## The standalone package
 
