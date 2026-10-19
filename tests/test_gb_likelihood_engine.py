@@ -390,6 +390,9 @@ class STFTEngineCallSignatureTest(unittest.TestCase):
         class _ACA:
             split_map = np.zeros(num_bands, dtype=int)
             ac_to_intra = np.arange(num_bands, dtype=np.int32)
+            # * The engine reads the routing tables per split, each on its split's device.
+            split_map_by_split = [split_map]
+            ac_to_intra_by_split = [ac_to_intra]
             cpp_splits = [_Group()]
             gpus = None
             linear_data_arr = [np.zeros(num_bands * 3 * 8 * 4, dtype=complex)]
