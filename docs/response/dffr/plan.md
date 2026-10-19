@@ -13,7 +13,7 @@ branch `feat-dffr` in both repositories.
 | 1 | Orbits cache | CPU part done; GPU part pending | 2026-10-17 | Existing outputs change by at most 6e-11 (templates, inner products), 2e-9 (gradients) and 2e-8 (Fisher on the TDI track, whose f̈ entries change by up to 8e-6); the step 1 captures are the new baseline. Results in `tests.md`. |
 | 2 | Fresnel split | CPU part done; GPU part pending | 2026-10-18 | Templates, inner products and the F-statistic change by at most 1.1e-14 of their peaks (gate 1e-12). Gradients and Fisher matrices change within the finite-difference noise that both codes carry, the criterion the author set for them in place of the gate. The step 2 captures are the new baseline; the pending step 1 GPU runs come from a frozen environment of the step 1 code. Results in `tests.md`. |
 | 3 | Tile seam | CPU part done; GPU part pending | 2026-10-18 | Every output of the seven kernels, swap included, is bit-identical to the step 2 code on the CPU (144 and 26 arrays, against a frozen environment of the step 2 code), with the same test outcomes. CPU timings lie within run-to-run noise at 27 of 30 points; the other three differ by at most 0.7 %, within the drift between runs of identical code. ptxas gives every kernel at least the blocks per SM of step 2 on the A100 (sm_80) and the H100 (sm_90). The pending step 2 GPU runs come from the frozen step 2 environment. Results in `tests.md`. Corrected on 2026-10-18 in step 4: the register counts of step 3 were those of each kernel's own file; in the linked module every kernel has 244 registers on the A100 and 222 on the H100, in step 2 and step 3 alike, so 2 blocks per SM, and the conclusion holds. |
-| 4 | DFFR kernels | 4a and 4b: CPU part done; 4c (DFFR Fisher) after step 5; GPU part pending | 2026-10-18 | The DFFR numerics, tile and galactic-binary model are built. The existing response stays bit-identical to step 3 on the CPU (144 and 26 arrays), with the same test outcomes and CPU timings within run-to-run noise or faster. Against standalone dffr on the same kinematics table, templates, global fill and segment table are bit-identical and the inner products agree to 6.3e-15. With the linear envelope of production, DFFR and the existing response differ by a median mismatch of 5.6e-10. Linked registers give the DFFR kernels 2 to 3 blocks of 128 threads per SM and the existing kernels 2; register caps and device link-time optimisation are timed in step 6. Results in `tests.md`. |
+| 4 | DFFR kernels | 4a, 4b and 4c: CPU part done; GPU part pending | 2026-10-18, 4c on 2026-10-19 | The DFFR numerics, tile and galactic-binary model are built. The existing response stays bit-identical to step 3 on the CPU (144 and 26 arrays), with the same test outcomes and CPU timings within run-to-run noise or faster. Against standalone dffr on the same kinematics table, templates, global fill and segment table are bit-identical and the inner products agree to 6.3e-15. With the linear envelope of production, DFFR and the existing response differ by a median mismatch of 5.6e-10. Linked registers give the DFFR kernels 2 to 3 blocks of 128 threads per SM and the existing kernels 2; register caps and device link-time optimisation are timed in step 6. Part 4c, after step 5, adds the DFFR Fisher matrix as a kernel of its own: it matches a reference built from `fill_global` templates to 3.3e-15 of sqrt(F_ii F_jj), lies on the plateau of its steps (1.1e-5 against the criterion of 1e-3), and leaves every output of step 5 bit-identical. On the CPU it misses its timing gate at batch 64 by 13 % with the installed `-Os` build of GBGPU's CPU module, and takes 0.30 to 0.42 of the time of the existing Fisher with the module at `-O3`; the A100 gate of step 6 decides. Results in `tests.md`. |
 | 5 | Wiring into `STFTGBComputations` | CPU part done, without the Fisher matrix of DFFR (4c); GPU part pending | 2026-10-19 | `STFTGBComputations(response="dffr")` runs DFFR in its six likelihood methods and gives the outputs of the DFFR entry points bit for bit; through it, the exchange with standalone dffr is bit-identical to step 4. The existing response stays bit-identical to step 4 (144 and 26 arrays), with the same test outcomes, and keeps its CPU timings: on the same binaries, the step 5 Python changes none of them measurably. With the envelope on, DFFR's gradient noise is unchanged in f0, ḟ, f̈, φ0, λ and β, so its gradients follow the group's envelope. On the CPU, DFFR takes 0.28 to 0.40 of the time of the existing response. The pending step 4 GPU runs come from a frozen environment of the step 4 code. Results in `tests.md`. |
 | 6 | Validation | Not started | | |
 | 7 | Review of documentation and scripts | Not started | | |
@@ -124,8 +124,9 @@ LAT (source-independent):
   path above 48 kB of dynamic shared memory.
 - `cutils/lat_dffr_kernels.hh` (step 4): DFFR settings, source-model contract, windowed
   transform, closed-form TDI weights of both generations with first-order delay terms, segment
-  table, `DFFRTile<SourceT, Rows>` with its launch inputs, and two diagnostics of a batch of
-  sources (compact templates, segment table). The DFFR Fisher follows in step 4c.
+  table, `DFFRTile<SourceT, Rows>` with its launch inputs, two diagnostics of a batch of sources
+  (compact templates, segment table), and since part 4c the DFFR Fisher matrix
+  (`dffr_information_matrix_kernel<SourceT, Rows>` and its host launcher).
 - `cutils/lat_dffr_diagnostics.{hh,cu}` (step 4): three source-independent diagnostics (bounded
   sub-interval integral, windowed transform, closed-form TDI coefficients), methods of
   `STFTFresnelWrap` and `KinematicsTableWrap` for `tests/test_dffr.py`. They leave LAT after step
@@ -142,7 +143,10 @@ GBGPU (GB-specific):
 - `cutils/gb_dffr.{hh,cu}` (step 4): the entry points `gb_dffr_*_wrap`, free functions in a
   translation unit of their own, bound as the `gb_dffr_*` methods of `GBComputationGroupWrap` in
   `binding_gbgpu.{hpp,cxx}`. Nothing DFFR enters `gb_tdi_on_the_fly.{hh,cu}`.
-- `gbcomps.py` (step 5): the `response` flag and the DFFR dispatch.
+- `gbcomps.py` (step 5): the `response` flag and the DFFR dispatch, of `information_matrix` too
+  since part 4c.
+- `cutils/gb_dffr_source.hh` and `cutils/gb_dffr.{hh,cu}` gain in part 4c the parameters that leave
+  the reception states unchanged and the entry point `gb_dffr_information_matrix_wrap`.
 
 ### Tile contract (the seam)
 
@@ -155,8 +159,9 @@ bit-identical. `DFFRTile` holds 32-row segment tables in shared memory and maps 
 band bin. The 32 is the warp size, so that the 32 threads of a warp take the 32 segments of one
 band bin; 32 rows of 1012 bytes also fit the 48 kB of shared memory a launch gets by default.
 `get_ll`, `fill_global`, `swap_ll`, the F-statistic and both gradients become tile-generic; the
-existing Fisher kernel stays as it is for FresnelColumn. The DFFR Fisher (step 4c) generalises it
-with the amplitude and grid split of step 4.
+existing Fisher kernel stays as it is for FresnelColumn. The DFFR Fisher (part 4c) is a kernel of
+its own in `lat_dffr_kernels.hh`, with the estimator of the existing one; whether one kernel can
+serve both responses is decided after the A100 timings of step 6.
 
 ### Source-model contract (modes)
 
@@ -347,10 +352,10 @@ Done on the CPU on 2026-10-18; the GPU runs are pending.
 
 ### Step 4: DFFR kernels
 
-Parts 4a and 4b done on the CPU on 2026-10-18; part 4c, the DFFR Fisher, follows; the GPU runs
-are pending. The author split the step into 4a (LAT core), 4b (pixel map, launch path, tile and
-galactic-binary model), 4c (Fisher) and 4d (documents, scripts, commits), with a review after
-each.
+Parts 4a and 4b done on the CPU on 2026-10-18, and part 4c, the DFFR Fisher, on 2026-10-19 after
+step 5; the GPU runs are pending. The author split the step into 4a (LAT core), 4b (pixel map,
+launch path, tile and galactic-binary model), 4c (Fisher) and 4d (documents, scripts, commits),
+with a review after each.
 
 - 4a, in `cutils/lat_dffr_kernels.hh`, ported from dffr 01530a5 with the same operations in the
   same order:
@@ -380,14 +385,15 @@ each.
   the F-statistic) are built for 32 and for 16 rows (65 344 and 32 960 bytes) and take
   `rows_per_pass`. `get_ll`, `fill_global` and the `get_ll` gradient use 32 rows.
 - Deviations, decided by the author on 2026-10-18:
-  - The DFFR Fisher moves to 4c. It generalises the existing Fisher kernel instead of copying it.
-    The derivative of a template splits into two parts:
+  - The DFFR Fisher moves to 4c. As planned then, it was to generalise the existing Fisher kernel
+    instead of copying it. The derivative of a template splits into two parts:
     - a grid part, the three reception kernels and moments, which only f0, ḟ, f̈, λ and β change;
     - an amplitude part, the eighteen coefficients (TDI weights times reference phasors), which A,
       φ0, ι and ψ change.
 
     Those four parameters share the grid slot of the central template, so 21 grid slots replace
-    36. The column Fisher must stay bit-identical.
+    36. The column Fisher must stay bit-identical. Part 4c below keeps the split but builds the
+    DFFR Fisher as a kernel of its own.
   - Components: in the contract only (see Source-model contract above).
   - File layout:
     - one LAT header, `lat_dffr_kernels.hh`, holds the numerics, the tile and the batch
@@ -416,13 +422,66 @@ each.
     the H100, but leaves the existing kernels at 2 (255 registers).
 - Tests: `tests/test_dffr.py` (LAT) and `tests/test_stft_gb_dffr.py` (GBGPU); the exchange with
   standalone dffr; DFFR against the existing response; and the bit identity of the existing
-  response against the frozen step 3 code. Driver: `scripts/dffr/run_step4.sh`. The Fisher
-  against a Python reference comes with 4c. Results in `tests.md`.
+  response against the frozen step 3 code. Driver: `scripts/dffr/run_step4.sh`. The tests of the
+  Fisher matrix are those of part 4c below. Results in `tests.md`.
+
+#### Part 4c: the DFFR Fisher matrix
+
+Done on the CPU on 2026-10-19, after step 5 and on its commits; the GPU runs are pending. Decisions
+of the author on 2026-10-19:
+
+- A kernel of its own. `dffr_information_matrix_kernel<SourceT, Rows>` in `lat_dffr_kernels.hh`
+  uses the estimator of the existing Fisher kernel: its parameter shifts, four-point stencil
+  (two-point with `easy_central_difference`), common support of the templates of one derivative,
+  cross-channel contraction and reduction. The existing Fisher kernel is not changed. Whether one
+  kernel can serve both responses is decided after the A100 timings of step 6, because that tuning
+  may still change the structure of the DFFR kernel. This replaces the plan of 2026-10-18, which
+  had the DFFR Fisher generalise the existing kernel.
+- Shared reception states. Each stencil template, a variant, gets its own segment table through
+  one scratch table and keeps what its pixels read: its 3 reference phasors and 18 TDI weights, and
+  its reception states unless the source model lists its parameter in
+  `reception_invariant_params`. For a galactic binary these are A, φ0, ι and ψ, which enter only the
+  link amplitudes and the phasors. Their variants share the reception states of the unperturbed
+  source, so a pixel evaluates their windowed sums once: 17 sets of sums for 32 variants on the 8
+  parameters of the global fit, 21 for 36 on 9.
+- Each variant applies its own reference phasors and weights to the shared sums per pixel, in the
+  order of the fill path, so every stencil template equals its `fill_global` template bit for bit.
+  For this, `dffr_evaluate_windowed_kernel` and `dffr_evaluate_reception_state` are split before
+  their final products (`dffr_windowed_sums`, `dffr_reception_sums`, `dffr_add_reception_state`),
+  with the same operations in the same order; the DFFR outputs stay bit-identical.
+- Compact tables in dynamic shared memory, sized at launch from the variants: 70 464 bytes at 4
+  rows on 8 parameters and 81 280 on 9, about 16.5 and 19.2 kB per segment row. A pass holds 4
+  rows on the GPU, or 8; both are instantiated, and `STFTGBComputations` passes 4
+  (`_DFFR_FISHER_ROWS_PER_PASS`), because 8 rows of 9 parameters do not fit an A100 block. The CPU
+  uses one row. The list of variants is built on the host from `inds` and the steps and passed to
+  the kernel by value; on the GPU the launcher copies `inds` and `param_eps` from the device for it.
+- Steps. The DFFR Fisher keeps the steps of the existing one: on the three XYZ production fixtures,
+  every entry outside the row and column of f̈ changes by at most 1.1e-5 of sqrt(F_ii F_jj) between
+  the default and the tenfold steps, against the criterion of 1e-3 the author set.
+- `information_matrix` dispatches to the new entry point `gb_dffr_information_matrix` for
+  `response="dffr"`. `astro_track` does not apply to DFFR's single chirp model, and
+  `linear_envelope` defaults to the group's setting, as for the gradients.
+- Resources (linked module): 170 registers on the A100 and 174 on the H100, a stack of 1848 bytes,
+  no spills; with the shared memory, 2 blocks of 128 threads per SM at 4 rows on 8 parameters on
+  both devices. The existing Fisher kernel has 244 and 222 registers and a stack of 14 048 bytes.
+- CPU timing. The DFFR Fisher spends nearly all its time in windowed transforms, 63 per pixel on 9
+  parameters, the existing one in its 36 TDI samplings per segment. With the installed build
+  (`-Os`) the DFFR Fisher takes 0.82 to 0.84 of the time of the existing one at batch 1, whose
+  only source sits at a window edge with 12 of its 21 bins inside, and 1.13 at batch 64: the CPU
+  gate fails there. Compiled at `-O3`, the DFFR code runs 2.9 times faster and the existing code 4
+  to 7 %; with the whole CPU module at `-O3` the DFFR Fisher takes 0.30 to 0.42 of the time of the
+  existing one. The author decided to record both and keep the build in this part.
+- Tests: `DFFRFisherTest` and the wiring test in GBGPU `tests/test_stft_gb_dffr.py`, the exact
+  amplitude and phase entries of the existing response in `tests/test_stft_gb.py`, and a CUDA class
+  for step 6. Driver: `scripts/dffr/run_step4c.sh`. Results in `tests.md`.
+- Questions left open, and the accuracy of the Fisher matrix, which a separate validation takes up:
+  see Risks and observations.
 
 ### Step 5: wiring
 
 Done on the CPU on 2026-10-19; the GPU runs are pending. On 2026-10-19 the author moved the wiring
-before part 4c, the DFFR Fisher. Until 4c, `information_matrix` raises for DFFR.
+before part 4c, the DFFR Fisher. Until 4c, `information_matrix` raised for DFFR; part 4c replaced
+the error with the DFFR Fisher matrix.
 
 - `STFTGBComputations` (`gbcomps.py`):
   - Constructor arguments `response` (`"tdi_on_the_fly"`, the default, or `"dffr"`),
@@ -447,7 +506,7 @@ before part 4c, the DFFR Fisher. Until 4c, `information_matrix` raises for DFFR.
   - `RESPONSE_DEFAULT` is the default `linear_envelope` of both gradients and the Fisher. It
     means `False` for the existing response, as before, and the group's setting for DFFR, as the
     design decided. `True`, `False` and `None` keep their meaning for both.
-  - `information_matrix` raises `NotImplementedError` for DFFR.
+  - `information_matrix` raises `NotImplementedError` for DFFR, until part 4c.
 - `recipe.py`: the optional keys `response`, `first_order_delays` and `chirp_rate_floor` of
   `gb_stft_kwargs`; without them the comp's defaults hold.
 - Usage, settings, what DFFR does not read and its limits: `README.md`, "How to select it". The
@@ -485,6 +544,11 @@ before part 4c, the DFFR Fisher. Until 4c, `information_matrix` raises for DFFR.
     which the pip wheel of the CUDA toolkit does not hold (`tests.md`, step 4);
   - 16 against 32 rows for the two-template DFFR consumers;
   - `Template::values` and `build` of the DFFR tile forced inline on the GPU, or not.
+- The DFFR Fisher of part 4c on an A100: its CUDA tests (against the reference Fisher, against the
+  CPU, 4 against 8 rows per pass) and the timing gate, which covers `information_matrix` since the
+  GB special move calls it once per repeat block. The A100 timings of both Fisher kernels decide 4
+  against 8 rows, and whether one Fisher kernel can serve both responses (author's decision of
+  2026-10-19).
 - The three source-independent diagnostics of step 4 (`lat_dffr_diagnostics.{hh,cu}`, their wrap
   methods and `tests/test_dffr.py`) leave LAT after this step. A copy stays in the author's work
   folder.
@@ -581,12 +645,16 @@ before part 4c, the DFFR Fisher. Until 4c, `information_matrix` raises for DFFR.
   0.2 to 1.8 in ḟ and 0.6 to 13 in f̈. `information_matrix` notes the cause, roundoff in the
   Fresnel phase, and widens its f0 and ḟ steps 10 and 100 times for it; per Fisher entry,
   relative to sqrt(F_ii F_jj), the noise is then at most 5.2e-4 except in the row and column of
-  f̈: up to 18 on its diagonal and 0.2 to 0.4 elsewhere. Step 4c plans the same estimator and
-  steps for the DFFR Fisher; the steps are to be reviewed there. Noted, not changed.
+  f̈: up to 18 on its diagonal and 0.2 to 0.4 elsewhere. Noted, not changed. The DFFR Fisher of
+  part 4c uses the same estimator and steps; on the three XYZ production fixtures, every entry
+  outside the row and column of f̈ changes by at most 1.1e-5 of sqrt(F_ii F_jj) between the default
+  and the tenfold steps, so the steps were kept for it (`tests.md`, part 4c).
 - Shared memory: one DFFR template takes 32 672 bytes at 32 rows, so the two of swap (65 344
-  bytes) exceed the 48 kB a launch gets on an A100 and on an H100; the Fisher needs the
-  reception-state sharing to fit. With the opt-in of step 4, which takes its limit from the
-  device, an A100 allows 163 kB per block and 164 kB per SM, an H100 227 kB and 228 kB.
+  bytes) exceed the 48 kB a launch gets on an A100 and on an H100. With the opt-in of step 4,
+  which takes its limit from the device, an A100 allows 163 kB per block and 164 kB per SM, an
+  H100 227 kB and 228 kB. The DFFR Fisher of part 4c holds the tables of every stencil template of
+  a pass: about 16.5 kB per segment row on 8 parameters and 19.2 kB on 9, so a pass takes 4 rows
+  (or 8, which does not fit 9 parameters on an A100).
 - Newer devices than the A100, the H100 (sm_90) in particular. The timing gate of this effort is
   measured on A100s, the GPUs of SURF Spider, while the standalone DFFR timings in the README were
   measured on an H100 NVL. Both devices have 65 536 registers per SM and at most 255 per thread,
@@ -632,4 +700,54 @@ before part 4c, the DFFR Fisher. Until 4c, `information_matrix` raises for DFFR.
   `nanobind_add_module` optimises a module's sources for size unless it is given `NOMINSIZE`,
   and GCC applies the last `-O` option, so the `-O3` of the release build has no effect there.
   The GPU code is compiled by nvcc at `-O3`. Noted, not changed: a change would move the CPU
-  timings and could change rounding through other inlining.
+  timings and could change rounding through other inlining. Measured in part 4c: at `-O3` the DFFR
+  code runs 2.3 to 2.9 times faster and the existing response's Fisher 4 to 7 %, and the DFFR
+  outputs move at rounding level (templates within 8e-15 of their peaks, gradients 6e-11). Whether
+  the CPU module, or `gb_dffr.cu` alone, moves to `-O3` is open; it would replace the bit identity
+  of the outputs against the earlier steps, and of DFFR against standalone dffr, by agreement to
+  rounding.
+- Open questions of the DFFR Fisher matrix (part 4c), left to later sessions by the author on
+  2026-10-19. A validation of the Fisher matrix itself is a separate effort, not part of this
+  integration.
+  - Layout copy on the GPU. `dffr_information_matrix` builds the list of stencil templates on the
+    host from `inds` and the steps. On the GPU it copies these two arrays, about 100 bytes, from
+    the device on every call, which waits for the stream. Open: keep the copy, or pass host arrays
+    through the binding.
+  - Eight rows and nine parameters. At 8 segment rows per pass the tables of nine parameters take
+    about 162 kB, which with the kernel's static shared memory exceeds the 163 kB an A100 block can
+    hold, so that launch raises `std::runtime_error`. `STFTGBComputations` uses 4 rows. Open: keep
+    the error, or let the entry point fall back to 4 rows.
+  - Table build on the GPU. The kernel builds the table of one stencil template at a time, so at
+    4 rows per pass the stages of a build give 12 to 24 of the 128 threads of a block work. Open,
+    with the A100 timings of step 6: build several templates per stage, against the shared memory
+    that needs.
+  - Source-model contract. The list in `lat_dffr_kernels.hh` gives `load(Constants*, params)`; the
+    source models also take the launch inputs `Model`, and the list names neither `Model` nor
+    `num_params`.
+  - Accuracy of the Fisher matrix, for the validation:
+    - Phase-offset step. The step of 1e-6 rad is added to template phases of up to 1.4e4 rad on the
+      test fixture of `test_stft_gb_dffr.py`, and of about 1e6 rad in production. Rounding the sum
+      to a double changes the realised step by up to half a unit in the last place of the phase:
+      9e-7 of the step on the test fixture, about 1e-4 in production. On the test fixture F_φ0φ0
+      equals (h|h) to a relative difference of 1.2e-7 to 2.1e-7 for DFFR, and of 1.4e-6 for the
+      existing response, whose TDI combination enlarges the rounding.
+    - DFFR against the existing Fisher. On the test fixture, with the envelope off and the 8
+      parameters of the global fit, the entries agree to 2.7e-3 of sqrt(F_ii F_jj) and the
+      diagonals to 0.27 %. The difference of the models (the Doppler shift in DFFR's reception
+      chirps, the astro track of the existing Fisher) and the finite-difference noise of each are
+      not separated. A comparison of each Fisher with the curvature of its own likelihood,
+      -2 Δln L against δᵀ F δ, would separate them.
+    - Conditioning. On the same fixture the normalised Fisher matrix of one of the two sources has
+      a condition number of 3e7 to 4e7 in both responses, against 1.6e5 for the other. Its marginal
+      standard deviations from the inverse then differ by up to 17 % between the responses while
+      its entries agree to 0.3 %. On the production fixtures the condition numbers reach 4e10.
+    - Astro track of the existing Fisher. On the production fixtures, for the four sources the
+      fixture places at the edges of their store windows, the template the existing Fisher
+      differences has an (h|h) up to 1.4 % away from DFFR's, while DFFR and the existing response's
+      production template agree to 4e-4: without the Doppler shift in its carrier, the astro track
+      puts another part of the band inside the window. The two Fisher matrices differ there by up
+      to 1.5e-2 of sqrt(F_ii F_jj), and by at most 3.5e-3 (median 4e-4 to 6e-4) for the sources
+      inside their windows.
+    - Steps of the existing Fisher on L1 orbits: between its default and tenfold steps it changes
+      by up to 1.6e-3 of sqrt(F_ii F_jj) in β, above the criterion of 1e-3 that DFFR meets with
+      1.1e-5.

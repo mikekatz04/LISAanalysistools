@@ -3,8 +3,9 @@
 This folder documents the integration of the Direct Fast Fresnel Response (DFFR) into the
 short-time Fourier transform (STFT) likelihood of galactic binaries in lisaanalysistools (LAT)
 and GBGPU. The work is in progress on the branch `feat-dffr` of both repositories. Since step 5,
-`STFTGBComputations(..., response="dffr")` selects DFFR (see "How to select it" below). Its Fisher
-matrix, its first runs on a GPU and the validation of step 6 are still to come.
+`STFTGBComputations(..., response="dffr")` selects DFFR (see "How to select it" below), and since
+part 4c it has a Fisher matrix (see "The Fisher matrix" below). Its first runs on a GPU and the
+validation of step 6 are still to come.
 
 | Document | Content |
 | --- | --- |
@@ -47,8 +48,8 @@ TDI-on-the-fly family does.
 
 ## Where the pieces live
 
-The pieces of steps 1 to 5 exist on `feat-dffr`; the DFFR Fisher matrix is planned. The final
-layout is recorded here once the steps in `plan.md` are done.
+The pieces of steps 1 to 5 and of part 4c, the DFFR Fisher matrix, exist on `feat-dffr`. The
+final layout is recorded here once the steps in `plan.md` are done.
 
 | Repository | Piece | Content | Status |
 | --- | --- | --- | --- |
@@ -57,13 +58,13 @@ layout is recorded here once the steps in `plan.md` are done.
 | LAT | `domaincomputation.py` | `STFTComputationGroup.cpp_kinematics`: builds the table on the group's device on first use and keeps it. | built (step 1) |
 | LAT | `cutils/lat_fresnel.hh` | The Fresnel integrals, their auxiliary functions and the derivatives of these, with DFFR's numerics, shared by `STFTFresnel` and DFFR. The header records its branches, their accuracy and its assumptions. `STFTFresnelWrap.compute_fresnel_functions` evaluates it for tests. | built (step 2) |
 | LAT | `cutils/lat_stft_kernels.hh` | Likelihood kernels written against a tile of pixels, so that both responses feed the same consumers (see "The tile seam" below). `ColumnTile` feeds them the existing response; the Fisher kernel keeps its own loop. Step 4 adds the band-bin-first pixel map and the launch path above 48 kB of shared memory. | built (steps 3 and 4) |
-| LAT | `cutils/lat_dffr_kernels.hh` | DFFR settings, source-model contract, windowed transform, closed-form TDI weights of both generations, segment table, the DFFR tile, and two diagnostics of a batch of sources (compact templates, segment table). The header records the definitions, conventions, accuracy and assumptions. | built (step 4); Fisher in step 4c |
+| LAT | `cutils/lat_dffr_kernels.hh` | DFFR settings, source-model contract, windowed transform, closed-form TDI weights of both generations, segment table, the DFFR tile, two diagnostics of a batch of sources (compact templates, segment table), and the DFFR Fisher matrix. The header records the definitions, conventions, accuracy and assumptions. | built (step 4, Fisher in part 4c) |
 | LAT | `cutils/lat_dffr_diagnostics.{hh,cu}` | Three source-independent diagnostics for `tests/test_dffr.py`: the bounded sub-interval integral, the windowed transform and the closed-form TDI coefficients, as methods of `STFTFresnelWrap` and `KinematicsTableWrap`. | built (step 4); removed after step 6 |
 | LAT | `response/tdiconfig.py` | `TDIConfig.generation`: 1 or 2 for the stock combinations, `None` otherwise. | built (step 4) |
 | GBGPU | `cutils/gb_physics.hh` | The GB phase, frequency and amplitude formulas, shared by `GBTDIonTheFly` and the DFFR source model. | built (step 4) |
-| GBGPU | `cutils/gb_dffr_source.hh` | `GBDFFRSource`, the galactic-binary source model of DFFR (see "Source model and components" below). | built (step 4) |
-| GBGPU | `cutils/gb_dffr.{hh,cu}` | The DFFR entry points, bound as the `gb_dffr_*` methods of `GBComputationGroupWrap` next to the `gb_stft_*` methods of the existing response. | built (step 4) |
-| GBGPU | `gbcomps.py` | The `response` flag of `STFTGBComputations`, the DFFR settings and the dispatch of its six likelihood methods to the DFFR kernels. | built (step 5); Fisher in step 4c |
+| GBGPU | `cutils/gb_dffr_source.hh` | `GBDFFRSource`, the galactic-binary source model of DFFR (see "Source model and components" below), with the parameters that leave the reception states unchanged. | built (step 4, that list in part 4c) |
+| GBGPU | `cutils/gb_dffr.{hh,cu}` | The DFFR entry points, bound as the `gb_dffr_*` methods of `GBComputationGroupWrap` next to the `gb_stft_*` methods of the existing response. | built (step 4, `gb_dffr_information_matrix` in part 4c) |
+| GBGPU | `gbcomps.py` | The `response` flag of `STFTGBComputations`, the DFFR settings and the dispatch of its six likelihood methods and of `information_matrix` to the DFFR kernels. | built (step 5, Fisher in part 4c) |
 | LAT | `globalfit/recipe.py` | Optional `response`, `first_order_delays` and `chirp_rate_floor` in `gb_stft_kwargs`. | built (step 5) |
 
 ## The tile seam
@@ -95,7 +96,8 @@ step 2 code bit for bit; the GPU comparison waits for a GPU node. The seven entr
 `stft_*_impl<SourceT>` keep their signatures and use this tile by default, so GBGPU compiles
 unchanged. The Fisher kernel keeps its own loop over the column policy: it shares one Fresnel
 kernel between perturbed templates that have the same chirp, which needs the split of a pixel
-value into a prefactor and a kernel that a tile does not expose.
+value into a prefactor and a kernel that a tile does not expose. The DFFR Fisher matrix is
+likewise a kernel of its own (see "The Fisher matrix" below).
 
 DFFR builds its segment tables in shared memory, 32 segments per pass and with all threads of a
 block, and maps one band bin to each warp. The 32 is the warp size of NVIDIA GPUs: with 32
@@ -162,7 +164,8 @@ What DFFR reads from the bound computation group:
 Settings that DFFR does not read:
 
 - `T`;
-- `freq_from_tdi_phase`, which picks how the existing response estimates its chirp;
+- `freq_from_tdi_phase`, which picks how the existing response estimates its chirp, and for the
+  same reason the `astro_track` argument of `information_matrix`;
 - `use_midpoint`: DFFR always expands the signal about the segment midpoint;
 - `window_factor`. This setting scales the existing response's templates when `window_alpha` is
   0, that is, when its model assumes a boxcar segment. It approximates the power that a taper of
@@ -175,8 +178,8 @@ Limits:
 - XYZ channels only: a group or domain of another TDI set raises `ValueError`.
 - The combinations of `TDIConfig("1st generation")` or `("2nd generation")` only, in any order;
   others raise `ValueError`.
-- No Fisher matrix yet: `information_matrix` raises `NotImplementedError`. The GB special move of
-  the global fit calls it for its proposal covariance, so a global-fit run with DFFR needs step 4c.
+- The Fisher matrix has not run on a GPU yet: its CUDA tests and its A100 timings belong to step
+  6.
 - The two-template kernels (swap, its gradient, the F-statistic) use 32 segment rows per pass on
   the GPU; the CPU uses one.
 
@@ -188,6 +191,41 @@ the differences; DFFR's slopes are closed forms in the source parameters. Measur
 three production fixtures: with the envelope on, DFFR's finite-difference noise in f0, ḟ, f̈, φ0,
 λ and β is unchanged, to two digits (`tests.md`). `True`, `False` and `None` (the group's
 setting) apply to both responses.
+
+## The Fisher matrix
+
+`information_matrix` of `STFTGBComputations(response="dffr")` returns the Fisher matrices of the
+DFFR templates, F_ij = 4 df Re sum conj(dh_i) invC dh_j, with the estimator of the existing
+response:
+
+- four-point central differences of the template (two-point with `easy_central_difference`) over
+  the parameters in `inds`, at the steps of `_information_matrix_steps`;
+- a step of zero or less freezes a parameter (zero row and column);
+- the four templates of one derivative share the union of their bands, so a carrier that the step
+  moves across a bin does not inflate the matrix.
+
+Each stencil template equals the template that `fill_global_stft` writes for its shifted
+parameters, bit for bit. The tests compare the kernel with `gbgpu.testing`'s reference Fisher,
+which differences those templates: they agree to 3.3e-15 of sqrt(F_ii F_jj) at most.
+
+The kernel, `dffr_information_matrix_kernel` in `lat_dffr_kernels.hh`, gives each stencil template
+its own segment table. The parameters that change no reception state share the windowed sums of the
+unperturbed source at each pixel; for a galactic binary these are the amplitude, the phase offset,
+the inclination and the polarisation, which `GBDFFRSource` lists in `reception_invariant_params`.
+On the 8 parameters of the global fit, a pixel evaluates 17 sets of sums for 32 templates. On the
+GPU a pass holds 4 segment rows: 70 kB of shared memory on 8 parameters, 81 kB on 9.
+
+- `linear_envelope` defaults to the group's setting, as for the gradients, and `astro_track` does
+  not apply.
+- The steps are those of the existing response. On the production fixtures the DFFR Fisher changes
+  by at most 1.1e-5 of sqrt(F_ii F_jj) between them and tenfold steps, outside the row and column
+  of f̈.
+- On the CPU with the installed build, the DFFR Fisher takes 0.82 to 1.13 of the time of the
+  existing one: it costs per pixel, the existing one per segment. With GBGPU's CPU module compiled
+  at `-O3`, it takes 0.30 to 0.42. The A100 timings come in step 6.
+
+The questions left open, and observations on the accuracy of the Fisher matrix, which a separate
+validation takes up, are listed in `plan.md` (Risks and observations).
 
 ## The standalone package
 

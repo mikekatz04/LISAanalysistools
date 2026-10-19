@@ -1417,11 +1417,255 @@ None in this step.
 
 ### Pending on the GPU
 
-After the step 4 GPU runs, which come from `$OUT/step4_env`. On a GPU node, from the shared
-environment:
-`PYTHON=$PYTHON BASE_ENV=$OUT/step4_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step5.sh --device gpu $OUT environment golden golden_l1 golden_dffr golden_dffr_l1 tests exchange against_existing envelope_noise benchmarks benchmarks_l1`.
+After the step 4 GPU runs, which come from `$OUT/step4_env`. Part 4c changed the trees of the
+shared environment, so these runs come from the frozen environment of the step 5 code,
+`$OUT/step5_env` (part 4c), with its own scripts. On a GPU node:
+`cd $OUT/step5_env/lisa-analysis-tools && PYTHON=$OUT/step5_env/.venv/bin/python BASE_ENV=$OUT/step4_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step5.sh --device gpu $OUT environment golden golden_l1 golden_dffr golden_dffr_l1 tests exchange against_existing envelope_noise benchmarks benchmarks_l1`.
 This runs the CUDA classes of the test files, the CUDA wiring test among them, and the first GPU
 captures and timings of DFFR through the comp.
+
+## Part 4c: DFFR Fisher matrix
+
+Part 4c of step 4 ran after step 5, on the committed step 5. Code: LAT `feat-dffr` at 568bb265 and
+GBGPU `feat-dffr` at 5f8c1db, with the changes of part 4c uncommitted: LAT `lat_dffr_kernels.hh`
+and scripts; GBGPU's DFFR source model, entry points, binding, `gbcomps.py` and tests. Rebuilt on
+2026-10-19 into the shared environment with `ONLY="lisa-analysis-tools GBGPU"
+./install_erebor_spider.sh`, CPU and CUDA backends, last at 11:07 to 11:15.
+
+CPU node: `wn-la-01` (AMD EPYC 9754, Bergamo), Slurm job 41576984, 16 CPUs, 2026-10-19. The parts
+ran inside that allocation as
+`srun --jobid=<job> --overlap -n 1 -c 16 env PYTHON=$PYTHON BASE_ENV=$OUT/step5_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> scripts/dffr/run_step4c.sh --device cpu $OUT <part>`:
+the regression parts side by side, then the timing parts alone
+(`$OUT/regression/step4c/part3_chain.sh`). The GPU runs are pending.
+
+The existing response and the likelihood outputs of DFFR must stay bit-identical to step 5. The
+DFFR Fisher matrix must equal a reference built from `fill_global` templates to 1e-13 of
+sqrt(F_ii F_jj), lie on the plateau of its steps, and be no slower than the existing Fisher on the
+CPU.
+
+### Frozen environment of the step 5 code
+
+Part 4c changes the trees of the shared environment, so its baseline and the pending step 5 GPU
+runs need the step 5 code frozen. `scripts/dffr/build_base_env.sh` built `$OUT/step5_env` before
+the first change: 14 minutes in job 41576984, 6.1 GB. It holds LAT 568bb265 and GBGPU 5f8c1db,
+with GPUBackendTools, Eryn and BBHx as in the shared clones. Command:
+`LAT_COMMIT=568bb265 GBGPU_COMMIT=5f8c1db JAX_PLATFORMS=cpu scripts/dffr/build_base_env.sh $OUT/step5_env`
+(chain: `$OUT/regression/step4c/step5_env_chain.sh`).
+
+Criterion: the environment must recompute the step 5 CPU captures bit for bit: the golden outputs
+of the existing response, swap kernels included; those of DFFR through the comp; and the LAT side
+of the exchange with dffr. Result: 144 of 144, 26 of 26, 42 of 42 and 21 of 21 arrays, and 29 of
+29 exchange entries, bit-identical, pass (`$OUT/regression/step4c/step5_env_recheck_*.txt`).
+
+### Unit tests
+
+**`GBGPU/tests/test_stft_gb_dffr.py`.** `DFFRFisherTest` checks the DFFR Fisher matrix on the
+fixture of the file: 24 six-hour segments, 3 side bins, two sources, each with a random Hermitian
+positive-definite inverse CSD of its own, so that the cross-channel contraction carries weight.
+Two settings differ in the TDI generation, the window (taper 0.5 or boxcar), the envelope and the
+first-order delays. All 10 tests pass on the CPU:
+
+- Parity with `gbgpu.testing.stft_information_matrix_reference`, which differences the
+  `fill_global_stft` templates and contracts them in NumPy: on all 9 parameters, on the 8 of the
+  global fit, and with the two-point stencil. Criterion: per entry, at most 1e-13 of
+  sqrt(F_ii F_jj). Measured: 2.3e-15 to 3.3e-15 (`$OUT/regression/step4c/parity_numbers.py`). The
+  matrices are exactly symmetric.
+- Exact entries. h is linear in A, and φ0 multiplies it by exp(-i φ0), so F_AA A² and F_φ0φ0
+  equal (h|h) of `get_ll_stft`, and F_Aφ0 vanishes. Criterion: 1e-5 relative. Measured: F_AA A²
+  3.7e-14 to 3.9e-14; F_φ0φ0 1.2e-7 to 2.1e-7; |F_Aφ0| / sqrt(F_AA F_φ0φ0) 9.4e-7 to 1.0e-6. The
+  phase-offset step of 1e-6 rad is added to template phases of up to 1.4e4 rad on this fixture,
+  and rounding the sum to a double changes the realised step by up to 9e-7 of itself; this sets
+  the values in φ0 and the criterion.
+- A subset of the parameters gives the submatrix, a window start of one bin the full-grid matrix,
+  and a zero step a zero row and column, bit for bit.
+- Carrier crossing. A source whose carrier sits on a half-bin boundary in one segment, placed with
+  the segment-table diagnostic so that the f0 stencil moves it across the bin there (checked), and
+  the same source a quarter bin away: every diagonal ratio lies in (0.5, 2).
+- A source whose reception chirp changes sign within the fixture, found by a scan in longitude,
+  matches the reference to 1e-13.
+- Declared parameters. Shifting A, φ0, ι or ψ leaves the effective frequencies, chirp rates and
+  band starts of every reception state unchanged, bit for bit; shifting f0, ḟ, f̈, λ or β moves
+  the effective frequencies.
+- Arguments: an index outside [0, 9) raises `ValueError` in the comp and in the entry point, and so
+  do rows per pass other than 4 or 8.
+
+The wiring test compares `information_matrix` with `gb_dffr_information_matrix` called with the
+expected arguments, bit for bit, in both of its settings. `DFFRGPUFisherTest` compares the CUDA
+Fisher with the reference, with the CPU, and the 4-row with the 8-row tables, within a provisional
+1e-7 of sqrt(F_ii F_jj); it is skipped without a GPU. `test_information_matrix_raises` is removed.
+
+**`GBGPU/tests/test_stft_gb.py`.** `test_exact_amplitude_and_phase_entries` checks the same
+identities for the existing response, with (h|h) from its astro track, the chirp its Fisher
+differences. It passes: F_φ0φ0 equals (h|h) to 1.4e-6, within the criterion of 1e-5; the TDI
+combination of the existing response enlarges the rounding of the phase step.
+
+### Regression tests
+
+**Golden outputs of the existing response against step 5** (parts `golden` and `golden_l1`, swap
+kernels included). Criterion: bit identity against the step 5 captures, and between two captures
+in separate processes. Result: 144 of 144 and 26 of 26 arrays bit-identical to step 5, and the
+repeats bit-identical, pass. Files: `$OUT/regression/step4c/golden_cpu{,_l1}_vs_step5.txt` and
+`golden_cpu{,_l1}_repeat_compare.txt`.
+
+**DFFR through the comp against step 5, and the first capture of its Fisher matrix** (parts
+`golden_dffr` and `golden_dffr_l1`). The captures now hold the DFFR Fisher matrices of four
+sources per configuration: defaults, two-point stencil, the subset f0, ḟ, λ, β, and the envelope
+forced on. DFFR has no TDI-track variant. Criterion: the arrays of step 5 bit-identical, and the
+repeats bit-identical. Result: 42 of 42 and 21 of 21 arrays bit-identical to step 5, and the
+repeats 50 of 50 and 25 of 25 bit-identical, pass. The 8 and 4 Fisher arrays are the reference of
+the DFFR Fisher for step 6 (`$OUT/regression/step4c/golden_dffr_cpu{,_l1}.npz`).
+
+**Exchange with standalone dffr** (part `exchange`). Criteria of step 5. Result: 14 outputs within
+the gate of 1e-13 of the peak of the dffr array, and 29 of 29 entries of the LAT capture
+bit-identical to step 5, pass (`exchange_compare_cpu.txt`, `exchange_lat_cpu_vs_step5.txt`).
+
+**Steps of the DFFR Fisher matrix** (part `fd_steps`). `finite_difference_steps.py --all-sources`
+evaluates the Fisher matrices of all 24 sources of the three XYZ production fixtures, at 1, 10,
+100 and 1000 times the default steps (the shared table, with f0 ten times and ḟ a hundred times
+wider), for both responses. `--plateau` prints per parameter the largest change between a factor
+and the tenfold one, relative to sqrt(F_ii F_jj), over the sources and the parameter's row,
+outside f̈. Criterion (author's decision of 2026-10-19): at most 1e-3 at the steps in use. Files:
+`fd_steps_{dffr,tdi_on_the_fly}_cpu.npz`, `plateau_{dffr,tdi_on_the_fly}_cpu.txt`.
+
+Largest change between the default and the tenfold steps:
+
+| Fixture | DFFR | Existing response | Existing response, TDI track |
+| --- | --- | --- | --- |
+| `esa_tdi1_const` | 1.1e-5 | 3.2e-5 | 3.5e-5 |
+| `esa_tdi2_envelope` | 1.1e-5 | 7.5e-5 | 9.1e-5 |
+| `l1_tdi2_envelope` | 8.8e-6 | 1.6e-3 (β) | 2.0e-3 (β) |
+| f̈ diagonal, recorded only | 5.7e-3 | 1.8e-2 to 4.3e-2 | 0.23 to 0.99 |
+
+- Result: the DFFR Fisher lies on the plateau at the steps in use, by two orders of magnitude, on
+  every fixture: pass. Its steps stay those of the existing response, and
+  `_information_matrix_steps` has no branch for DFFR. The changes fall by a factor of 6 to 10 per
+  decade of step, as rounding does.
+- Observation: at its own steps, the existing response's Fisher on the L1 fixture changes by up
+  to 1.6e-3 in β and 4.3e-4 in λ, above the criterion. Noted for the validation of the Fisher
+  matrix, not changed.
+
+**DFFR against the existing Fisher matrix** (part `fd_steps`, `fisher_against_existing.py`), on
+the same captures at the default steps, 8 parameters. No threshold: the two responses model the
+signal differently.
+
+| Fixture | Largest / median over sources of max \|ΔF\| / sqrt(F_ii F_jj) | Diagonal ratio | Largest change of F_ij / sqrt(F_ii F_jj) | Condition numbers | Marginal standard deviation ratio, median (range) |
+| --- | --- | --- | --- | --- | --- |
+| `esa_tdi1_const` | 1.5e-2 / 5.4e-4 | 0.985 to 1.003 | 1.4e-3 | 6.2e3 to 3.8e10 | 1.014 (0.99 to 3.7) |
+| `esa_tdi2_envelope` | 1.5e-2 / 5.7e-4 | 0.985 to 1.003 | 1.4e-3 | 6.3e3 to 3.8e10 | 1.022 (0.99 to 7.5) |
+| `l1_tdi2_envelope` | 4.8e-3 / 7.7e-4 | 0.996 to 1.005 | 1.1e-3 | 4.8e3 to 3.5e10 | 1.011 (0.99 to 7.2) |
+
+- The largest differences belong to sources 0 to 3, which the fixture places next to the edges
+  of their store windows (one and two bins inside), so that 12 of the 21 bins of their band lie
+  in the window. There they are a common scale of the source's whole matrix: its eight diagonal
+  ratios agree to 0.1 % (0.986 for the largest), so they come from (h|h). DFFR's (h|h) agrees with
+  that of the existing response's production template, on the TDI-phase track, to 0.99992 to
+  1.00037, and with that of the astro-track template its Fisher differences to 0.986 to 1.001 on
+  ESA orbits and 0.998 to 1.005 on L1 orbits (`$OUT/regression/step4c/norm_tracks_quick.py`).
+  The astro track has no Doppler shift in its carrier, so at a window edge it puts another part
+  of the band inside the window.
+- For the 20 sources inside their windows: largest 2.5e-3 to 3.5e-3, median 4.2e-4 to 5.5e-4, and
+  diagonal ratios 0.996 to 1.003. The steps leave each Fisher's own noise at most 1e-4 on these
+  fixtures, except the sky entries of the existing response on L1, so these are differences of
+  the models.
+- The marginal standard deviations from the inverses agree to a median of 1 to 2 %. Their range
+  reaches a factor of 7 for sources whose normalised Fisher matrix has a condition number of up
+  to 4e10 over 32 days; there the inverse turns small differences of the entries into large ones.
+- On the test fixture of `test_stft_gb_dffr.py`, envelope off: the entries agree to 2.7e-3 and the
+  diagonals to 0.27 %, with condition numbers of 1.6e5 and of 3e7 to 4e7 for the two sources
+  (`$OUT/regression/step4c/dffr_vs_existing_fisher_quick.py`, `fisher_conditioning_quick.py`).
+
+**Test suites** (part `tests`). Criterion: every test case of step 5 keeps its outcome. Result:
+pass. Files: `gbgpu_tests_cpu.{log,xml}`, `lat_tests_cpu.log`.
+
+- GBGPU: the 71 cases of step 5 keep their outcomes, except `test_information_matrix_raises`,
+  which is removed. 11 cases are new: 10 pass, and the CUDA Fisher test is skipped. In all: 68
+  passed and 11 skipped, plus the failure and the error of step 5, the two cases that need a GPU.
+- LAT: 302 tests. The 299 that pair by name with step 5 keep their outcomes. In all: 2 failures
+  and 14 errors, 63 skips, as in step 5.
+
+**GPU resources, without a GPU** (part `resources`). `kernel_resources.py`, now with a second
+host program for the dynamic shared memory of the DFFR Fisher, which depends on the parameters it
+differences. Reference: the step 5 module, from `$OUT/step5_env`. Files:
+`kernel_resources_sm{80,90}.txt`.
+
+| Kernel | Linked registers, sm_80 / sm_90 | Stack [B] | Spills | Static shared [B], sm_80 / sm_90 | Dynamic shared [B] | Blocks per SM by registers and by shared memory, A100 / H100 |
+| --- | --- | --- | --- | --- | --- | --- |
+| DFFR Fisher, 4 rows, 8 parameters | 170 / 174 | 1848 | none | 9696 / 10720 | 70 464 | 2, 2 / 2, 2 |
+| DFFR Fisher, 8 rows, 8 parameters | 170 / 174 | 1848 | none | 10016 / 11040 | 140 640 | 2, 1 / 2, 1 |
+| DFFR Fisher, 4 rows, 9 parameters | 170 / 174 | 1848 | none | 9696 / 10720 | 81 280 | 2, 1 / 2, 2 |
+| DFFR Fisher, 8 rows, 9 parameters | 170 / 174 | 1848 | none | 10016 / 11040 | 162 272 | 2, 0 / 2, 1 |
+| Existing Fisher, unchanged | 244 / 222 | 14 048 | none | 9424 / 10448 | none | 2, 16 / 2, 22 |
+
+- 8 rows of 9 parameters do not fit an A100 block, and that launch raises; `STFTGBComputations`
+  uses 4 rows.
+- The existing kernels keep their resources of step 5. The DFFR kernels keep their linked
+  registers and blocks per SM, except the fill kernel, with one register fewer (155); the own
+  registers of the two-template DFFR kernels fall by 2 to 4, from the split of the pixel
+  functions.
+
+### Benchmarks
+
+**Timing gate of the DFFR Fisher matrix on the CPU** (parts `fisher_timing` and
+`fisher_timing_l1`), alone in the allocation. The Fisher of both responses on all 9 parameters and
+on the 8 of the global fit, at batches 1, 8 and 64, three runs of each response in turn, on the
+ESA and L1 production fixtures (32 one-day segments). Criterion (author's decision): DFFR no
+slower than the existing response at every point. Files:
+`$OUT/benchmarks/step4c/cpu_{esa,l1}_fisher_{existing,dffr}_run{1,2,3}.json`,
+`compare_cpu_{esa,l1}_fisher_dffr_vs_existing.txt`.
+
+| Fixture, parameters | Existing, batch 1 / 8 / 64 [ms] | DFFR, batch 1 / 8 / 64 [ms] | DFFR / existing |
+| --- | --- | --- | --- |
+| ESA, 9 | 42.58 / 363.32 / 3075.62 | 35.62 / 355.78 / 3473.96 | 0.837 / 0.979 / 1.130 |
+| ESA, 8 | 36.40 / 307.62 / 2576.70 | 29.89 / 297.95 / 2900.01 | 0.821 / 0.969 / 1.125 |
+| L1, 9 | 42.44 / 362.36 / 3067.56 | 35.58 / 354.92 / 3469.78 | 0.838 / 0.979 / 1.131 |
+| L1, 8 | 36.15 / 306.38 / 2573.24 | 29.84 / 297.23 / 2895.88 | 0.825 / 0.970 / 1.125 |
+
+Result: fail, by 13 % at batch 64 on both fixtures.
+
+- Why the ratio grows with the batch. The DFFR Fisher spends nearly all its time in windowed
+  transforms, 63 per pixel on 9 parameters (21 sets of three reception states); the existing
+  Fisher spends most of its time sampling the TDI, 36 times per segment, whatever the pixels.
+  Sources 0 to 3 sit at the edges of their windows, with 12 of their 21 bins inside. One source
+  at a time (`$OUT/regression/step4c/fisher_cost_quick.py`), the DFFR Fisher takes 35.5 ms for
+  these four and about 56 ms for most others, the existing Fisher 41 to 50 ms. Batch 1 holds only
+  source 0.
+- Compilation. GBGPU's CPU module compiles with `-Os` (plan, Risks and observations). Two variants
+  were built in `$OUT/regression/step4c/o3_variant/` and loaded in place of the installed module,
+  without changing it (`build_o3_variant.sh`, `build_full_o3.sh`, `run_with_overlay.py`):
+  - `gb_dffr.cu` alone at `-O3`: every DFFR method is 2.3 to 2.9 times faster. At batch 64,
+    `get_ll_stft` takes 0.42 of its time with `-Os`, the Fisher 0.35. The DFFR outputs change at
+    rounding level: none of the 50 arrays of `golden_dffr` is bit-identical; templates and inner
+    products stay within 8e-15 of their peaks, gradients within 6e-11.
+  - The whole module at `-O3`, both responses in turn: the DFFR Fisher takes 0.30 to 0.42 of the
+    time of the existing one (9 parameters: 12.7 / 125 / 1207 ms against 40.8 / 343 / 2872 ms).
+    The existing Fisher gains 4 to 7 % against its `-Os` runs of the same day.
+- Decision of the author (2026-10-19): both results recorded, the build unchanged in this part.
+  The `-Os` of the CPU module is an open item, and the A100 gate of step 6 remains the gate for
+  production.
+
+**The existing response against the step 5 code** (parts `existing_timing` and
+`existing_timing_l1`), alone, the two environments in turn, three runs each, every method but the
+swap kernels. Criterion of step 3: each point within the larger run-to-run spread of the two sets.
+Files: `compare_cpu_{esa,l1}_vs_step5_env.txt`.
+
+| Fixture | Ratio, all points | Median | Within noise |
+| --- | --- | --- | --- |
+| ESA | 0.996 to 1.013 | 1.003 | 14 of 15 |
+| `L1Orbits` | 0.995 to 1.007 | 0.999 | 13 of 15 |
+
+The three points outside the spread differ by at most 0.7 %, the drift between runs of identical
+code seen in steps 3 to 5. Result: pass; part 4c leaves the timings of the existing response, whose
+compiled code it does not change, as they were.
+
+### Validation runs
+
+None in this part.
+
+### Pending on the GPU
+
+On a GPU node, from the shared environment, after the step 5 GPU runs:
+`PYTHON=$PYTHON BASE_ENV=$OUT/step5_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step4c.sh --device gpu $OUT environment golden golden_l1 golden_dffr golden_dffr_l1 exchange tests fd_steps fisher_timing fisher_timing_l1 existing_timing existing_timing_l1`.
+This runs the CUDA Fisher test and the first GPU captures and timings of the DFFR Fisher.
 
 ## Step 6: validation
 
