@@ -2395,6 +2395,207 @@ Files: `$OUT/benchmarks/standalone/` (`report.txt`, `inputs_*.npz`, `ours_*_run*
 `dffr_*_run*.npz`, `fill_check/`). Chain: `$OUT/benchmarks/standalone/standalone_chain.sh`; the
 commands of a single run are in the docstring of `scripts/dffr/dffr_timing_lat.py`.
 
+**Item 1 of the validation: both responses against the STFT of a time-domain truth, and the window
+convention** (2026-10-21). The author set the scope and order of the validation on 2026-10-21;
+this is its first item. It measures how well the templates of both responses reproduce the
+transform of time-domain data, and how much of the difference comes from the window: the global
+fit windows the data with LAT's symmetric Tukey window, while both responses integrate the
+periodic one. The numbers are recorded; there is no gate.
+
+Code: LAT 0195b391 and GBGPU 11d5159, with the uncommitted scripts `stft_accuracy.py`,
+`td_truth.py`, `td_injection.py` and `run_step6.sh`; dffr 2b61cdd for the truth, in its own
+environment (lisagwresponse 3.0.2, pytdi 2.2.1, lisainstrument 2.3.0, lisaorbits 3.1.0). The comps
+ran on the A100 of the conventions above, the truth on the CPUs of the same node.
+
+- Sources, chosen by the author for items 1 to 3: 0.5 and 20 mHz; at each, the largest and the
+  smallest ḟ of the global fit's GB prior at that frequency (`get_fdot_mojito(f, "+")` and
+  `(f, "-")`: 1.1e-18 and -6.6e-20 Hz/s at 0.5 mHz, 8.2e-13 and -2.3e-11 Hz/s at 20 mHz); each at
+  the two sky positions of the step 0 truth, (λ, β) = (2.1, -0.35) and (5.0, 0.9) rad. A = 1e-22,
+  φ0 = 1.2, ι = 0.9 and ψ = 0.7, as in the step 0 truth, and f̈ = 0, as the global fit sets it. The
+  parameters refer to the start of the ESA orbit file.
+- Truth: X2, Y2 and Z2 every 5 s from the chain of the standalone package's truth
+  (`dffr.comparison.TimeDomainTruth`): lisagwresponse on the strain at the exact retarded times,
+  then pytdi, on the ESA orbits that LAT ships (the dffr environment ships the same file; the
+  scripts compare its MD5). A year: 365 one-day segments from 10 days after the start of the orbit
+  file. The step 0 truth put lisainstrument, with every noise off, between the two. Over 2 days
+  the two chains agree to 6.3e-7 of the peak at 0.5 mHz and 4.2e-7 at 20 mHz (`truth_chains/`),
+  while a year of the longer chain needs about 74 GB per source (6.1 GB per 30 days in step 0), so
+  the truth leaves lisainstrument out.
+- Data: `TDSignal.stft` of the truth, dt·rfft(w·x) per segment, with two windows: LAT's
+  `windowfun("tukey", N, 0.1157)`, as `globalfit/engine.py` builds the data, and the periodic
+  Tukey window (`scipy.signal.windows.tukey(N, 0.1157, sym=False)`), which both responses
+  integrate.
+- Templates: `STFTGBComputations` with each response and the production settings (XYZ, TDI 2nd
+  generation, taper 0.1157, segment midpoints, linear envelope, `freq_from_tdi_phase`), but 60
+  side bins (author's decision, below; production takes 10). Each source has a domain over its
+  frequency track for the year, plus the side bins and 20 bins on each side, cut at the start of
+  the production band (0.1 mHz). Inverse covariance: the XYZ instrument noise of
+  `XYZSensitivityBackend` (TDI 2nd generation, its default noise levels). The template comes from
+  `fill_global_stft`, (d|h) and (h|h) from `get_ll_stft`, and (d|d) from the group.
+- Metrics, per source, response and window, with d the data and h the template. Over the pixels
+  that the template fills, the metrics of the step 0 truth: the flat mismatch
+  1 - |<d, h>| / (|d| |h|), with a free phase, and per segment and channel max |h - d| / max |d|.
+  With the noise weights of the likelihood, over the whole domain and without a free phase: the
+  mismatch 1 - Re(d|h) / sqrt((d|d)(h|h)), the residual (d-h|d-h)/(d|d) (the loss in ln L at the
+  true parameters is SNR² times half of it), the amplitude ratio sqrt((h|h)/(d|d)) and the phase
+  of (d|h). Also the share of (d|d) outside the pixels that the template fills.
+- Checks: the truth against `GBTDIonTheFly` in the time domain (2 days from day 100 of the data,
+  spline knots every 300 s): 1.6e-7 to 3.3e-7 of the peak at 20 mHz, with a least-squares scale
+  within 2.2e-8 of 1, and 1.3e-5 to 1.7e-5 at 0.5 mHz. The noise-weighted products of the script
+  agree with those of the comp and the group to 1.8e-15 at 20 mHz and 3.8e-11 at 0.5 mHz, where
+  the 3 × 3 XYZ noise covariance has a condition number of 3e4 to 1.1e5 (2.6 at 20 mHz).
+- Command, from the LAT root inside the job:
+  `PYTHON=$PYTHON DFFR_PYTHON=<dffr repository>/.venv/bin/python scripts/dffr/run_step6.sh --device gpu $OUT accuracy truth_chains`.
+  The truth takes about 12 minutes (8 processes side by side), the comps about 2 s per source.
+  Files: `$OUT/validation/accuracy/`: `truth/`, `year_pytdi_n60/` (`report.txt`, `summary.json`,
+  a figure per source, `summary.png`), `year_pytdi_n10/` (`N_SIDE_BINS=10`), `truth_chains/`.
+
+Results with 60 side bins, on data with the periodic window (the author's choice for the
+benchmark, below). Ranges over the 4 sources of each frequency.
+
+| Frequency | Response | Flat mismatch, template pixels | Median segment error | Largest segment error | Noise-weighted mismatch | Residual |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0.5 mHz | DFFR | 2.7e-8 | 1.0e-4 | 2.5e-4 to 9.0e-4 | 1.3e-7 | 2.5e-7 to 2.7e-7 |
+| 0.5 mHz | existing | 2.7e-8 | 1.0e-4 | 3.2e-4 to 6.2e-3 | 7.2e-6 to 1.4e-5 | 1.4e-5 to 2.8e-5 |
+| 20 mHz | DFFR | 4.8e-10 to 6.8e-10 | 2.2e-5 to 3.2e-5 | 4.0e-4 to 4.7e-4 | 2.4e-8 to 3.6e-8 | 4.8e-8 to 7.2e-8 |
+| 20 mHz | existing | 7.6e-10 to 1.2e-9 | 1.4e-5 to 1.9e-5 | 4.1e-3 to 4.6e-3 | 2.5e-8 to 3.7e-8 | 5.0e-8 to 7.3e-8 |
+
+- At 20 mHz DFFR matches the truth at least as well as the standalone package did in step 0
+  (mismatch 7.5e-10 to 1.2e-9 and median segment errors 3.2e-5 to 4.1e-5 at 20 mHz, over 30
+  days). The largest segment errors of both responses fall where one channel's signal is weak: in
+  the worst segment that channel's peak is 6 % to 7 % of its median over the year. There DFFR
+  reaches 4.0e-4 to 4.7e-4, as in step 0 (4.8e-4 at 20 mHz in sky 0), and the existing response
+  4.1e-3 to 4.6e-3, while its median error is the lower one. The noise-weighted mismatch of both is
+  set by the power beyond 60 bins, 4.6e-8 to 7.0e-8 of (d|d).
+- At 0.5 mHz the band of 60 side bins reaches the start of the production band. There the data
+  hold the leakage of the signal's negative-frequency image, which neither response computes:
+  both give the transform of the positive-frequency part. It sets a floor of 1.0e-4 in the
+  segment error and of 2.7e-8 in the flat mismatch of both. With 10 side bins these pixels lie
+  outside the band, and the median segment errors are 3.7e-5 (existing) and 4.9e-5 to 5.4e-5
+  (DFFR).
+- At 0.5 mHz the noise-weighted mismatch of the existing response, 7.2e-6 to 1.4e-5, is 50 to 100
+  times that of DFFR. Its errors sit in the combination T = (X + Y + Z)/√3, which carries 0.9 % of
+  the signal of A there and whose noise is far below that of A and E, so the likelihood weights it
+  heavily. Relative error in T over the template pixels: 2.6e-3 to 3.7e-3 for the existing
+  response, 3.4e-4 for DFFR; in A and E both have 2.3e-4, set by the image above. With 10 side
+  bins the band truncation (below) hides this.
+- With 10 side bins the sampling of the ESA orbit file, every 1.87 days, shows at 0.5 mHz: both
+  responses follow the same day-to-day ripple and share an error floor of about 3.7e-5 per
+  segment, and the truth differs from `GBTDIonTheFly`, which reads LAT's orbits as both responses
+  do, by 1.3e-5 to 1.7e-5. LAT and lisagwresponse interpolate the file's samples differently; that
+  is the likely cause, not tested directly.
+
+The window convention. The data window of the global fit, LAT's symmetric Tukey window, divides
+by N - 1 in its taper and is zero at the last sample of a segment. It equals scipy's symmetric
+Tukey window to 8e-9 and is the periodic window of the models squeezed in time by (N - 1)/N. In
+the trailing taper it is lower by up to 1.53e-3 (2465 s before the segment end, 9.7e-4 on average
+over the last 5000 s), in the leading taper by at most 5.3e-5, and its sum is 5.8e-5 smaller
+(`window_explained/windows.png`, made with the script's window formulas). On the truth, the same
+in every segment and for every source, the LAT-window data differ from the periodic-window data
+by:
+
+| Quantity | 0.5 mHz | 20 mHz |
+| --- | --- | --- |
+| Flat mismatch | 3.6e-8 | 3.6e-8 |
+| Median segment error | 6.3e-5 | 6.3e-5 to 6.6e-5 |
+| Amplitude ratio minus 1 | -2.9e-5 | -2.9e-5 |
+| Phase [rad] | -6.4e-6 | -9.7e-8 to -5.8e-8 |
+| Residual, of (d\|d) | 7.5e-8 | 7.3e-8 |
+
+Against LAT-window data both responses carry this on top of their own error. With 60 side bins:
+flat mismatch 3.7e-8 to 3.8e-8 at 20 mHz and 6.2e-8 to 6.4e-8 at 0.5 mHz, median segment errors
+7.5e-5 to 9.3e-5 and 1.0e-4 to 1.1e-4, residual 1.2e-7 to 1.5e-7 at 20 mHz. In ln L at the true
+parameters the window costs SNR² × 3.6e-8: 4e-4 at SNR 100. The author decided on 2026-10-21 to
+benchmark the accuracy on data with the periodic window and to leave production as it is: there
+the 10 side bins leave a mismatch four orders of magnitude larger (below).
+
+Side bins. With the 10 side bins of production (`year_pytdi_n10/`), 1.3e-3 (20 mHz) to 1.7e-3
+(0.5 mHz) of (d|d) lies outside the template's pixels, with either window. That sets the
+noise-weighted mismatch of both responses at 6.4e-4 to 8.8e-4 and their residual at 1.3e-3 to
+1.8e-3: at SNR 100, a loss of 6 to 9 in ln L at the true parameters. The window causes it: under
+the taper 0.1157 a tone keeps 1.2e-3 to 1.4e-3 of its power beyond 10 bins, 1.3e-6 to 5.8e-6
+beyond 30 and 3.8e-8 to 1.1e-7 beyond 60. On data with the periodic window, the in-band metrics at
+20 mHz equal those of the 60-bin run to two digits. The author decided to run the validation with
+60 side bins.
+
+LAT's full time-domain response. The first injection was LAT's `pyResponseTDI`
+(`td_injection.py`; `stft_accuracy.py` without `--truth`, `year_pyresponsetdi_n10/`). Its check
+against `GBTDIonTheFly` showed an error that grows as f^-3 below 5 mHz: 3.0e-3 of the peak at
+0.5 mHz, 3.7e-4 at 1 mHz, 4.3e-5 at 2 mHz, 2.7e-6 at 5 mHz and 3.4e-7 at 20 mHz. `pyResponseTDI`
+interpolates the factor A(e) of its fractional-delay Lagrange weights linearly from a table of
+1001 values (`MAX_A_VALS` in `LISAResponse.cu`), which underestimates A by up to 2.1e-7. At
+20 mHz that is a scale error of 2.4e-7; at low frequency TDI 2 amplifies it, because each link term
+is a small difference of two strain values and the combination cancels the links again. In the
+template band the effect is smaller: the two injections agree to 2.5e-7 to 2.9e-7 per segment
+(median) at 20 mHz and to 1.2e-5 at 0.5 mHz, so most of the time-domain error lies outside the
+band. The author then chose the truth chain of the standalone package and decided to record this
+finding only.
+
+**Item 2 of the validation: the cases of the step 0 truth through both responses** (2026-10-21).
+The second item of the author's scope, as the author defined it after item 1: the truth of step 0
+for both responses of `STFTGBComputations`, on the cases and the grid of step 0, over 30 days with
+the chain of step 0 and over a year without lisainstrument. It ties the accuracy that `README.md`
+quotes for the standalone package to the code of production. The numbers are recorded; there is
+no gate.
+
+- Code: as item 1, with `stft_accuracy.py --source-set step0`.
+- Cases, those of step 0: 3, 20 and 40 mHz with ḟ = 3e-16 Hz/s, and 20 mHz with ḟ = 1e-13 Hz/s,
+  carriers moved to the nearest bin, each at the two sky positions; A = 1e-22, φ0 = 1.2, ι = 0.9,
+  ψ = 0.7 and f̈ = 0.
+- Grid of step 0: one-day segments from 5 days after the start of the ESA orbit file; data
+  windowed with the periodic Tukey window of taper 0.116, which both responses take as well; flat
+  metrics over the 51 bins within 3e-4 Hz of the carrier, in every segment. Both responses use 60
+  side bins, which hold that band in every segment (the script checks it).
+- Truth: the chain of step 0 (lisagwresponse, lisainstrument with every noise off, pytdi) over 30
+  days, and the chain of item 1 (without lisainstrument) over a year and over its first 30 days.
+- Checks: the truth against `GBTDIonTheFly` (2 days from day 28 of the 30-day runs and from day
+  100 of the year): at most 2.8e-6 of the peak at 3 mHz and 1.3e-6 at 20 and 40 mHz. The products
+  of the script agree with those of the comp and the group to 3e-13 at 3 mHz and 4e-15 at 20 and
+  40 mHz.
+- Command, from the LAT root inside the job:
+  `PYTHON=$PYTHON DFFR_PYTHON=<dffr repository>/.venv/bin/python scripts/dffr/run_step6.sh --device gpu $OUT step0`.
+  The 16 truth runs go side by side: about 3 minutes per case for 30 days with lisainstrument and
+  15 minutes for a year without; then three runs of `stft_accuracy.py`. Files:
+  `$OUT/validation/accuracy/step0/` (`truth/`, `truth_instrument_30d/`, `30d_instrument_n60/`,
+  `30d_gws_n60/`, `year_n60/`).
+
+Over 30 days with the chain of step 0 (`30d_instrument_n60/`), next to the standalone package of
+step 0 on the same cases. Each entry gives the flat mismatch, the median and the largest segment
+error.
+
+| Case | Sky | Standalone dffr, step 0 | DFFR in `STFTGBComputations` | Existing response |
+| --- | --- | --- | --- | --- |
+| 3 mHz | 0 | 1.23e-9, 4.65e-5, 1.41e-4 | 1.23e-9, 4.65e-5, 1.41e-4 | 8.72e-10, 1.85e-5, 2.83e-4 |
+| 3 mHz | 1 | 6.47e-10, 3.17e-5, 9.89e-5 | 6.47e-10, 3.17e-5, 9.89e-5 | 1.04e-9, 2.87e-5, 8.66e-5 |
+| 20 mHz | 0 | 1.24e-9, 4.06e-5, 4.79e-4 | 1.24e-9, 4.06e-5, 4.79e-4 | 1.04e-8, 1.93e-5, 4.08e-3 |
+| 20 mHz | 1 | 7.49e-10, 3.23e-5, 5.63e-5 | 7.49e-10, 3.23e-5, 5.64e-5 | 9.61e-10, 2.99e-5, 8.16e-5 |
+| 20 mHz, ḟ = 1e-13 Hz/s | 0 | 1.24e-9, 4.05e-5, 4.75e-4 | 1.24e-9, 4.04e-5, 4.75e-4 | 1.04e-8, 1.92e-5, 4.05e-3 |
+| 20 mHz, ḟ = 1e-13 Hz/s | 1 | 7.49e-10, 3.25e-5, 5.66e-5 | 7.49e-10, 3.24e-5, 5.66e-5 | 9.61e-10, 3.01e-5, 8.19e-5 |
+| 40 mHz | 0 | 9.92e-10, 3.68e-5, 8.94e-5 | 9.93e-10, 3.68e-5, 8.93e-5 | 2.97e-10, 1.43e-5, 7.78e-5 |
+| 40 mHz | 1 | 1.08e-9, 4.53e-5, 7.41e-5 | 1.08e-9, 4.53e-5, 7.41e-5 | 5.86e-10, 2.42e-5, 7.37e-5 |
+
+- DFFR in the comp reproduces the standalone package to two or three digits in every case,
+  although it runs on the GPU from LAT's kinematics table, where step 0 ran the standalone CPU path
+  from its own. The accuracy that `README.md` quotes thus holds for the integrated response.
+- The existing response has the lower median errors, 1.4e-5 to 3.0e-5 against 3.2e-5 to 4.7e-5,
+  and the smaller mismatch at 40 mHz and at 3 mHz in sky 0. At 20 mHz in sky 0 its mismatch is
+  1.04e-8, 8 times that of DFFR, from the segments where the Y channel is weak (largest error
+  4.1e-3).
+- The chain without lisainstrument changes these numbers by at most 1 % (`30d_gws_n60/`).
+
+Over a year without lisainstrument (`year_n60/`): flat mismatch 3.7e-10 to 1.3e-9 and median
+segment errors 2.2e-5 to 4.0e-5 for DFFR, 5.8e-10 to 1.4e-9 and 1.5e-5 to 2.0e-5 for the existing
+response. The largest segment errors come from segments where one channel nearly vanishes: at
+3 mHz in sky 1, on day 352, the peak of Y is 1 % of its median over the year, and the errors reach
+2.4e-3 (DFFR) and 7.8e-2 (existing); the 99th percentiles of the segment errors of that case are
+3.5e-4 and 1.8e-3. With the noise weights of the likelihood, both responses reach 1.7e-8 to 2.4e-8
+at 20 and 40 mHz, set by the power beyond 60 bins (3.3e-8 to 4.6e-8 of (d|d)). At 3 mHz the
+existing response reaches 5.8e-8 to 1.2e-7 against 2.2e-8 to 2.3e-8 for DFFR: the effect of the
+combination X + Y + Z that item 1 found at 0.5 mHz, smaller at the higher frequency.
+
+The window convention on these cases (LAT's window against the periodic one, taper 0.116): flat
+mismatch 3.5e-8 to 3.6e-8 and median segment errors 5.8e-5 to 6.6e-5, as in item 1.
+
 ## Step 7: review of documentation and scripts
 
 Not started.

@@ -15,7 +15,7 @@ branch `feat-dffr` in both repositories.
 | 3 | Tile seam | Done, CPU and GPU | 2026-10-18, GPU on 2026-10-19 | Every output of the seven kernels, swap included, is bit-identical to the step 2 code on the CPU (144 and 26 arrays, against a frozen environment of the step 2 code), with the same test outcomes. CPU timings lie within run-to-run noise at 27 of 30 points; the other three differ by at most 0.7 %, within the drift between runs of identical code. ptxas gives every kernel at least the blocks per SM of step 2 on the A100 (sm_80) and the H100 (sm_90). On the A100 every output is bit-identical to step 2 except `fill_global_stft`, whose atomic additions round differently from run to run (at most 8.6e-17 of its peak, within the GPU criterion of 1e-15), with the same test outcomes. In the interleaved GPU timings of step 6, 27 of 35 points lie within the run-to-run noise and the other 8 within 0.7 %, accepted by the author as drift, as on the CPU. Results in `tests.md`. Corrected on 2026-10-18 in step 4: the register counts of step 3 were those of each kernel's own file; in the linked module every kernel has 244 registers on the A100 and 222 on the H100, in step 2 and step 3 alike, so 2 blocks per SM, and the conclusion holds. |
 | 4 | DFFR kernels | 4a, 4b and 4c: done, CPU and GPU; the DFFR Fisher misses its A100 timing gate (step 6) | 2026-10-18, 4c on 2026-10-19, GPU on 2026-10-20 | The DFFR numerics, tile and galactic-binary model are built. The existing response stays bit-identical to step 3 on the CPU (144 and 26 arrays), with the same test outcomes and CPU timings within run-to-run noise or faster. Against standalone dffr on the same kinematics table, templates, global fill and segment table are bit-identical and the inner products agree to 6.3e-15. With the linear envelope of production, DFFR and the existing response differ by a median mismatch of 5.6e-10. Linked registers give the DFFR kernels 2 to 3 blocks of 128 threads per SM and the existing kernels 2; register caps and device link-time optimisation are timed in step 6. Part 4c, after step 5, adds the DFFR Fisher matrix as a kernel of its own: it matches a reference built from `fill_global` templates to 3.3e-15 of sqrt(F_ii F_jj), lies on the plateau of its steps (1.1e-5 against the criterion of 1e-3), and leaves every output of step 5 bit-identical. On the CPU it misses its timing gate at batch 64 by 13 % with the installed `-Os` build of GBGPU's CPU module, and takes 0.30 to 0.42 of the time of the existing Fisher with the module at `-O3`. On the A100 the existing response stays bit-identical to step 3 except `fill_global_stft` (rounding of its atomic additions); the exchange with standalone dffr on its GPU backend agrees within 1.7e-14; two DFFR CUDA tests that ask for CPU-level agreement fail and are recorded (author's decision). Part 4c on the A100 changes DFFR's swap, F-statistic and swap gradient at rounding level against step 5 (nvcc compiles an out-of-line function differently), which the author accepted. The DFFR Fisher misses its A100 gate from 1000 sources (1.34 to 1.47 times the existing Fisher on nine parameters, 1.06 to 1.09 at 1000 sources on eight); it is optimised in step 6. Results in `tests.md`. |
 | 5 | Wiring into `STFTGBComputations` | Done, CPU and GPU; GPU timings in step 6 | 2026-10-19, GPU on 2026-10-20 | `STFTGBComputations(response="dffr")` runs DFFR in its six likelihood methods and gives the outputs of the DFFR entry points bit for bit; through it, the exchange with standalone dffr is bit-identical to step 4. The existing response stays bit-identical to step 4 (144 and 26 arrays), with the same test outcomes, and keeps its CPU timings: on the same binaries, the step 5 Python changes none of them measurably. With the envelope on, DFFR's gradient noise is unchanged in f0, ḟ, f̈, φ0, λ and β, so its gradients follow the group's envelope. On the CPU, DFFR takes 0.28 to 0.40 of the time of the existing response. On the A100 the existing response stays bit-identical to step 4 except `fill_global_stft`, DFFR through the comp is reproducible like the existing response and agrees with its CPU outputs to 8.0e-15 (templates and inner products), and the comparisons with standalone dffr and with the existing response give the CPU numbers. Results in `tests.md`. |
-| 6 | Validation | Started: standalone dffr against the integration, GPU timings of the steps, the DFFR Fisher optimised, the occupancy A/B closed, all on the A100 | 2026-10-19 to 2026-10-21 | The standalone package passes its own suite on the A100 (51 of 51) with a CUDA 13 backend added for this comparison. On the same inputs, a year of one-day segments and 10 000 sources on the ESA orbits, DFFR in `STFTGBComputations` takes 4 to 7 % more time per source than standalone dffr in `fill_global` and 6 to 13 % more in `get_ll`; (d\|h) and (h\|h) agree to 1.4e-15 of their peaks. In the interleaved GPU timings of the steps, DFFR is 2.1 to 8.8 times faster than the existing response in every likelihood method from 1000 sources. The DFFR Fisher, with its final reduction staged in dynamic shared memory and its tables built in waves straight into the Fisher tables, takes 0.51 to 0.63 of the time of the existing Fisher and meets its A100 gate at every batch size; its outputs are unchanged bit for bit on the CPU and the GPU, `fill_global` aside. The occupancy A/B changed nothing in the build: a register cap of 168 on `domains.cu` makes the existing response 4 to 15 % faster but two DFFR methods up to 1 % slower and moves inner products at rounding level, so the author left it out. Results in `tests.md`. |
+| 6 | Validation | Started: standalone dffr against the integration, GPU timings of the steps, the DFFR Fisher optimised, the occupancy A/B closed, all on the A100; validation items 1 (accuracy against a time-domain truth, window convention) and 2 (the step 0 cases through both responses) done | 2026-10-19 to 2026-10-21 | The standalone package passes its own suite on the A100 (51 of 51) with a CUDA 13 backend added for this comparison. On the same inputs, a year of one-day segments and 10 000 sources on the ESA orbits, DFFR in `STFTGBComputations` takes 4 to 7 % more time per source than standalone dffr in `fill_global` and 6 to 13 % more in `get_ll`; (d\|h) and (h\|h) agree to 1.4e-15 of their peaks. In the interleaved GPU timings of the steps, DFFR is 2.1 to 8.8 times faster than the existing response in every likelihood method from 1000 sources. The DFFR Fisher, with its final reduction staged in dynamic shared memory and its tables built in waves straight into the Fisher tables, takes 0.51 to 0.63 of the time of the existing Fisher and meets its A100 gate at every batch size; its outputs are unchanged bit for bit on the CPU and the GPU, `fill_global` aside. The occupancy A/B changed nothing in the build: a register cap of 168 on `domains.cu` makes the existing response 4 to 15 % faster but two DFFR methods up to 1 % slower and moves inner products at rounding level, so the author left it out. Against a year of a time-domain truth (lisagwresponse and pytdi) at 0.5 and 20 mHz, with 60 side bins and the periodic window on the data, DFFR's templates reach a flat mismatch of 4.8e-10 to 6.8e-10 at 20 mHz, as the standalone package did in step 0, and at 0.5 mHz a noise-weighted mismatch 50 to 100 times below that of the existing response. LAT's symmetric data window adds a mismatch of 3.6e-8, which the author judged insignificant against the 6.4e-4 to 8.8e-4 that production's 10 side bins leave, so production keeps it. On the eight cases of the step 0 truth, DFFR in the comp reproduces the standalone package's accuracy to two or three digits. Results in `tests.md`. |
 | 7 | Review of documentation and scripts | Not started | | |
 
 ## Context
@@ -70,7 +70,7 @@ outputs (golden `.npz` files, timings, figures) go to a folder outside git, for 
 | Channels | XYZ only; DFFR raises on an AET domain. |
 | Derivatives | For `response="dffr"`, gradients and the Fisher inherit the group's `linear_envelope` (a sentinel default keeps `False` for the existing response). |
 | Oracle | Standalone dffr on the same kinematics arrays, the existing GBGPU accuracy tests, and dffr's time-domain truth. |
-| Window | The data use LAT's symmetric Tukey window, while STFTFresnel and DFFR model the periodic one. The effect, estimated at 5e-5 per segment and so comparable to DFFR's own error, is measured in step 6 before either side changes. |
+| Window | The data use LAT's symmetric Tukey window, while STFTFresnel and DFFR model the periodic one. The effect, estimated at 5e-5 per segment and so comparable to DFFR's own error, is measured in step 6 before either side changes. Measured in step 6: 6.3e-5 per segment and a mismatch of 3.6e-8; the author kept both sides (2026-10-21), since production's 10 side bins leave a mismatch four orders of magnitude larger, and the validation runs on data with the periodic window. |
 | Documentation | README, plan and tests record in LAT `docs/response/dffr/`, scripts in LAT `scripts/dffr/`, updated every step; a final step reviews both. |
 
 ## Findings the design relies on
@@ -529,15 +529,46 @@ the error with the DFFR Fisher matrix.
 
 - Accuracy against the brute-force STFT of a time-domain GB TDI injection built with the LAT
   window, both responses (`test_stft_gb_accuracy.py` recipe); size the window-convention error.
+  Done on 2026-10-21 (`scripts/dffr/stft_accuracy.py`, `td_truth.py`, `run_step6.sh`; results in
+  `tests.md`). The author's decisions: the injection comes from the truth chain of the
+  standalone package (lisagwresponse and pytdi), after LAT's `pyResponseTDI` proved inaccurate
+  below 5 mHz (its Lagrange weights come from a linearly interpolated table; recorded only); a
+  year on the ESA orbits; the eight sources of the likelihood surfaces below; 60 side bins for
+  every validation run, since under the production taper 10 side bins leave 1.2e-3 to 1.4e-3 of
+  a tone's power outside the template and 60 leave 4e-8 to 1e-7; and the periodic window on the
+  data of every validation run, while production keeps LAT's symmetric window.
 - dffr time-domain truth (lisagwresponse, lisainstrument, pytdi) on the ESA trailing orbits, 30
   days to months, on a compute node, both responses.
+  Done on 2026-10-21 on the cases and the grid of step 0, as the author defined the item after
+  item 1 (`run_step6.sh` part `step0`; results in `tests.md`): over 30 days with the chain of
+  step 0, DFFR in `STFTGBComputations` reproduces the numbers of the standalone package to two or
+  three digits in all eight cases; the existing response has lower median errors and, at 20 mHz in
+  sky 0, an 8 times larger mismatch. A year without lisainstrument gives the same picture.
 - Likelihood surfaces against a full time-domain simulation (author's decision of 2026-10-21, in
   place of the cross-domain SNR^2 against FD and WDM and of the Mojito FD mismatch of the first
   plan). The surfaces of four waveforms for every parameter, on one year of data: FD GBGPU, FD
   TDI-on-the-fly, STFT TDI-on-the-fly and DFFR. Eight sources: one at low and one at high
   frequency, each at the largest and the smallest ḟ at that frequency, each at two sky positions.
+  Fixed in item 1 (author's decisions of 2026-10-21): 0.5 and 20 mHz, the two bounds of the
+  global fit's GB prior at that frequency (`get_fdot_mojito`), and the two sky positions of the
+  step 0 truth.
   A surface is a scan of one parameter with every other parameter at its true value, repeated for
   each parameter, over a range of its own.
+  Further decisions of the author (2026-10-21, after items 1 and 2):
+  - No scan of the time-domain likelihood itself, whose cost per point is that of a full
+    time-domain simulation: each waveform's surface is computed in its own domain against the
+    transform of the same time-domain data.
+  - The data are the noiseless time-domain truth of items 1 and 2 (lisagwresponse and pytdi, a
+    year on the ESA orbits). The likelihood weights them with the noise of `XYZSensitivityBackend`
+    at the global fit's default levels: optical metrology 15e-12 m/√Hz and test-mass acceleration
+    3e-15 m s⁻²/√Hz, the noise injection of the global-fit settings and the defaults of
+    `set_sensitivity_matrix`.
+  - Every source at an optimal SNR of 100, by its amplitude.
+  - The 8 parameters of the global fit: the nine of `GBTDIonTheFly` without f̈.
+  - Each scan covers about 4 σ on both sides of the injection, with σ from DFFR's information
+    matrix (`STFTGBComputations.information_matrix`) at the injection.
+  - As in items 1 and 2: 60 side bins for the STFT waveforms and the periodic Tukey window on the
+    STFT data.
 - Likelihood surfaces of the same four waveforms against the Mojito-light data (in the data
   folder of `lisa_nlddpc`), for its five galactic binaries of highest frequency.
 - Benchmarks per method and batch size, both responses, on a full A100 and on the CPU. Gate:
@@ -680,7 +711,37 @@ the error with the DFFR Fisher matrix.
 - Window convention: the data use LAT's symmetric Tukey (`utils/utility.py:60`, used at
   `globalfit/engine.py:388`), while STFTFresnel and DFFR model the periodic window. Estimated
   effect of order 5e-5 per segment, comparable to DFFR's own error; measured in step 6, and any
-  change is decided then.
+  change is decided then. Measured in step 6 on a year of a time-domain truth: the symmetric window
+  is the periodic one squeezed in time by (N - 1)/N, up to 1.5e-3 lower in the trailing taper; it
+  changes every segment by 6.3e-5 of its peak, the amplitude by -2.9e-5 and the mismatch by
+  3.6e-8, the same for every source. That is the largest error of both responses inside the band,
+  but four orders of magnitude below what the 10 side bins of production leave (next entry). The
+  author kept both sides as they are (2026-10-21); the validation runs on data with the periodic
+  window.
+- Side bins of production: with the Tukey taper 0.1157, the 10 side bins of the production
+  templates leave 1.3e-3 (20 mHz) to 1.7e-3 (0.5 mHz) of a source's noise-weighted power outside
+  the template, for both responses. That sets their mismatch against time-domain data at 6.4e-4
+  to 8.8e-4, and the loss in ln L at the true parameters at 6 to 9 for a source of SNR 100
+  (`tests.md`, step 6, item 1). A tone keeps 1.3e-6 to 5.8e-6 of its power beyond 30 bins and
+  4e-8 to 1e-7 beyond 60. Recorded for the owners of the production settings; the validation
+  uses 60 side bins.
+- Negative-frequency image: both responses give the transform of the positive-frequency part of
+  the signal. At 0.5 mHz, 60 side bins reach the start of the production band, 34 bins below the
+  carrier, where the data hold the leakage of the image at minus the carrier frequency: a floor of
+  1.0e-4 in the segment error and 2.7e-8 in the flat mismatch of both responses. With 10 side bins
+  it does not reach the band. Noted, not changed; adding the image term would remove it.
+- The combination X + Y + Z at low frequency: at 0.5 mHz it carries 0.9 % of the signal of A and
+  far less noise, so the likelihood weights it heavily. The existing response gets it wrong by
+  2.6e-3 to 3.7e-3 of its size, DFFR by 3.4e-4, and the existing response's noise-weighted
+  mismatch against the truth is 50 to 100 times DFFR's (7.2e-6 to 1.4e-5 against 1.3e-7, with 60
+  side bins). Recorded; the likelihood surfaces of the next validation items show what it does to
+  parameter estimates.
+- LAT's full time-domain response (`pyResponseTDI`) takes the factor A(e) of its fractional-delay
+  Lagrange weights from a table of 1001 values with linear interpolation (`MAX_A_VALS` in
+  `LISAResponse.cu`), which underestimates it by up to 2.1e-7. TDI 2 amplifies this at low
+  frequency: against `GBTDIonTheFly` its X, Y and Z are off by 3.0e-3 of the peak at 0.5 mHz, 4.3e-5
+  at 2 mHz and 3.4e-7 at 20 mHz. Found in step 6 and recorded only (author's decision); computing
+  A(e) exactly in the two interpolation functions would remove it.
 - Sky frame of the shipped ESA file: LAT's `Orbits` docstring calls it ecliptic, the dffr docs
   call it ICRS. The regressions read raw file positions on both sides (`frame="ecliptic"`, no
   rotation); the question itself is checked in step 6.
@@ -702,7 +763,11 @@ the error with the DFFR Fisher matrix.
   accelerations of lisaorbits by 8.4e-5 (ESA). Both responses read these positions. On the ESA
   orbits, at 20 mHz, the position difference (up to 486 m) and the acceleration difference over
   half a day each shift the phase by about 2e-7 rad. Step 6 measures the effect against the
-  time-domain truth.
+  time-domain truth. Measured in step 6 (item 1): at 20 mHz the truth, which interpolates the file
+  with lisagwresponse, and `GBTDIonTheFly`, which reads LAT's orbits, agree to 3.3e-7 of the peak;
+  at 0.5 mHz, where TDI 2 cancels most of the signal, they differ by 1.3e-5 to 1.7e-5, and both
+  responses follow a day-to-day ripple with the 1.87-day sampling of the file. The orbit
+  representation is the likely cause; not tested directly.
 - GBT `CubicSplineSegment` derivative helpers return `c1 + c2 dx + c3 dx^2` and `c2 + c3 dx`,
   not the power-basis derivatives. Nothing calls them; noted only.
 - At their default steps, the gradients and Fisher matrices of the existing response carry

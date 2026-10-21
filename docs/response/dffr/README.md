@@ -191,6 +191,35 @@ three production fixtures: with the envelope on, DFFR's finite-difference noise 
 λ and β is unchanged, to two digits (`tests.md`). `True`, `False` and `None` (the group's
 setting) apply to both responses.
 
+## Accuracy against a time-domain truth
+
+Measured in step 6 (`tests.md`, item 1): both responses of `STFTGBComputations` against the STFT of
+a time-domain truth (lisagwresponse and pytdi, X2, Y2 and Z2 every 5 s) over a year of one-day
+segments on the ESA orbits. Eight sources at 0.5 and 20 mHz: at each frequency the two ḟ bounds of
+the global fit's GB prior, each at two sky positions. Production settings but 60 side bins, and
+data windowed with the periodic Tukey window. Ranges over the four sources of each frequency.
+
+| | 0.5 mHz, DFFR | 0.5 mHz, existing | 20 mHz, DFFR | 20 mHz, existing |
+| --- | --- | --- | --- | --- |
+| Flat mismatch, template pixels | 2.7e-8 | 2.7e-8 | 4.8e-10 to 6.8e-10 | 7.6e-10 to 1.2e-9 |
+| Median error per segment | 1.0e-4 | 1.0e-4 | 2.2e-5 to 3.2e-5 | 1.4e-5 to 1.9e-5 |
+| Largest error per segment | 2.5e-4 to 9.0e-4 | 3.2e-4 to 6.2e-3 | 4.0e-4 to 4.7e-4 | 4.1e-3 to 4.6e-3 |
+| Noise-weighted mismatch | 1.3e-7 | 7.2e-6 to 1.4e-5 | 2.4e-8 to 3.6e-8 | 2.5e-8 to 3.7e-8 |
+
+- On the eight cases of the standalone package's truth comparison (the first row of the table in
+  "Why integrate it"), with its chain and grid over 30 days, DFFR in `STFTGBComputations`
+  reproduces those numbers to two or three digits (`tests.md`, step 6, item 2).
+- The error per segment is max |h - d| / max |d| per segment and channel. The largest errors fall
+  where one channel's signal is weak.
+- At 0.5 mHz both responses share a floor from the signal's negative-frequency image, which
+  neither computes and which 60 side bins reach near the start of the production band. The
+  existing response's larger noise-weighted mismatch there comes from the combination X + Y + Z,
+  which the likelihood weights heavily at low frequency.
+- The global fit windows the data with LAT's symmetric Tukey window, while both responses
+  integrate the periodic one. That adds a mismatch of 3.6e-8 and 6.3e-5 per segment. Production
+  keeps it, because its 10 side bins leave 1.3e-3 to 1.7e-3 of the power outside the template, a
+  mismatch of 6.4e-4 to 8.8e-4 (`plan.md`, Risks and observations).
+
 ## The Fisher matrix
 
 `information_matrix` of `STFTGBComputations(response="dffr")` returns the Fisher matrices of the
