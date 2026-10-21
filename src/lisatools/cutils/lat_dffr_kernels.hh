@@ -1494,7 +1494,8 @@ inline DFFRFisherLayout dffr_information_layout(const int *inds, const double *p
 
 // Dynamic shared memory of the Fisher kernel: the scratch arena of the tile (source constants,
 // settings, the segment table of the variant being built), the reception states and the amplitude
-// parts, each section at a 16-byte boundary.
+// parts, each section at a 16-byte boundary. After a source's last pass the final reduction stages
+// its sums where the states and amplitude parts were, so that region holds at least those sums.
 CUDA_CALLABLE_MEMBER inline size_t dffr_information_align(size_t bytes) {
   return (bytes + 15) & ~static_cast<size_t>(15);
 }
@@ -1513,8 +1514,13 @@ CUDA_CALLABLE_MEMBER inline size_t dffr_information_amplitudes_offset(
 
 template <class SourceT, int Rows>
 inline size_t dffr_information_bytes(const DFFRFisherLayout &layout) {
-  return dffr_information_amplitudes_offset<SourceT, Rows>(layout) +
-         dffr_information_align((size_t)layout.num_variants * sizeof(DFFRFisherAmplitude<Rows>));
+  const size_t tables_end =
+      dffr_information_amplitudes_offset<SourceT, Rows>(layout) +
+      dffr_information_align((size_t)layout.num_variants * sizeof(DFFRFisherAmplitude<Rows>));
+  const size_t staging_end =
+      dffr_information_states_offset<SourceT, Rows>() +
+      dffr_information_align((size_t)NUM_THREADS_HERE * layout.num_derivs * sizeof(double));
+  return (tables_end > staging_end) ? tables_end : staging_end;
 }
 
 // Fill the reception states and amplitude parts of every variant for rows_here segments from
@@ -1699,7 +1705,6 @@ CUDA_KERNEL void dffr_information_matrix_kernel(double *info_out, DFFRTileInputs
   CUDA_SHARED int carrier_lo[STFT_FISHER_NDERIV_MAX * Rows];
   CUDA_SHARED int carrier_hi[STFT_FISHER_NDERIV_MAX * Rows];
 #ifdef __CUDACC__
-  CUDA_SHARED double reduction_staging[NUM_THREADS_HERE * STFT_FISHER_NDERIV_MAX];
   const int thread_index = threadIdx.x;
 #endif
 
@@ -1806,6 +1811,10 @@ CUDA_KERNEL void dffr_information_matrix_kernel(double *info_out, DFFRTileInputs
 
     const double scale = 4.0 * stft->diff_comp;
     double *info_source_out = &info_out[(size_t)bin_i * num_derivs * num_derivs];
+#ifdef __CUDACC__
+    double *reduction_staging =
+        reinterpret_cast<double *>(arena + dffr_information_states_offset<SourceT, Rows>());
+#endif
     for (int row_derivative = 0; row_derivative < num_derivs; row_derivative += 1) {
       const int width = num_derivs - row_derivative;
 #ifdef __CUDACC__
