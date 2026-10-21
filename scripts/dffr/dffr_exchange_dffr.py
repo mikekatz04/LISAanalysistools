@@ -22,16 +22,9 @@ import numpy as np
 from dffr.detector import TABLE_FIELDS
 
 
-def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--inputs", required=True, metavar="LAT_NPZ")
-    parser.add_argument("--output", required=True, metavar="DFFR_NPZ")
-    parser.add_argument("--device", choices=("cpu", "gpu"), default="cpu")
-    args = parser.parse_args(argv)
-
-    inputs = np.load(args.inputs)
+def build_response(inputs, device: str):
+    """The grid and the standalone response of the inputs LAT stored, on the CPU or a GPU."""
     description = json.loads(str(inputs["description"]))
-    backend = "cpu" if args.device == "cpu" else "gpu"
     grid = dffr.STFTGrid(
         t0=description["t0"],
         segment_duration=description["segment_duration"],
@@ -40,7 +33,7 @@ def main(argv=None) -> None:
         num_bins=description["num_bins"],
     )
     fields = {name: inputs[f"kinematics__{name}"] for name, _ in TABLE_FIELDS}
-    kinematics = dffr.OrbitKinematics.from_arrays(grid, fields, force_backend=backend)
+    kinematics = dffr.OrbitKinematics.from_arrays(grid, fields, force_backend=device)
     response = dffr.DirectFastFresnelResponse(
         kinematics,
         t_ref=description["t_ref"],
@@ -51,6 +44,26 @@ def main(argv=None) -> None:
         first_order_delays=description["first_order_delays"],
         chirp_rate_floor=description["chirp_rate_floor"],
     )
+    return grid, response
+
+
+def dffr_commit() -> str:
+    """Commit of the dffr clone that the running environment imports."""
+    repository = Path(dffr.__file__).resolve().parents[2]
+    return subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+
+
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--inputs", required=True, metavar="LAT_NPZ")
+    parser.add_argument("--output", required=True, metavar="DFFR_NPZ")
+    parser.add_argument("--device", choices=("cpu", "gpu"), default="cpu")
+    args = parser.parse_args(argv)
+
+    inputs = np.load(args.inputs)
+    grid, response = build_response(inputs, args.device)
     xp = response.xp
     params = xp.asarray(inputs["params"])
 
@@ -70,10 +83,7 @@ def main(argv=None) -> None:
     outputs["d_h"] = response.d_h
     outputs["h_h"] = response.h_h
 
-    repository = Path(dffr.__file__).resolve().parents[2]
-    commit = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "HEAD"], capture_output=True, text=True
-    ).stdout.strip()
+    commit = dffr_commit()
     host = {
         name: (value.get() if hasattr(value, "get") else np.asarray(value))
         for name, value in outputs.items()

@@ -19,6 +19,11 @@ generation, linear envelope and first-order delays on, the 24 sources of the pro
 and seeded data and inverse covariance over the band. Standalone dffr has no store windows, so the
 domain is the whole band, and both sides then read the same f_min. Times stay in LAT's frame, the
 start of the orbit file; DFFR uses differences of times only.
+
+``--inputs INPUTS.npz`` replaces the fixture by the inputs that ``dffr_timing_lat.py
+--write-inputs`` stored (another grid, band and source draw), the first ``--max-sources`` of their
+sources. ``--compare ... --by-segment`` adds, for the compact templates, the largest difference
+per group of consecutive segments, which shows whether the difference grows along the grid.
 """
 
 from __future__ import annotations
@@ -67,27 +72,36 @@ SEGMENT_TABLE_FIELDS = (
 )
 
 
-def capture(path: str, device: str) -> None:
-    """Build the fixture, run LAT's DFFR on it and store inputs and outputs."""
+def build_dffr_comp(
+    orbits,
+    t_ref,
+    band,
+    data,
+    inverse_covariance,
+    device,
+    n_side_bins=PRODUCTION_N_SIDE_BINS,
+    window_alpha=PRODUCTION_WINDOW_ALPHA,
+    table_fields=None,
+):
+    """``STFTGBComputations(response="dffr")`` over one domain, and its kinematics table.
+
+    ``band`` gives the grid (``NT``, ``NF_active``, ``t0``, ``min_freq``, ``max_freq``, ``dt``,
+    ``df``). Without ``table_fields`` the table is built from the orbits; with them, the table
+    wraps device copies of the given fields. Returns the comp, the table wrap and its arrays.
+    """
     from gbgpu.gbcomps import STFTGBComputations
 
     from lisatools.domaincomputation import KINEMATICS_TABLE_FIELDS
 
     xp = array_module(device)
-    orbits, orbits_start = load_orbits("esa", device)
-    data_start = orbits_start + DATA_START_OFFSET
-    band, _ = production_settings(data_start, NUM_SEGMENTS, device)
-    params, _, rng = production_sources(band, NUM_SOURCES)
-    data, inverse_covariance = draw_cell_arrays(rng, NUM_SEGMENTS, band.NF_active, False)
-
     comp = STFTGBComputations(
         stft_comps=None,
-        T=NUM_SEGMENTS * band.dt,
-        t_ref=orbits_start,
+        T=band.NT * band.dt,
+        t_ref=t_ref,
         orbits=orbits,
         tdi_config="2nd generation",
         force_backend=device,
-        n_side_bins=PRODUCTION_N_SIDE_BINS,
+        n_side_bins=n_side_bins,
         response="dffr",
         first_order_delays=FIRST_ORDER_DELAYS,
         chirp_rate_floor=CHIRP_RATE_FLOOR,
@@ -106,31 +120,117 @@ def capture(path: str, device: str) -> None:
     )
     fresnel = backend.STFTFresnelWrap(
         *grid,
-        window_alpha=PRODUCTION_WINDOW_ALPHA,
+        window_alpha=window_alpha,
         use_midpoint=True,
         linear_envelope=LINEAR_ENVELOPE,
     )
-    table_arrays = {
-        name: xp.zeros(int(np.prod(shape)) * band.NT) for name, shape in KINEMATICS_TABLE_FIELDS
-    }
+    if table_fields is None:
+        table_arrays = {
+            name: xp.zeros(int(np.prod(shape)) * band.NT) for name, shape in KINEMATICS_TABLE_FIELDS
+        }
+    else:
+        table_arrays = {
+            name: xp.asarray(np.ascontiguousarray(table_fields[name]).reshape(-1))
+            for name, _ in KINEMATICS_TABLE_FIELDS
+        }
     table = backend.KinematicsTableWrap(
         band.t0 + 0.5 * band.dt, band.dt, band.NT, *table_arrays.values()
     )
-    table.build(comp.cpp_orbits)
+    if table_fields is None:
+        table.build(comp.cpp_orbits)
     # * fill_global and get_ll run through the comp; the group stand-in hands it this table.
+    # ! The wraps hold raw pointers into the data, inverse covariance and table arrays.
     comp.stft_comps = ShimGroup(
         fresnel,
         domain,
         num_noise=1,
-        buffers=(data_device, inverse_covariance_device),
+        buffers=(data_device, inverse_covariance_device, *table_arrays.values()),
         linear_envelope=LINEAR_ENVELOPE,
         kinematics=table,
     )
+    return comp, table, table_arrays
+
+
+#: Grid attributes that build_dffr_comp reads; dffr_timing_lat.py stores them in its inputs.
+GRID_KEYS = ("NT", "NF_active", "t0", "min_freq", "max_freq", "dt", "df")
+
+
+def fixture_case(device):
+    """The exchange fixture: orbits, grid, settings, sources, data, inverse covariance, no table."""
+    orbits, orbits_start = load_orbits("esa", device)
+    data_start = orbits_start + DATA_START_OFFSET
+    band, _ = production_settings(data_start, NUM_SEGMENTS, device)
+    params, _, rng = production_sources(band, NUM_SOURCES)
+    data, inverse_covariance = draw_cell_arrays(rng, NUM_SEGMENTS, band.NF_active, False)
+    description = dict(
+        device=device,
+        orbits="esa",
+        orbits_start=orbits_start,
+        data_start=data_start,
+        t0=band.t0,
+        segment_duration=band.dt,
+        num_segments=int(band.NT),
+        first_bin=int(band.ind_min),
+        num_bins=int(band.NF_active),
+        df=band.df,
+        f_min=band.min_freq,
+        t_ref=orbits_start,
+        window_taper=PRODUCTION_WINDOW_ALPHA,
+        num_side_bins=PRODUCTION_N_SIDE_BINS,
+        tdi_generation=TDI_GENERATION,
+        linear_envelope=LINEAR_ENVELOPE,
+        first_order_delays=FIRST_ORDER_DELAYS,
+        chirp_rate_floor=CHIRP_RATE_FLOOR,
+    )
+    return orbits, band, description, params, data, inverse_covariance, None
+
+
+def stored_case(inputs_path, max_sources, device):
+    """The inputs that dffr_timing_lat.py --write-inputs stored, with its kinematics table."""
+    from types import SimpleNamespace
+
+    from lisatools.domaincomputation import KINEMATICS_TABLE_FIELDS
+
+    inputs = np.load(inputs_path)
+    description = dict(json.loads(str(inputs["description"])), device=device)
+    band = SimpleNamespace(**{key: description[key] for key in GRID_KEYS})
+    orbits, _ = load_orbits(description["orbits"], device)
+    params = inputs["params"][:max_sources]
+    table_fields = {name: inputs[f"kinematics__{name}"] for name, _ in KINEMATICS_TABLE_FIELDS}
+    data, inverse_covariance = inputs["data"][0], inputs["inverse_covariance"][0]
+    return orbits, band, description, params, data, inverse_covariance, table_fields
+
+
+def capture(path: str, device: str, inputs_path=None, max_sources=None) -> None:
+    """Run LAT's DFFR on the exchange fixture, or on stored inputs, and store inputs and outputs."""
+    from lisatools.domaincomputation import KINEMATICS_TABLE_FIELDS
+
+    xp = array_module(device)
+    if inputs_path is None:
+        case = fixture_case(device)
+    else:
+        case = stored_case(inputs_path, max_sources, device)
+    orbits, band, description, params, data, inverse_covariance, table_fields = case
+    num_side_bins = description["num_side_bins"]
+
+    comp, table, table_arrays = build_dffr_comp(
+        orbits,
+        description["t_ref"],
+        band,
+        data,
+        inverse_covariance,
+        device,
+        n_side_bins=num_side_bins,
+        window_alpha=description["window_taper"],
+        table_fields=table_fields,
+    )
+    backend = comp.backend
+    fresnel, domain = comp.stft_comps.cpp_fresnel, comp.stft_comps.cpp_domain
 
     wrap = backend.GBComputationGroupWrap()
     knobs = (
-        orbits_start,
-        PRODUCTION_N_SIDE_BINS,
+        description["t_ref"],
+        num_side_bins,
         TDI_GENERATION,
         LINEAR_ENVELOPE,
         FIRST_ORDER_DELAYS,
@@ -164,7 +264,7 @@ def capture(path: str, device: str) -> None:
         )
     outputs["segment_table__start_freq_ind"] = to_host(starts).reshape(num_sources, band.NT)
 
-    band_width = 2 * PRODUCTION_N_SIDE_BINS + 1
+    band_width = 2 * num_side_bins + 1
     compact = xp.zeros(num_sources * 3 * band.NT * band_width, dtype=np.complex128)
     compact_starts = xp.zeros(num_sources * band.NT, dtype=np.int32)
     wrap.gb_dffr_fill_template(
@@ -196,27 +296,7 @@ def capture(path: str, device: str) -> None:
         f"kinematics__{name}": to_host(table_arrays[name]).reshape(shape + (num_times,))
         for name, shape in KINEMATICS_TABLE_FIELDS
     }
-    description = dict(
-        device=device,
-        orbits="esa",
-        orbits_start=orbits_start,
-        data_start=data_start,
-        t0=band.t0,
-        segment_duration=band.dt,
-        num_segments=int(band.NT),
-        first_bin=int(band.ind_min),
-        num_bins=int(band.NF_active),
-        df=band.df,
-        f_min=band.min_freq,
-        t_ref=orbits_start,
-        window_taper=PRODUCTION_WINDOW_ALPHA,
-        num_side_bins=PRODUCTION_N_SIDE_BINS,
-        tdi_generation=TDI_GENERATION,
-        linear_envelope=LINEAR_ENVELOPE,
-        first_order_delays=FIRST_ORDER_DELAYS,
-        chirp_rate_floor=CHIRP_RATE_FLOOR,
-        num_sources=num_sources,
-    )
+    description["num_sources"] = num_sources
     np.savez(
         path,
         description=json.dumps(description),
@@ -263,17 +343,47 @@ def compare(lat_path: str, dffr_path: str) -> int:
     return 1 if failures else 0
 
 
+def compare_by_segment(lat_path: str, dffr_path: str, num_groups: int = 10) -> None:
+    """Compact templates per segment: does their difference grow along the grid?
+
+    For each segment, the largest difference over sources, channels and band bins, relative to the
+    largest value of the dffr templates in that segment; printed as the largest over each of
+    ``num_groups`` consecutive groups of segments.
+    """
+    ours = np.load(lat_path)["lat__compact_template"]
+    theirs = np.load(dffr_path)["dffr__compact_template"]
+    # * Layout [source, channel, segment, band bin]: reduce over everything but the segment.
+    difference = np.abs(ours - theirs).max(axis=(0, 1, 3))
+    peak = np.abs(theirs).max(axis=(0, 1, 3))
+    relative = np.divide(difference, peak, out=np.zeros_like(difference), where=peak > 0)
+    print(f"{'segments':>14s} {'largest relative difference':>28s}")
+    for group in np.array_split(np.arange(relative.size), min(num_groups, relative.size)):
+        print(f"{group[0]:>6d} to {group[-1]:<5d} {relative[group].max():28.2e}")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--capture", metavar="LAT_NPZ")
     action.add_argument("--compare", nargs=2, metavar=("LAT_NPZ", "DFFR_NPZ"))
     parser.add_argument("--device", choices=("cpu", "gpu"), default="cpu")
+    parser.add_argument(
+        "--inputs",
+        metavar="INPUTS_NPZ",
+        help="capture on inputs of dffr_timing_lat.py --write-inputs instead of the fixture",
+    )
+    parser.add_argument("--max-sources", type=int, default=None, help="with --inputs")
+    parser.add_argument(
+        "--by-segment", action="store_true", help="with --compare: compact templates per segment"
+    )
     args = parser.parse_args(argv)
     if args.capture:
-        capture(args.capture, args.device)
+        capture(args.capture, args.device, args.inputs, args.max_sources)
         return 0
-    return compare(*args.compare)
+    status = compare(*args.compare)
+    if args.by_segment:
+        compare_by_segment(*args.compare)
+    return status
 
 
 if __name__ == "__main__":

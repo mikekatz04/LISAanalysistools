@@ -6,7 +6,9 @@ a production fixture of ``stft_fixtures.py``; ``information_matrix`` on all nine
 as ``information_matrix_test_inds`` on the eight that the GB proposal of the global fit asks for.
 Each point is one warm-up call followed by ``--repeats`` timed calls; on the GPU the device is
 synchronised before each clock reading. The times include the Python work of each method, which
-the global fit pays as well. ``--response`` selects the response.
+the global fit pays as well. ``--response`` selects the response. ``--dffr-rows`` times the DFFR
+swap, F-statistic and swap gradient at 16 or 32 rows per pass, and ``--dffr-fisher-rows`` the DFFR
+Fisher matrix at 4 or 8, in place of the comp's constants.
 
 Usage:
     python stft_benchmarks.py --device cpu --mojito-l1 FILE.h5 --output OUT.json
@@ -111,10 +113,29 @@ def main(argv=None):
         help="leave out get_swap_ll_stft and get_swap_ll_grad_stft (CPU runs from step 2 on)",
     )
     parser.add_argument("--response", choices=fixtures.RESPONSES, default=fixtures.RESPONSES[0])
+    parser.add_argument(
+        "--dffr-rows",
+        type=int,
+        choices=(16, 32),
+        default=None,
+        help="rows per pass of the DFFR swap, F-statistic and swap gradient in place of the comp's "
+        "constant, for an A/B of the two instantiations (--response dffr only)",
+    )
+    parser.add_argument(
+        "--dffr-fisher-rows",
+        type=int,
+        choices=(4, 8),
+        default=None,
+        help="rows per pass of the DFFR Fisher matrix in place of the comp's constant, for an A/B "
+        "of the two instantiations (--response dffr only)",
+    )
     parser.add_argument("--output", required=True, metavar="OUT_JSON")
     args = parser.parse_args(argv)
     if args.without_swap:
         args.methods = [method for method in args.methods if "swap" not in method]
+    for option in ("dffr_rows", "dffr_fisher_rows"):
+        if getattr(args, option) is not None and args.response != "dffr":
+            parser.error(f"--{option.replace('_', '-')} needs --response dffr")
 
     fixture = fixtures.build_production_fixture(
         args.config,
@@ -124,6 +145,11 @@ def main(argv=None):
         num_sources=max(args.batch_sizes),
         response=args.response,
     )
+    # * An instance attribute shadows the class constant for this comp only.
+    if args.dffr_rows is not None:
+        fixture.comp._DFFR_ROWS_PER_PASS = args.dffr_rows
+    if args.dffr_fisher_rows is not None:
+        fixture.comp._DFFR_FISHER_ROWS_PER_PASS = args.dffr_fisher_rows
     results = []
     for batch_size in args.batch_sizes:
         calls = method_calls(fixture, batch_size)
@@ -150,6 +176,8 @@ def main(argv=None):
         metadata=fixtures.run_metadata(args.backend, args.mojito_l1),
         config=args.config,
         response=args.response,
+        dffr_rows=args.dffr_rows,
+        dffr_fisher_rows=args.dffr_fisher_rows,
         fixture=fixture.description,
         repeats=args.repeats,
         results=results,
