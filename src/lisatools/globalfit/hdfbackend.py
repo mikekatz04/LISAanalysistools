@@ -842,6 +842,15 @@ class GBHDFBackend(eryn_HDFBackend):
 class MBHHDFBackend(eryn_HDFBackend):
     """Sub-backend that persists the per-leaf MBH temperature ladder."""
 
+    def __init__(
+                self,
+                *args,
+                name: str = "global_fit",
+                **kwargs,
+            ):
+        
+                super().__init__(*args, name=name, **kwargs)
+
     def reset(self, nwalkers, *args, ntemps=1, num_mbhs: int = None, **kwargs):
         """Create a ``betas_all`` dataset of shape ``(*, num_mbhs, ntemps)``."""
         if num_mbhs is None:
@@ -999,6 +1008,15 @@ class MBHHDFBackend(eryn_HDFBackend):
 
 class EMRIHDFBackend(eryn_HDFBackend):
     """Sub-backend that persists the per-leaf EMRI temperature ladder."""
+
+    def __init__(
+                self,
+                *args,
+                name: str = "global_fit",
+                **kwargs,
+            ):
+        
+                super().__init__(*args, name=name, **kwargs)
 
     def reset(self, nwalkers, *args, ntemps=1, num_emris: int = None, **kwargs):
         """Create a ``betas_all`` dataset of shape ``(*, num_emris, ntemps)``."""
@@ -1159,6 +1177,15 @@ class SOBBHHDFBackend(eryn_HDFBackend):
     Mirrors :class:`EMRIHDFBackend` — one ``betas_all`` row per leaf, sliced
     out at save time and restored from disk for warm-starts.
     """
+
+    def __init__(
+                self,
+                *args,
+                name: str = "global_fit",
+                **kwargs,
+            ):
+        
+                super().__init__(*args, name=name, **kwargs)
 
     def reset(self, nwalkers, *args, ntemps=1, num_sobbhs: int = None, **kwargs):
         """Create a ``betas_all`` dataset of shape ``(*, num_sobbhs, ntemps)``."""
