@@ -560,50 +560,121 @@ struct DFFRSegmentTable {
 static_assert(sizeof(DFFRSegmentTable<32>) == 32 * DFFR_SEGMENT_TABLE_BYTES_PER_ROW,
               "the segment table no longer holds 1012 bytes per row");
 
-// Store the bin-independent quantities of one reception state.
-template <int Rows>
-CUDA_DEVICE inline void dffr_store_reception_state(DFFRSegmentTable<Rows> &table,
-                                                   const DFFRSettings &settings, int slot,
-                                                   const DFFRQuadPhaseExpansion &expansion,
-                                                   double first_derivative,
-                                                   double second_derivative) {
+// The bin-independent scalars of one reception state; its reference phasor is the
+// dffr_expansion_phasor of the same expansion.
+struct DFFRReceptionScalars {
+  double effective_frequency;
+  DFFRQuadPhaseScalars quad_phase;
+};
+
+CUDA_DEVICE
+inline DFFRReceptionScalars dffr_make_reception_scalars(const DFFRSettings &settings,
+                                                        const DFFRQuadPhaseExpansion &expansion,
+                                                        double first_derivative,
+                                                        double second_derivative) {
   const double chirp_rate = dffr_apply_chirp_rate_floor(
       expansion.frequency_rate * first_derivative * first_derivative +
           expansion.instantaneous_frequency * second_derivative,
       settings.chirp_rate_floor);
-  const DFFRQuadPhaseScalars scalars = dffr_make_quad_phase_scalars(chirp_rate);
-
-  table.effective_frequency[slot] = expansion.instantaneous_frequency * first_derivative;
-  table.chirp_rate[slot] = scalars.chirp_rate;
-  table.scale_factor[slot] = scalars.scale_factor;
-  table.inverse_scale[slot] = scalars.inverse_scale;
-  table.reciprocal_chirp[slot] = scalars.reciprocal_chirp;
-  table.moment_prefactor[slot] = scalars.moment_prefactor;
-  // * The amplitude ratio multiplies the kernel and its moment alike, so it folds into the
-  // * reference phasor together with the phase.
-  table.reference_phasor[slot] =
-      expansion.amplitude_ratio * dffr_polar_unit(expansion.reference_phase);
+  DFFRReceptionScalars state;
+  state.quad_phase = dffr_make_quad_phase_scalars(chirp_rate);
+  state.effective_frequency = expansion.instantaneous_frequency * first_derivative;
+  return state;
 }
+
+// The phasor of a state at its epoch, amplitude ratio times exp(i phase).
+// * The amplitude ratio multiplies the kernel and its moment alike, so it folds into the phasor
+// * together with the phase.
+CUDA_DEVICE
+inline cmplx dffr_expansion_phasor(const DFFRQuadPhaseExpansion &expansion) {
+  return expansion.amplitude_ratio * dffr_polar_unit(expansion.reference_phase);
+}
+
+// Store the scalars of a reception state in a DFFRSegmentTable or a DFFRFisherReception, which
+// share their names.
+template <class StatesT>
+CUDA_DEVICE inline void dffr_store_reception_scalars(StatesT &states, int slot,
+                                                     const DFFRReceptionScalars &state) {
+  states.effective_frequency[slot] = state.effective_frequency;
+  states.chirp_rate[slot] = state.quad_phase.chirp_rate;
+  states.scale_factor[slot] = state.quad_phase.scale_factor;
+  states.inverse_scale[slot] = state.quad_phase.inverse_scale;
+  states.reciprocal_chirp[slot] = state.quad_phase.reciprocal_chirp;
+  states.moment_prefactor[slot] = state.quad_phase.moment_prefactor;
+}
+
+// ===========================================================================
+// Where a build stores its rows
+// ===========================================================================
+// The build (dffr_build_rows) runs over the rows of one or more variants of a source, and reaches
+// every field through a storage type. The tile's table is the storage of one variant
+// (DFFRTableStorage); the Fisher matrix stores a wave of its stencil templates
+// (DFFRFisherWaveStorage). Each field is the same function of the same inputs in both, only
+// stored elsewhere, so both hold the same values bit for bit.
+// A storage type supplies, as CUDA_DEVICE members:
+//   single_variant                    static constexpr bool, true when it holds one variant
+//   num_variants()                    variants of the build
+//   source(v)                         source constants of variant v
+//   writes_states(v)                  whether v stores its reception scalars and band starts; a
+//                                     variant that does not reads equal ones stored by another
+//   store_reception(v, slot, scalars) the scalars of a reception state
+//   effective_frequency(v, slot), chirp_rate(v, slot)
+//                                     read back, at slot row * 3 + spacecraft
+//   reference_phasor(v, slot)         reference, at slot row * 3 + spacecraft
+//   emission_phasor(v, slot), emission_frequency(v, slot), link_amplitude(v, slot),
+//   envelope_slope(v, slot)           references, at slot row * 6 + link
+//   start_freq_ind(v, row)            reference to the band start of a row
+//   tdi_weights(v, row)               pointer to the eighteen weights of a row
+
+// The tile's segment table as the storage of a build of one variant.
+template <class SourceT, int Rows>
+struct DFFRTableStorage {
+  DFFRSegmentTable<Rows> &table;
+  const typename SourceT::Constants &constants;
+
+  static constexpr bool single_variant = true;
+  CUDA_DEVICE int num_variants() const { return 1; }
+  CUDA_DEVICE const typename SourceT::Constants &source(int) const { return constants; }
+  CUDA_DEVICE bool writes_states(int) const { return true; }
+  CUDA_DEVICE void store_reception(int, int slot, const DFFRReceptionScalars &state) const {
+    dffr_store_reception_scalars(table, slot, state);
+  }
+  CUDA_DEVICE double effective_frequency(int, int slot) const {
+    return table.effective_frequency[slot];
+  }
+  CUDA_DEVICE double chirp_rate(int, int slot) const { return table.chirp_rate[slot]; }
+  CUDA_DEVICE cmplx &reference_phasor(int, int slot) const { return table.reference_phasor[slot]; }
+  CUDA_DEVICE cmplx &emission_phasor(int, int slot) const { return table.emission_phasor[slot]; }
+  CUDA_DEVICE double &emission_frequency(int, int slot) const {
+    return table.emission_frequency[slot];
+  }
+  CUDA_DEVICE cmplx &link_amplitude(int, int slot) const { return table.link_amplitude[slot]; }
+  CUDA_DEVICE cmplx &envelope_slope(int, int slot) const { return table.envelope_slope[slot]; }
+  CUDA_DEVICE int &start_freq_ind(int, int row) const { return table.start_freq_ind[row]; }
+  CUDA_DEVICE cmplx *tdi_weights(int, int row) const {
+    return table.tdi_weights + row * DFFR_TDI_WEIGHTS;
+  }
+};
 
 // The emission phasor of a link over the reception phasor of its sender: their exact amplitude
 // ratio and phase difference at the segment anchor.
-template <int Rows>
-CUDA_DEVICE inline cmplx dffr_emission_rotation(const DFFRSegmentTable<Rows> &table, int link_slot,
-                                                int sender_slot) {
-  const cmplx sender_reference = table.reference_phasor[sender_slot];
+template <class StorageT>
+CUDA_DEVICE inline cmplx dffr_emission_rotation(const StorageT &storage, int variant,
+                                                int link_slot, int sender_slot) {
+  const cmplx sender_reference = storage.reference_phasor(variant, sender_slot);
   const double sender_norm = sender_reference.real() * sender_reference.real() +
                              sender_reference.imag() * sender_reference.imag();
   // ! A sender without signal has no ratio; zero keeps NaN out of the weights and of the global
   // ! grid that the atomics share between sources.
   if (!(sender_norm > 0.0)) return cmplx(0.0, 0.0);
   return (1.0 / sender_norm) *
-         dffr_mul(table.emission_phasor[link_slot], gcmplx::conj(sender_reference));
+         dffr_mul(storage.emission_phasor(variant, link_slot), gcmplx::conj(sender_reference));
 }
 
 // Add one link's two channel coefficients to the eighteen weights of its row. Each link difference
 // becomes a combination of the three reception kernels and moments.
-template <int Rows>
-CUDA_DEVICE inline void dffr_fold_link_weights(const DFFRSegmentTable<Rows> &table, int row,
+template <class StorageT>
+CUDA_DEVICE inline void dffr_fold_link_weights(const StorageT &storage, int variant, int row,
                                                int link_index, const cmplx &first_coefficient,
                                                const cmplx &second_coefficient,
                                                bool sender_delay_moment, cmplx *weights) {
@@ -611,16 +682,17 @@ CUDA_DEVICE inline void dffr_fold_link_weights(const DFFRSegmentTable<Rows> &tab
   const int sender_index = dffr_link_sender(link_index);
   const int receiver_index = dffr_link_receiver(link_index);
   const int sender_slot = row * DFFR_NUM_SPACECRAFT + sender_index;
-  const cmplx antenna = 0.5 * gcmplx::conj(table.link_amplitude[link_slot]);
-  const cmplx slope = table.envelope_slope[link_slot];
-  const cmplx rotation = dffr_emission_rotation(table, link_slot, sender_slot);
+  const cmplx antenna = 0.5 * gcmplx::conj(storage.link_amplitude(variant, link_slot));
+  const cmplx slope = storage.envelope_slope(variant, link_slot);
+  const cmplx rotation = dffr_emission_rotation(storage, variant, link_slot, sender_slot);
   // * The carrier offset shifts the rebuilt state by 2 pi i offset times its first moment;
   // * switched off, the sender keeps only its exact phase at the anchor.
   const cmplx moment_factor =
-      sender_delay_moment ? cmplx(0.0, DFFR_TWO_PI * (table.emission_frequency[link_slot] -
-                                                     table.effective_frequency[sender_slot])) +
-                                slope
-                          : slope;
+      sender_delay_moment
+          ? cmplx(0.0, DFFR_TWO_PI * (storage.emission_frequency(variant, link_slot) -
+                                      storage.effective_frequency(variant, sender_slot))) +
+                slope
+          : slope;
 
   const int channel_of[2] = {dffr_link_channel_first(link_index),
                              dffr_link_channel_second(link_index)};
@@ -685,8 +757,8 @@ inline void dffr_link_coefficients(const cmplx *delay_phasor, int generation, cm
 }
 
 // The eighteen weights of one row at zeroth order in the delays.
-template <int Rows>
-CUDA_DEVICE inline void dffr_store_channel_weights(DFFRSegmentTable<Rows> &table, int row,
+template <class StorageT>
+CUDA_DEVICE inline void dffr_store_channel_weights(const StorageT &storage, int variant, int row,
                                                    const cmplx *delay_phasor,
                                                    bool sender_delay_moment, int generation) {
   cmplx first[DFFR_NUM_LINKS];
@@ -694,12 +766,12 @@ CUDA_DEVICE inline void dffr_store_channel_weights(DFFRSegmentTable<Rows> &table
   dffr_link_coefficients(delay_phasor, generation, first, second);
 
   // ? One thread owns a row here, so the weights accumulate without atomics.
-  cmplx *weights = table.tdi_weights + row * DFFR_TDI_WEIGHTS;
+  cmplx *weights = storage.tdi_weights(variant, row);
   for (int entry = 0; entry < DFFR_TDI_WEIGHTS; entry += 1) weights[entry] = cmplx(0.0, 0.0);
 #pragma unroll
   for (int link_index = 0; link_index < DFFR_NUM_LINKS; link_index += 1)
-    dffr_fold_link_weights(table, row, link_index, first[link_index], second[link_index],
-                           sender_delay_moment, weights);
+    dffr_fold_link_weights(storage, variant, row, link_index, first[link_index],
+                           second[link_index], sender_delay_moment, weights);
 }
 
 // ===========================================================================
@@ -766,20 +838,20 @@ inline DFFRTDIChainExpansion dffr_make_chain_expansion(const KinematicsTable &ki
 
 // Add one link's first-order terms to a channel's six increments, held by place relative to the
 // channel's vertex (i, j, k at places 0, 1, 2).
-template <int Rows>
-CUDA_DEVICE inline void dffr_fold_first_order_link(const DFFRSegmentTable<Rows> &table, int row,
+template <class StorageT>
+CUDA_DEVICE inline void dffr_fold_first_order_link(const StorageT &storage, int variant, int row,
                                                    int link_index, int sender_place,
                                                    int receiver_place,
                                                    const DFFRTDIChainExpansion &coefficient,
                                                    cmplx *increment) {
   const int link_slot = row * DFFR_NUM_LINKS + link_index;
   const int sender_slot = row * DFFR_NUM_SPACECRAFT + dffr_link_sender(link_index);
-  const cmplx antenna = 0.5 * gcmplx::conj(table.link_amplitude[link_slot]);
-  const cmplx slope = table.envelope_slope[link_slot];
-  const cmplx rotation = dffr_emission_rotation(table, link_slot, sender_slot);
+  const cmplx antenna = 0.5 * gcmplx::conj(storage.link_amplitude(variant, link_slot));
+  const cmplx slope = storage.envelope_slope(variant, link_slot);
+  const cmplx rotation = dffr_emission_rotation(storage, variant, link_slot, sender_slot);
   const cmplx moment_factor =
-      cmplx(0.0, DFFR_TWO_PI * (table.emission_frequency[link_slot] -
-                                table.effective_frequency[sender_slot])) +
+      cmplx(0.0, DFFR_TWO_PI * (storage.emission_frequency(variant, link_slot) -
+                                storage.effective_frequency(variant, sender_slot))) +
       slope;
 
   const cmplx link_change = -dffr_mul(antenna, dffr_mul(slope, coefficient.weighted));
@@ -797,8 +869,8 @@ CUDA_DEVICE inline void dffr_fold_first_order_link(const DFFRSegmentTable<Rows> 
 // i = c + 1 with arms to j = i + 1 and k = i - 1:
 //   X_i = (1 - a)(1 - b a) eta_iki - (1 - b)(1 - a b) eta_iji,  a = z_ij z_ji,  b = z_ik z_ki,
 // and the 1st generation drops the factors (1 - b a) and (1 - a b).
-template <int Rows>
-CUDA_DEVICE inline void dffr_first_order_delay_increments(const DFFRSegmentTable<Rows> &table,
+template <class StorageT>
+CUDA_DEVICE inline void dffr_first_order_delay_increments(const StorageT &storage, int variant,
                                                           const KinematicsTable &kinematics,
                                                           int row, int segment_index, int channel,
                                                           int generation, cmplx *increment) {
@@ -813,13 +885,14 @@ CUDA_DEVICE inline void dffr_first_order_delay_increments(const DFFRSegmentTable
   double carrier_sum = 0.0;
   for (int link_index = 0; link_index < DFFR_NUM_LINKS; link_index += 1) {
     const int receiver_index = dffr_link_receiver(link_index);
-    carrier_sum += 0.5 * (table.effective_frequency[row * DFFR_NUM_SPACECRAFT + receiver_index] +
-                          table.emission_frequency[row * DFFR_NUM_LINKS + link_index]);
+    carrier_sum +=
+        0.5 * (storage.effective_frequency(variant, row * DFFR_NUM_SPACECRAFT + receiver_index) +
+               storage.emission_frequency(variant, row * DFFR_NUM_LINKS + link_index));
   }
   const double carrier_frequency = carrier_sum / (double)DFFR_NUM_LINKS;
   double chirp_sum = 0.0;
   for (int spacecraft_index = 0; spacecraft_index < DFFR_NUM_SPACECRAFT; spacecraft_index += 1)
-    chirp_sum += table.chirp_rate[row * DFFR_NUM_SPACECRAFT + spacecraft_index];
+    chirp_sum += storage.chirp_rate(variant, row * DFFR_NUM_SPACECRAFT + spacecraft_index);
   const double delay_chirp = chirp_sum / (double)DFFR_NUM_SPACECRAFT;
 
   const DFFRTDIChainExpansion delay_ij =
@@ -846,19 +919,20 @@ CUDA_DEVICE inline void dffr_first_order_delay_increments(const DFFRSegmentTable
   for (int entry = 0; entry < 6; entry += 1) increment[entry] = cmplx(0.0, 0.0);
   // * Link ij is received by i and sent by j: places (receiver 0, sender 1). Likewise ji sits at
   // * (1, 0), ik at (0, 2) and ki at (2, 0).
-  dffr_fold_first_order_link(table, row, link_ik, 2, 0, on_iki, increment);
-  dffr_fold_first_order_link(table, row, link_ki, 0, 2, dffr_chain_mul(on_iki, delay_ik),
-                             increment);
-  dffr_fold_first_order_link(table, row, link_ij, 1, 0, on_iji, increment);
-  dffr_fold_first_order_link(table, row, link_ji, 0, 1, dffr_chain_mul(on_iji, delay_ij),
-                             increment);
+  dffr_fold_first_order_link(storage, variant, row, link_ik, 2, 0, on_iki, increment);
+  dffr_fold_first_order_link(storage, variant, row, link_ki, 0, 2,
+                             dffr_chain_mul(on_iki, delay_ik), increment);
+  dffr_fold_first_order_link(storage, variant, row, link_ij, 1, 0, on_iji, increment);
+  dffr_fold_first_order_link(storage, variant, row, link_ji, 0, 1,
+                             dffr_chain_mul(on_iji, delay_ij), increment);
 }
 
 // Add a channel's increments to its six weights, mapping places back to spacecraft.
-template <int Rows>
-CUDA_DEVICE inline void dffr_add_first_order_increments(DFFRSegmentTable<Rows> &table, int row,
-                                                        int channel, const cmplx *increment) {
-  cmplx *channel_weights = table.tdi_weights + row * DFFR_TDI_WEIGHTS + 6 * channel;
+template <class StorageT>
+CUDA_DEVICE inline void dffr_add_first_order_increments(const StorageT &storage, int variant,
+                                                        int row, int channel,
+                                                        const cmplx *increment) {
+  cmplx *channel_weights = storage.tdi_weights(variant, row) + 6 * channel;
 #pragma unroll
   for (int place = 0; place < DFFR_NUM_SPACECRAFT; place += 1) {
     const int spacecraft_index = (channel + place) % DFFR_NUM_SPACECRAFT;
@@ -870,25 +944,32 @@ CUDA_DEVICE inline void dffr_add_first_order_increments(DFFRSegmentTable<Rows> &
 }
 
 // ===========================================================================
-// Building the segment table
+// Building the rows
 // ===========================================================================
-// Fill the table for rows_here segments from row_base on. Every thread of the block must enter:
-// the body has barriers between stages that read what the previous stage wrote. The caller
-// separates it from earlier readers of the table and from later readers by barriers of its own.
-template <class SourceT, int Rows>
-CUDA_DEVICE inline void dffr_build_segment_table(DFFRSegmentTable<Rows> &table,
-                                                 const DFFRSettings &settings,
-                                                 const KinematicsTable &kinematics,
-                                                 const typename SourceT::Constants &source,
-                                                 int row_base, int rows_here) {
-  const double time_reference = SourceT::time_reference(source);
-  const DFFRSourceGeometry &geometry = source.geometry;
+// Fill rows row_base .. row_base + rows_here - 1 of every variant of a storage: the reception
+// states, emission states, link amplitudes, band starts and the eighteen weights. The anchors are
+// not part of it (dffr_store_anchors), because the Fisher matrix builds them after all its
+// variants. Items run variant by variant, each over the rows, so neighbouring threads take
+// neighbouring rows of one variant. Every thread of the block must enter: the body has barriers
+// between stages that read what an earlier stage wrote. The caller separates it from earlier
+// readers of the storage and from later readers by barriers of its own.
+template <class SourceT, class StorageT>
+CUDA_DEVICE inline void dffr_build_rows(const StorageT &storage, const DFFRSettings &settings,
+                                        const KinematicsTable &kinematics, int row_base,
+                                        int rows_here) {
+  const int num_variants = storage.num_variants();
 
   // --- reception events, three per segment -------------------------------------------------------
-  for (int item = THREAD_START_X; item < rows_here * DFFR_NUM_SPACECRAFT; item += BLOCK_INCR_X) {
-    const int spacecraft_index = item / rows_here;
-    const int row = item - spacecraft_index * rows_here;
+  // ? With one variant the index is a constant, so the tile keeps the item arithmetic of one table.
+  const int reception_items = rows_here * DFFR_NUM_SPACECRAFT;
+  for (int item = THREAD_START_X; item < num_variants * reception_items; item += BLOCK_INCR_X) {
+    const int variant = StorageT::single_variant ? 0 : item / reception_items;
+    const int variant_item = item - variant * reception_items;
+    const int spacecraft_index = variant_item / rows_here;
+    const int row = variant_item - spacecraft_index * rows_here;
     const int segment_index = row_base + row;
+    const typename SourceT::Constants &source = storage.source(variant);
+    const DFFRSourceGeometry &geometry = source.geometry;
     const double segment_midpoint = kinematics.segment_midpoint(segment_index);
 
     double projection_delay = 0.0;
@@ -906,19 +987,29 @@ CUDA_DEVICE inline void dffr_build_segment_table(DFFRSegmentTable<Rows> &table,
     projection_delay_rate /= DFFR_LIGHT_SPEED;
     projection_delay_acceleration /= DFFR_LIGHT_SPEED;
 
-    const double retarded_time = (segment_midpoint - time_reference) + projection_delay;
+    const double retarded_time =
+        (segment_midpoint - SourceT::time_reference(source)) + projection_delay;
     const DFFRQuadPhaseExpansion expansion = SourceT::expand(source, 0, retarded_time);
-    dffr_store_reception_state(table, settings, row * DFFR_NUM_SPACECRAFT + spacecraft_index,
-                               expansion, 1.0 + projection_delay_rate,
-                               projection_delay_acceleration);
+    const int slot = row * DFFR_NUM_SPACECRAFT + spacecraft_index;
+    storage.reference_phasor(variant, slot) = dffr_expansion_phasor(expansion);
+    if (storage.writes_states(variant))
+      storage.store_reception(variant, slot,
+                              dffr_make_reception_scalars(settings, expansion,
+                                                          1.0 + projection_delay_rate,
+                                                          projection_delay_acceleration));
   }
 
   // --- emission events, one per link ------------------------------------------------------------
   // * Only what the delay changes is kept: the emission state's phasor and carrier.
-  for (int item = THREAD_START_X; item < rows_here * DFFR_NUM_LINKS; item += BLOCK_INCR_X) {
-    const int link_index = item / rows_here;
-    const int row = item - link_index * rows_here;
+  const int link_items = rows_here * DFFR_NUM_LINKS;
+  for (int item = THREAD_START_X; item < num_variants * link_items; item += BLOCK_INCR_X) {
+    const int variant = StorageT::single_variant ? 0 : item / link_items;
+    const int variant_item = item - variant * link_items;
+    const int link_index = variant_item / rows_here;
+    const int row = variant_item - link_index * rows_here;
     const int segment_index = row_base + row;
+    const typename SourceT::Constants &source = storage.source(variant);
+    const DFFRSourceGeometry &geometry = source.geometry;
     const double segment_midpoint = kinematics.segment_midpoint(segment_index);
     const int link_slot = link_index * kinematics.num_time_segments + segment_index;
 
@@ -936,22 +1027,27 @@ CUDA_DEVICE inline void dffr_build_segment_table(DFFRSegmentTable<Rows> &table,
     projection_delay /= DFFR_LIGHT_SPEED;
     projection_delay_rate /= DFFR_LIGHT_SPEED;
 
-    const double retarded_time = (emission_time - time_reference) + projection_delay;
+    const double retarded_time =
+        (emission_time - SourceT::time_reference(source)) + projection_delay;
     const DFFRQuadPhaseExpansion expansion = SourceT::expand(source, 0, retarded_time);
 
     // * The emission epoch advances at (1 - dL/dt), which rescales the sender's Doppler factor.
     const double first_derivative = (1.0 - light_travel_time_rate) * (1.0 + projection_delay_rate);
     const int slot = row * DFFR_NUM_LINKS + link_index;
-    table.emission_phasor[slot] =
-        expansion.amplitude_ratio * dffr_polar_unit(expansion.reference_phase);
-    table.emission_frequency[slot] = expansion.instantaneous_frequency * first_derivative;
+    storage.emission_phasor(variant, slot) = dffr_expansion_phasor(expansion);
+    storage.emission_frequency(variant, slot) =
+        expansion.instantaneous_frequency * first_derivative;
   }
 
   // --- link amplitude and its logarithmic slope -------------------------------------------------
-  for (int item = THREAD_START_X; item < rows_here * DFFR_NUM_LINKS; item += BLOCK_INCR_X) {
-    const int link_index = item / rows_here;
-    const int row = item - link_index * rows_here;
+  for (int item = THREAD_START_X; item < num_variants * link_items; item += BLOCK_INCR_X) {
+    const int variant = StorageT::single_variant ? 0 : item / link_items;
+    const int variant_item = item - variant * link_items;
+    const int link_index = variant_item / rows_here;
+    const int row = variant_item - link_index * rows_here;
     const int segment_index = row_base + row;
+    const typename SourceT::Constants &source = storage.source(variant);
+    const DFFRSourceGeometry &geometry = source.geometry;
 
     double unit_direction[3], unit_direction_rate[3];
     for (int xyz = 0; xyz < 3; xyz += 1) {
@@ -991,7 +1087,7 @@ CUDA_DEVICE inline void dffr_build_segment_table(DFFRSegmentTable<Rows> &table,
     const int slot = row * DFFR_NUM_LINKS + link_index;
     const cmplx factor(amplitude * plus_weight * amplitude_plus,
                        amplitude * cross_weight * amplitude_cross);
-    table.link_amplitude[slot] = factor;
+    storage.link_amplitude(variant, slot) = factor;
 
     if (settings.linear_envelope) {
       const double numerator_plus_rate = 2.0 * (u_dot_beam * u_dot_rate - v_dot_beam * v_dot_rate);
@@ -1018,33 +1114,38 @@ CUDA_DEVICE inline void dffr_build_segment_table(DFFRSegmentTable<Rows> &table,
       // ! The response pairs the kernel with conj(F), so the slope is the conjugate of the
       // ! logarithmic derivative. The source amplitude slope adds to it.
       const double amplitude_slope = SourceT::amplitude_log_slope(
-          source, 0, kinematics.segment_midpoint(segment_index) - time_reference);
-      table.envelope_slope[slot] = ((factor_magnitude_squared > 0.0)
-                                        ? gcmplx::conj(factor_rate / factor)
-                                        : cmplx(0.0, 0.0)) +
-                                   cmplx(amplitude_slope, 0.0);
+          source, 0, kinematics.segment_midpoint(segment_index) - SourceT::time_reference(source));
+      storage.envelope_slope(variant, slot) = ((factor_magnitude_squared > 0.0)
+                                                   ? gcmplx::conj(factor_rate / factor)
+                                                   : cmplx(0.0, 0.0)) +
+                                              cmplx(amplitude_slope, 0.0);
     } else {
-      table.envelope_slope[slot] = cmplx(0.0, 0.0);
+      storage.envelope_slope(variant, slot) = cmplx(0.0, 0.0);
     }
   }
 
   CUDA_SYNC_THREADS;
 
   // --- segment carrier, band start, delay phasors -----------------------------------------------
-  for (int row = THREAD_START_X; row < rows_here; row += BLOCK_INCR_X) {
+  for (int item = THREAD_START_X; item < num_variants * rows_here; item += BLOCK_INCR_X) {
+    const int variant = StorageT::single_variant ? 0 : item / rows_here;
+    const int row = item - variant * rows_here;
     const int segment_index = row_base + row;
     double carrier_sum = 0.0;
     for (int link_index = 0; link_index < DFFR_NUM_LINKS; link_index += 1) {
       const int receiver_index = dffr_link_receiver(link_index);
       // * The two states of a link differ only by inter-spacecraft Doppler.
-      carrier_sum += 0.5 * (table.effective_frequency[row * DFFR_NUM_SPACECRAFT + receiver_index] +
-                            table.emission_frequency[row * DFFR_NUM_LINKS + link_index]);
+      carrier_sum +=
+          0.5 * (storage.effective_frequency(variant, row * DFFR_NUM_SPACECRAFT + receiver_index) +
+                 storage.emission_frequency(variant, row * DFFR_NUM_LINKS + link_index));
     }
     const double carrier_frequency = carrier_sum / (double)DFFR_NUM_LINKS;
 
     const int carrier_bin =
         (int)std::floor((carrier_frequency - settings.f_min) / settings.df + 0.5);
-    table.start_freq_ind[row] = carrier_bin - settings.num_side_bins;
+    // ? A variant that reads the reception states of another has that variant's band start.
+    if (storage.writes_states(variant))
+      storage.start_freq_ind(variant, row) = carrier_bin - settings.num_side_bins;
 
     cmplx delay_phasor[DFFR_NUM_LINKS];
     for (int link_index = 0; link_index < DFFR_NUM_LINKS; link_index += 1) {
@@ -1053,7 +1154,7 @@ CUDA_DEVICE inline void dffr_build_segment_table(DFFRSegmentTable<Rows> &table,
       delay_phasor[link_index] =
           dffr_polar_unit(-DFFR_TWO_PI * carrier_frequency * light_travel_time);
     }
-    dffr_store_channel_weights(table, row, delay_phasor, settings.first_order_delays,
+    dffr_store_channel_weights(storage, variant, row, delay_phasor, settings.first_order_delays,
                                settings.tdi_generation);
   }
 
@@ -1061,46 +1162,71 @@ CUDA_DEVICE inline void dffr_build_segment_table(DFFRSegmentTable<Rows> &table,
 
   // --- first-order delay terms, one channel of one row per thread -------------------------------
   if (settings.first_order_delays) {
-    for (int item = THREAD_START_X; item < rows_here * DFFR_NUM_CHANNELS; item += BLOCK_INCR_X) {
-      const int channel = item / rows_here;
-      const int row = item - channel * rows_here;
+    const int channel_items = rows_here * DFFR_NUM_CHANNELS;
+    for (int item = THREAD_START_X; item < num_variants * channel_items; item += BLOCK_INCR_X) {
+      const int variant = StorageT::single_variant ? 0 : item / channel_items;
+      const int variant_item = item - variant * channel_items;
+      const int channel = variant_item / rows_here;
+      const int row = variant_item - channel * rows_here;
       cmplx increment[6];
-      dffr_first_order_delay_increments(table, kinematics, row, row_base + row, channel,
-                                        settings.tdi_generation, increment);
-      dffr_add_first_order_increments(table, row, channel, increment);
+      dffr_first_order_delay_increments(storage, variant, kinematics, row, row_base + row,
+                                        channel, settings.tdi_generation, increment);
+      dffr_add_first_order_increments(storage, variant, row, channel, increment);
     }
   }
+}
+
+// The four endpoint anchors of the reception state at slot, in a row whose band starts at
+// start_freq_ind. AnchorsT holds them under the names of DFFRSegmentTable.
+// * Anchored on the row's band start, so that both phases of the later split stay near 1e2 rad.
+template <class AnchorsT>
+CUDA_DEVICE inline void dffr_store_anchors(AnchorsT &anchors, const DFFRSettings &settings,
+                                           int slot, int start_freq_ind,
+                                           double effective_frequency, double chirp_rate) {
+  const double band_anchor = settings.f_min + (double)start_freq_ind * settings.df;
+  const double delta_anchor = effective_frequency - band_anchor;
+
+  const double outer = settings.half_duration;
+  const double quadratic_outer = M_PI * chirp_rate * outer * outer;
+  const double linear_outer = DFFR_TWO_PI * delta_anchor * outer;
+  const cmplx outer_plus = dffr_polar_unit(quadratic_outer + linear_outer);
+  const cmplx outer_minus = dffr_polar_unit(quadratic_outer - linear_outer);
+  anchors.anchor_outer_plus[slot] = outer_plus;
+  anchors.anchor_outer_minus[slot] = outer_minus;
+
+  if (settings.window_taper > 0.0) {
+    const double inner = settings.plateau_half_width;
+    const double quadratic_inner = M_PI * chirp_rate * inner * inner;
+    const double linear_inner = DFFR_TWO_PI * delta_anchor * inner;
+    anchors.anchor_inner_plus[slot] = dffr_polar_unit(quadratic_inner + linear_inner);
+    anchors.anchor_inner_minus[slot] = dffr_polar_unit(quadratic_inner - linear_inner);
+  } else {
+    // ? The boxcar never reads these; they are set so that no NaN can reach them.
+    anchors.anchor_inner_plus[slot] = outer_plus;
+    anchors.anchor_inner_minus[slot] = outer_minus;
+  }
+}
+
+// Fill the tile's table for rows_here segments from row_base on: the rows of its one variant, then
+// the anchors. Every thread of the block must enter; the caller separates it from earlier readers
+// of the table and from later readers by barriers of its own.
+template <class SourceT, int Rows>
+CUDA_DEVICE inline void dffr_build_segment_table(DFFRSegmentTable<Rows> &table,
+                                                 const DFFRSettings &settings,
+                                                 const KinematicsTable &kinematics,
+                                                 const typename SourceT::Constants &source,
+                                                 int row_base, int rows_here) {
+  const DFFRTableStorage<SourceT, Rows> storage{table, source};
+  dffr_build_rows<SourceT>(storage, settings, kinematics, row_base, rows_here);
 
   // --- endpoint phasor anchors, three per segment -----------------------------------------------
-  // * Anchored on the row's band start, so that both phases of the later split stay near 1e2 rad.
+  // ? The band starts they read were published by the barrier before the first-order terms.
   for (int item = THREAD_START_X; item < rows_here * DFFR_NUM_SPACECRAFT; item += BLOCK_INCR_X) {
     const int spacecraft_index = item / rows_here;
     const int row = item - spacecraft_index * rows_here;
     const int slot = row * DFFR_NUM_SPACECRAFT + spacecraft_index;
-
-    const double band_anchor = settings.f_min + (double)table.start_freq_ind[row] * settings.df;
-    const double delta_anchor = table.effective_frequency[slot] - band_anchor;
-    const double chirp_rate = table.chirp_rate[slot];
-
-    const double outer = settings.half_duration;
-    const double quadratic_outer = M_PI * chirp_rate * outer * outer;
-    const double linear_outer = DFFR_TWO_PI * delta_anchor * outer;
-    const cmplx outer_plus = dffr_polar_unit(quadratic_outer + linear_outer);
-    const cmplx outer_minus = dffr_polar_unit(quadratic_outer - linear_outer);
-    table.anchor_outer_plus[slot] = outer_plus;
-    table.anchor_outer_minus[slot] = outer_minus;
-
-    if (settings.window_taper > 0.0) {
-      const double inner = settings.plateau_half_width;
-      const double quadratic_inner = M_PI * chirp_rate * inner * inner;
-      const double linear_inner = DFFR_TWO_PI * delta_anchor * inner;
-      table.anchor_inner_plus[slot] = dffr_polar_unit(quadratic_inner + linear_inner);
-      table.anchor_inner_minus[slot] = dffr_polar_unit(quadratic_inner - linear_inner);
-    } else {
-      // ? The boxcar never reads these; they are set so that no NaN can reach them.
-      table.anchor_inner_plus[slot] = outer_plus;
-      table.anchor_inner_minus[slot] = outer_minus;
-    }
+    dffr_store_anchors(table, settings, slot, table.start_freq_ind[row],
+                       table.effective_frequency[slot], table.chirp_rate[slot]);
   }
 }
 
@@ -1137,12 +1263,13 @@ inline DFFRBandBinPhasors dffr_make_band_bin_phasors(const DFFRSettings &setting
 }
 
 // The windowed sums of one reception state at one pixel, before its reference phasor and the
-// origin phasor. StatesT holds the bin-independent quantities of the states at slot
-// row * 3 + spacecraft: a DFFRSegmentTable, or the states of a Fisher variant
-// (DFFRFisherReception).
-template <class StatesT>
-CUDA_DEVICE inline void dffr_reception_sums(const StatesT &states, const DFFRSettings &settings,
-                                            int slot, double frequency,
+// origin phasor. StatesT holds the bin-independent scalars of the states at slot
+// row * 3 + spacecraft and AnchorsT their endpoint anchors: both a DFFRSegmentTable, or those of a
+// Fisher variant (DFFRFisherReception, DFFRFisherAnchors).
+template <class StatesT, class AnchorsT>
+CUDA_DEVICE inline void dffr_reception_sums(const StatesT &states, const AnchorsT &anchors,
+                                            const DFFRSettings &settings, int slot,
+                                            double frequency,
                                             const DFFRBandBinPhasors &band_bin_phasors,
                                             cmplx *total_out, cmplx *moment_out) {
   DFFRQuadPhaseScalars scalars;
@@ -1153,10 +1280,10 @@ CUDA_DEVICE inline void dffr_reception_sums(const StatesT &states, const DFFRSet
   scalars.moment_prefactor = states.moment_prefactor[slot];
   scalars.chirp_sign = (scalars.chirp_rate > 0.0) ? 1.0 : -1.0;
 
-  const cmplx outer_plus = band_bin_phasors.outer_sign * states.anchor_outer_plus[slot];
-  const cmplx outer_minus = band_bin_phasors.outer_sign * states.anchor_outer_minus[slot];
-  const cmplx inner_plus = dffr_mul(states.anchor_inner_plus[slot], band_bin_phasors.inner);
-  const cmplx inner_minus = dffr_mul(states.anchor_inner_minus[slot], band_bin_phasors.inner_conj);
+  const cmplx outer_plus = band_bin_phasors.outer_sign * anchors.anchor_outer_plus[slot];
+  const cmplx outer_minus = band_bin_phasors.outer_sign * anchors.anchor_outer_minus[slot];
+  const cmplx inner_plus = dffr_mul(anchors.anchor_inner_plus[slot], band_bin_phasors.inner);
+  const cmplx inner_minus = dffr_mul(anchors.anchor_inner_minus[slot], band_bin_phasors.inner_conj);
 
   dffr_windowed_sums(settings, scalars, states.effective_frequency[slot], frequency, outer_plus,
                      outer_minus, inner_plus, inner_minus, true, total_out, moment_out);
@@ -1171,7 +1298,8 @@ CUDA_DEVICE inline void dffr_evaluate_reception_state(const DFFRSegmentTable<Row
                                                       cmplx *moment_out) {
   const int slot = row * DFFR_NUM_SPACECRAFT + spacecraft_index;
   cmplx total, total_moment;
-  dffr_reception_sums(table, settings, slot, frequency, band_bin_phasors, &total, &total_moment);
+  dffr_reception_sums(table, table, settings, slot, frequency, band_bin_phasors, &total,
+                      &total_moment);
   const cmplx overall = dffr_mul(table.reference_phasor[slot], origin_phasor);
   *kernel_out = dffr_mul(overall, total);
   *moment_out = dffr_mul(overall, total_moment);
@@ -1370,10 +1498,12 @@ inline DFFRTileInputs<SourceT> dffr_tile_inputs(STFTFresnel *fresnel, STFTDomain
 // templates of one derivative, contraction and reduction. The output is exactly symmetric, and a
 // step of zero or less freezes a parameter (zero row and column).
 //
-// Each stencil template, a variant, gets its own segment table through one scratch table, and
-// keeps what its pixels read: its reference phasors and TDI weights, and its reception states
-// unless the source model lists its parameter in reception_invariant_params. Those variants read
-// the reception states of the unperturbed source, so a pixel evaluates their windowed sums once.
+// Each stencil template, a variant, keeps what its pixels read: its reference phasors and TDI
+// weights, and its reception states unless the source model lists its parameter in
+// reception_invariant_params. Those variants read the reception states of the unperturbed source,
+// so a pixel evaluates their windowed sums once. The rows of every variant are built straight into
+// these tables by dffr_build_rows, the build of the tile, a wave of variants at a time
+// (dffr_information_build).
 // * Each variant applies its own reference phasors and weights to its windowed sums in the order
 // * of dffr_evaluate_pixel, so it equals the template that fill_global writes for the shifted
 // * parameters bit for bit, and only the contraction separates this kernel from a reference built
@@ -1393,14 +1523,11 @@ inline DFFRTileInputs<SourceT> dffr_tile_inputs(STFTFresnel *fresnel, STFTDomain
 #define DFFR_FISHER_ROWS_PER_PASS_DOUBLE 1
 #endif
 
-// The bin-independent quantities of the reception states of one variant at slot
-// row * 3 + spacecraft, under the names of DFFRSegmentTable, for dffr_reception_sums.
+// The bin-independent scalars of the reception states of one variant at slot
+// row * 3 + spacecraft, and the band start of each row, under the names of DFFRSegmentTable, for
+// dffr_reception_sums.
 template <int Rows>
 struct DFFRFisherReception {
-  cmplx anchor_outer_plus[Rows * DFFR_NUM_SPACECRAFT];
-  cmplx anchor_outer_minus[Rows * DFFR_NUM_SPACECRAFT];
-  cmplx anchor_inner_plus[Rows * DFFR_NUM_SPACECRAFT];
-  cmplx anchor_inner_minus[Rows * DFFR_NUM_SPACECRAFT];
   double effective_frequency[Rows * DFFR_NUM_SPACECRAFT];
   double chirp_rate[Rows * DFFR_NUM_SPACECRAFT];
   double scale_factor[Rows * DFFR_NUM_SPACECRAFT];
@@ -1408,6 +1535,16 @@ struct DFFRFisherReception {
   double reciprocal_chirp[Rows * DFFR_NUM_SPACECRAFT];
   double moment_prefactor[Rows * DFFR_NUM_SPACECRAFT];
   int start_freq_ind[Rows];
+};
+
+// The endpoint anchors of the same states. They have an array of their own: until the anchors are
+// built, after every variant, the build keeps the intermediates of its waves in their space.
+template <int Rows>
+struct DFFRFisherAnchors {
+  cmplx anchor_outer_plus[Rows * DFFR_NUM_SPACECRAFT];
+  cmplx anchor_outer_minus[Rows * DFFR_NUM_SPACECRAFT];
+  cmplx anchor_inner_plus[Rows * DFFR_NUM_SPACECRAFT];
+  cmplx anchor_inner_minus[Rows * DFFR_NUM_SPACECRAFT];
 };
 
 // What a variant applies to the windowed sums of its reception states.
@@ -1428,7 +1565,6 @@ struct DFFRFisherLayout {
   int shared_states;  // the set of the unperturbed source, -1 when no variant reads it
   double step[STFT_FISHER_NDERIV_MAX];  // eps of each derivative; zero or less freezes it
   int first_variant[STFT_FISHER_NDERIV_MAX];
-  int variant_derivative[STFT_FISHER_NTEMPLATE_MAX];
   int variant_param[STFT_FISHER_NTEMPLATE_MAX];
   double variant_shift[STFT_FISHER_NTEMPLATE_MAX];
   int variant_states[STFT_FISHER_NTEMPLATE_MAX];
@@ -1472,7 +1608,6 @@ inline DFFRFisherLayout dffr_information_layout(const int *inds, const double *p
     for (int point = 0; point < layout.num_stencil; point += 1) {
       const int variant = layout.num_variants;
       layout.num_variants += 1;
-      layout.variant_derivative[variant] = derivative;
       layout.variant_param[variant] = param;
       layout.variant_shift[variant] = shift[point];
       if (invariant) {
@@ -1492,100 +1627,197 @@ inline DFFRFisherLayout dffr_information_layout(const int *inds, const double *p
   return layout;
 }
 
-// Dynamic shared memory of the Fisher kernel: the scratch arena of the tile (source constants,
-// settings, the segment table of the variant being built), the reception states and the amplitude
-// parts, each section at a 16-byte boundary. After a source's last pass the final reduction stages
-// its sums where the states and amplitude parts were, so that region holds at least those sums.
+// Dynamic shared memory of the Fisher kernel, each section at a 16-byte boundary: the settings
+// that the pixels read, the reception states, the amplitude parts and the anchors. While a pass is
+// built, the anchor space holds the intermediates of a wave instead (DFFRFisherWave), and it is
+// made large enough for one variant where the anchors take less. After a source's last pass the
+// final reduction stages its sums where the states and amplitude parts were, so that region holds
+// at least those sums.
 CUDA_CALLABLE_MEMBER inline size_t dffr_information_align(size_t bytes) {
   return (bytes + 15) & ~static_cast<size_t>(15);
 }
 
-template <class SourceT, int Rows>
 CUDA_CALLABLE_MEMBER inline size_t dffr_information_states_offset() {
-  return dffr_information_align(sizeof(typename DFFRTile<SourceT, Rows>::Arena));
+  return dffr_information_align(sizeof(DFFRSettings));
+}
+
+template <int Rows>
+CUDA_CALLABLE_MEMBER inline size_t dffr_information_amplitudes_offset(
+    const DFFRFisherLayout &layout) {
+  return dffr_information_states_offset() +
+         dffr_information_align((size_t)layout.num_states * sizeof(DFFRFisherReception<Rows>));
+}
+
+template <int Rows>
+CUDA_CALLABLE_MEMBER inline size_t dffr_information_anchors_offset(
+    const DFFRFisherLayout &layout) {
+  return dffr_information_amplitudes_offset<Rows>(layout) +
+         dffr_information_align((size_t)layout.num_variants * sizeof(DFFRFisherAmplitude<Rows>));
+}
+
+// The intermediates of a build wave in the anchor space: the source constants of each variant,
+// and its emission states and link amplitudes at [variant * Rows * 6 + row * 6 + link].
+template <class SourceT, int Rows>
+struct DFFRFisherWave {
+  typename SourceT::Constants *constants;
+  cmplx *emission_phasor;
+  cmplx *link_amplitude;
+  cmplx *envelope_slope;
+  double *emission_frequency;
+};
+
+template <class SourceT, int Rows>
+CUDA_CALLABLE_MEMBER inline size_t dffr_information_wave_bytes(int wave_variants) {
+  const size_t link_slots = (size_t)wave_variants * Rows * DFFR_NUM_LINKS;
+  return dffr_information_align((size_t)wave_variants * sizeof(typename SourceT::Constants)) +
+         link_slots * (3 * sizeof(cmplx) + sizeof(double));
 }
 
 template <class SourceT, int Rows>
-CUDA_CALLABLE_MEMBER inline size_t dffr_information_amplitudes_offset(
-    const DFFRFisherLayout &layout) {
-  return dffr_information_states_offset<SourceT, Rows>() +
-         dffr_information_align((size_t)layout.num_states * sizeof(DFFRFisherReception<Rows>));
+CUDA_DEVICE inline DFFRFisherWave<SourceT, Rows> dffr_information_wave(unsigned char *space,
+                                                                       int wave_variants) {
+  const size_t link_slots = (size_t)wave_variants * Rows * DFFR_NUM_LINKS;
+  cmplx *link_fields = reinterpret_cast<cmplx *>(
+      space + dffr_information_align((size_t)wave_variants * sizeof(typename SourceT::Constants)));
+  DFFRFisherWave<SourceT, Rows> wave;
+  wave.constants = reinterpret_cast<typename SourceT::Constants *>(space);
+  wave.emission_phasor = link_fields;
+  wave.link_amplitude = link_fields + link_slots;
+  wave.envelope_slope = link_fields + 2 * link_slots;
+  wave.emission_frequency = reinterpret_cast<double *>(link_fields + 3 * link_slots);
+  return wave;
+}
+
+// Variants per build wave: the most whose intermediates fit in the anchor space, at least one,
+// then spread evenly over the waves that this count needs. Host and device compute it alike.
+template <class SourceT, int Rows>
+CUDA_CALLABLE_MEMBER inline int dffr_information_wave_variants(const DFFRFisherLayout &layout) {
+  if (layout.num_variants < 1) return 0;
+  const size_t anchor_bytes = (size_t)layout.num_states * sizeof(DFFRFisherAnchors<Rows>);
+  int fitting = layout.num_variants;
+  while (fitting > 1 && dffr_information_wave_bytes<SourceT, Rows>(fitting) > anchor_bytes)
+    fitting -= 1;
+  const int num_waves = (layout.num_variants + fitting - 1) / fitting;
+  return (layout.num_variants + num_waves - 1) / num_waves;
 }
 
 template <class SourceT, int Rows>
 inline size_t dffr_information_bytes(const DFFRFisherLayout &layout) {
+  const size_t anchor_bytes = (size_t)layout.num_states * sizeof(DFFRFisherAnchors<Rows>);
+  const size_t wave_bytes = dffr_information_wave_bytes<SourceT, Rows>(
+      dffr_information_wave_variants<SourceT, Rows>(layout));
   const size_t tables_end =
-      dffr_information_amplitudes_offset<SourceT, Rows>(layout) +
-      dffr_information_align((size_t)layout.num_variants * sizeof(DFFRFisherAmplitude<Rows>));
+      dffr_information_anchors_offset<Rows>(layout) +
+      dffr_information_align((anchor_bytes > wave_bytes) ? anchor_bytes : wave_bytes);
   const size_t staging_end =
-      dffr_information_states_offset<SourceT, Rows>() +
+      dffr_information_states_offset() +
       dffr_information_align((size_t)NUM_THREADS_HERE * layout.num_derivs * sizeof(double));
   return (tables_end > staging_end) ? tables_end : staging_end;
 }
 
-// Fill the reception states and amplitude parts of every variant for rows_here segments from
-// row_base, and the lowest and highest carrier of each derivative's variants per row. Every
-// thread of the block enters; it ends with a barrier.
+// A wave of variants as the storage of dffr_build_rows: reception scalars, band starts, reference
+// phasors and weights go straight to the Fisher tables, the rest to the wave's intermediates. A
+// variant that does not write its set of reception states reads the one its layout names.
 template <class SourceT, int Rows>
-CUDA_DEVICE inline void dffr_information_build(typename DFFRTile<SourceT, Rows>::Arena *scratch,
-                                               DFFRFisherReception<Rows> *states,
+struct DFFRFisherWaveStorage {
+  const DFFRFisherLayout &layout;
+  int first_variant;  // layout index of the wave's variant 0
+  int wave_size;
+  DFFRFisherReception<Rows> *states;
+  DFFRFisherAmplitude<Rows> *amplitudes;
+  DFFRFisherWave<SourceT, Rows> wave;
+
+  static constexpr bool single_variant = false;
+  CUDA_DEVICE int num_variants() const { return wave_size; }
+  CUDA_DEVICE const typename SourceT::Constants &source(int variant) const {
+    return wave.constants[variant];
+  }
+  CUDA_DEVICE bool writes_states(int variant) const {
+    return layout.variant_writes_states[first_variant + variant];
+  }
+  CUDA_DEVICE DFFRFisherReception<Rows> &reception(int variant) const {
+    return states[layout.variant_states[first_variant + variant]];
+  }
+  CUDA_DEVICE void store_reception(int variant, int slot, const DFFRReceptionScalars &state) const {
+    dffr_store_reception_scalars(reception(variant), slot, state);
+  }
+  CUDA_DEVICE double effective_frequency(int variant, int slot) const {
+    return reception(variant).effective_frequency[slot];
+  }
+  CUDA_DEVICE double chirp_rate(int variant, int slot) const {
+    return reception(variant).chirp_rate[slot];
+  }
+  CUDA_DEVICE cmplx &reference_phasor(int variant, int slot) const {
+    return amplitudes[first_variant + variant].reference_phasor[slot];
+  }
+  CUDA_DEVICE cmplx &emission_phasor(int variant, int slot) const {
+    return wave.emission_phasor[variant * Rows * DFFR_NUM_LINKS + slot];
+  }
+  CUDA_DEVICE double &emission_frequency(int variant, int slot) const {
+    return wave.emission_frequency[variant * Rows * DFFR_NUM_LINKS + slot];
+  }
+  CUDA_DEVICE cmplx &link_amplitude(int variant, int slot) const {
+    return wave.link_amplitude[variant * Rows * DFFR_NUM_LINKS + slot];
+  }
+  CUDA_DEVICE cmplx &envelope_slope(int variant, int slot) const {
+    return wave.envelope_slope[variant * Rows * DFFR_NUM_LINKS + slot];
+  }
+  CUDA_DEVICE int &start_freq_ind(int variant, int row) const {
+    return reception(variant).start_freq_ind[row];
+  }
+  CUDA_DEVICE cmplx *tdi_weights(int variant, int row) const {
+    return amplitudes[first_variant + variant].tdi_weights + row * DFFR_TDI_WEIGHTS;
+  }
+};
+
+// Fill the reception states, amplitude parts and anchors of every variant for rows_here segments
+// from row_base. The variants are built in waves (dffr_information_wave_variants): the wave's
+// shifted sources are loaded, then dffr_build_rows fills their rows straight into the tables,
+// with the wave's intermediates in the anchor space. The anchors of every set of states follow
+// the last wave. Every thread of the block enters; the caller's next barrier publishes the anchors.
+template <class SourceT, int Rows>
+CUDA_DEVICE inline void dffr_information_build(DFFRFisherReception<Rows> *states,
                                                DFFRFisherAmplitude<Rows> *amplitudes,
-                                               int *carrier_lo, int *carrier_hi,
+                                               DFFRFisherAnchors<Rows> *anchors,
                                                const DFFRTileInputs<SourceT> &inputs,
-                                               const DFFRFisherLayout &layout,
+                                               const DFFRFisherLayout &layout, int wave_variants,
                                                const double *params, int nparams, int row_base,
                                                int rows_here) {
-  const DFFRSegmentTable<Rows> &table = scratch->table;
-  for (int variant = 0; variant < layout.num_variants; variant += 1) {
-    // * One thread loads the shifted source. The barrier after it also keeps this build from
-    // * overwriting the scratch table while the copies of the previous variant still read it.
-    if (THREAD_START_X == 0) {
+  const DFFRFisherWave<SourceT, Rows> wave =
+      dffr_information_wave<SourceT, Rows>(reinterpret_cast<unsigned char *>(anchors),
+                                           wave_variants);
+  for (int first_variant = 0; first_variant < layout.num_variants;
+       first_variant += wave_variants) {
+    const int remaining = layout.num_variants - first_variant;
+    const int wave_size = (remaining < wave_variants) ? remaining : wave_variants;
+    // * One thread per variant loads its shifted source. The barrier after the loads also keeps
+    // * this wave from overwriting intermediates that the last stage of the previous wave reads.
+    for (int variant = THREAD_START_X; variant < wave_size; variant += BLOCK_INCR_X) {
       double shifted[N_PARAMS_MAX];
       for (int index = 0; index < nparams; index += 1) shifted[index] = params[index];
-      const int param = layout.variant_param[variant];
-      shifted[param] = params[param] + layout.variant_shift[variant];
-      SourceT::load(&scratch->source, inputs.model, shifted);
+      const int param = layout.variant_param[first_variant + variant];
+      shifted[param] = params[param] + layout.variant_shift[first_variant + variant];
+      SourceT::load(&wave.constants[variant], inputs.model, shifted);
     }
     CUDA_SYNC_THREADS;
-    dffr_build_segment_table<SourceT, Rows>(scratch->table, inputs.settings, inputs.kinematics,
-                                            scratch->source, row_base, rows_here);
-    CUDA_SYNC_THREADS;
-
-    DFFRFisherAmplitude<Rows> &amplitude = amplitudes[variant];
-    const bool writes_states = layout.variant_writes_states[variant];
-    DFFRFisherReception<Rows> &reception = states[layout.variant_states[variant]];
-    // ? The first rows_here * 3 slots of the table are the states of rows 0 .. rows_here - 1.
-    for (int slot = THREAD_START_X; slot < rows_here * DFFR_NUM_SPACECRAFT; slot += BLOCK_INCR_X) {
-      amplitude.reference_phasor[slot] = table.reference_phasor[slot];
-      if (writes_states) {
-        reception.anchor_outer_plus[slot] = table.anchor_outer_plus[slot];
-        reception.anchor_outer_minus[slot] = table.anchor_outer_minus[slot];
-        reception.anchor_inner_plus[slot] = table.anchor_inner_plus[slot];
-        reception.anchor_inner_minus[slot] = table.anchor_inner_minus[slot];
-        reception.effective_frequency[slot] = table.effective_frequency[slot];
-        reception.chirp_rate[slot] = table.chirp_rate[slot];
-        reception.scale_factor[slot] = table.scale_factor[slot];
-        reception.inverse_scale[slot] = table.inverse_scale[slot];
-        reception.reciprocal_chirp[slot] = table.reciprocal_chirp[slot];
-        reception.moment_prefactor[slot] = table.moment_prefactor[slot];
-      }
-    }
-    for (int entry = THREAD_START_X; entry < rows_here * DFFR_TDI_WEIGHTS; entry += BLOCK_INCR_X)
-      amplitude.tdi_weights[entry] = table.tdi_weights[entry];
-
-    // * The same thread owns a row for every variant, so the carrier ranges need no atomics.
-    const int derivative = layout.variant_derivative[variant];
-    const bool first = (variant == layout.first_variant[derivative]);
-    for (int row = THREAD_START_X; row < rows_here; row += BLOCK_INCR_X) {
-      const int band_start = table.start_freq_ind[row];
-      if (writes_states) reception.start_freq_ind[row] = band_start;
-      const int carrier = band_start + inputs.settings.num_side_bins;
-      const int slot = derivative * Rows + row;
-      if (first || carrier < carrier_lo[slot]) carrier_lo[slot] = carrier;
-      if (first || carrier > carrier_hi[slot]) carrier_hi[slot] = carrier;
-    }
+    const DFFRFisherWaveStorage<SourceT, Rows> storage{layout,     first_variant, wave_size,
+                                                       states,     amplitudes,    wave};
+    dffr_build_rows<SourceT>(storage, inputs.settings, inputs.kinematics, row_base, rows_here);
   }
   CUDA_SYNC_THREADS;
+
+  // --- endpoint anchors of every set of states, once no wave reads the anchor space -------------
+  const int anchor_items = rows_here * DFFR_NUM_SPACECRAFT;
+  for (int item = THREAD_START_X; item < layout.num_states * anchor_items; item += BLOCK_INCR_X) {
+    const int state_set = item / anchor_items;
+    const int set_item = item - state_set * anchor_items;
+    const int spacecraft_index = set_item / rows_here;
+    const int row = set_item - spacecraft_index * rows_here;
+    const int slot = row * DFFR_NUM_SPACECRAFT + spacecraft_index;
+    const DFFRFisherReception<Rows> &reception = states[state_set];
+    dffr_store_anchors(anchors[state_set], inputs.settings, slot, reception.start_freq_ind[row],
+                       reception.effective_frequency[slot], reception.chirp_rate[slot]);
+  }
 }
 
 // The derivatives dh[d][c] of the three channels at one pixel of row `row`, on the common support
@@ -1593,10 +1825,10 @@ CUDA_DEVICE inline void dffr_information_build(typename DFFRTile<SourceT, Rows>:
 // frequency = f_min + freq_j_here df, as in the consumers.
 template <int Rows>
 CUDA_DEVICE inline void dffr_information_derivatives(
-    const DFFRFisherReception<Rows> *states, const DFFRFisherAmplitude<Rows> *amplitudes,
-    const int *carrier_lo, const int *carrier_hi, const DFFRSettings &settings,
-    const DFFRFisherLayout &layout, int row, int freq_j_here, double frequency,
-    cmplx dh[STFT_FISHER_NDERIV_MAX][DFFR_NUM_CHANNELS]) {
+    const DFFRFisherReception<Rows> *states, const DFFRFisherAnchors<Rows> *anchors,
+    const DFFRFisherAmplitude<Rows> *amplitudes, const int *carrier_lo, const int *carrier_hi,
+    const DFFRSettings &settings, const DFFRFisherLayout &layout, int row, int freq_j_here,
+    double frequency, cmplx dh[STFT_FISHER_NDERIV_MAX][DFFR_NUM_CHANNELS]) {
   const double bin_sign = (freq_j_here & 1) ? -1.0 : 1.0;
   const cmplx origin_phasor = bin_sign * settings.origin_phasor_base;
 
@@ -1643,8 +1875,9 @@ CUDA_DEVICE inline void dffr_information_derivatives(
         // ! Not unrolled, as in dffr_evaluate_pixel: each iteration inlines a reception state.
         for (int spacecraft_index = 0; spacecraft_index < DFFR_NUM_SPACECRAFT;
              spacecraft_index += 1)
-          dffr_reception_sums(reception, settings, row * DFFR_NUM_SPACECRAFT + spacecraft_index,
-                              frequency, band_bin_phasors, &total[spacecraft_index],
+          dffr_reception_sums(reception, anchors[set], settings,
+                              row * DFFR_NUM_SPACECRAFT + spacecraft_index, frequency,
+                              band_bin_phasors, &total[spacecraft_index],
                               &moment[spacecraft_index]);
         if (shared) {
           for (int spacecraft_index = 0; spacecraft_index < DFFR_NUM_SPACECRAFT;
@@ -1696,7 +1929,6 @@ CUDA_KERNEL void dffr_information_matrix_kernel(double *info_out, DFFRTileInputs
                                                 DFFRFisherLayout layout, int num_bin, int nparams,
                                                 const int *start_freq_inds,
                                                 unsigned char *host_arena) {
-  using Scratch = typename DFFRTile<SourceT, Rows>::Arena;
   using Map = StftBandBinMap<Rows>;
 
   CUDA_SHARED double params[N_PARAMS_MAX];
@@ -1709,13 +1941,16 @@ CUDA_KERNEL void dffr_information_matrix_kernel(double *info_out, DFFRTileInputs
 #endif
 
   unsigned char *arena = stft_tile_arena(host_arena);
-  Scratch *scratch = reinterpret_cast<Scratch *>(arena);
-  DFFRFisherReception<Rows> *states = reinterpret_cast<DFFRFisherReception<Rows> *>(
-      arena + dffr_information_states_offset<SourceT, Rows>());
+  DFFRSettings *shared_settings = reinterpret_cast<DFFRSettings *>(arena);
+  DFFRFisherReception<Rows> *states =
+      reinterpret_cast<DFFRFisherReception<Rows> *>(arena + dffr_information_states_offset());
   DFFRFisherAmplitude<Rows> *amplitudes = reinterpret_cast<DFFRFisherAmplitude<Rows> *>(
-      arena + dffr_information_amplitudes_offset<SourceT, Rows>(layout));
-  const DFFRSettings &settings = scratch->settings;
+      arena + dffr_information_amplitudes_offset<Rows>(layout));
+  DFFRFisherAnchors<Rows> *anchors = reinterpret_cast<DFFRFisherAnchors<Rows> *>(
+      arena + dffr_information_anchors_offset<Rows>(layout));
+  const DFFRSettings &settings = *shared_settings;
   const DFFRFisherBands<Rows> band_context{&bands};
+  const int wave_variants = dffr_information_wave_variants<SourceT, Rows>(layout);
 
   const int num_derivs = layout.num_derivs;
   const int num_times = inputs.settings.num_time_segments;
@@ -1724,7 +1959,7 @@ CUDA_KERNEL void dffr_information_matrix_kernel(double *info_out, DFFRTileInputs
   const double f_min = stft->f_min;
 
   // * The pixels read the settings from shared memory, as the tile does, to keep one pointer.
-  if (THREAD_START_X == 0) scratch->settings = inputs.settings;
+  if (THREAD_START_X == 0) *shared_settings = inputs.settings;
 
   for (int bin_i = BLOCK_START_X; bin_i < num_bin; bin_i += GRID_INCR_X) {
     const int noise_index = noise_index_all[bin_i];
@@ -1743,18 +1978,29 @@ CUDA_KERNEL void dffr_information_matrix_kernel(double *info_out, DFFRTileInputs
 
     for (int row_base = 0; row_base < num_times; row_base += Rows) {
       const int rows_here = (num_times - row_base < Rows) ? (num_times - row_base) : Rows;
-      dffr_information_build<SourceT, Rows>(scratch, states, amplitudes, carrier_lo, carrier_hi,
-                                            inputs, layout, params, nparams, row_base, rows_here);
+      dffr_information_build<SourceT, Rows>(states, amplitudes, anchors, inputs, layout,
+                                            wave_variants, params, nparams, row_base, rows_here);
 
-      // * A row's band is the union of its derivatives' common supports.
+      // * A row's band is the union of its derivatives' common supports, each spanned by the
+      // * carriers of the derivative's variants.
       Map map(band_context, rows_here);
       for (int row = map.first_row(); row < rows_here; row += map.row_stride()) {
         int band_lo = 0, band_hi = -1;
         bool any_active = false;
         for (int derivative = 0; derivative < num_derivs; derivative += 1) {
           if (!(layout.step[derivative] > 0.0)) continue;
-          const int lo = carrier_lo[derivative * Rows + row] - settings.num_side_bins;
-          const int hi = carrier_hi[derivative * Rows + row] + settings.num_side_bins;
+          int lowest_carrier = 0, highest_carrier = 0;
+          for (int point = 0; point < layout.num_stencil; point += 1) {
+            const int variant = layout.first_variant[derivative] + point;
+            const int carrier =
+                states[layout.variant_states[variant]].start_freq_ind[row] + settings.num_side_bins;
+            if (point == 0 || carrier < lowest_carrier) lowest_carrier = carrier;
+            if (point == 0 || carrier > highest_carrier) highest_carrier = carrier;
+          }
+          carrier_lo[derivative * Rows + row] = lowest_carrier;
+          carrier_hi[derivative * Rows + row] = highest_carrier;
+          const int lo = lowest_carrier - settings.num_side_bins;
+          const int hi = highest_carrier + settings.num_side_bins;
           if (!any_active || lo < band_lo) band_lo = lo;
           if (!any_active || hi > band_hi) band_hi = hi;
           any_active = true;
@@ -1772,8 +2018,8 @@ CUDA_KERNEL void dffr_information_matrix_kernel(double *info_out, DFFRTileInputs
         const double freq_here = f_min + freq_j_here * df;
 
         cmplx dh[STFT_FISHER_NDERIV_MAX][DFFR_NUM_CHANNELS];  // derivative templates, per channel
-        dffr_information_derivatives<Rows>(states, amplitudes, carrier_lo, carrier_hi, settings,
-                                           layout, row, freq_j_here, freq_here, dh);
+        dffr_information_derivatives<Rows>(states, anchors, amplitudes, carrier_lo, carrier_hi,
+                                           settings, layout, row, freq_j_here, freq_here, dh);
 
         // * The contraction of stft_eval_block_information on the cross-channel inverse CSD.
         cmplx invc[DFFR_NUM_CHANNELS][DFFR_NUM_CHANNELS];  // inverse CSD of the pixel
@@ -1813,7 +2059,7 @@ CUDA_KERNEL void dffr_information_matrix_kernel(double *info_out, DFFRTileInputs
     double *info_source_out = &info_out[(size_t)bin_i * num_derivs * num_derivs];
 #ifdef __CUDACC__
     double *reduction_staging =
-        reinterpret_cast<double *>(arena + dffr_information_states_offset<SourceT, Rows>());
+        reinterpret_cast<double *>(arena + dffr_information_states_offset());
 #endif
     for (int row_derivative = 0; row_derivative < num_derivs; row_derivative += 1) {
       const int width = num_derivs - row_derivative;
