@@ -2725,6 +2725,190 @@ mismatch is 1 - Re(d|h)/√((d|d)(h|h)) at the truth.
   in the FD and 3.0 in the STFT, where the CSD per segment ties T to A and E. At 20 mHz T carries
   0.1 % of (d|d) in both domains, and the two FD CSDs agree to 0.01 %.
 
+**Item 4 of the validation: six waveforms on the Mojito-light data** (2026-10-21). The fourth item
+of the author's scope: the four waveforms of item 3, and the two of jaxgb, against the Mojito-light
+simulation for its five galactic binaries of highest frequency. Each waveform runs in its own
+domain against the transform of the same preprocessed data. The script gives the mismatch and the
+SNRs at the true parameters and the one-parameter scans of item 3. The numbers are recorded; there
+is no gate.
+
+- Code: LAT b0cc2743 with the new `mojito_dffr_validation.py` and the part `mojito` of
+  `run_step6.sh`; GBGPU 11d5159; jaxgb 0.2.2 and lisaorbits 3.1.0 from PyPI. The comps, FastGB and
+  jaxgb ran on the A100 of the conventions above, the FD heterodyne on the CPUs of the same node.
+- Data: the Mojito-light L1 files of the galaxy (`data/GB/L1`, the white-dwarf binaries of
+  `catalogues/wdwd_cat_mojito_lite_processed.hdf5`, 15 539 324 of them) and of the instrument noise
+  (`data/INSTRUMENT/L1`): X2, Y2 and Z2 every 2.5 s over 731 days, divided by the laser frequency.
+  They are read and preprocessed as `globalfit/engine.py` does with the settings of
+  `mojito_input/gb_high_freq_global_fit_settings.py`: `L1ProcessingStep`, a high-pass at 1e-5 Hz
+  and a low-pass at 0.1 Hz (order-2 Butterworth, each run forward and backward), downsampling to
+  5 s (`resample_poly` with a Kaiser window of β = 31) and 200 h trimmed from each end; then the
+  first 1.92 years, the longest span the trim leaves, where the settings file takes 9 months. Both
+  domains use the 701 whole one-day segments of that span, which starts 720 850.5 s after the
+  catalogue's reference time.
+- Orbits: LAT's `L1Orbits` from the noise file (ICRS, `MOJITO_AVERAGE_ARMLENGTH`), as the global
+  fit loads them, for the comps, FastGB and the noise weights. The signal codes take the file's
+  time-varying light travel times; the constant arm length enters only FastGB. jaxgb takes
+  lisaorbits orbits: `InterpolatedOrbits` on the spacecraft positions and velocities of the same
+  file, whose light travel times stay within 2.5e-7 s of the file's. The galaxy and the noise files
+  hold the same positions, and light travel times within 2.5e-7 s of each other, 3e-8 rad of phase
+  at 20 mHz.
+- STFT: the periodic Tukey window of taper 0.1157 (1e4 s on a one-day segment) on the data and 60
+  side bins, as in items 1 to 3, in place of the settings file's taper of 1/(14 mHz) = 71 s and the
+  10 side bins of production. FD: dt rfft of the same 701 days with LAT's symmetric Tukey of taper
+  1e4 s, as in item 3, on a band of 8192 bins about each carrier.
+- Sources: the five binaries of highest gravitational-wave frequency, all between 15.6 and 20.4
+  mHz, at the catalogue's amplitudes. Their parameters are those of the catalogue at its reference
+  time (`MOJITO_REFERENCE_TIME`), mapped as the global fit maps them
+  (`gb_catalogue_to_sampling_basis` and the stock GB transform: φ0 = +TrueAnomaly, sky and
+  polarisation angles in ICRS). The SNR is DFFR's optimal SNR at the truth with the noise weights
+  below; the gaps are those of the carriers in the middle of the span, in bins of 1/(1 day).
+
+| Source | f [mHz] | ḟ [Hz/s] | A | SNR | Nearest catalogue binary |
+| --- | --- | --- | --- | --- | --- |
+| gb0 | 20.380 | 1.02e-13 | 1.37e-22 | 223 | gb1, 61.6 bins away |
+| gb1 | 19.668 | 8.26e-14 | 1.36e-22 | 95 | gb0, 61.6 bins away |
+| gb2 | 16.716 | 3.36e-14 | 1.15e-22 | 163 | gb3, 92.3 bins away |
+| gb3 | 15.652 | -1.07e-13 | 4.26e-23 | 67 | gb4, 1.9 bins away |
+| gb4 | 15.626 | 3.86e-14 | 1.57e-22 | 193 | gb3, 1.9 bins away |
+
+- gb3 and gb4 lie inside each other's templates in the STFT, an overlapping pair, and 1595 bins
+  apart in the FD. Of the 40 binaries of highest frequency, down to 10.9 mHz, only the three above
+  16.7 mHz have no neighbour within their 60 side bins; each of the others has one with at least
+  54 % of its amplitude.
+- Waveforms, each in its own domain, on X, Y and Z with the full complex CSD: DFFR and TDI on the
+  fly in `STFTGBComputations` with t_ref = `MOJITO_REFERENCE_TIME`, as the global fit sets it;
+  `GBFDComputations` and FastGB with the parameters carried to the data start, FastGB with
+  `flip_ref_phase=True`, as in item 3; JaxGB and JaxGBaccurate through jaxgb's `get_tdi` (TDI 2.0)
+  with frequency and phase carried to the data start and the amplitude kept, since jaxgb has no
+  amplitude evolution (as its `GBObject.to_jaxgb_array`). The FD heterodyne, FastGB and JaxGB give
+  the transform of the data span without a window, as in item 3. JaxGBaccurate transforms a span
+  twice as long, [t0 - T/2, t0 + 3T/2), under its own window, which is flat over the data; its
+  template goes back to the time domain, where the data span takes the FD data window, as the data
+  did.
+- Noise weights: `XYZSensitivityBackend` at its default levels with the options of the settings
+  file (TDI 2.0, transfer-function dips masked within 2 %, transfer functions averaged over the
+  orbit in the FD) and, as its `normalize_window` asks, the CSD scaled by the mean square of the
+  data window.
+- Three data sets in every product: the galaxy plus the noise, the data of the global fit; the
+  galaxy alone; and the galaxy without each source's neighbours, the catalogue binaries whose
+  template reaches its STFT band. The neighbours leave the galaxy at their catalogue parameters:
+  in the STFT as DFFR templates written by `fill_global_stft`, whose (h|h) and (d|h) equal those of
+  `get_ll_stft` to 1.8e-15; in the FD as templates of `GBFDComputations` on 16 times their sample
+  count, with the FD window applied in the time domain. In both domains the templates first take
+  the gain of the preprocessing filters at their frequencies, as the neighbours in the data did.
+- Metrics at the truth, against the galaxy without neighbours: the mismatch
+  1 - Re(d|h)/√((d|d)(h|h)), the amplitude ratio √((h|h)/(d|d)), the phase of (d|h) and ln L; the
+  optimal SNR √(h|h), the matched-filter SNR Re(d|h)/√(h|h) on the data, and the noise level
+  (n|n)/(6N) of the noise alone over the N pixels or bins of the band, which is 1 when the CSD
+  describes the noise. Scans as in item 3, on all three data sets: the eight parameters of the
+  global fit, ±4σ in 81 points, σ = 1/√F_ii of DFFR's information matrix at the truth.
+- The author's decisions of 2026-10-21: the settings of `gb_high_freq_global_fit_settings.py` with
+  all of its preprocessing, over 1.92 years; the galaxy plus the noise as data; the STFT window of
+  items 1 to 3 and 60 side bins; the catalogue's amplitudes; the five binaries of highest frequency,
+  all of them, with gb3 and gb4 reported as an overlapping pair; FastGB with the conventions of
+  item 3; and jaxgb's JaxGB and JaxGBaccurate as two more waveforms.
+- Command, from the LAT root inside the job:
+  `PYTHON=$PYTHON scripts/dffr/run_step6.sh --device gpu $OUT mojito`. The first run reads and
+  preprocesses the files (44 s) into `$OUT/validation/mojito/data/`, which later runs reuse. The
+  run took 11 min 44 s at a peak of 15.4 GB of memory; a source takes about 2 minutes, 1.5 of
+  them for the FD heterodyne on the CPU.
+  Files: `$OUT/validation/mojito/` (`report.txt`, `summary.json`, per source `NAME.json`,
+  `NAME.npz` and `NAME.png`, `summary_offsets_{data,isolated}.png`,
+  `summary_widths_{data,isolated}.png`, `summary_mismatch.png`); the review checks below in `dev/`.
+
+Results. Mismatch at the truth against the galaxy without neighbours; for the FD heterodyne on
+8192 points, and on 16 times as many in brackets.
+
+| Source | DFFR | TDI on the fly, STFT | TDI on the fly, FD | FastGB | JaxGB | JaxGBaccurate |
+| --- | --- | --- | --- | --- | --- | --- |
+| gb0 | 3.1e-8 | 3.3e-8 | 1.4e-5 (7.6e-6) | 2.2e-3 | 2.2e-3 | 2.1e-3 |
+| gb1 | 1.8e-7 | 1.8e-7 | 4.0e-5 (1.7e-5) | 2.5e-3 | 2.5e-3 | 2.4e-3 |
+| gb2 | 5.8e-8 | 5.9e-8 | 1.1e-4 (2.2e-5) | 1.1e-3 | 1.1e-3 | 9.7e-4 |
+| gb3 | 4.5e-7 | 4.5e-7 | 6.2e-5 (5.5e-5) | 7.6e-4 | 7.6e-4 | 6.8e-4 |
+| gb4 | 5.4e-8 | 5.4e-8 | 1.9e-5 (3.3e-6) | 1.0e-3 | 1.0e-3 | 9.7e-4 |
+
+Scans against the galaxy without neighbours: the largest peak offset over f0, ḟ, φ0, ψ, λ and β,
+in σ, and the offset of A for DFFR.
+
+| Source | DFFR | TDI on the fly, STFT | TDI on the fly, FD | FastGB | JaxGB | JaxGBaccurate | A, DFFR |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| gb0 | 0.003 | 0.001 | 0.004 | 0.88 | 1.05 | 0.96 | -0.177 |
+| gb1 | 0.003 | 0.003 | 0.004 | 0.25 | 0.25 | 0.26 | -0.066 |
+| gb2 | 0.002 | 0.001 | 0.010 | 1.32 | 1.33 | 1.27 | -0.059 |
+| gb3 | 0.001 | 0.001 | 0.001 | 0.44 | 0.45 | 0.43 | -0.007 |
+| gb4 | 0.002 | 0.001 | 0.002 | 1.05 | 1.09 | 0.90 | -0.056 |
+
+- DFFR and TDI on the fly in the STFT agree to 2 % in mismatch at every source and put every peak
+  in f0, ḟ, φ0, ψ, λ and β within 0.003σ of the truth, with widths of 0.997 to 1.000 σ. Their
+  mismatch is 3.1e-8 to 5.8e-8 where no louder binary is near. Beside a louder one it rises to
+  1.8e-7 (gb1) and 4.5e-7 (gb3): the neighbour leaves the data with DFFR's own error of 3e-8 to 5e-8
+  of its power, which counts (SNR of the neighbour / SNR)² times in the weaker source's (d|d),
+  5.5 and 8.3 times here.
+- Amplitude: a waveform without the preprocessing filters sees the data lower by the low-pass's
+  gain, 0.99932 at 20.4 mHz to 0.99977 at 15.6 mHz. DFFR's amplitude ratios, 1.00011 to 1.00079,
+  are that inverse gain plus 6e-5 to 1.1e-4, or -1.3e-4 for gb3, whose ḟ is negative: the amplitude
+  evolution A ∝ f^(2/3) of the model of LAT and GBGPU, which the Mojito binaries lack (review check
+  4). In the scans this moves A, and ι through its correlation with A, by up to 0.18σ at gb0 (SNR
+  223), the shift that the amplitude ratio predicts to three digits.
+- The FD heterodyne: 1.4e-5 to 1.1e-4 on 8192 points and 3.3e-6 to 5.5e-5 on 16 times as many;
+  most of the rest is the data window, which it does not model (with the window applied, review
+  check 4, 3e-10 to 2.4e-9). Peaks within 0.010σ; ln L at the truth -0.28 to -2.9 on 8192 points
+  and -0.12 to -0.60 on 16 times as many.
+- FastGB, JaxGB and JaxGBaccurate: mismatch 6.8e-4 to 2.5e-3, peaks up to 1.3σ off (λ of gb2,
+  β of gb4, f0 of gb0), ln L at the truth -3.1 to -109. JaxGBaccurate's time-varying arm lengths
+  gain only 2 % to 11 % over JaxGB. Review check 4 traces this to their TDI step.
+- The pair: with the neighbour left in the noiseless galaxy, the peaks of gb3 and gb4 move by at
+  most 0.031σ in the STFT and 0.033σ in the FD, and the A of gb3 by 0.115σ in the STFT. Their STFT
+  templates overlap by -5.6e-4 (normalised), a cross term of -7.3 in ln L; in the FD the cross
+  terms are +0.35 and +0.58. For gb0 and gb1, 61.6 bins apart, the neighbour changes no peak in the
+  third digit.
+- With the noise the peaks move by up to 2.5σ (ι of gb4), alike for all six waveforms; the STFT
+  and the FD weight the noise differently, so their offsets differ by up to 0.6σ. The
+  widths stay within 0.973 and 1.031 σ. The noise level is 0.9968 to 0.9998 in the STFT and 0.9946
+  to 1.0068 in the FD: the CSD at its default levels describes the Mojito noise to 0.7 % at these
+  frequencies. No peak needed a rescan.
+
+Review checks of the item, in `$OUT/validation/mojito/dev/`:
+
+1. Neighbour templates without the preprocessing gain (`check_without_gain/`): the filtered
+   remainder of the neighbours set the mismatch of gb1 to 1.9e-6 and of gb3 to 8.4e-7, against
+   1.8e-7 and 4.5e-7 with the gain (`check_with_gain/`).
+2. The preprocessing on a tone: the low-pass at 0.1 Hz, run forward and backward, scales the
+   amplitude by 0.99937 at 20 mHz and 0.99712 at 29 mHz; the high-pass at 1e-5 Hz leaves it at 1 to
+   six digits, and the downsampling filter changes it by at most 7.4e-6 up to 29 mHz. The
+   processed sum of galaxy and noise and the sum of the processed parts agree to 2.4e-9 of the peak.
+3. The taper of `gb_high_freq_global_fit_settings.py`: `window_taper_duration = 1/start_freq` is
+   71 s for its band from 14 mHz, a Tukey α of 8.3e-4 on a one-day segment. On a pure tone it
+   leaves up to 1.9e-2 of the power outside 10 side bins and 2.9e-3 outside 60 (a tone half a bin
+   off; 3.6e-4 and 3.4e-4 on a bin), against 1.4e-3 and 1.1e-7 with the taper of 1e4 s. The author
+   sets the file to 1e4 s (decision of 2026-10-21); this item ran with 1e4 s.
+4. The Mojito signal chain (`jaxgb_tests/`, a script that the author keeps out of the repository;
+   pytdi 2.2.1). On the raw 2.5 s data without filters, over the same span, in each source's FD
+   band with the 1e4 s window:
+
+   | Source | (a) JaxGBaccurate links vs the file's η_ij | (b) pytdi TDI 2.0 of those links vs the file's X2, Y2, Z2 | jaxgb's `get_tdi` | `GBFDComputations`, 16 times N, window applied |
+   | --- | --- | --- | --- | --- |
+   | gb0 | 7.8e-16 | 0 to rounding | 2.1e-3 | 1.6e-9 |
+   | gb1 | 2.3e-14 | 2.6e-14 | 2.4e-3 | 1.2e-9 |
+   | gb2 | 1.3e-12 | 8.5e-13 | 9.7e-4 | 3.0e-10 |
+   | gb3 | 3.9e-12 | 5.6e-12 | 9.4e-4 | 2.4e-9 |
+   | gb4 | 2.0e-12 | 3.0e-12 | 9.4e-4 | 2.4e-9 |
+
+   Before the sources, pytdi's TDI 2.0 (`X2_ETA`, `Y2_ETA` and `Z2_ETA`, with the Doppler factors)
+   of the file's own intermediary variables η_ij and light travel times gives the file's X2, Y2
+   and Z2 to 3.3e-15 of their peak, so the check rebuilds the pipeline's TDI step. The mismatches
+   are those of the table above; each source is modelled with its neighbours. The Mojito galaxy is
+   thus JaxGBaccurate's link responses (column a, phases within 3e-9 rad, which also confirms the
+   parameter mapping of the catalogue) combined by pytdi with the time-varying light travel times
+   (column b). jaxgb's `get_tdi`, like FastGB, combines the links with one arm length, the mean
+   light travel time (its `tdi.py`: "assuming equal armlengths"). Over the 701 days the six light
+   travel times move within -0.081 s and +0.080 s of their mean of 8.3172 s, up to 1.0e-2 rad of
+   delay phase at 20.4 mHz. `GBFDComputations`, which forms TDI 2.0 from the time-varying light
+   travel times, gives 3e-10 to 2.4e-9 once the window is applied, with an amplitude 2.6e-5 to
+   9.9e-5 high: the amplitude evolution of its model, which the Mojito binaries lack. pytdi ran in
+   chunks of 2^20 samples, each with 400 samples of its neighbours on both sides, on 20 processes;
+   the rebuild of the pipeline's TDI above shows that the chunks give the series of one evaluation.
+
 ## Step 7: review of documentation and scripts
 
 Not started.

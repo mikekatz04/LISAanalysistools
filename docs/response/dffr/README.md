@@ -228,6 +228,18 @@ the truth. TDI on the fly stays within 0.010σ in the STFT and 0.016σ in the fr
 (`GBFDComputations`). FastGB is off by up to 2.2σ at 20 mHz and 6.6σ at 0.5 mHz, where it lacks
 the combination X + Y + Z.
 
+On the Mojito-light data (`tests.md`, step 6, item 4): the five galactic binaries of highest
+frequency (15.6 to 20.4 mHz) at the catalogue's amplitudes (SNR 67 to 223), the galaxy and the
+instrument noise preprocessed as the global fit does over 1.92 years, each of six waveforms in its
+own domain. Against the noiseless galaxy with each source's neighbours removed, DFFR reaches a
+mismatch of 3.1e-8 to 5.8e-8 (up to 4.5e-7 beside a louder binary), like TDI on the fly in the
+STFT, and puts every peak in f0, ḟ, φ0, ψ, λ and β within 0.003σ of the truth. A and ι move by
+up to 0.18σ: the preprocessing's low-pass filter lowers the data by 0.07 % at 20 mHz, and the
+Mojito binaries have no amplitude evolution. FastGB and jaxgb's JaxGB and JaxGBaccurate miss by
+6.8e-4 to 2.5e-3 and lie up to 1.3σ off, because they form TDI with one arm length; jaxgb's link
+responses, combined by pytdi with the time-varying light travel times as the Mojito pipeline
+does, reproduce the data to rounding.
+
 ## The Fisher matrix
 
 `information_matrix` of `STFTGBComputations(response="dffr")` returns the Fisher matrices of the
