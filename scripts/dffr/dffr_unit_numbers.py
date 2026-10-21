@@ -62,15 +62,7 @@ def main(argv=None):
 
     if args.device == "gpu":
         rows = [
-            (
-                name,
-                difference,
-                (
-                    unit.LINK_COEFFICIENT_BOUND
-                    if name.startswith("link")
-                    else unit.GPU_TRANSFORM_BOUND
-                ),
-            )
+            (name, difference, unit.GPU_AGAINST_CPU_BOUND)
             for name, difference in unit.gpu_against_cpu_differences(backend).items()
         ]
         print_rows("CUDA against CPU", rows)

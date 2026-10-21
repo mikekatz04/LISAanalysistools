@@ -71,9 +71,9 @@ WINDOWED_MOMENT_BOUND = 2.0 * MOMENT_BOUND
 # ? 3e-14 together, for coefficients of order one to four.
 LINK_COEFFICIENT_BOUND = 1.0e-13
 
-# ? CUDA against CPU, provisional until a first GPU run measures the differences: 1e-13 of the
-# ? normalisations above for the transforms, and the coefficient bound for the coefficients.
-GPU_TRANSFORM_BOUND = 1.0e-13
+# * CUDA against CPU, for the transforms (of the normalisations above) and the coefficients: ten
+# * times the 1.0e-15 that an A100 gave (2026-10-19; the transforms at most 3.8e-16).
+GPU_AGAINST_CPU_BOUND = 1.0e-14
 
 
 def _cuda_backend_name():
@@ -464,11 +464,10 @@ class DFFRStagesGPUTest(DFFRStagesTest):
     backend_name = _cuda_backend_name() or "cpu"
 
     def test_gpu_matches_cpu(self):
-        """The transforms and the coefficients agree within the provisional bounds."""
+        """The transforms and the coefficients agree within GPU_AGAINST_CPU_BOUND."""
         for name, difference in gpu_against_cpu_differences(self.backend).items():
-            bound = LINK_COEFFICIENT_BOUND if name.startswith("link") else GPU_TRANSFORM_BOUND
             with self.subTest(quantity=name):
-                self.assertLessEqual(difference, bound, msg=f"{difference:.3e}")
+                self.assertLessEqual(difference, GPU_AGAINST_CPU_BOUND, msg=f"{difference:.3e}")
 
 
 if __name__ == "__main__":

@@ -78,9 +78,9 @@ PHASE_KERNEL_CASES = tuple(
 KERNEL_BOUND = 2.0e-10
 MOMENT_BOUND = 5.0e-8
 
-# ? CUDA against CPU, provisional until a first GPU run measures the differences: eight roundings,
-# ? absolute for C, S and g' (values below one) and relative for f, g and f'; 1e-13 of the DFFR
-# ? normalisations for the phase kernel and its moment.
+# * CUDA against CPU: eight roundings, absolute for C, S and g' (values below one) and relative for
+# * f, g and f'. The phase kernel and its moment get 1e-14 of the DFFR normalisations, ten times
+# * the 3.0e-16 that an A100 gave (2026-10-19); the functions measured at most 2.2e-16 there.
 GPU_FUNCTION_BOUNDS = {
     "cosine": (8 * EPS, "absolute"),
     "sine": (8 * EPS, "absolute"),
@@ -89,7 +89,7 @@ GPU_FUNCTION_BOUNDS = {
     "slope_f": (8 * EPS, "relative"),
     "slope_g": (8 * EPS, "absolute"),
 }
-GPU_PHASE_KERNEL_BOUND = 1e-13
+GPU_PHASE_KERNEL_BOUND = 1e-14
 
 
 def _cuda_backend_name():
@@ -404,7 +404,7 @@ class FresnelFunctionsGPUTest(FresnelFunctionsTest):
     backend_name = _cuda_backend_name() or "cpu"
 
     def test_gpu_matches_cpu(self):
-        """Every function and the phase kernel agree within the provisional rounding bounds."""
+        """Every function and the phase kernel agree within their rounding bounds."""
         differences = gpu_against_cpu_differences(self.backend)
         for name, (bound, kind) in GPU_FUNCTION_BOUNDS.items():
             with self.subTest(function=name):
