@@ -2955,6 +2955,19 @@ def main() -> int:
     from mpi4py import MPI
     from lisatools.globalfit.monitor import rank as _monitor_rank
 
+    # HOST-MEMORY FLIGHT RECORDER on EVERY process of the run (head, compute
+    # ranks, saver, monitor rank), started before the monitor split so the
+    # monitor rank has it too: "[GF_MEM] w<rank> pid ... rss / children / node
+    # avail" lines on change, the node's largest processes (+ shmem / slab
+    # totals) every 10 min, and below 15 % available a table every 15 s plus a
+    # faulthandler Python-stack dump (SIGWINCH) of the largest run process.
+    # Why: the 9mo jobs 795 and 798 were both OOM-killed on node B after ~8 h
+    # with nothing in the log naming the process that grew
+    # (lisatools/globalfit/memwatch.py). GF_MEMWATCH=0 off.
+    from lisatools.globalfit import memwatch as _memwatch
+
+    _memwatch.start(f"w{MPI.COMM_WORLD.Get_rank()}")
+
     _run_comm, _mon = _monitor_rank.split_monitor_rank(MPI.COMM_WORLD)
     if _run_comm is None:
         print(f"[combined] rank {MPI.COMM_WORLD.Get_rank()} is the dedicated "
