@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # * Step 6 of the DFFR integration (validation), the parts run so far: both responses against
 # * the STFT of a time-domain truth with both data windows (items 1 and 2, the second on the cases
-# * and grid of the step 0 truth), and the checks behind that truth.
+# * and grid of the step 0 truth), the checks behind that truth, and the likelihood surfaces of
+# * four waveforms against it (item 3).
 # What each part records, and the results, are in docs/response/dffr/tests.md.
 #
 # Usage: run_step6.sh --device cpu|gpu OUTPUT_ROOT [PART ...]
@@ -15,9 +16,12 @@
 #                            truth without lisainstrument over DAYS days and with it over 30
 #                            days (one process per case and chain, side by side), then a run over
 #                            DAYS days and two over 30 days, one per chain
+#         surfaces           the likelihood surfaces of the 8 validation sources against the
+#                            truth of part accuracy (one process per source, SURFACE_PROCESSES
+#                            side by side), then the combined report and figures
 # Environment: PYTHON (default python), DFFR_PYTHON (the Python of the standalone dffr
 #   environment, for the truth), DAYS (default 365), N_SIDE_BINS (default 60, side bins of the
-#   templates; production takes 10).
+#   templates; production takes 10), SURFACE_PROCESSES (default 4, part surfaces).
 set -euo pipefail
 
 usage="usage: run_step6.sh --device cpu|gpu OUTPUT_ROOT [PART ...]"
@@ -33,6 +37,7 @@ python_bin=${PYTHON:-python}
 dffr_python=${DFFR_PYTHON:-}
 days=${DAYS:-365}
 n_side_bins=${N_SIDE_BINS:-60}
+surface_processes=${SURFACE_PROCESSES:-4}
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 accuracy_dir="$output_root/validation/accuracy"
 truth_dir="$accuracy_dir/truth"
@@ -124,10 +129,30 @@ step0() {
         --days 30
 }
 
+surfaces() {
+    local surfaces_dir="$output_root/validation/surfaces" running=() name status=0
+    [ -f "$truth_dir/sources.json" ] || { echo "run part accuracy first" >&2; return 2; }
+    mkdir -p "$surfaces_dir"
+    for name in $(source_names "$truth_dir/sources.json"); do
+        # ! At most SURFACE_PROCESSES at a time: eight side by side ran out of the A100's 40 GB.
+        if [ ${#running[@]} -ge "$surface_processes" ]; then
+            wait "${running[0]}" || status=1
+            running=("${running[@]:1}")
+        fi
+        "$python_bin" "$script_dir/likelihood_surfaces.py" --device "$device" --truth "$truth_dir" \
+            --output "$surfaces_dir" --days "$days" --sources "$name" --no-summary \
+            > "$surfaces_dir/$name.log" 2>&1 &
+        running+=($!)
+    done
+    wait_all "${running[@]}" || status=1
+    [ "$status" = 0 ] || { echo "a surface run failed; see $surfaces_dir" >&2; return 1; }
+    "$python_bin" "$script_dir/likelihood_surfaces.py" --output "$surfaces_dir" --summarize-only
+}
+
 for part in "${parts[@]}"; do
     echo "[step6] $(date +%T) part $part"
     case "$part" in
-    accuracy | truth_chains | accuracy_response | step0) "$part" ;;
+    accuracy | truth_chains | accuracy_response | step0 | surfaces) "$part" ;;
     *) echo "unknown part $part" >&2 && exit 2 ;;
     esac
 done
