@@ -447,7 +447,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         diff = cold[both] - ref[both]
         spread = float(diff.max() - diff.min())
         med = float(np.median(diff))
-        if spread <= 1e-1 and abs(med) <= 5.0:
+        if spread <= 1 and abs(med) <= 5.0:
             return
 
         msg = (
@@ -588,7 +588,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 self.check_ll_mode != "0"
                 and self._dbg_step % self.check_ll_every == 0
             ):
-                _cold_ref = asnumpy(self.acs.likelihood())
+                _cold_ref = asnumpy(self.acs.likelihood(source_only=True))
 
             # remove the cold chain sources FROM THE FIT: add their templates
             # back into the residual (r = d - h  ->  r = d), exposing this leaf.
