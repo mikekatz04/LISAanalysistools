@@ -220,6 +220,14 @@ data windowed with the periodic Tukey window. Ranges over the four sources of ea
   keeps it, because its 10 side bins leave 1.3e-3 to 1.7e-3 of the power outside the template, a
   mismatch of 6.4e-4 to 8.8e-4 (`plan.md`, Risks and observations).
 
+Likelihood surfaces against the same truth (`tests.md`, step 6, item 3): the eight sources at an
+SNR of 100, each of four waveforms in its own domain with X, Y, Z and the full CSD, one parameter
+scanned at a time over ±4σ of DFFR's Fisher matrix. DFFR puts every peak within 0.002σ of the
+truth, with widths equal to its Fisher matrix to three digits, and loses at most 1.3e-3 in ln L at
+the truth. TDI on the fly stays within 0.010σ in the STFT and 0.016σ in the frequency domain
+(`GBFDComputations`). FastGB is off by up to 2.2σ at 20 mHz and 6.6σ at 0.5 mHz, where it lacks
+the combination X + Y + Z.
+
 ## The Fisher matrix
 
 `information_matrix` of `STFTGBComputations(response="dffr")` returns the Fisher matrices of the

@@ -2596,6 +2596,135 @@ combination X + Y + Z that item 1 found at 0.5 mHz, smaller at the higher freque
 The window convention on these cases (LAT's window against the periodic one, taper 0.116): flat
 mismatch 3.5e-8 to 3.6e-8 and median segment errors 5.8e-5 to 6.6e-5, as in item 1.
 
+**Item 3 of the validation: likelihood surfaces of four waveforms against a time-domain truth**
+(2026-10-21). The third item of the author's scope. Each of four waveforms is evaluated in its
+own domain against the transform of the same noiseless time-domain data, one parameter at a time.
+The scans show where each waveform puts the peak of its likelihood, and how wide the peak is, in
+units of the widths of DFFR's Fisher matrix. The numbers are recorded; there is no gate.
+
+- Code: LAT 0195b391 with the scripts of items 1 and 2 and the new `likelihood_surfaces.py`;
+  GBGPU 11d5159. The comps and FastGB ran on the A100 of the conventions above, the FD
+  heterodyne on the CPUs of the same node.
+- Waveforms: DFFR and TDI on the fly in `STFTGBComputations` (STFT); TDI on the fly in the
+  frequency domain, `GBFDComputations` (`GBTDIonTheFly` sampled on N points over the year,
+  shifted by the carrier and Fourier transformed); and FastGB, `gbgpu.gbgpu.GBGPU`.
+- Data: the truth of item 1 for its eight sources (lisagwresponse and pytdi, X2, Y2 and Z2 every
+  5 s over a year from 10 days after the start of the ESA orbit file), scaled to an optimal SNR of
+  100, where SNR² is the STFT (d|d) with the periodic window and 60 side bins. The truth is linear
+  in the amplitude, so the scaling needs no new run: A = 5.7e-21 to 6.2e-21 at 0.5 mHz and 1.2e-22
+  to 1.3e-22 at 20 mHz.
+- STFT: the data and settings of item 1 (periodic Tukey window of taper 0.1157 on the data, 60
+  side bins, production settings otherwise), with one CSD per segment.
+- FD: dt rfft of the same 365 days with the window of the global fit's FD path, LAT's symmetric
+  Tukey with a taper of 1e4 s (α = 3.17e-4). Both FD codes run without a window: their windows act
+  on whole samples of T/N, 3850 s at N = 8192, so they cannot represent a taper of 5000 s at each
+  end. The products cover a band of N bins about the carrier at the data start, with N = 8192 at
+  0.5 mHz and at 20 mHz with the largest ḟ and N = 262 144 at 20 mHz with the smallest ḟ: four
+  times the smallest power of two, at least 2048, that holds the Doppler-shifted frequency track
+  with a margin of 64 bins. One CSD for the year, from `XYZSensitivityBackend` with its transfer
+  functions averaged over the orbit.
+- Likelihoods: on X, Y and Z with the full complex 3 × 3 CSD in every domain (author's rule), as
+  ln L(θ) = -(d - h(θ)|d - h(θ))/2, so that an exact waveform gives 0 at the true parameters. STFT:
+  `get_ll_stft`. FD: one product in the script for both FD codes, since the own kernel of
+  `GBFDComputations` (`get_ll_fd`) contracts with the real part of C⁻¹ only (checks below).
+- Parameters: those of the truth, at t_ref = 0. FastGB returns the transform of [t0, t0 + T) with
+  its time origin at t0, so its parameters must be those at its t0, which must be the data start
+  to match the FD data. It runs with t0 at the data start, f0, φ0 and A carried there (exact in
+  phase; the amplitude evolution, which FastGB lacks, to first order), and `flip_ref_phase=True`,
+  since its phase is +φ0 + 2πf0ξ + … where LAT's is -φ0 + 2πf0τ + …; with TDI 2.0, XYZ, its
+  compiled kernel up to N = 2048 and its Python path beyond. `GBFDComputations` requires
+  t_start = t_ref, so it gets the same carried parameters with both at the data start.
+- Scans: each of the eight parameters of the global fit (the nine of `GBTDIonTheFly` without f̈),
+  the others at the truth, over ±4σ in 81 points, where σ = 1/√F_ii of DFFR's information matrix at
+  the truth: the width of the likelihood along the scan with the other parameters fixed. A peak
+  farther than 3σ from the centre of its scan gets up to three more scans centred on it.
+- Metrics, per source, waveform and parameter: the peak offset (θ_peak - θ_true)/σ and the width
+  relative to σ, from a parabola fitted within ±1σ of the largest grid value; ln L at the truth.
+- Checks at the truth, before the scans: overlap, amplitude ratio and phase of (d|h) of every
+  waveform; FastGB's Python path against its compiled kernel; `get_ll_fd` against the script's
+  products; both FD codes at 4 and 16 times their N, cut to the same band, and against the data
+  without a window; the FD window against no window; the weight of T = (X + Y + Z)/√3 in both
+  domains, with the backend's other FD CSD for comparison.
+- The author's decisions of 2026-10-21, in the sub-plan and at the review of the first source:
+  FastGB and `GBFDComputations` as the FD waveforms; the global fit's FD window on the FD data;
+  N four times the base length, after N = 2048 left the FD heterodyne at up to 2.2 in ln L at the
+  truth from its own sampling; the CSD with averaged transfer functions (below); σ conditional;
+  the physical parameters; X, Y, Z and the full CSD for data and likelihoods everywhere.
+- Command, from the LAT root inside the job, after part `accuracy`:
+  `PYTHON=$PYTHON scripts/dffr/run_step6.sh --device gpu $OUT surfaces`. At most four processes
+  run side by side (`SURFACE_PROCESSES`): the first run, with all eight, ran out of the A100's
+  40 GB for three sources, which were rerun; the script now returns CuPy's memory pool between its
+  phases. A source takes 2 minutes, a 20 mHz source with the smallest ḟ 50 minutes, 46 of them for
+  the FD heterodyne's 648 templates of 262 144 samples on the CPU. Files:
+  `$OUT/validation/surfaces/` (`report.txt`, `summary.json`, per source `NAME.json`, `NAME.npz`
+  and `NAME.png`, `summary_offsets.png`, `summary_widths.png`, `summary_levels.png`); the checks of
+  the review in `dev/`.
+
+Results. The largest peak offset is over the 8 parameters; widths are in units of DFFR's σ; the
+mismatch is 1 - Re(d|h)/√((d|d)(h|h)) at the truth.
+
+| Sources | Waveform | Largest peak offset [σ] | Width / σ | ln L at the truth | Mismatch at the truth |
+| --- | --- | --- | --- | --- | --- |
+| 0.5 mHz (4) | DFFR | 0.002 | 1.000 | -1.3e-3 | 1.3e-7 |
+| | TDI on the fly, STFT | 0.010 | 0.998 to 1.000 | -0.07 to -0.14 | 7.2e-6 to 1.4e-5 |
+| | TDI on the fly, FD | 0.016 | 0.70 to 0.86 | -0.49 to -0.77 | 2.8e-5 to 4.4e-5 |
+| | FastGB | 6.6 | 0.89 to 0.99 | -3.1e3 to -3.2e3 | 0.20 to 0.21 |
+| 20 mHz, largest ḟ (2) | DFFR | 0.002 | 1.000 | -2.4e-4 to -2.7e-4 | 2.4e-8 to 2.7e-8 |
+| | TDI on the fly, STFT | 0.001 | 1.000 | -2.5e-4 to -2.8e-4 | 2.5e-8 to 2.8e-8 |
+| | TDI on the fly, FD | 0.010 | 0.962 to 0.965 | -0.34 to -0.44 | 3.2e-5 to 4.1e-5 |
+| | FastGB | 2.2 | 0.965 to 0.978 | -36 | 3.3e-3 to 3.4e-3 |
+| 20 mHz, smallest ḟ (2) | DFFR | 0.002 | 1.000 | -3.6e-4 | 3.6e-8 |
+| | TDI on the fly, STFT | 0.001 | 1.000 | -3.6e-4 to -3.7e-4 | 3.6e-8 to 3.7e-8 |
+| | TDI on the fly, FD | 0.009 | 0.961 to 0.965 | -0.30 to -0.39 | 2.8e-5 to 3.6e-5 |
+| | FastGB | 5.7 | 0.971 to 0.988 | -45 to -49 | 4.1e-3 to 4.5e-3 |
+
+- DFFR puts every peak within 0.002σ of the truth, with widths equal to its Fisher matrix to three
+  digits, at all eight sources; its error at the truth costs at most 1.3e-3 in ln L. At SNR 100
+  its model error does not show in the surfaces, and its Fisher matrix gives the curvature of its
+  likelihood against a time-domain truth.
+- TDI on the fly in the STFT stays within 0.010σ. At 0.5 mHz it loses 0.07 to 0.14 in ln L at the
+  truth, the error in X + Y + Z that item 1 found.
+- The FD widths differ from the STFT ones because the domains hold different information, not
+  because of the waveforms. At 20 mHz they are 0.962 to 0.965, √(1 - 5α/8) = 0.963: the year
+  without a window keeps the 7 % of the power that the STFT's Tukey removes. At 0.5 mHz they are
+  0.70 to 0.86: the FD CSD weights T more than the CSD per segment (FD SNR 132, below), and the
+  widths in A and φ0, 0.756 to 0.759, equal the ratio of the SNRs, 100/132.
+- TDI on the fly in the FD stays within 0.016σ. Its loss at the truth, 0.30 to 0.77 in ln L, has
+  two causes. The data window, which no FD template models: the tapered year differs from the
+  untapered one by a residual of 2.3e-5 to 7.1e-5 of (d|d) in the band. And at 20 mHz with the
+  largest ḟ its own sampling on N = 8192 points: against untapered data it loses 0.34 to 0.44,
+  0.019 to 0.025 at 4N and 0.0011 to 0.0015 at 16N, cut to the same band. That error sits mostly
+  at the band's edges; the check at the review, on the middle 2048 bins only, had given at most
+  0.1. Its own kernel (`get_ll_fd`) moves ln L at the truth by at most 2.1e-3: its (h|h) differs
+  from the product with the full CSD by up to 2.9e-3 at 0.5 mHz and equals the script's product
+  with Re(C⁻¹) to 1e-11.
+- FastGB is off by up to 2.2σ at 20 mHz with the largest ḟ, 5.7σ with the smallest and 6.6σ at
+  0.5 mHz, mostly in φ0 and ψ (its phase error) and in f0, ḟ and the sky; every final peak lies
+  inside its scan, after 18 rescans at 0.5 mHz and 9 at 20 mHz. At 0.5 mHz it produces no T: its A
+  and E match the truth to an unweighted mismatch of 3e-5 to 5e-5, but its T is zero where the
+  truth's is 0.9 % of A, and the FD CSD gives T much weight (the data without T keep 0.64 of
+  (d|d)). That costs 3.1e3 to 3.2e3 in ln L at the truth. At 20 mHz its A and E differ from the
+  truth by an unweighted mismatch of 3e-4 to 1e-3, its T is 11 % low with the opposite sign (sky
+  0), its amplitude 0.6 % to 1.8 % low and its phase 0.02 to 0.06 rad off; the largest errors are
+  those of the strongly chirping sources. Its Python path equals its compiled kernel to 2.8e-10 of
+  the peak, and its error hardly depends on N (ln L at the truth -36.0 to -36.2 at N = 8192,
+  -35.8 to -36.0 at 131 072). The nominal arm length in its transfer function, its TDI 2 factor taken at f0, and its
+  missing amplitude evolution are likely causes, not tested.
+- FastGB's reference time, checked at the review: with t0 at the start of the orbit file and the
+  parameters there, or with t0 at the data start and the parameters not carried, ln L at the truth
+  falls to -1.1e4 at 20 mHz with the largest ḟ (template 22 bins off, ḟΔ/df). At 0.5 mHz, t0 at
+  the start of the file takes it from -3.1e3 and -3.2e3 to -3.4e3 and -3.8e3, while not carrying
+  the parameters changes nothing, since f0Δ is a whole number of cycles and ḟΔ is 3e-5 bins.
+  Notebook: `$OUT/notebooks/fastgb_reference_time.ipynb`. `GBFDComputations` built with t_ref = 0 and its
+  t_start set to the data start afterwards gives ln L at the truth within 0.001 of the carried
+  version: its kernel takes the GB phase from t_ref.
+- The FD CSD decides how much T counts at low frequency. At 0.5 mHz the FD data have an SNR of
+  132 with the transfer functions averaged over the orbit, 182 with the CSD at the orbit-averaged
+  arm lengths (the backend's default, which the global fit's FD path builds), against 100 in the
+  STFT, about 104 without its window. Removing T from the data changes (d|d) by a factor of 0.64
+  in the FD and 3.0 in the STFT, where the CSD per segment ties T to A and E. At 20 mHz T carries
+  0.1 % of (d|d) in both domains, and the two FD CSDs agree to 0.01 %.
+
 ## Step 7: review of documentation and scripts
 
 Not started.
