@@ -9,13 +9,13 @@ branch `feat-dffr` in both repositories.
 
 | Step | Scope | Status | Date | Notes |
 | --- | --- | --- | --- | --- |
-| 0 | Branches, documents, baseline of the existing response | CPU part done, `L1Orbits` included; GPU part pending | 2026-10-17 | The GPU part runs from a frozen environment of the step 0 code, which reproduces every CPU golden output bit for bit; every GPU node of SURF Spider has been down since 2026-10-16. Results in `tests.md`. |
-| 1 | Orbits cache | CPU part done; GPU part pending | 2026-10-17 | Existing outputs change by at most 6e-11 (templates, inner products), 2e-9 (gradients) and 2e-8 (Fisher on the TDI track, whose f̈ entries change by up to 8e-6); the step 1 captures are the new baseline. Results in `tests.md`. |
-| 2 | Fresnel split | CPU part done; GPU part pending | 2026-10-18 | Templates, inner products and the F-statistic change by at most 1.1e-14 of their peaks (gate 1e-12). Gradients and Fisher matrices change within the finite-difference noise that both codes carry, the criterion the author set for them in place of the gate. The step 2 captures are the new baseline; the pending step 1 GPU runs come from a frozen environment of the step 1 code. Results in `tests.md`. |
-| 3 | Tile seam | CPU part done; GPU part pending | 2026-10-18 | Every output of the seven kernels, swap included, is bit-identical to the step 2 code on the CPU (144 and 26 arrays, against a frozen environment of the step 2 code), with the same test outcomes. CPU timings lie within run-to-run noise at 27 of 30 points; the other three differ by at most 0.7 %, within the drift between runs of identical code. ptxas gives every kernel at least the blocks per SM of step 2 on the A100 (sm_80) and the H100 (sm_90). The pending step 2 GPU runs come from the frozen step 2 environment. Results in `tests.md`. Corrected on 2026-10-18 in step 4: the register counts of step 3 were those of each kernel's own file; in the linked module every kernel has 244 registers on the A100 and 222 on the H100, in step 2 and step 3 alike, so 2 blocks per SM, and the conclusion holds. |
-| 4 | DFFR kernels | 4a, 4b and 4c: CPU part done; GPU part pending | 2026-10-18, 4c on 2026-10-19 | The DFFR numerics, tile and galactic-binary model are built. The existing response stays bit-identical to step 3 on the CPU (144 and 26 arrays), with the same test outcomes and CPU timings within run-to-run noise or faster. Against standalone dffr on the same kinematics table, templates, global fill and segment table are bit-identical and the inner products agree to 6.3e-15. With the linear envelope of production, DFFR and the existing response differ by a median mismatch of 5.6e-10. Linked registers give the DFFR kernels 2 to 3 blocks of 128 threads per SM and the existing kernels 2; register caps and device link-time optimisation are timed in step 6. Part 4c, after step 5, adds the DFFR Fisher matrix as a kernel of its own: it matches a reference built from `fill_global` templates to 3.3e-15 of sqrt(F_ii F_jj), lies on the plateau of its steps (1.1e-5 against the criterion of 1e-3), and leaves every output of step 5 bit-identical. On the CPU it misses its timing gate at batch 64 by 13 % with the installed `-Os` build of GBGPU's CPU module, and takes 0.30 to 0.42 of the time of the existing Fisher with the module at `-O3`; the A100 gate of step 6 decides. Results in `tests.md`. |
-| 5 | Wiring into `STFTGBComputations` | CPU part done, without the Fisher matrix of DFFR (4c); GPU part pending | 2026-10-19 | `STFTGBComputations(response="dffr")` runs DFFR in its six likelihood methods and gives the outputs of the DFFR entry points bit for bit; through it, the exchange with standalone dffr is bit-identical to step 4. The existing response stays bit-identical to step 4 (144 and 26 arrays), with the same test outcomes, and keeps its CPU timings: on the same binaries, the step 5 Python changes none of them measurably. With the envelope on, DFFR's gradient noise is unchanged in f0, ḟ, f̈, φ0, λ and β, so its gradients follow the group's envelope. On the CPU, DFFR takes 0.28 to 0.40 of the time of the existing response. The pending step 4 GPU runs come from a frozen environment of the step 4 code. Results in `tests.md`. |
-| 6 | Validation | Not started | | |
+| 0 | Branches, documents, baseline of the existing response | Done, CPU and GPU, `L1Orbits` included | 2026-10-17, GPU on 2026-10-19 | The GPU part ran on a full A100 from a frozen environment of the step 0 code, which reproduces every CPU golden output bit for bit. On the GPU every output is reproducible bit for bit except `fill_global_stft`, whose atomic additions change their order from run to run (at most 1.1e-16 of the peak). At a year of one-day segments and 10 000 sources the existing response takes 66 µs per source in `get_ll_stft` and 61 µs in `fill_global_stft`. Results in `tests.md`. |
+| 1 | Orbits cache | Done, CPU and GPU | 2026-10-17, GPU on 2026-10-19 | Existing outputs change by at most 6e-11 (templates, inner products), 2e-9 (gradients) and 2e-8 (Fisher on the TDI track, whose f̈ entries change by up to 8e-6); the step 1 captures are the new baseline. On the A100 the outputs change in the same arrays by the same amounts, and the CUDA kinematics table equals the CPU table bit for bit. Results in `tests.md`. |
+| 2 | Fresnel split | Done, CPU and GPU | 2026-10-18, GPU on 2026-10-19 | Templates, inner products and the F-statistic change by at most 1.1e-14 of their peaks (gate 1e-12). Gradients and Fisher matrices change within the finite-difference noise that both codes carry, the criterion the author set for them in place of the gate. The step 2 captures are the new baseline. On the A100 the direct outputs, swap included, change by at most 7.2e-14, and gradients and Fisher matrices meet the same noise criterion; CUDA and CPU special functions agree to 3e-16. Results in `tests.md`. |
+| 3 | Tile seam | Done, CPU and GPU | 2026-10-18, GPU on 2026-10-19 | Every output of the seven kernels, swap included, is bit-identical to the step 2 code on the CPU (144 and 26 arrays, against a frozen environment of the step 2 code), with the same test outcomes. CPU timings lie within run-to-run noise at 27 of 30 points; the other three differ by at most 0.7 %, within the drift between runs of identical code. ptxas gives every kernel at least the blocks per SM of step 2 on the A100 (sm_80) and the H100 (sm_90). On the A100 every output is bit-identical to step 2 except `fill_global_stft`, whose atomic additions round differently from run to run (at most 8.6e-17 of its peak, within the GPU criterion of 1e-15), with the same test outcomes. In the interleaved GPU timings of step 6, 27 of 35 points lie within the run-to-run noise and the other 8 within 0.7 %, accepted by the author as drift, as on the CPU. Results in `tests.md`. Corrected on 2026-10-18 in step 4: the register counts of step 3 were those of each kernel's own file; in the linked module every kernel has 244 registers on the A100 and 222 on the H100, in step 2 and step 3 alike, so 2 blocks per SM, and the conclusion holds. |
+| 4 | DFFR kernels | 4a, 4b and 4c: done, CPU and GPU; the DFFR Fisher misses its A100 timing gate (step 6) | 2026-10-18, 4c on 2026-10-19, GPU on 2026-10-20 | The DFFR numerics, tile and galactic-binary model are built. The existing response stays bit-identical to step 3 on the CPU (144 and 26 arrays), with the same test outcomes and CPU timings within run-to-run noise or faster. Against standalone dffr on the same kinematics table, templates, global fill and segment table are bit-identical and the inner products agree to 6.3e-15. With the linear envelope of production, DFFR and the existing response differ by a median mismatch of 5.6e-10. Linked registers give the DFFR kernels 2 to 3 blocks of 128 threads per SM and the existing kernels 2; register caps and device link-time optimisation are timed in step 6. Part 4c, after step 5, adds the DFFR Fisher matrix as a kernel of its own: it matches a reference built from `fill_global` templates to 3.3e-15 of sqrt(F_ii F_jj), lies on the plateau of its steps (1.1e-5 against the criterion of 1e-3), and leaves every output of step 5 bit-identical. On the CPU it misses its timing gate at batch 64 by 13 % with the installed `-Os` build of GBGPU's CPU module, and takes 0.30 to 0.42 of the time of the existing Fisher with the module at `-O3`. On the A100 the existing response stays bit-identical to step 3 except `fill_global_stft` (rounding of its atomic additions); the exchange with standalone dffr on its GPU backend agrees within 1.7e-14; two DFFR CUDA tests that ask for CPU-level agreement fail and are recorded (author's decision). Part 4c on the A100 changes DFFR's swap, F-statistic and swap gradient at rounding level against step 5 (nvcc compiles an out-of-line function differently), which the author accepted. The DFFR Fisher misses its A100 gate from 1000 sources (1.34 to 1.47 times the existing Fisher on nine parameters, 1.06 to 1.09 at 1000 sources on eight); it is optimised in step 6. Results in `tests.md`. |
+| 5 | Wiring into `STFTGBComputations` | Done, CPU and GPU; GPU timings in step 6 | 2026-10-19, GPU on 2026-10-20 | `STFTGBComputations(response="dffr")` runs DFFR in its six likelihood methods and gives the outputs of the DFFR entry points bit for bit; through it, the exchange with standalone dffr is bit-identical to step 4. The existing response stays bit-identical to step 4 (144 and 26 arrays), with the same test outcomes, and keeps its CPU timings: on the same binaries, the step 5 Python changes none of them measurably. With the envelope on, DFFR's gradient noise is unchanged in f0, ḟ, f̈, φ0, λ and β, so its gradients follow the group's envelope. On the CPU, DFFR takes 0.28 to 0.40 of the time of the existing response. On the A100 the existing response stays bit-identical to step 4 except `fill_global_stft`, DFFR through the comp is reproducible like the existing response and agrees with its CPU outputs to 8.0e-15 (templates and inner products), and the comparisons with standalone dffr and with the existing response give the CPU numbers. Results in `tests.md`. |
+| 6 | Validation | Started: standalone dffr against the integration, GPU timings of the steps, the DFFR Fisher optimised, the occupancy A/B closed, all on the A100 | 2026-10-19 to 2026-10-21 | The standalone package passes its own suite on the A100 (51 of 51) with a CUDA 13 backend added for this comparison. On the same inputs, a year of one-day segments and 10 000 sources on the ESA orbits, DFFR in `STFTGBComputations` takes 4 to 7 % more time per source than standalone dffr in `fill_global` and 6 to 13 % more in `get_ll`; (d\|h) and (h\|h) agree to 1.4e-15 of their peaks. In the interleaved GPU timings of the steps, DFFR is 2.1 to 8.8 times faster than the existing response in every likelihood method from 1000 sources. The DFFR Fisher, with its final reduction staged in dynamic shared memory and its tables built in waves straight into the Fisher tables, takes 0.51 to 0.63 of the time of the existing Fisher and meets its A100 gate at every batch size; its outputs are unchanged bit for bit on the CPU and the GPU, `fill_global` aside. The occupancy A/B changed nothing in the build: a register cap of 168 on `domains.cu` makes the existing response 4 to 15 % faster but two DFFR methods up to 1 % slower and moves inner products at rounding level, so the author left it out. Results in `tests.md`. |
 | 7 | Review of documentation and scripts | Not started | | |
 
 ## Context
@@ -204,7 +204,7 @@ comp was built in step 5.
 
 ### Step 1: orbits cache
 
-Done on the CPU on 2026-10-17; the GPU runs are pending.
+Done on the CPU on 2026-10-17 and on the GPU on 2026-10-19.
 
 - `Orbits::get_velocity`, `get_acceleration`, `get_ltt_rate` and `get_ltt_acceleration`
   (`Detector.cu`): five-point central differences of the linearly interpolated tables. Each grid
@@ -246,7 +246,7 @@ Done on the CPU on 2026-10-17; the GPU runs are pending.
 
 ### Step 2: Fresnel split
 
-Done on the CPU on 2026-10-18; the GPU runs are pending.
+Done on the CPU on 2026-10-18 and on the GPU on 2026-10-19.
 
 - `cutils/lat_fresnel.hh` (new), with the numerics of dffr's `fresnel.hh` at 01530a5:
   `lat_fresnel_series` (the Maclaurin series of C and S for |x| <= 1.6, 17 terms in x^4 summed by
@@ -285,7 +285,7 @@ Done on the CPU on 2026-10-18; the GPU runs are pending.
 
 ### Step 3: tile seam
 
-Done on the CPU on 2026-10-18; the GPU runs are pending.
+Done on the CPU on 2026-10-18 and on the GPU on 2026-10-19; its GPU timings are compared in step 6.
 
 - Only `cutils/lat_stft_kernels.hh` changes; GBGPU is rebuilt, not changed. The consumers
   `get_ll`, `fill_global`, `swap_ll`, the F-statistic and both gradients are templates on one tile
@@ -353,7 +353,7 @@ Done on the CPU on 2026-10-18; the GPU runs are pending.
 ### Step 4: DFFR kernels
 
 Parts 4a and 4b done on the CPU on 2026-10-18, and part 4c, the DFFR Fisher, on 2026-10-19 after
-step 5; the GPU runs are pending. The author split the step into 4a (LAT core), 4b (pixel map,
+step 5; the GPU runs followed on 2026-10-20. The author split the step into 4a (LAT core), 4b (pixel map,
 launch path, tile and galactic-binary model), 4c (Fisher) and 4d (documents, scripts, commits),
 with a review after each.
 
@@ -427,7 +427,7 @@ with a review after each.
 
 #### Part 4c: the DFFR Fisher matrix
 
-Done on the CPU on 2026-10-19, after step 5 and on its commits; the GPU runs are pending. Decisions
+Done on the CPU on 2026-10-19, after step 5 and on its commits; the GPU runs followed on 2026-10-20. Decisions
 of the author on 2026-10-19:
 
 - A kernel of its own. `dffr_information_matrix_kernel<SourceT, Rows>` in `lat_dffr_kernels.hh`
@@ -479,7 +479,7 @@ of the author on 2026-10-19:
 
 ### Step 5: wiring
 
-Done on the CPU on 2026-10-19; the GPU runs are pending. On 2026-10-19 the author moved the wiring
+Done on the CPU on 2026-10-19 and on the GPU on 2026-10-20. On 2026-10-19 the author moved the wiring
 before part 4c, the DFFR Fisher. Until 4c, `information_matrix` raised for DFFR; part 4c replaced
 the error with the DFFR Fisher matrix.
 
@@ -531,11 +531,30 @@ the error with the DFFR Fisher matrix.
   window, both responses (`test_stft_gb_accuracy.py` recipe); size the window-convention error.
 - dffr time-domain truth (lisagwresponse, lisainstrument, pytdi) on the ESA trailing orbits, 30
   days to months, on a compute node, both responses.
-- Cross-domain SNR^2 against FD and WDM (`test_stft_gb_crossdomain.py`) for DFFR.
-- Mojito: `scripts/validation/gb_mojito_stft_fd_mismatch.py` for both responses.
-- Benchmarks per method and batch size, both responses, on a full A100 and one A100 MIG slice,
-  and on the CPU. Gate: DFFR is not slower than the existing response for any method the global
-  fit calls.
+- Likelihood surfaces against a full time-domain simulation (author's decision of 2026-10-21, in
+  place of the cross-domain SNR^2 against FD and WDM and of the Mojito FD mismatch of the first
+  plan). The surfaces of four waveforms for every parameter, on one year of data: FD GBGPU, FD
+  TDI-on-the-fly, STFT TDI-on-the-fly and DFFR. Eight sources: one at low and one at high
+  frequency, each at the largest and the smallest ḟ at that frequency, each at two sky positions.
+  A surface is a scan of one parameter with every other parameter at its true value, repeated for
+  each parameter, over a range of its own.
+- Likelihood surfaces of the same four waveforms against the Mojito-light data (in the data
+  folder of `lisa_nlddpc`), for its five galactic binaries of highest frequency.
+- Benchmarks per method and batch size, both responses, on a full A100 and on the CPU. Gate:
+  DFFR is not slower than the existing response for any method the global fit calls. On
+  2026-10-19 the author dropped the A100 MIG slice of the first plan: the global fit will run on
+  several full A100s, so the code is optimised and judged on a full A100 first.
+- Standalone dffr against the integration on the A100 (author's decisions of 2026-10-19): the
+  standalone's own test suite, then `fill_global` and `get_ll` of both codes on the same inputs
+  on the ESA orbits, in the setup of the standalone's benchmark (bands 41 and 21) and with the
+  production settings, interleaved runs (`scripts/dffr/dffr_timing_lat.py`). The ratio of the
+  times is recorded, not a gate; the occupancy runs below aim to close any gap. For it, standalone
+  dffr gained a CUDA 13 backend, so that both codes are built by the same nvcc.
+- On the GPU the `fill_global` grids of the two codes differ by up to 1e-12 of their peak over a
+  year of 10 000 sources, a systematic difference, while the inner products agree to 1.4e-15.
+  Before anything else is decided, the per-source templates of both codes are compared at 32, 120
+  and 365 segments, to see whether the difference grows with the template phase (author's
+  decision of 2026-10-19).
 - Occupancy, from the linked registers of step 4 (author's decisions of 2026-10-18). A/B timings
   on an A100, for both responses; the faster settings go in:
   - `domains.cu` without a register cap, and capped at 168 and at 128. The cap changes the
@@ -544,11 +563,51 @@ the error with the DFFR Fisher matrix.
     which the pip wheel of the CUDA toolkit does not hold (`tests.md`, step 4);
   - 16 against 32 rows for the two-template DFFR consumers;
   - `Template::values` and `build` of the DFFR tile forced inline on the GPU, or not.
+
+  Done on 2026-10-21, after an estimate of each setting's gain from the linked registers. The
+  author chose to time the cap at 168 only, with 16 rows inside both builds, on the ESA fixture
+  at 10 000 sources, three runs in turn, and to adopt a setting only when it is faster at some
+  point and slower at none, over every method of both responses. The cap at 128 adds spills
+  without a further block, forced inlining costs the `get_ll` gradient a block, and device
+  link-time optimisation would need the install to supply `libnvvm` for the pip toolkit. Results
+  (`tests.md`, step 6): the cap makes every method of the existing response 4 % to 15 % faster,
+  but the DFFR swap and swap gradient 0.5 % to 1 % slower; and it is not bit-identical, against
+  the premise above: the compiler computes 12 products of `add_ip_contrib` apart from their
+  additions, which moves the inner products of both responses by up to 4e-16 of their peaks and
+  their gradients by up to 5e-10. 16 rows pay only for the DFFR swap with the cap. The author left
+  the cap out, and the two-template DFFR consumers keep their 32 rows.
 - The DFFR Fisher of part 4c on an A100: its CUDA tests (against the reference Fisher, against the
   CPU, 4 against 8 rows per pass) and the timing gate, which covers `information_matrix` since the
   GB special move calls it once per repeat block. The A100 timings of both Fisher kernels decide 4
   against 8 rows, and whether one Fisher kernel can serve both responses (author's decision of
-  2026-10-19).
+  2026-10-19). The GPU runs of part 4c (2026-10-20) passed the CUDA tests and missed the timing
+  gate from 1000 sources, so the DFFR Fisher is optimised before the occupancy runs below
+  (author's decisions of 2026-10-20):
+  - First, where its time goes: a side build with cycle counters around the table build, the band
+    setup, the pixel loop and the final reduction, never committed (profiling counters of the GPU
+    are open to administrators only on SURF Spider).
+  - The final reduction no longer stages its sums in a static array of 9 kB. On nine parameters
+    at 4 rows the kernel then needed 81 280 bytes of dynamic and 9 696 of static shared memory,
+    more than the 82 944 bytes per block that 2 blocks per SM allow on an A100, so it ran 1 block
+    per SM, the existing Fisher 2. With the sums staged in dynamic shared memory, the gate held at
+    every batch size but 1000 sources, where it missed by 5 % to 8 %.
+  - The table build straight into the Fisher tables, with all threads of the block. The table build
+    took half of the kernel's time on the A100, one stencil template after the other through a
+    scratch table (`tests.md`, step 6). The author's design, all templates of a pass at once and no
+    scratch table, does not fit: besides the tables the build makes, per template, its shifted
+    source constants and, per segment row, 6 emission states and 6 link amplitudes, 54 kB on nine
+    parameters at 4 rows, where 5.4 kB are free before the second block per SM goes. Deviation,
+    decided by the author on 2026-10-20: the templates are built in waves, whose intermediates sit
+    in the space of the endpoint anchors. The anchors moved into an array of their own and are
+    built after the last wave. The tile and the Fisher share one build (`dffr_build_rows`), the
+    tile as the build of one template. The outputs stay bit-identical on the CPU and the GPU
+    (`fill_global` aside), the build takes 12 % to 15 % of the kernel instead of half, and the DFFR
+    Fisher takes 0.51 to 0.63 of the time of the existing Fisher, 1.9 times less than before from
+    1000 sources.
+  - 4 against 8 rows, timed with the gate in turn with the existing Fisher. 8 rows are faster up to
+    100 sources (0.54 to 0.93 of the 4-row time) and slower from 1000 (1.25 to 1.32), because their
+    tables leave room for one block per SM instead of two. Both meet the gate at every batch size.
+    The author decided on 2026-10-21 that `STFTGBComputations` keeps its 4 rows for every batch.
 - The three source-independent diagnostics of step 4 (`lat_dffr_diagnostics.{hh,cu}`, their wrap
   methods and `tests/test_dffr.py`) leave LAT after this step. A copy stays in the author's work
   folder.
@@ -596,11 +655,18 @@ the error with the DFFR Fisher matrix.
   per gradient component and Fisher entry, the change must stay within each code's own
   finite-difference noise. Outputs computed directly from templates keep the tolerance of the
   step. Steps that must leave the existing response bit-identical (3 and 4) ask bit identity of
-  every output.
+  every output. On the GPU, `fill_global_stft` adds with `atomicAdd` and is reproducible to
+  rounding only, so there it must agree to 1e-15 of its peak instead (author's decision of
+  2026-10-19).
 - CPU tests: `python -m pytest GBGPU/tests/test_stft_gb.py GBGPU/tests/test_stft_gb_accuracy.py
   GBGPU/tests/test_stft_gb_crossdomain.py` and
   `python -m unittest tests.test_orbit_kinematics tests.test_fresnel` from the LAT root.
-- GPU tests and benchmarks with `force_backend="gpu"`, on one A100 MIG slice or a full A100 node.
+- GPU tests and benchmarks with `force_backend="gpu"`, on one full A100 (partition
+  `gpu_a100_22c` of SURF Spider; the MIG slices were dropped, see step 6). Each step's GPU run
+  keeps its own benchmark parts, but the GPU timings of different steps are compared through one
+  interleaved round, which alternates the seven environments (steps 0 to 5 and part 4c), three
+  runs each, on both orbit fixtures. Runs of one step after the other span many hours, and drift
+  over that time would enter the comparison (author's decision of 2026-10-19).
 - dffr environment: `cd direct-fast-fresnel-response && uv sync --extra compare`; the regression
   scripts in `scripts/dffr/` exchange arrays as `.npz` files in the output folder's
   `regression/`. The LAT side counts times from the start of the orbit file (`t0 = 0`, as the
@@ -653,8 +719,9 @@ the error with the DFFR Fisher matrix.
   bytes) exceed the 48 kB a launch gets on an A100 and on an H100. With the opt-in of step 4,
   which takes its limit from the device, an A100 allows 163 kB per block and 164 kB per SM, an
   H100 227 kB and 228 kB. The DFFR Fisher of part 4c holds the tables of every stencil template of
-  a pass: about 16.5 kB per segment row on 8 parameters and 19.2 kB on 9, so a pass takes 4 rows
-  (or 8, which does not fit 9 parameters on an A100).
+  a pass: about 16.5 kB per segment row on 8 parameters and 19.2 kB on 9, so a pass takes 4 rows,
+  or 8 at one block per SM. Before the direct build of step 6, 8 rows did not fit 9 parameters on
+  an A100; since then they take 154 kB and fit.
 - Newer devices than the A100, the H100 (sm_90) in particular. The timing gate of this effort is
   measured on A100s, the GPUs of SURF Spider, while the standalone DFFR timings in the README were
   measured on an H100 NVL. Both devices have 65 536 registers per SM and at most 255 per thread,
@@ -689,7 +756,19 @@ the error with the DFFR Fisher matrix.
   - H100 features that the kernels do not use: clusters of blocks with distributed shared memory
     would let the blocks of a cluster read each other's segment tables, for example the add and
     remove tables of swap.
-- MIG slices have no peer access; multi-split tests use slices of one job and host-routed checks.
+- Bit identity on the GPU. `fill_global_stft` adds with `atomicAdd`, so on the GPU it is
+  reproducible to rounding only, and the gate for it there is 1e-15 of its peak. And nvcc decides
+  per kernel whether to inline a function and which products to fuse: in part 4c the split of the
+  windowed sums left the CPU code alone but added two multiplies to the out-of-line
+  `DFFRTile::Template::values` that the two-template kernels call, which moved their GPU outputs at
+  rounding level (accepted by the author on 2026-10-20). Changes of the DFFR code are therefore
+  judged on the GPU to rounding, and the GPU machine code of the affected kernels is compared
+  when outputs move (`tests.md`, part 4c, "On the GPU"). For the same reason two CUDA tests of
+  step 4 that ask for agreement at CPU level fail on the A100; they are recorded, not changed.
+- Multi-device runs are not checked in this effort (author's decision of 2026-10-19): the LAT
+  tests that need two CUDA devices, the developer checks behind `STFT_MULTI_GPU_CHECK`, and a
+  DFFR replica on a second device, which builds its own kinematics table there. Step 5 checks the
+  multi-GPU path of the replica builder on the CPU only (`tests.md`).
 - Proposal for the GBGPU maintainers, recorded at the author's request (2026-10-18), not done:
   `GBComputationGroup`, whose 23 method definitions sit among the kernels of the existing response
   in `gb_tdi_on_the_fly.cu`, could move to a file of its own, generic over the response. The
@@ -713,14 +792,20 @@ the error with the DFFR Fisher matrix.
     host from `inds` and the steps. On the GPU it copies these two arrays, about 100 bytes, from
     the device on every call, which waits for the stream. Open: keep the copy, or pass host arrays
     through the binding.
-  - Eight rows and nine parameters. At 8 segment rows per pass the tables of nine parameters take
-    about 162 kB, which with the kernel's static shared memory exceeds the 163 kB an A100 block can
-    hold, so that launch raises `std::runtime_error`. `STFTGBComputations` uses 4 rows. Open: keep
-    the error, or let the entry point fall back to 4 rows.
-  - Table build on the GPU. The kernel builds the table of one stencil template at a time, so at
-    4 rows per pass the stages of a build give 12 to 24 of the 128 threads of a block work. Open,
-    with the A100 timings of step 6: build several templates per stage, against the shared memory
-    that needs.
+  - Eight rows and nine parameters. At 8 segment rows per pass the tables of nine parameters took
+    about 162 kB, which with the kernel's static shared memory exceeded the 163 kB an A100 block
+    can hold, so that launch raised `std::runtime_error`. Resolved in step 6: the direct build
+    removed the scratch table, and the launch now takes 154 kB. The error stays for layouts beyond
+    a block of the device.
+  - Table build on the GPU. The kernel built the table of one stencil template at a time, so at 4
+    rows per pass the stages of a build gave 12 to 24 of the 128 threads of a block work, and the
+    DFFR Fisher was 1.34 to 1.47 times slower than the existing Fisher from 1000 sources on nine
+    parameters (A100, 2026-10-20). Resolved in step 6 by the staged reduction and the direct build
+    in waves: the DFFR Fisher takes 0.51 to 0.63 of the time of the existing one.
+  - Rows per pass of the DFFR Fisher. `STFTGBComputations` passes 4 rows. 8 rows are 7 % to 46 %
+    faster while a batch has fewer sources than the device has SMs, and 25 % to 32 % slower from
+    1000 sources (`tests.md`, step 6). The author decided on 2026-10-21 to keep 4 rows for every
+    batch; a choice by batch size would need the device's SM count at launch.
   - Source-model contract. The list in `lat_dffr_kernels.hh` gives `load(Constants*, params)`; the
     source models also take the launch inputs `Model`, and the list names neither `Model` nor
     `num_params`.

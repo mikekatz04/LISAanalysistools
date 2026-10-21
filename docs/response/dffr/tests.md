@@ -19,6 +19,14 @@ Conventions:
 - CPU captures and timings are compared on the same node type only. NumPy and OpenBLAS select
   different code paths on AMD Bergamo (AVX-512) than on AMD Rome, which can change the fixture
   inputs in the last bit.
+- GPU runs use one full A100 (A100-PCIE-40GB) on `wn-gb-02` of partition `gpu_a100_22c`, in
+  Slurm job 41556413 (22 CPUs, driver 615.71.10), from 2026-10-19. The node's other A100 runs
+  another user's job. Every environment holds CUDA toolkit 13.2.2 (nvcc 13.2.86), CuPy 14.2.0
+  (`cupy-cuda13x`) and JAX 0.11.2. The A100 MIG slices of the first plan were dropped on
+  2026-10-19 (`plan.md`, step 6).
+- On the GPU, every part of a step driver runs as a call of its own, from a chain script in
+  `$OUT/regression/<step>/`: a comparison that finds a differing array exits with status 1, and
+  under the drivers' `set -e` that would skip every later part.
 
 ## Step 0: baseline of the existing response
 
@@ -94,15 +102,32 @@ the file above). The 26 arrays of the production fixture on `L1Orbits`, captured
 separate processes, are bit-identical, 26 of 26. Baseline:
 `$OUT/regression/step0/golden_cpu_l1.npz`; the comparison is in `golden_cpu_l1_repeat_compare.txt`.
 
-**Pending.** The golden outputs on the GPU, all seven fixtures, captured twice, from the step 0
-code. Every GPU node of SURF Spider has been down since 2026-10-16 14:56, and step 1 rebuilt the
-shared environment, so these captures come from the frozen environment of the step 0 code that
-`scripts/dffr/build_base_env.sh` builds. That environment reproduces both CPU baselines above bit
-for bit (step 1, "Frozen environment of the step 0 code"). The two GPU captures also measure
-whether the GPU outputs are reproducible: `fill_global_stft` adds into the template rows with
-`atomicAdd` (`lat_stft_kernels.hh:815`), so sources that share pixels can be summed in a
-different order from run to run. Command, on a GPU node, with `BASE=$OUT/base_env`:
-`PYTHON=$BASE/.venv/bin/python LAT_ROOT=$BASE/lisa-analysis-tools MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_baseline.sh --device gpu $OUT environment golden golden_l1 benchmarks benchmarks_l1 tests`.
+**Golden outputs on the GPU** (parts `golden` and `golden_l1`, 2026-10-19, the full A100 of the
+conventions above). Every GPU node of SURF Spider was down from 2026-10-16 14:56 to 2026-10-19
+about 17:00, and step 1 had rebuilt the shared environment, so these captures come from the frozen
+environment of the step 0 code (LAT 71b3f351, GBGPU a156dc3), which reproduces both CPU baselines
+above bit for bit (step 1, "Frozen environment of the step 0 code"). Each capture ran twice, in
+separate processes.
+
+- Six single-grid fixtures: 141 of the 144 arrays are bit-identical between the two captures. The
+  other three are the `fill` outputs of `rect`, `esa_tdi2_envelope` and `esa_tdi1_const`; they
+  differ by at most 3.4e-17 of their peaks, or 8 to 64 units in the last place of small elements.
+- `l1_tdi2_envelope`: 25 of the 26 arrays are bit-identical; `fill` differs by 1.1e-16 of its
+  peak.
+
+`fill_global_stft` adds into its template rows with `atomicAdd` (`lat_stft_kernels.hh:815`), so
+where sources share pixels the order of the additions changes from run to run. On the GPU, `fill`
+is therefore reproducible to rounding only; every other output is reproducible bit for bit. In
+the steps that ask bit identity (3, 4, 5 and part 4c), `fill` on the GPU must agree with the
+previous step to 1e-15 of its peak, about ten times the largest run-to-run difference here
+(author's decision of 2026-10-19); every other output must stay bit-identical. Baseline: `$OUT/regression/step0/golden_gpu.npz`
+and `golden_gpu_l1.npz`; comparisons in `golden_gpu_repeat_compare.txt` and
+`golden_gpu_l1_repeat_compare.txt`.
+
+Command, one driver call per part (`$OUT/regression/step0/step0_gpu_chain.sh`), with
+`BASE=$OUT/base_env`, for each part of `environment golden golden_l1 benchmarks benchmarks_l1
+tests`:
+`PYTHON=$BASE/.venv/bin/python LAT_ROOT=$BASE/lisa-analysis-tools MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_baseline.sh --device gpu $OUT <part>`.
 
 ### Benchmarks
 
@@ -147,15 +172,48 @@ six-hour segments, `n_side_bins=4`, median of seven calls. `rect`: `get_ll` 863.
 1943.28 ms, fill 841.04 ms. `tukey_mid`: `get_ll` 1194.85 ms, swap 3299.53 ms, fill 1172.76 ms.
 File: `$OUT/benchmarks/step0/column_oracle_bench_cpu.txt`.
 
-**Pending:** the GPU benchmarks of both orbit fixtures, a year of one-day segments with batch sizes
-1 to 10 000, on one A100 MIG slice and on a full A100.
+**GPU** (part `benchmarks`, 2026-10-19, the full A100), fixture `esa_tdi2_envelope` with a year
+of one-day segments (365) and batch sizes from 1 to 10 000, otherwise as on the CPU: one warm-up
+call and five timed calls per point, each closed by a device synchronisation, three runs in
+separate processes. Files: `$OUT/benchmarks/step0/gpu_esa_run{1,2,3}.json`.
+
+| Method | Batch 1 [ms] | Batch 10 [ms] | Batch 100 [ms] | Batch 1000 [ms] | Batch 10 000 [ms] | Per source at 10 000 [µs] | Largest spread |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `get_ll_stft` | 15.34 | 10.00 | 10.20 | 66.51 | 660.29 | 66.03 | 0.74 % |
+| `get_swap_ll_stft` | 22.87 | 34.75 | 36.55 | 199.19 | 1883.38 | 188.34 | 60.18 % |
+| `get_fstat_ll_stft` | 131.18 | 158.00 | 165.06 | 1194.83 | 11292.06 | 1129.21 | 1.07 % |
+| `fill_global_stft` | 8.18 | 9.70 | 9.97 | 62.20 | 605.75 | 60.58 | 1.05 % |
+| `get_ll_grad_stft` | 139.13 | 162.69 | 166.15 | 1074.38 | 10121.46 | 1012.15 | 1.09 % |
+| `get_swap_ll_grad_stft` | 559.37 | 1067.80 | 1109.35 | 5996.97 | 55774.14 | 5577.41 | 1.72 % |
+| `information_matrix` | 80.34 | 87.76 | 94.63 | 610.56 | 6205.82 | 620.58 | 1.61 % |
+
+The largest spread of every method lies at or below 1.72 %, except one point: `get_swap_ll_stft`
+at batch 1, whose three run medians are 16.6, 30.3 and 22.9 ms. Up to 100 sources a call costs
+about the same as for one, so the device is not yet filled; from 1000 sources on the time grows
+in proportion to the batch.
+
+**GPU on `L1Orbits`** (part `benchmarks_l1`): fixture `l1_tdi2_envelope`, otherwise as above.
+Files: `$OUT/benchmarks/step0/gpu_l1_run{1,2,3}.json`.
+
+| Method | Batch 1 [ms] | Batch 10 [ms] | Batch 100 [ms] | Batch 1000 [ms] | Batch 10 000 [ms] | Per source at 10 000 [µs] | Largest spread |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `get_ll_stft` | 15.22 | 10.05 | 10.17 | 66.25 | 666.07 | 66.61 | 0.52 % |
+| `get_swap_ll_stft` | 23.06 | 35.01 | 36.43 | 200.34 | 1903.03 | 190.30 | 60.03 % |
+| `get_fstat_ll_stft` | 132.37 | 159.47 | 165.02 | 1199.19 | 11379.38 | 1137.94 | 0.27 % |
+| `fill_global_stft` | 8.13 | 9.71 | 9.85 | 61.72 | 602.85 | 60.28 | 0.43 % |
+| `get_ll_grad_stft` | 138.12 | 163.08 | 166.28 | 1080.45 | 10197.67 | 1019.77 | 0.31 % |
+| `get_swap_ll_grad_stft` | 561.06 | 1075.64 | 1115.64 | 6075.64 | 56384.48 | 5638.45 | 0.59 % |
+| `information_matrix` | 81.24 | 88.96 | 96.02 | 596.85 | 6170.26 | 617.03 | 0.65 % |
+
+Again only `get_swap_ll_stft` at batch 1 spreads widely (60.03 %). At 10 000 sources every method
+lies within 1.1 % of the ESA orbits (ratios 0.994 to 1.011).
 
 ### Test suites
 
 Both suites ran on the CPU node through the driver parts `gbgpu_tests` and `lat_tests`, with the
 two uncommitted changes above in place. Neither run left files in the repositories
 (`git_status_after_*_cpu.txt`). Failures that already exist at the base commits are recorded
-here, not fixed. The GPU runs are pending with the GPU baseline.
+here, not fixed. The GPU runs follow the CPU tables.
 
 **GBGPU** (`pytest tests -rA --continue-on-collection-errors`, 119 s): 40 tests collected, 39
 passed, 1 failed, 1 module not importable. Log and JUnit file:
@@ -188,6 +246,38 @@ which imports `gbgpu.testing`. Logs: `$OUT/regression/step0/*_first_run.*`.
 | 9 | developer checks, run only with `STFT_MULTI_GPU_CHECK=1` |
 | 3 | a Mojito cache at a fixed path of another developer's machine |
 | 1 | needs a GPU host with a fully initialised band buffer |
+| 1 | the helper `gf_dev/ltt_averaging_diagnostic` is not in this checkout |
+
+**On the GPU** (part `tests`, 2026-10-19, the full A100, from `$OUT/base_env`). These outcomes are
+the GPU baseline that later steps must keep. Neither run left files in the frozen clones
+(`git_status_after_*_gpu.txt`).
+
+GBGPU (109 s): 33 passed, 4 failed, 6 errors. Log and JUnit file:
+`$OUT/regression/step0/gbgpu_tests_gpu.{log,xml}`.
+
+| Outcome | Tests | Cause |
+| --- | --- | --- |
+| passed (33) | `test_stft_gb` (23), `test_intra_split_index` (6), `test_stft_gb_accuracy` (4) | |
+| error (6) | every test of `test_stft_gb_crossdomain` | its orbits are built on the CPU backend and receive CuPy arrays (`OrbitsWrapCPU.__init__`, incompatible arguments); on the CPU node all 6 pass |
+| failed (4) | `test_gbgpu` (`test_circ`, `test_likelihood`, `test_information_matrix`), `test_thirdbody::test_ecc_third_body` | out of date against the GBGPU class: no `XYZf` or `inject_signal`, and `information_matrix` asks for `psd` |
+
+LAT (`python -m unittest discover -v`, 289 s): 271 tests, 223 passed, 28 skipped, 7 failures,
+13 errors. Log: `$OUT/regression/step0/lat_tests_gpu.log`.
+
+| Outcome | Tests | Cause |
+| --- | --- | --- |
+| error (2) | `test_detector` (`test_get_vel`, `test_orbits`) | they ask for the CUDA 12 backend by name; the environment has the CUDA 13 backend |
+| error (8) | `test_sensitivity` (seven `test_sensitivity_matrix_*`), `test_quintic_response::test_quintic_batched_heterogeneous_shift_equals_per_source` | a CuPy array reaches NumPy (`Implicit conversion to a NumPy array is not allowed`) |
+| failure (3) | `test_response_alignment` (`test_batched_min_trim_preserves_leading_signal`, `test_off_grid_data_t0_no_one_sample_desync`, `test_times_land_on_data_grid`) | assertion errors; skipped on the CPU node |
+| failure (2) | `test_domain_backend_threading` (`test_transform_target_backend_mismatch_raises`, `test_wdm_to_stft_layered_chain`) | they expect the backend name `gpu` where the backend reports `cuda13x`, and a `ValueError` that is not raised |
+| error (2), failure (2), error (1) | the five cases of the CPU table above | as on the CPU |
+
+| Skipped | Reason |
+| --- | --- |
+| 14 | two or more CUDA devices needed; the job holds one |
+| 9 | developer checks, run only with `STFT_MULTI_GPU_CHECK=1` |
+| 3 | bbhx, phentax or mojito not importable |
+| 1 | needs a fully initialised band buffer on a GPU host |
 | 1 | the helper `gf_dev/ltt_averaging_diagnostic` is not in this checkout |
 
 **Scripts after formatting.** After `black` (100 columns) and a variable rename in
@@ -249,8 +339,8 @@ and CUDA backends.
 CPU node: `wn-la-01` (AMD EPYC 9754, Bergamo), Slurm job 41559105, 8 CPUs, 2026-10-17. The
 regressions run inside that allocation as
 `srun --jobid=<job> --overlap -n 1 -c 1 env PYTHON=$PYTHON BASE_ENV=$OUT/base_env DFFR_REPOSITORY=<dffr clone> MOJITO_L1=<file> scripts/dffr/run_step1.sh --device cpu $OUT <part>`;
-the driver sets the thread counts and `JAX_PLATFORMS` as in step 0. The GPU runs are pending;
-they repeat the same parts with `--device gpu`.
+the driver sets the thread counts and `JAX_PLATFORMS` as in step 0. The GPU runs (2026-10-19)
+repeat the same parts with `--device gpu` ("On the GPU" below).
 
 How to read the numbers. A relative value is the largest absolute difference over an array
 divided by the largest absolute value of the reference array, as everywhere in this document;
@@ -301,7 +391,7 @@ cover the arithmetic of each value and the fused multiply-adds either side may u
 | Coverage | the earliest and latest grids that fit build; grids 1 s earlier or later raise `ValueError` naming the light-travel-time or the position grid | | as expected | pass |
 | Arguments | wrong length raises `ValueError`; float32 or strided arrays raise `TypeError` | | as expected | pass |
 | Group cache | `cpp_kinematics` builds once per orbits object, another object gets its own table, and the fields equal a direct build bit for bit | | as expected | pass |
-| CUDA against CPU | absolute difference of every field | rounding bound | pending | pending |
+| CUDA against CPU | absolute difference of every field | rounding bound | 0 in all 11 fields: on the A100 the CUDA table equals the CPU table bit for bit (2026-10-19) | pass |
 
 The thresholds of the circle come from the errors of the method, with margins from 1.7
 (positions, whose error is the deterministic interpolation sag) to about 20 over the measured
@@ -481,13 +571,47 @@ apart on a shared node, which limits how finely such small ratios can be read.
 
 None in this step.
 
-### Pending on the GPU
+### On the GPU
 
-The shared environment holds the step 2 code since 2026-10-18, so these runs come from the frozen
-environment of the step 1 code, `$OUT/step1_env`, which reproduces the step 1 CPU golden outputs
-bit for bit (step 2 records how it was built and checked). On a GPU node, with `S1=$OUT/step1_env`:
-`PYTHON=$S1/.venv/bin/python BASE_ENV=$OUT/base_env DFFR_REPOSITORY=<dffr clone> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" $S1/lisa-analysis-tools/scripts/dffr/run_step1.sh --device gpu $OUT environment unit golden golden_l1 dffr l1 tests benchmarks benchmarks_l1`,
-after the GPU baseline of step 0, so that `golden_gpu*.npz` of step 0 exist for the comparison.
+Run on 2026-10-19 from 20:39 to 21:56 on the full A100 of the conventions, from the frozen
+environment of the step 1 code, `$OUT/step1_env`, after the GPU baseline of step 0. Every part
+runs as a call of its own (`$OUT/regression/gpu_chain_steps1_4c.sh`), with `S1=$OUT/step1_env`,
+for each part of `environment unit golden golden_l1 dffr l1 tests benchmarks benchmarks_l1`:
+`PYTHON=$S1/.venv/bin/python BASE_ENV=$OUT/base_env DFFR_REPOSITORY=<dffr clone> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" $S1/lisa-analysis-tools/scripts/dffr/run_step1.sh --device gpu $OUT <part>`.
+The driver compares its captures with step 0 only after the repeat check, which on the GPU always
+finds `fill` differing, so the part ends first; `$OUT/regression/gpu_step_comparisons.sh` makes
+these comparisons with the step's own scripts, for this and every later step.
+
+- **Unit tests** (part `unit`): 13 of 13 pass, the six CUDA cases included. The CUDA table equals
+  the CPU table bit for bit in all 11 fields, and every other number equals the CPU's
+  (`unit_numbers_gpu.txt`).
+- **Golden outputs.** The two captures are bit-identical except `fill`, as in step 0 (143 of 144
+  and 25 of 26; `fill` differs by 3.4e-17 and 3.4e-18 of its peak). Against the step 0 GPU
+  captures the outputs change as on the CPU: the same arrays stay bit-identical (all of `astro`,
+  and the plain Fisher estimators everywhere), and the largest changes per kind of output are of
+  the same size (files `golden_gpu{,_l1}_vs_step0.txt`; table by
+  `$OUT/regression/gpu_review/step_changes.py`):
+
+| Fixture | Unchanged arrays | Inner products, F-statistic, templates | Gradients | Fisher, TDI track | Fisher, other estimators |
+| --- | --- | --- | --- | --- | --- |
+| `astro` | 22 of 22 | 0 | 0 | 0 | 0 |
+| `rect` | 3 of 22 | 4.7e-11 | 1.8e-9 | 1.5e-8 | 0 |
+| `tukey_mid` | 3 of 22 | 2.2e-14 | 1.1e-9 | 2.6e-9 | 0 |
+| `esa_tdi2_envelope` | 4 of 26 | 4.4e-11 | 1.7e-10 | 1.7e-11 | 0 |
+| `esa_tdi1_const` | 4 of 26 | 4.4e-11 | 5.0e-10 | 7.0e-12 | 0 |
+| `esa_aet_diag` | 4 of 26 | 3.3e-11 | 1.9e-10 | 3.3e-11 | 0 |
+| `l1_tdi2_envelope` | 4 of 26 | 5.9e-11 | 3.0e-10 | 2.3e-11 | 0 |
+
+  Both criteria of this step hold on the GPU. Pass.
+- **Exchange with standalone dffr** (part `dffr`) **and the Mojito orbits** (part `l1`): every
+  number equals the CPU's, since the CUDA table equals the CPU table
+  (`kinematics_esa_compare_gpu.txt`, `kinematics_l1_gpu.txt`). Pass.
+- **Test suites** (part `tests`): every test keeps its step 0 outcome on the GPU, and the 13 new
+  tests pass (`$OUT/regression/gpu_review/test_outcomes.py $OUT/regression/step0
+  $OUT/regression/step1`). Pass.
+- **Benchmarks** (parts `benchmarks` and `benchmarks_l1`): `$OUT/benchmarks/step1/gpu_{esa,l1}_run{1,2,3}.json`.
+  The timings of different steps are compared through the interleaved round ("GPU timings of the
+  steps", step 6).
 
 ## Step 2: Fresnel split
 
@@ -503,7 +627,7 @@ regressions ran inside that allocation as
 the parts `environment unit golden accuracy`, `golden_l1` and `tests` side by side, then
 `benchmarks benchmarks_l1` alone, so that nothing else ran during the timings
 (`$OUT/regression/step2/step2_cpu_chain.sh`); `fd_steps fd_steps_l1` ran afterwards. The GPU
-runs are pending.
+runs are recorded below ("On the GPU").
 
 Numbers are read as in step 1. A value relative to an array's peak is the largest absolute
 difference over the array divided by the largest absolute value of the reference array. A bound
@@ -553,7 +677,7 @@ above the measured values; the bounds on rounding sit 2 to 3 times above.
 | Odd symmetry | C(-x) + C(x) and S(-x) + S(x) | 0 | 0 (bit for bit) | pass |
 | f, g and their derivatives against quadrature, 882 arguments from the first double above 1.6 to 1e8 | relative error; for g' on the rational branch absolute, because g' falls to -7.5e-5 near \|x\| = 8 | rational fits: f 1e-9, g and f' 2.5e-9, g' 1e-9; asymptotic series: f 1e-14, g and f' 2.5e-13, g' 2e-12 | rational fits: 8.6e-10, 2.2e-9, 2.2e-9 and 8.4e-10, all at the seam; asymptotic series: 5.8e-15, 1.3e-13, 1.3e-13 and 9.6e-13, at \|x\| = 8 | pass |
 | Phase kernel and moment, the 16 cases of dffr's `tests/test_fresnel.py` (chirp rates +-4e-13, 1e-20 and -1e-22 Hz/s; 0, 0.3, 7 and -18.5 bins from the carrier; one day) | error of the integral as a fraction of the segment length, and of its moment as a fraction of the half-length squared | 2e-10 and 5e-8, dffr's bounds | 7.2e-11 and 2.9e-8, both 0.3 bins from the carrier at \|alpha\| = 4e-13, where an endpoint falls next to the seam; at most 3.9e-14 and 9.5e-12 in the other 14 cases | pass |
-| CUDA against CPU | absolute difference for C, S and g', relative for f, g and f'; the phase kernel as a fraction of dffr's normalisation | 8 roundings; 1e-13, provisional | pending | pending |
+| CUDA against CPU | absolute difference for C, S and g', relative for f, g and f'; the phase kernel as a fraction of dffr's normalisation | 8 roundings; 1e-14, ten times the largest A100 value (the provisional 1e-13 was set to this on 2026-10-20) | on the A100: C 2.2e-16, S 1.1e-16; f, g, f', g' bit-identical; phase kernel 9.0e-17, moment 3.0e-16 | pass, with the bound of 1e-14 too |
 
 ### Regression tests
 
@@ -676,15 +800,42 @@ dominate. Their effect on the GPU is measured with the GPU runs.
 
 None in this step.
 
-### Pending on the GPU
+### On the GPU
 
-After the step 1 GPU runs, so that `golden_gpu*.npz` of step 1 exist for the comparison. The
-shared environment holds the step 3 code since 2026-10-18, so these runs come from the frozen
-environment of the step 2 code, `$OUT/step2_env`, which reproduces the step 2 CPU golden outputs
-bit for bit (step 3 records how it was built and checked). On a GPU node, with `S2=$OUT/step2_env`:
-`PYTHON=$S2/.venv/bin/python BASE_ENV=$OUT/step1_env MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" $S2/lisa-analysis-tools/scripts/dffr/run_step2.sh --device gpu $OUT environment unit golden golden_l1 fd_steps fd_steps_l1 tests benchmarks benchmarks_l1`.
-The GPU order is therefore: step 0 from `$OUT/base_env`, step 1 from `$OUT/step1_env`, step 2
-from `$OUT/step2_env`, then step 3 from the shared environment.
+Run on 2026-10-19 from 21:56 to 23:13 on the full A100, from the frozen environment of the step 2
+code, `$OUT/step2_env`, after the step 1 GPU runs, one call per part
+(`$OUT/regression/gpu_chain_steps1_4c.sh`), with `S2=$OUT/step2_env`, for each part of
+`environment unit golden golden_l1 fd_steps fd_steps_l1 tests benchmarks benchmarks_l1`:
+`PYTHON=$S2/.venv/bin/python BASE_ENV=$OUT/step1_env MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" $S2/lisa-analysis-tools/scripts/dffr/run_step2.sh --device gpu $OUT <part>`.
+The comparisons with step 1 come from `$OUT/regression/gpu_step_comparisons.sh` (step 1, "On the
+GPU").
+
+- **Unit tests** (part `unit`): 9 of 9 pass, the five CUDA cases included. CUDA against CPU, on
+  the A100: C 2.2e-16 and S 1.1e-16 absolute, f, g, f' and g' bit-identical, the phase kernel and
+  its moment 9.0e-17 and 3.0e-16 of dffr's normalisation (table above; `unit_numbers_gpu.txt`).
+- **Golden outputs.** The two captures are bit-identical except `fill` (141 of 144 and 25 of 26;
+  `fill` at most 1.1e-16 of its peak). Against the step 1 GPU captures, with the swap kernels,
+  which the GPU keeps: every output computed directly from templates changes by at most 7.2e-14
+  of its peak (`astro`; 4.9e-14 `rect`, at most 1.4e-14 elsewhere), within the gate of 1e-12.
+  Pass. The 54 arrays above the gate are all gradients and Fisher matrices, as on the CPU
+  (`golden_gpu{,_l1}_vs_step1.txt`).
+- **Gradients and Fisher matrices** (parts `fd_steps` and `fd_steps_l1`, the criterion of the CPU
+  runs above): 62 of 63 gradient components lie within the larger noise of the two codes
+  (largest ratio change / noise 1.43, the amplitude component of `esa_aet_diag`), and 4519 of
+  4536 Fisher entries (largest ratio 2.14). The entries above the noise are again terms in
+  amplitude, ι and ψ that both codes compute almost exactly, with changes of 1e-12 to 1e-9 of
+  their scale. Accepted, as on the CPU (CPU: 62 of 63 and 4526 of 4536, ratios up to 2.47).
+  Files: `fd_steps_step{1,2}_gpu{,_l1}.npz`, `fd_steps_step2_vs_step1_gpu{,_l1}.txt`.
+- **Swap gradients.** `finite_difference_steps.py` does not evaluate them, so the noise criterion
+  above does not cover them, although the CPU record said the GPU runs would. Per component,
+  relative to its largest value over the sources, they change as much as the `get_ll` gradient:
+  f0 1.5e-5 (`get_ll` gradient 1.0e-5), ḟ 4.5e-5 (7.5e-5), f̈ 1.4e-3 (5.4e-4), φ0 2.0e-6
+  (6.2e-6), angles at most 1.6e-9, amplitude 1.1e-12, all far below the noise this step measured
+  at the default steps (f̈ 0.6 to 13, ḟ 0.2 to 1.8, f0 1e-2 to 0.25). Recorded.
+- **Test suites** (part `tests`): every test keeps its step 1 outcome on the GPU, and the 9 new
+  tests pass. Pass.
+- **Benchmarks**: `$OUT/benchmarks/step2/gpu_{esa,l1}_run{1,2,3}.json`; compared between steps
+  through the interleaved round (step 6).
 
 ## Step 3: tile seam
 
@@ -701,7 +852,7 @@ ran inside that allocation as
 `srun --jobid=<job> --overlap -n 1 -c 16 env PYTHON=$PYTHON BASE_ENV=$OUT/step2_env MOJITO_L1=<file> scripts/dffr/run_step3.sh --device cpu $OUT <part>`:
 `environment reference` first, then `golden oracle accuracy`, `golden_l1` and `tests` side by
 side, then `benchmarks benchmarks_l1` alone, and `resources` last
-(`$OUT/regression/step3/step3_cpu_chain.sh`). The GPU runs are pending.
+(`$OUT/regression/step3/step3_cpu_chain.sh`). The GPU runs are recorded below ("On the GPU").
 
 The gate of this step is bit identity (`numpy.array_equal`) of every output against the step 2
 code, and timings within run-to-run noise. Unlike step 2, the CPU captures keep the two swap
@@ -870,17 +1021,27 @@ those of the final code. That run also showed the drift between days: the unchan
 
 None in this step.
 
-### Pending on the GPU
+### On the GPU
 
-After the step 2 GPU runs, so that `golden_gpu*.npz` and the GPU benchmarks of step 2 exist for the
-comparison. Since step 4 the shared environment holds step 4 code, so the step 3 runs come from
-the frozen environment of the step 3 code (step 4, below), with its own clone of the scripts. On a
-GPU node, from `$OUT/step3_env/lisa-analysis-tools`:
-`PYTHON=$OUT/step3_env/.venv/bin/python BASE_ENV=$OUT/step2_env MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step3.sh --device gpu $OUT environment golden golden_l1 tests benchmarks benchmarks_l1`.
+Run on 2026-10-19 from 23:13 to 00:30 on the full A100, from the frozen environment of the step 3
+code (`$OUT/step3_env`, step 4 below), with its own scripts, one call per part, for each part of
+`environment golden golden_l1 tests benchmarks benchmarks_l1`, from
+`$OUT/step3_env/lisa-analysis-tools`:
+`PYTHON=$OUT/step3_env/.venv/bin/python BASE_ENV=$OUT/step2_env MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step3.sh --device gpu $OUT <part>`.
 On the GPU the captures and the benchmarks keep the swap kernels, and the reference is the step 2
-GPU capture itself. `fill_global_stft` adds into its template rows with `atomicAdd`, so the GPU
-captures of steps 0 to 2 first show whether that output is reproducible from run to run; bit
-identity against step 2 can only be asked of it if it is.
+GPU capture itself.
+
+- **Golden outputs.** The steps 0 to 2 showed that on the GPU `fill` is reproducible to rounding
+  only, so the gate of this step is bit identity of every other output and 1e-15 of its peak for
+  `fill` (step 0). Against step 2: 141 of 144 arrays bit-identical, the other three the `fill`
+  outputs of `astro`, `esa_tdi1_const` and `esa_tdi2_envelope`, at most 8.6e-17 of their peaks;
+  `l1_tdi2_envelope` 25 of 26, `fill` 1.4e-17. Pass. The two captures of this step differ only in
+  `fill` too (at most 3.4e-17), and on `L1Orbits` not at all
+  (`golden_gpu{,_l1}_vs_step2.txt`, `golden_gpu{,_l1}_repeat_compare.txt`).
+- **Test suites** (part `tests`): every test keeps its step 2 outcome on the GPU. Pass.
+- **Benchmarks**: `$OUT/benchmarks/step3/gpu_{esa,l1}_run{1,2,3}.json`. The timing criterion of
+  this step reads from the interleaved round (step 6): 27 of 35 points within the noise on both
+  fixtures, the other 8 within 0.7 %, accepted by the author as drift. Pass.
 
 ## Step 4: DFFR kernels
 
@@ -897,7 +1058,7 @@ CPU node: `wn-la-01` (AMD EPYC 9754, Bergamo), Slurm job 41563985, 16 CPUs, 2026
 ran inside that allocation as
 `srun --jobid=<job> --overlap -n 1 -c 16 env PYTHON=$PYTHON BASE_ENV=$OUT/step3_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> scripts/dffr/run_step4.sh --device cpu $OUT <part>`:
 every part but the benchmarks side by side, then `benchmarks benchmarks_l1` alone
-(`$OUT/regression/step4/step4_cpu_chain.sh`). The GPU runs are pending.
+(`$OUT/regression/step4/step4_cpu_chain.sh`). The GPU runs are recorded below ("On the GPU").
 
 The existing response must stay bit-identical to the step 3 code, with timings within run-to-run
 noise. The DFFR code is checked in four ways:
@@ -944,7 +1105,9 @@ The sub-interval bounds are those of the standalone package's `tests/test_fresne
 bounds are twice those, since the six sub-intervals carry window weights that sum to 2. The
 largest sub-interval errors sit 0.3 bins from the carrier at the Doppler-dominated rates, where the
 rational fits of `lat_fresnel.hh` (about 2e-10) set them. The CUDA class of the file is skipped
-without a GPU: 5 tests, CUDA against CPU among them, with a provisional bound of 1e-13.
+without a GPU: 5 tests, CUDA against CPU among them. On the A100 all 5 pass ("On the GPU" below);
+the provisional bound of 1e-13 of CUDA against CPU became 1e-14 on 2026-10-20, and the CUDA class
+passes with it on the A100, at 0.004 to 0.10 of the bound (`$OUT/regression/gpu_review/`).
 
 **`GBGPU/tests/test_stft_gb_dffr.py`.** The `gb_dffr_*` entry points, called with the arguments
 the comp will pass in step 5. Fixture: 24 six-hour segments of 10 s samples, the band 3.9 to 4.6
@@ -967,7 +1130,8 @@ CPU tests pass:
   `ValueError`.
 
 The CUDA class of the file is skipped without a GPU: 9 tests, among them CUDA against CPU and the
-16-row tiles against the 32-row tiles, with a provisional bound of 1e-12 of each peak.
+16-row tiles against the 32-row tiles, with a provisional bound of 1e-12 of each peak. On the A100
+7 of the 9 pass and two fail ("On the GPU" below).
 
 ### Regression tests
 
@@ -1147,18 +1311,43 @@ points are therefore drift between runs, which the unchanged `information_matrix
 
 None in this step.
 
-### Pending on the GPU
+### On the GPU
 
-After the step 3 GPU runs. On a GPU node, from the shared environment:
-`PYTHON=$PYTHON BASE_ENV=$OUT/step3_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step4.sh --device gpu $OUT environment golden golden_l1 tests unit_numbers exchange benchmarks benchmarks_l1`.
-This runs:
+Run on 2026-10-20 from 00:30 to 01:53 on the full A100, from the frozen environment of the step 4
+code, `$OUT/step4_env` (step 5 records how it was built and checked), after the step 3 GPU runs,
+one call per part, for each part of `environment golden golden_l1 tests unit_numbers exchange
+benchmarks benchmarks_l1`, from `$OUT/step4_env/lisa-analysis-tools`:
+`PYTHON=$OUT/step4_env/.venv/bin/python BASE_ENV=$OUT/step3_env DFFR_PYTHON=<Python of the dffr CUDA 13 environment> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step4.sh --device gpu $OUT <part>`.
+The exchange calls standalone dffr on its CUDA 13 backend (step 6, "Standalone dffr against DFFR
+in `STFTGBComputations`"), in `.venv-gpu13` of the dffr clone.
 
-- the CUDA classes of both test files, CUDA against CPU and 16 against 32 rows among them;
-- the exchange on the GPU backends of both packages;
-- the existing response against the step 3 GPU captures.
-
-The first GPU run also reaches code that no CPU run reaches: the launch above 48 kB, the band-bin
-map at 32 rows and the device copy of the domain.
+- **Existing response against step 3** (parts `golden` and `golden_l1`): every output
+  bit-identical except `fill` (141 of 144; `fill` at most 3.4e-17 of its peak), and 26 of 26 on
+  `L1Orbits`; in this step the two captures of each fixture were bit-identical, `fill` included.
+  Pass.
+- **LAT tests** (`tests/test_dffr.py`): 10 of 10 pass, the 5 CUDA cases included. CUDA against CPU
+  at most 3.8e-16 for the transforms and 1.0e-15 for the coefficients; every other number equals
+  the CPU's (`unit_numbers_gpu.txt`). Pass.
+- **GBGPU tests** (`tests/test_stft_gb_dffr.py`): 17 of the 19 new tests pass, among them CUDA
+  against CPU and 16 against 32 rows. So the code that no CPU run reaches runs: the launch above
+  48 kB (swap at 32 rows), the band-bin map at 32 rows and the device copy of the domain. Two
+  CUDA cases fail; both assert a property that the CPU build has and the GPU build need not have.
+  The author decided on 2026-10-20 to leave them failing and record them:
+  - `test_compact_template_equals_fill_global` asks for bit equality of the compact template and
+    the `fill_global` grid. On the A100, 375 of 1080 elements differ, by at most 3.8e-15 of their
+    values. The two come from different kernels, which nvcc compiles separately; with one source,
+    the additions into the grid are exact, so the difference is the rounding of two builds.
+  - `test_swap_ll_grad_matches_host_differences` compares the swap gradient with host central
+    differences of `get_swap_ll_stft` at rtol 1e-6. On the A100 only f̈ of the added source
+    misses, by 5.2e-4. The test's f̈ step, 1e-28 Hz/s² over six days, changes the phase far less
+    than rounding, so this component measures rounding: on the CPU the kernel and the host round
+    alike, on the GPU the swap-gradient kernel and the swap kernel do not.
+- **Every other test** keeps its step 3 outcome on the GPU.
+- **Exchange with standalone dffr on the GPU** (part `exchange`): 14 of 14 outputs within the
+  gate of 1e-13: compact templates 1.7e-14, `fill_global` 1.2e-14, (d|h) 5.0e-16, (h|h) 1.5e-16,
+  the segment table identical except the TDI weights (2.7e-16) (`exchange_compare_gpu.txt`). Pass.
+- **Benchmarks**: `$OUT/benchmarks/step4/gpu_{esa,l1}_run{1,2,3}.json`; compared between steps
+  through the interleaved round (step 6).
 
 ## Step 5: wiring
 
@@ -1171,7 +1360,7 @@ CPU node: `wn-la-01` (AMD EPYC 9754, Bergamo), Slurm job 41576984, 16 CPUs, 2026
 ran inside that allocation as
 `srun --jobid=<job> --overlap -n 1 -c 16 env PYTHON=$PYTHON BASE_ENV=$OUT/step4_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> scripts/dffr/run_step5.sh --device cpu $OUT <part>`:
 every part but the benchmarks side by side, then `benchmarks benchmarks_l1` alone
-(`$OUT/regression/step5/step5_cpu_chain.sh`). The GPU runs are pending.
+(`$OUT/regression/step5/step5_cpu_chain.sh`). The GPU runs are recorded below ("On the GPU").
 
 The existing response must stay bit-identical to the step 4 code, with timings within run-to-run
 noise. The DFFR response, called through `STFTGBComputations`, must give the outputs of its entry
@@ -1415,14 +1604,36 @@ and so is the Fisher matrix, which DFFR does not have yet.
 
 None in this step.
 
-### Pending on the GPU
+### On the GPU
 
-After the step 4 GPU runs, which come from `$OUT/step4_env`. Part 4c changed the trees of the
-shared environment, so these runs come from the frozen environment of the step 5 code,
-`$OUT/step5_env` (part 4c), with its own scripts. On a GPU node:
-`cd $OUT/step5_env/lisa-analysis-tools && PYTHON=$OUT/step5_env/.venv/bin/python BASE_ENV=$OUT/step4_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step5.sh --device gpu $OUT environment golden golden_l1 golden_dffr golden_dffr_l1 tests exchange against_existing envelope_noise benchmarks benchmarks_l1`.
-This runs the CUDA classes of the test files, the CUDA wiring test among them, and the first GPU
-captures and timings of DFFR through the comp.
+Run on 2026-10-20 from 01:53 to 03:39 on the full A100, from the frozen environment of the step 5
+code, `$OUT/step5_env`, after the step 4 GPU runs, one call per part, for each part of
+`environment golden golden_l1 golden_dffr golden_dffr_l1 tests exchange against_existing
+envelope_noise benchmarks benchmarks_l1`:
+`cd $OUT/step5_env/lisa-analysis-tools && PYTHON=$OUT/step5_env/.venv/bin/python BASE_ENV=$OUT/step4_env DFFR_PYTHON=<Python of the dffr CUDA 13 environment> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step5.sh --device gpu $OUT <part>`.
+
+- **Existing response against step 4** (parts `golden` and `golden_l1`): every output
+  bit-identical except `fill` (142 of 144 and 25 of 26; `fill` at most 3.4e-17 of its peak). Pass.
+- **First GPU captures of DFFR through the comp** (parts `golden_dffr` and `golden_dffr_l1`, 42
+  and 21 arrays): the two captures are bit-identical except `fill` (at most 1.2e-16 of its peak),
+  the same reproducibility as the existing response. Against the CPU captures of this step:
+  (d|h) and (h|h) at most 1.4e-15 of their peaks, the swap terms 8.0e-15 (the cross term), the
+  F-statistic 4.1e-15, `fill` 2.3e-14, and gradients 1.1e-10 to 7.2e-10, the finite differences
+  enlarging the rounding. These captures are the GPU baseline of DFFR for part 4c.
+- **Test suites** (part `tests`): every test keeps its step 4 outcome on the GPU, the two failing
+  CUDA cases of step 4 included; the 11 new tests pass, the CUDA wiring test among them, and
+  `test_engine_calls_bind_to_STFTGBComputations_signatures` now passes, as on the CPU. Pass.
+- **Exchange through the comp on the GPU** (part `exchange`): 14 of 14 outputs within the gate of
+  1e-13, with the numbers of step 4. LAT's side equals step 4's in 28 of 29 entries; `fill_global`
+  differs by 6.1e-17 of its peak, the rounding of its atomic additions. Pass.
+- **DFFR against the existing response** (part `against_existing`): the same numbers as on the CPU
+  to every printed digit: median mismatch 5.6e-10, largest 2.6e-8, phases within 2.2e-5 rad, norm
+  ratios 0.99998 to 1.00008 (`against_existing_gpu.txt`).
+- **Envelope noise** (part `envelope_noise`): with the envelope on, DFFR's gradient noise is
+  unchanged in f0, ḟ, f̈, φ0, λ and β (ratio on / off 1.00 on all three fixtures), as on the CPU;
+  the existing response's ratios lie between 0.81 and 1.40 (`envelope_noise_*_gpu.txt`).
+- **Benchmarks**: `$OUT/benchmarks/step5/gpu_{esa,l1}{,_dffr}_run{1,2,3}.json`, both responses;
+  compared between steps and between the responses through the interleaved round (step 6).
 
 ## Part 4c: DFFR Fisher matrix
 
@@ -1436,7 +1647,7 @@ CPU node: `wn-la-01` (AMD EPYC 9754, Bergamo), Slurm job 41576984, 16 CPUs, 2026
 ran inside that allocation as
 `srun --jobid=<job> --overlap -n 1 -c 16 env PYTHON=$PYTHON BASE_ENV=$OUT/step5_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> scripts/dffr/run_step4c.sh --device cpu $OUT <part>`:
 the regression parts side by side, then the timing parts alone
-(`$OUT/regression/step4c/part3_chain.sh`). The GPU runs are pending.
+(`$OUT/regression/step4c/part3_chain.sh`). The GPU runs are recorded below ("On the GPU").
 
 The existing response and the likelihood outputs of DFFR must stay bit-identical to step 5. The
 DFFR Fisher matrix must equal a reference built from `fill_global` templates to 1e-13 of
@@ -1492,7 +1703,8 @@ first-order delays. All 10 tests pass on the CPU:
 The wiring test compares `information_matrix` with `gb_dffr_information_matrix` called with the
 expected arguments, bit for bit, in both of its settings. `DFFRGPUFisherTest` compares the CUDA
 Fisher with the reference, with the CPU, and the 4-row with the 8-row tables, within a provisional
-1e-7 of sqrt(F_ii F_jj); it is skipped without a GPU. `test_information_matrix_raises` is removed.
+1e-7 of sqrt(F_ii F_jj); it is skipped without a GPU, and passes on the A100 ("On the GPU" below).
+`test_information_matrix_raises` is removed.
 
 **`GBGPU/tests/test_stft_gb.py`.** `test_exact_amplitude_and_phase_entries` checks the same
 identities for the existing response, with (h|h) from its astro track, the chirp its Fisher
@@ -1661,21 +1873,527 @@ compiled code it does not change, as they were.
 
 None in this part.
 
-### Pending on the GPU
+### On the GPU
 
-On a GPU node, from the shared environment, after the step 5 GPU runs:
-`PYTHON=$PYTHON BASE_ENV=$OUT/step5_env DFFR_PYTHON=<Python of the dffr environment> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step4c.sh --device gpu $OUT environment golden golden_l1 golden_dffr golden_dffr_l1 exchange tests fd_steps fisher_timing fisher_timing_l1 existing_timing existing_timing_l1`.
-This runs the CUDA Fisher test and the first GPU captures and timings of the DFFR Fisher.
+Run on 2026-10-20 from 03:39 to 06:35 on the full A100, from the shared environment (LAT
+24b4bd8a, GBGPU 2d52f70), after the step 5 GPU runs, one call per part, for each part of
+`environment golden golden_l1 golden_dffr golden_dffr_l1 exchange tests fd_steps fisher_timing
+fisher_timing_l1 existing_timing existing_timing_l1`:
+`PYTHON=$PYTHON BASE_ENV=$OUT/step5_env DFFR_PYTHON=<Python of the dffr CUDA 13 environment> MOJITO_L1=<file> BENCH_ARGS="--num-segments 365 --batch-sizes 1 10 100 1000 10000" scripts/dffr/run_step4c.sh --device gpu $OUT <part>`.
+
+- **Existing response against step 5**: every output bit-identical except `fill` (143 of 144 and
+  25 of 26; `fill` at most 4.2e-18 of its peak). Pass.
+- **DFFR against step 5.** On the CPU this part leaves every DFFR output bit-identical; on the GPU
+  it does not. 16 of the 42 arrays and 8 of the 21 on `L1Orbits` stay bit-identical: the outputs
+  of `get_ll`, its gradients, and the swap terms of the added source. The others are `fill`
+  (rounding of its atomic additions) and outputs of the two-template kernels: the swap terms of
+  the removed source change by at most 2.7e-15 of their peaks (the cross term), the F-statistic
+  by 3.9e-16, and the swap gradients by up to 1.1e-10.
+  Per component the swap gradients change 3 to 5 orders of magnitude less than DFFR's own
+  gradient noise (part `envelope_noise` of step 5) in f0, ḟ, f̈, φ0, λ, β and ι; in the amplitude
+  and ψ the change reaches 2.5 times that noise, which there is itself rounding (1e-13 and 1e-9
+  of their scale), as in step 2.
+
+  The machine code for the A100 (`cuobjdump` and `nvdisasm` of the sm_80 images of both GBGPU
+  modules) shows the cause. `DFFRTile::Template::values`, which nvcc keeps out of line in the
+  two-template kernels, holds two more double-precision multiplies in this part, where the
+  windowed sums were split before their final products. The kernels that inline it (`get_ll`,
+  `fill_global`, the `get_ll` gradient) only order independent operations differently, which
+  changes no rounding. The agreement of the GPU with the CPU is the same before and after: (d|h)
+  and (h|h) within 1.4e-15 of their peaks, the swap cross term 8.0e-15 and 6.2e-15 (step 5 and
+  this part), `fill` 2.3e-14, gradients 1.1e-10 to 7.2e-10. Files:
+  `$OUT/regression/gpu_review/sass/`, `golden_dffr_gpu{,_l1}_vs_step5.txt`.
+
+  The author decided on 2026-10-20 to accept the change: on the GPU these outputs are judged to
+  rounding (direct outputs within 1e-14 of their peaks, gradients by their noise) instead of bit
+  identity, because the occupancy runs of step 6 change this code again. Pass by that criterion.
+- **First GPU captures of the DFFR Fisher** (8 and 4 arrays): the two captures are bit-identical.
+  CUDA against CPU, per entry relative to sqrt(F_ii F_jj): at most 9.3e-6 on all nine parameters,
+  where the f̈ entries carry their finite-difference noise, and 2.8e-8 on the subset f0, ḟ, λ, β.
+- **Test suites** (part `tests`): every test keeps its step 5 outcome on the GPU, the two failing
+  CUDA cases of step 4 included; the 11 new tests pass, among them `DFFRGPUFisherTest` (the CUDA
+  Fisher against the reference, against the CPU, and 4 against 8 rows, within 1e-7 of
+  sqrt(F_ii F_jj)). `test_information_matrix_raises` is removed. Pass.
+- **Exchange** (part `exchange`): 14 of 14 outputs within the gate of 1e-13, the numbers of step
+  4; LAT's side equals step 5's in 28 of 29 entries, `fill_global` 6.1e-17 of its peak. Pass.
+- **Steps of the Fisher matrix** (part `fd_steps`): between the default and the tenfold steps the
+  DFFR Fisher changes by at most 8.8e-6 of sqrt(F_ii F_jj) outside the row and column of f̈,
+  against the criterion of 1e-3 (CPU 1.1e-5): on the plateau from the default steps. The
+  existing Fisher changes by 2.0e-3 there (β), on the plateau from the tenfold steps; recorded,
+  as on the CPU. DFFR against the existing Fisher: median over sources 5.7e-4 (ESA) and 7.7e-4
+  (`L1Orbits`) of sqrt(F_ii F_jj), largest 1.5e-2 at the sources the fixture places at window
+  edges (`plateau_*_gpu.txt`, `fisher_against_existing_gpu.txt`).
+- **Timing gate of the DFFR Fisher on the A100** (parts `fisher_timing` and `fisher_timing_l1`;
+  the two Fisher kernels in turn, three runs each, a year of one-day segments). Ratio of the time
+  of the DFFR Fisher to that of the existing Fisher:
+
+  | Batch | 9 parameters, ESA | 9 parameters, `L1Orbits` | 8 parameters, ESA | 8 parameters, `L1Orbits` |
+  | --- | --- | --- | --- | --- |
+  | 1 | 0.995 | 0.982 | 0.989 | 0.974 |
+  | 10 | 0.931 | 0.927 | 0.942 | 0.939 |
+  | 100 | 0.925 | 0.919 | 0.932 | 0.923 |
+  | 1000 | 1.435 | 1.469 | 1.062 | 1.087 |
+  | 10 000 | 1.336 | 1.343 | 0.987 | 0.994 |
+
+  At 10 000 sources the existing Fisher takes 605 µs per source on nine parameters and 513 µs on
+  eight, the DFFR Fisher 809 µs and 507 µs. The run-to-run spreads stay below 2.2 %. The gate,
+  not slower than the existing Fisher, fails from 1000 sources on nine parameters, and at 1000
+  sources on the eight parameters of the global fit. The GPU builds the stencil tables one at a
+  time, which keeps 12 to 24 of a block's 128 threads busy during a build (Risks and observations
+  of `plan.md`). The author decided on 2026-10-20 to optimise this in step 6 and to measure the
+  gate again then. Files: `$OUT/benchmarks/step4c/gpu_{esa,l1}_fisher_{dffr,existing}_run*.json`,
+  `compare_gpu_{esa,l1}_fisher_dffr_vs_existing.txt`.
+- **Existing response against the step 5 build** (parts `existing_timing` and
+  `existing_timing_l1`, in turn): 32 of 35 and 33 of 35 points within the run-to-run noise, the
+  others within 0.5 %, median ratio 1.000 on both fixtures. Unchanged. Files:
+  `compare_gpu_{esa,l1}_vs_step5_env.txt`.
 
 ## Step 6: validation
 
-Not started.
+Started on 2026-10-19 with the comparison of standalone dffr and the integration on the A100.
 
 ### Unit tests
 
+Added with the direct build of the DFFR Fisher tables (2026-10-20), in GBGPU
+`tests/test_stft_gb_dffr.py`:
+
+- `DFFRFisherTest.test_parity_on_one_set_of_states`: the Fisher matrix on A and φ0 alone against
+  the reference built from `fill_global` templates, at the bound of the other parity tests
+  (`FISHER_BOUND`), for both settings of the class. Both parameters leave the reception states
+  unchanged, so their eight stencil templates share one set of states: the smallest layout, where
+  the build holds one template at a time and enlarges the space that holds it.
+- `DFFRGPUFisherTest.test_gpu_matches_reference_and_cpu` gains the same layout: the CUDA Fisher
+  against the CPU one (`GPU_FISHER_BOUND`).
+
+Both pass on the CPU and on the A100, with the code before and after the change (below).
+
 ### Regression tests
 
+**GPU timings of the steps** (the interleaved round, author's decision of 2026-10-19; run on
+2026-10-20 from 06:40 to 15:41 on the full A100). Each of the seven environments (steps 0 to 5 and
+part 4c) ran its own `stft_benchmarks.py`: a year of one-day segments, batches 1 to 10 000, one
+warm-up and five timed calls per point. The environments took turns, in three passes over both
+orbit fixtures, and the environments of step 5 and part 4c also timed DFFR in each pass. Each
+comparison is `compare_benchmarks.py` over the three runs: the ratio of the medians, and "within"
+when it lies inside the larger run-to-run spread of the two sets (`$OUT/benchmarks/interleaved/`,
+chain `$OUT/benchmarks/interleaved_chain.sh`).
+
+| Comparison | ESA: median ratio, points within | `L1Orbits`: median ratio, points within | Outside the noise |
+| --- | --- | --- | --- |
+| Step 1 / step 0 | 1.003, 17 of 35 | 1.002, 18 of 35 | from 1000 sources on 1.1 % to 2.1 % slower, gradients the most: the five-point acceleration. No threshold in this step. |
+| Step 2 / step 1 | 0.960, 2 of 35 | 0.955, 4 of 35 | 3 % to 6 % faster in every method but the Fisher matrix (0.975 to 1.00): the cheaper special functions of step 2, within the noise on the CPU. |
+| Step 3 / step 2 | 1.000, 27 of 35 | 0.998, 27 of 35 | the other 8 points per fixture differ by at most 0.7 % (0.991 to 1.007), in both directions, against run-to-run spreads of 0.1 % to 0.4 %. |
+| Step 4 / step 3 | 1.000, 33 of 35 | 1.000, 34 of 35 | at most 0.6 %. |
+| Step 5 / step 4 | 0.999, 33 of 35 | 1.000, 35 of 35 | at most 0.5 %. |
+| Part 4c / step 5 | 1.000, 35 of 35 | 1.000, 35 of 35 | none. |
+| DFFR, part 4c / DFFR, step 5 | 0.999, 22 of 30 | 0.999, 25 of 30 | `get_ll_stft` at 10 000 sources 1.0 % slower on both fixtures; the rest calls of about 1 ms at batch 1 or within 0.6 %. |
+
+The only larger ratios, 0.70 to 1.35, are `get_swap_ll_stft` at batch 1, whose run medians spread
+by 14 % to 64 % in every environment.
+
+- Step 3, whose criterion is the run-to-run spread per point, meets it at 27 of 35 points on both
+  fixtures; the other 8 lie within 0.7 %. On the CPU the same criterion left 3 of 30 points
+  outside, by at most 0.7 %, which the author accepted as drift. The author accepted these 8 as
+  drift too (2026-10-20): they are below 1 %, in both directions, and the linked kernels of
+  steps 2 and 3 have the same registers.
+- Steps 4, 5 and part 4c leave the GPU timings of the existing response unchanged.
+
+DFFR against the existing response, both in the part 4c environment, as the speed-up of DFFR
+(existing time over DFFR time; ESA, `L1Orbits` within 3 % except at batch 1):
+
+| Method | Batch 1 | 10 | 100 | 1000 | 10 000 | Per source at 10 000, existing / DFFR [µs] |
+| --- | --- | --- | --- | --- | --- | --- |
+| `fill_global_stft` | 5.2 | 5.7 | 5.8 | 7.9 | 8.8 | 57.9 / 6.6 |
+| `get_ll_stft` | 7.2 | 5.0 | 5.1 | 7.2 | 8.2 | 63.5 / 7.7 |
+| `get_ll_grad_stft` | 7.5 | 4.9 | 4.3 | 4.9 | 4.9 | 998 / 206 |
+| `get_swap_ll_stft` | 4.7 | 3.4 | 3.4 | 4.0 | 4.1 | 179 / 43.7 |
+| `get_fstat_ll_stft` | 4.5 | 4.9 | 4.8 | 4.7 | 4.0 | 1077 / 273 |
+| `get_swap_ll_grad_stft` | 6.4 | 2.8 | 2.2 | 2.2 | 2.1 | 5457 / 2584 |
+| `information_matrix`, 9 parameters | 1.02 | 1.08 | 1.07 | 0.70 | 0.76 | 614 / 812 |
+| `information_matrix`, 8 parameters | 1.02 | 1.06 | 1.06 | 0.95 | 1.03 | 521 / 508 |
+
+DFFR is faster in every likelihood method at every batch size, by 2.1 to 8.8 times from 1000
+sources on. The Fisher matrix of this build is not; see the next entry for the change of its
+reduction.
+
+**Shared code of the exchange scripts.** `dffr_exchange_lat.py` gained `build_dffr_comp` (the comp,
+its domain, Fresnel object, kinematics table and group stand-in) and `dffr_exchange_dffr.py`
+`build_response`, which the timing scripts below use as well. On 2026-10-20 `dffr_exchange_lat.py`
+gained `--inputs` (a capture on the inputs of `dffr_timing_lat.py --write-inputs`, with
+`--max-sources`) and `--by-segment` (the compact templates compared per group of segments). On one
+node, the committed and the changed scripts give the same exchange outputs on the fixture: LAT
+side 29 of 29 arrays (checked after each of the two changes), dffr side 14 of 14, bit-identical.
+Captures of one script on two CPU types differ in 8 of the 29 arrays, as the conventions expect.
+Files: `$OUT/regression/step6_prep/exchange_refactor_check/`.
+
+**Final reduction of the DFFR Fisher in dynamic shared memory** (2026-10-20, uncommitted in
+`lat_dffr_kernels.hh`). The reduction staged its sums in a static array of 128 threads × 9
+derivatives (9 216 bytes). It now stages them where the reception states and amplitude parts were,
+which are free after a source's last pass, with the same tree and so the same order of the sums.
+The author had asked for a warp-shuffle reduction to free the memory; this variant frees it as
+well and keeps the GPU results bit for bit. `dffr_information_bytes` takes the larger of the
+tables and the staging, so the dynamic shared memory of every layout in use is unchanged.
+`kernel_resources.py` against the step 5 module, for the A100 and the H100
+(`$OUT/regression/step6_fisher/kernel_resources_sm{80,90}.txt`):
+
+| Kernel | Static shared [B], A100 / H100 | Blocks per SM by registers and by shared memory, A100 / H100 |
+| --- | --- | --- |
+| DFFR Fisher, 4 rows, 8 parameters | 9 696 → 480 / 10 720 → 1 504 | 2, 2 / 2, 3 (was 2, 2 / 2, 2) |
+| DFFR Fisher, 4 rows, 9 parameters | 9 696 → 480 / 10 720 → 1 504 | 2, 2 / 2, 2 (was 2, 1 / 2, 2) |
+
+Registers (170 and 174), stack (1 848 bytes) and dynamic shared memory are unchanged, and so is
+every other kernel of the module. On nine parameters the A100 now runs 2 blocks per SM instead of
+1, as the existing Fisher does.
+
+Checks after the rebuild of the shared environment with this change (2026-10-20, 15:45 to 16:16,
+`$OUT/regression/step6_fisher/staging_chain.sh`):
+
+- CPU, both captures on the A100 node before and after the rebuild: the DFFR outputs, Fisher
+  matrices included, bit-identical, 50 of 50 and 25 of 25. Pass.
+- GPU, against the part 4c GPU captures: DFFR bit-identical except `fill` (48 of 50 and 24 of 25;
+  `fill` at most 1.1e-16 of its peak, the rounding of its atomic additions), so the Fisher
+  matrices are bit-identical; the existing response 144 of 144. Pass.
+- `DFFRFisherTest` and `DFFRGPUFisherTest`: 10 of 10 pass.
+- Timing gate of the DFFR Fisher again, in turn with the existing Fisher, three runs each (ratio
+  of the DFFR time to the existing time):
+
+  | Batch | 9 parameters, ESA | 9 parameters, `L1Orbits` | 8 parameters, ESA | 8 parameters, `L1Orbits` |
+  | --- | --- | --- | --- | --- |
+  | 1 | 1.008 | 0.992 | 0.990 | 0.983 |
+  | 10 | 0.945 | 0.940 | 0.940 | 0.936 |
+  | 100 | 0.936 | 0.929 | 0.932 | 0.930 |
+  | 1000 | 1.046 | 1.074 | 1.058 | 1.078 |
+  | 10 000 | 0.974 | 0.980 | 0.987 | 0.993 |
+
+  On nine parameters the ratio at 1000 sources falls from 1.44 to 1.47 to 1.05 to 1.07, and at
+  10 000 from 1.34 to 0.97 to 0.98. Eight parameters keep the ratios of part 4c. The gate, not
+  slower than the existing Fisher, now fails at 1000 sources only, by 5 % to 8 %, on both
+  parameter sets (`compare_gpu_{esa,l1}_fisher_dffr_vs_existing.txt`).
+
+**Where the DFFR Fisher spends its time on the A100** (2026-10-20, on the code with the change
+above). A side build, never committed, adds cycle counters to the kernel: thread 0 of each block
+reads `clock64()` around the table build of each pass, the band setup, the pixel loop (closed by
+an added barrier, so that it is the block's) and the final reduction, and prints its sums for 32
+sources per call. GPU profiling counters are open to administrators only on SURF Spider, so
+Nsight Compute cannot be used. Fixture `esa_tdi2_envelope`, a year of one-day segments, 4 rows per
+pass, 1000 and 10 000 sources, 64 sources per line (`$OUT/validation/fisher_profile/`:
+`patch_header.py`, `build_profile.sh`, `run_with_profile.py`, `summary.txt`).
+
+| Derivatives | Table build | Band setup | Pixel loop | Reduction | Cycles per source and block |
+| --- | --- | --- | --- | --- | --- |
+| 8 | 50.0 % to 50.2 % | 0.1 % | 49.6 % to 49.8 % | below 0.1 % | 149 to 150 million |
+| 9 | 48.4 % to 48.6 % | 0.1 % | 51.3 % to 51.5 % | below 0.1 % | 173 to 176 million |
+
+The batch size does not change the split. At the A100's clock of about 1.41 GHz, 150 million
+cycles per source and 216 blocks at a time give about 490 µs per source, the measured 507 µs. Half
+of the time is the table build, which builds one stencil template at a time and keeps 12 to 24 of
+the 128 threads busy. The first profile run failed at import: the module relinked from the
+recorded commands kept the build tree's library path, which does not hold `libcudart.so.13`;
+`build_profile.sh` now sets the toolkit's path with `patchelf` (`failed_run_1/`).
+
+**Direct build of the DFFR Fisher tables** (2026-10-20, uncommitted in `lat_dffr_kernels.hh`). The
+build of part 4c ran the tile's table build once per stencil template, through a scratch table
+that the block then copied into the Fisher tables. At 4 rows its stages had 4 to 24 work items,
+so one warp did the work, with 4 barriers per template. The author asked for a build straight into
+the Fisher tables, with all threads of the block and no scratch table. All templates at once do not
+fit: the build also makes values that only its later stages read, per template the shifted source
+constants (152 bytes) and per segment row 6 emission states and 6 link amplitudes (336 bytes).
+At 4 rows that is 54 kB for the 36 templates of 9 parameters, where 5.4 kB are free before the
+second block per SM goes. The author chose these changes instead (2026-10-20):
+
+- One build for the tile and the Fisher matrix. The stages of the tile's table build run over
+  (template, row) items and reach every field through a storage type (`dffr_build_rows`). The
+  tile's table is the storage of one template, a wave of Fisher templates the other. Each field
+  comes from the same function and the same inputs as before; only where it is stored differs.
+- Waves in the anchor space. The four endpoint anchors of each reception state moved out of
+  `DFFRFisherReception` into an array of their own, `DFFRFisherAnchors`. Only the pixels read them,
+  so they are built after the last wave, and until then the waves keep their intermediates in their
+  space. A wave holds as many templates as fit there, spread evenly over the waves: at 4 rows 9 of
+  the 36 templates on 9 parameters and 8 of the 32 on 8, in 4 waves. Where the anchors take less
+  than one template (A and φ0 alone, one set of states), the space is enlarged to hold one. A pass
+  has 13 barriers instead of 129 on 8 parameters and 145 on 9.
+- The band setup takes each derivative's carrier range from the band starts of its templates, so
+  the build keeps no carrier ranges. The scratch table, its copies and the layout field
+  `variant_derivative`, now unused, are gone.
+
+Resources (`kernel_resources.py` on the shared environment's build tree, which compiles the edited
+header; `$OUT/regression/step6_build/kernel_resources_sm{80,90}.txt`, against the staging
+change's report above):
+
+| DFFR Fisher | A100 (sm_80) | H100 (sm_90) |
+| --- | --- | --- |
+| Registers | 170 → 176 | 174 → 183 |
+| Dynamic shared memory at 4 rows, 8 / 9 parameters [B] | 70 464 → 66 272 / 81 280 → 77 088 | same |
+| Dynamic shared memory at 8 rows, 8 / 9 parameters [B] | 140 640 → 132 400 / 162 272 → 154 032 | same |
+| Blocks per SM by registers and by shared memory at 4 rows, 8 / 9 parameters | 2, 2 / 2, 2 (unchanged) | 2, 3 / 2, 2 (unchanged) |
+
+Stack (1 848 bytes), spills (none) and static shared memory are unchanged. A third block per SM
+would need 168 registers or fewer, so the added registers cost nothing. Nine parameters at 8 rows
+now fit an A100 block (154 032 bytes and 800 static, below 163 kB), where that launch raised before.
+The tile's kernels keep their registers, stack and shared memory; only the own registers of the
+DFFR swap gradient on the A100 change, 180 → 184, below its linked 254.
+
+Machine code (`cuobjdump` with `nvdisasm` 13.2, `compare_sass.py` and `compare_fp_ops.py` of
+`$OUT/regression/gpu_review/sass/`; listings in `$OUT/regression/step6_build/sass/`): every DFFR
+function has other instructions on both devices. The tile's kernels and functions keep their
+double-precision operations in number and kind, in another order. The Fisher kernels keep their
+double multiplies, adds, fused multiply-adds and reciprocals (83 `MUFU.RCP64H` on the A100), and have
+8 more single-precision reciprocals, all in integer divisions (5 → 13, the division of the work
+items into template and row), and 6 fewer double comparisons (390 → 384).
+
+Checks (chain `$OUT/regression/step6_build/chain.sh`, job 41556413 on wn-gb-02, 2026-10-20 from
+21:00 to 22:31). "Before" is the shared environment, built with the staging change. "After" is
+GBGPU's CPU and CUDA modules with `gb_dffr.cu` recompiled from the edited header by the commands the
+build tree records, and linked into copies of the installed packages (`build_overlay.sh`, loaded by
+`run_with_overlay.py`), so nothing installed changed. A check of the loaded module files confirms
+which build each run used (`loaded_{before,after}.log`).
+
+- CPU, both captures on this node: the DFFR outputs through the comp, Fisher matrices included,
+  bit-identical, 50 of 50 and 25 of 25. The "before" captures also equal those of the staging
+  chain. Pass.
+- Exchange with standalone dffr on the CPU: the LAT capture is bit-identical before and after, 29 of
+  29 entries, compared entry by entry, because one entry is text, which `--compare-files` cannot
+  subtract. Against standalone dffr, none of the 14 outputs is above the gate of 1e-13. Pass.
+- GPU, against the staging chain's captures: DFFR 48 of 50 and 24 of 25 bit-identical, Fisher
+  matrices included; the other three are `fill`, within 1.1e-16 of its peak (the order of its
+  atomic additions, criterion 1e-15). The existing response 143 of 144; the other is its `fill`,
+  3.0e-17. Pass.
+- `tests/test_stft_gb_dffr.py` with both builds: 36 passed and 2 failed before and after. The 2
+  failures are the `DFFRGPUTest` cases recorded in step 4; the new tests pass with both builds.
+
+Timings on the A100 (`$OUT/regression/step6_build/timing/`), in turn: per run and fixture the
+existing Fisher, the DFFR Fisher before, after, and after at 8 rows, then the DFFR likelihood
+methods before and after. Three runs on both fixtures, a year of one-day segments, batches 1 to
+10 000. The DFFR Fisher after the change, over the existing Fisher:
+
+| Batch | 9 parameters, ESA | 9 parameters, `L1Orbits` | 8 parameters, ESA | 8 parameters, `L1Orbits` |
+| --- | --- | --- | --- | --- |
+| 1 | 0.632 | 0.584 | 0.563 | 0.554 |
+| 10 | 0.540 | 0.540 | 0.528 | 0.525 |
+| 100 | 0.518 | 0.512 | 0.510 | 0.505 |
+| 1000 | 0.555 | 0.562 | 0.560 | 0.567 |
+| 10 000 | 0.510 | 0.513 | 0.518 | 0.520 |
+
+- The gate, not slower than the existing Fisher, holds at every point. At 10 000 sources the DFFR
+  Fisher takes 309 µs per source on 9 parameters and 266 µs on 8, the existing one 606 and 513 µs.
+- Against the code before the change, the DFFR Fisher takes 0.52 to 0.63 of the time (median
+  0.55): 1.9 times faster from 1000 sources.
+- 8 rows over 4 rows: 0.54 to 0.76 at batch 1, 0.90 to 0.93 at 10 and 100, 1.25 to 1.32 at 1000 and
+  10 000. At 8 rows a block fills an SM's shared memory, at 4 rows two blocks share it. While a
+  batch has fewer sources than the A100 has SMs (108), no SM holds a second block either way, and
+  the 8-row build wins: half the passes, twice the items per stage. From 1000 sources the second
+  block per SM wins. At 8 rows the Fisher takes 0.30 to 0.73 of the time of the existing one, so
+  it meets the gate as well. The author decided on 2026-10-21 to keep 4 rows for every batch.
+- DFFR likelihood methods, after over before: median ratio 1.001 (ESA) and 1.000 (`L1Orbits`), 27
+  and 23 of 30 points within the run-to-run spread, the others within 0.8 % in both directions
+  (`fill_global_stft` at batch 1 aside, whose run medians spread by 22 % to 70 %).
+  `fill_global_stft` at 10 000 sources is 0.8 % to 0.9 % slower on both fixtures, in 5 of 6 pairs
+  of runs; its kernel does the same arithmetic in another order, and its outputs are unchanged.
+  The author accepted this as drift (2026-10-21).
+
+CPU (the A100 node, ESA fixture, 32 segments, batches 1, 8 and 64, three runs in turn;
+`cpu_timing_chain.sh`, `$OUT/regression/step6_build/timing_cpu/`): the DFFR Fisher after over
+before 0.993 to 1.006, 6 of 6 points within the spread; the likelihood methods without the swap
+kernels 0.970 to 1.005, 10 of 12 within, `get_ll_stft` at batches 8 and 64 2.5 % faster.
+
+Where the time goes now: the profile above, its patch adapted to the new call
+(`$OUT/regression/step6_build/profile/`):
+
+| Derivatives | Table build | Band setup | Pixel loop | Reduction | Cycles per source and block |
+| --- | --- | --- | --- | --- | --- |
+| 8 | 14.8 % | 0.4 % to 0.5 % | 84.7 % | 0.1 % | 80 million (149 to 150 before) |
+| 9 | 12.3 % to 12.4 % | 0.4 % | 87.1 % to 87.2 % | 0.1 % | 93 to 94 million (173 to 176 before) |
+
+The build takes 12 and 11 million cycles per source instead of 75 and 85 million, 6.3 and 7.4
+times fewer. The pixel loop takes 68 and 81 million cycles instead of 74 and 90 million. The
+counters give the elapsed cycles of a block that shares its SM with another block, so this
+difference is not separated from the other block's phases. The pixel loop is now 85 % to 87 % of
+the kernel; at 4 rows a pass gives 84 to 92 pixels to the 128 threads of a block.
+
+Rebuild of the shared environment with the change (author's decision of 2026-10-21;
+`rebuild_chain.sh`, 08:35 to 08:49 on wn-gb-02). The rebuilt environment reproduces the overlay's
+captures: on the CPU bit for bit, 50 of 50 and 25 of 25; on the GPU bit for bit but for `fill`
+(DFFR at most 1.2e-16 of its peak, the existing response 3.1e-17, the order of the atomic
+additions). The DFFR test file gives the same outcomes, 36 passed and the 2 recorded failures. The
+installed CUDA module holds the machine code of the overlay that was timed: of the 185 functions
+of its sm_80 code, none has other instructions (`sass/installed_vs_overlay_sm80.txt`).
+
+**Occupancy: `domains.cu` capped at 168 registers** (2026-10-21). Of the four settings the plan
+lists for this A/B, the author chose to time the cap at 168 only, after an estimate of what each
+would gain. The cap at 128 adds spills without a further block per SM, and forcing `values` and
+`build` inline costs the `get_ll` gradient a block. Device link-time optimisation would give the
+DFFR two-template kernels a third block, but needs a change of the install for the pip toolkit.
+The two-template DFFR consumers are timed at 16 rows as well, inside both builds. Further
+decisions of the author that day: the ESA fixture, 10 000 sources, three runs in turn; and a
+setting goes in when it is faster beyond the run-to-run spread at some point and slower beyond it
+at none, over every method of both responses.
+
+Resources with the cap (`register_cap.py`, the script of step 4 pointed at the record of the
+direct build, `$OUT/regression/step6_occupancy/register_cap_168_sm{80,90}.txt`). The cap applies to
+every function of `domains.cu`, which GBGPU's CUDA module compiles from LAT's tree:
+
+| | A100 (sm_80) | H100 (sm_90) |
+| --- | --- | --- |
+| Spill stores per call of `get_fourier_value`, `get_fourier_kernel`, `add_ip_swap_contrib` [B] | 164, 52, 96 | 164, 68, 96 |
+| Existing response, every kernel, Fisher included | 244 → 166 registers: 2 → 3 blocks per SM | 222 → 166: 2 → 3 |
+| DFFR swap | 220 → 168: 3 blocks at 16 rows, 2 at 32 (shared memory) | 222 → 166: 3 at both |
+| DFFR F-statistic | 220 → 178 (its own code): 2 | 222 → 168: 3 at both |
+| DFFR swap gradient | 254, set by the tile's out-of-line functions: 2 | 254: 2 |
+
+`add_ip_contrib` does not spill, and the other DFFR kernels keep their registers. On the A100 the
+DFFR F-statistic and swap gradient gain no block, while `add_ip_swap_contrib`, which they call,
+spills 96 bytes per call.
+
+Checks (chain `$OUT/regression/step6_occupancy/chain.sh`, job 41556413 on wn-gb-02, 2026-10-21
+from 09:31 to 11:18). The cap build is GBGPU's CUDA module with `domains.cu` recompiled at
+`-maxrregcount=168` by the build tree's recorded commands, linked into a copy of the installed
+package (`build_cap_overlay.sh`); the baseline is the rebuilt shared environment.
+
+- GPU outputs against the rebuilt environment's captures: not bit-identical, against the premise
+  of the plan that a cap changes only the allocation of registers. Under the cap the compiler
+  computes 12 products in `STFTDomainGPU::add_ip_contrib` apart from their additions instead of in
+  fused multiply-adds (12 fewer `DFMA`, 12 more `DADD`), and `get_fourier_kernel` has one multiply
+  less (`compare_fp_ops.py`, `sass/fp_ops_cap168_vs_rebuilt_sm80.txt`). Unchanged: the templates
+  (`fill` within 1.2e-16 of its peak, the order of the atomic additions), the swap outputs and the
+  Fisher matrices of both responses. Changed in both responses: (d|h), (h|h), the log-likelihood
+  and the F-statistic, by at most 4.0e-16 of their peaks, and the gradients built from them, by at
+  most 5.4e-10 of their peaks for the existing response and 1.4e-11 for DFFR. Existing response 92
+  of 144 arrays bit-identical, DFFR 31 of 50 and 15 of 25.
+- `tests/test_stft_gb_dffr.py`: 36 passed and the 2 recorded failures, with both builds.
+
+Timings, ESA fixture, a year of one-day segments, 10 000 sources, three runs in turn
+(`$OUT/regression/step6_occupancy/timing/`); ratio of the cap build to the baseline:
+
+| Method | Existing response | DFFR, 32 rows | DFFR, 16 rows (over 32 rows of the baseline) |
+| --- | --- | --- | --- |
+| `get_ll_stft` | 0.919 | 0.996 (within) | |
+| `fill_global_stft` | 0.896 | 1.000 (within) | |
+| `get_ll_grad_stft` | 0.929 | 1.002 (within) | |
+| `get_swap_ll_stft` | 0.950 | 1.010 | 0.970 (1.166 without the cap) |
+| `get_fstat_ll_stft` | 0.937 | 1.004 (within) | 1.048 (1.050 without the cap) |
+| `get_swap_ll_grad_stft` | 0.961 | 1.005 | 1.121 (1.116 without the cap) |
+| `information_matrix`, 9 parameters | 0.848 | 1.000 (within) | |
+| `information_matrix`, 8 parameters | 0.852 | 1.001 | |
+
+- The existing response is faster in every method, by 4 % to 15 %, beyond the run-to-run spread
+  (at most 0.6 %).
+- DFFR at 32 rows keeps 5 of 8 points within the spread; the swap (1.0 %), the swap gradient
+  (0.5 %) and the Fisher matrix on 8 parameters (0.1 %, against a spread of 0.03 %) are slower:
+  the spills of `add_ip_swap_contrib`, without a block gained.
+- 16 rows pay only for the DFFR swap with the cap, which gives it a third block per SM: 3 % faster
+  than the baseline at 32 rows. Without the cap, 16 rows are 5 % to 17 % slower. The comp passes
+  one number of rows to all three two-template methods.
+
+Under the author's rule, faster at some point and slower at none, the cap is a mixed result: the
+existing response gains in every method, DFFR loses in two to three. The author left the cap out
+(2026-10-21), and the two-template DFFR consumers keep their 32 rows. This closes the occupancy
+A/B of step 6.
+
 ### Validation runs
+
+**Standalone dffr against DFFR in `STFTGBComputations` on the full A100** (2026-10-19). The author
+decided that day to run the standalone package's own test suite on the A100 and to time both
+codes on the same inputs, on the ESA orbits only. The ratio of the times is recorded and steers
+the occupancy runs of this step; it is not a gate.
+
+Code: dffr 01530a5 with an uncommitted change that adds a CUDA 13 backend (below); LAT 24b4bd8a and
+GBGPU 2d52f70 (part 4c) with the uncommitted scripts `dffr_timing_lat.py` and `dffr_timing_dffr.py`.
+Both codes were compiled by nvcc 13.2.86 for sm_80 and ran with CuPy 14.2.0 and the CUDA 13.2
+runtime, on the node and job of the conventions above.
+
+- CUDA 13 backend of standalone dffr. The author asked for it so that both codes use one toolkit:
+  the standalone had a CUDA 12 backend only, while the lisatools stack builds with CUDA 13.2, so a
+  CUDA 12 build would have timed two compilers. The change: `DFFRCuda13xBackend` in `src/dffr/backends.py`, which runs
+  the generic CUDA checks of gpubackendtools 0.1.1 with the CUDA 13 version range, because that
+  release has no CUDA 13 class; the extra `gpu-cuda13` (`cupy-cuda13x[ctk]` and the CUDA 13.2
+  runtime libraries); and `tests/test_gpu.py` on the first CUDA backend found. CMake already names
+  the module after the major version of the toolkit. The environment `.venv-gpu13` of the dffr
+  clone was built with the CUDA 13.2 toolkit of the lisatools environment (`DFFR_CUDA_ARCH=80`,
+  `DFFR_MARCH=x86-64-v3`). Logs: `$OUT/validation/standalone_cuda13_build*.log`.
+- Standalone test suite on the A100 (`pytest -rA`, 73 s): 51 of 51 passed, the CUDA tests on
+  `dffr_cuda13x` included. Its timing script `scripts/benchmark.py` and its parity script
+  `scripts/backend_parity.py` were not run, because both build Keplerian orbits. Files:
+  `$OUT/benchmarks/standalone/dffr_pytest_gpu.{log,xml}`.
+- Inputs (`dffr_timing_lat.py --write-inputs`): LAT's kinematics table of the grid, 10 000
+  sources, seeded data and a Hermitian 3 × 3 inverse covariance over one domain; a year of one-day
+  segments from 10 days after the start of the ESA orbit file; TDI 2nd generation, the linear
+  envelope, first-order delays and a chirp-rate floor of 1e-22 Hz/s. Three setups:
+  - the setup of the standalone's benchmark, at band 41 and band 21: the band from 1.5 to 28.5 mHz
+    (2333 bins), Tukey taper 0.116, sources drawn as that benchmark draws them (2 to 28 mHz, seed 7);
+  - the production settings at band 21: the band from 0.1 to 29 mHz (2497 bins), Tukey taper
+    0.1157, the sources of the production fixtures. The standalone has no store windows, so both
+    codes take the whole band as one domain; the store windows of production are timed by the step
+    benchmarks.
+- Timing: `fill_global` and `get_ll` of each code on the first B sources, B from 1 to 10 000, one
+  warm-up call and five timed calls, each closed by a device synchronisation. Three runs; within a
+  run the two codes alternate, one process per code and setup. The standalone's `get_ll` computes
+  (d|d) on every call, which the comp reads from its group; that step is timed on its own, and the
+  columns "without (d|d)" remove it.
+
+Time per source at 10 000 sources. The ratio is ours over the standalone; the spread is the larger
+of the two codes' spreads of their run medians.
+
+| Setup | Method | Ours [µs] | Standalone [µs] | Standalone without (d\|d) [µs] | Ratio | Ratio without (d\|d) | Spread |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| standalone, band 41 | `fill_global` | 11.22 | 10.75 | | 1.044 | | 0.97 % |
+| standalone, band 41 | `get_ll` | 14.59 | 13.52 | 12.86 | 1.079 | 1.134 | 0.87 % |
+| standalone, band 21 | `fill_global` | 6.56 | 6.19 | | 1.059 | | 0.32 % |
+| standalone, band 21 | `get_ll` | 8.45 | 8.16 | 7.50 | 1.035 | 1.126 | 0.71 % |
+| production, band 21 | `fill_global` | 6.45 | 6.05 | | 1.066 | | 0.47 % |
+| production, band 21 | `get_ll` | 7.72 | 7.94 | 7.27 | 0.972 | 1.061 | 0.22 % |
+
+From 1 to 1000 sources the run medians of either code spread by up to 76 %, so those points are not
+quoted; they are in `report.txt`. At 10 000 sources, DFFR in the comp takes 4 to 7 % more time per
+source than standalone dffr in `fill_global`, and 6 to 13 % more in `get_ll` once the standalone's
+(d|d) is removed.
+
+Agreement of the outputs at 10 000 sources, the largest difference relative to the standalone's
+peak: (d|h) at most 1.4e-15 and (h|h) 7.3e-16 in all three setups; the `fill_global` grids
+1.0e-12 (standalone setup, band 41), 6.2e-13 (band 21) and 1.1e-13 (production settings). Two
+checks place the grid difference (`fill_check/`):
+
+- Two runs of the same code differ by 2.4e-16 of the peak (band 41), the order of `atomicAdd`.
+  Between the codes the difference is 1.04e-12 in both pairs of runs, so it is systematic.
+- The exchange on the GPU (24 production sources, 32 segments, `dffr_exchange_*.py --device gpu`)
+  passes its gate of 1e-13 in every output: compact templates 1.7e-14, `fill_global` 1.2e-14, (d|h)
+  5.0e-16, (h|h) 1.5e-16, the segment table identical except the TDI weights (2.7e-16).
+
+On the CPU the two codes agree bit for bit (step 4), so on the GPU the two builds round
+differently. Why the difference grows to 1e-12 over a year is not measured. One candidate: the
+template phase reaches about 5e6 rad over a year, where one unit in the last place is about
+1e-9 rad. The author decided on 2026-10-19 to locate it in this step, before deciding anything
+else: the per-source templates of both codes at 32, 120 and 365 segments.
+
+**Where the two codes' GPU templates differ** (2026-10-20). Compact templates of both codes on the
+A100, on identical inputs: the setup of the standalone's benchmark at band 41, 100 sources, a grid
+of 32, 120 and 365 one-day segments from the same start (`dffr_timing_lat.py --write-inputs`, then
+`dffr_exchange_lat.py --capture --inputs`, `dffr_exchange_dffr.py --device gpu`, and
+`dffr_exchange_lat.py --compare --by-segment`; `$OUT/validation/grid_difference/`). Largest
+difference per segment, relative to the largest template value of that segment:
+
+| Days after the data start | 32 segments | 120 segments | 365 segments |
+| --- | --- | --- | --- |
+| 0 to 73 | 1.3e-14 to 2.7e-14 | 1.3e-14 to 2.7e-14 | 2.2e-14 to 2.7e-14 |
+| 74 to 95 | | 2.5e-14 to 5.8e-14 | 1.2e-13 |
+| 96 to 119 | | 1.1e-13 to 1.2e-13 | 1.1e-13 to 1.2e-13 |
+| 120 to 292 | | | 8.2e-14 to 1.2e-13 |
+| 293 to 364 | | | 2.7e-14 |
+
+The difference does not grow with time, as rounding of the template phase would make it: it rises
+at the same days in the 120-day and the year-long grids and falls again after day 292. So it
+belongs to the orbit's configuration over the year, which sets the arguments of the special
+functions, not to the phase accumulated since the reference time. The segment tables of the two
+codes agree bit for bit except the TDI weights (3.5e-16), so the difference arises in the
+evaluation of the pixels, which the two builds compile differently. With 100 sources the
+`fill_global` grids differ by 8.7e-14 of their peak, with 10 000 by 1.0e-12, about the square root
+of the ratio of the source counts. The year-long grid difference is thus these per-template
+roundings adding up over overlapping sources. (d|h) and (h|h) agree to 1.3e-15 and 3.7e-16. At 120
+segments the templates differ by 1.01e-13 of the peak, just above the gate of 1e-13 of the
+exchange, which was set for its 32 segments.
+
+Files: `$OUT/benchmarks/standalone/` (`report.txt`, `inputs_*.npz`, `ours_*_run*.npz`,
+`dffr_*_run*.npz`, `fill_check/`). Chain: `$OUT/benchmarks/standalone/standalone_chain.sh`; the
+commands of a single run are in the docstring of `scripts/dffr/dffr_timing_lat.py`.
 
 ## Step 7: review of documentation and scripts
 

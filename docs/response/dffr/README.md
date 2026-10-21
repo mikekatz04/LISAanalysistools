@@ -4,8 +4,8 @@ This folder documents the integration of the Direct Fast Fresnel Response (DFFR)
 short-time Fourier transform (STFT) likelihood of galactic binaries in lisaanalysistools (LAT)
 and GBGPU. The work is in progress on the branch `feat-dffr` of both repositories. Since step 5,
 `STFTGBComputations(..., response="dffr")` selects DFFR (see "How to select it" below), and since
-part 4c it has a Fisher matrix (see "The Fisher matrix" below). Its first runs on a GPU and the
-validation of step 6 are still to come.
+part 4c it has a Fisher matrix (see "The Fisher matrix" below). Since 2026-10-20 every step has run
+on a full A100 as well; the validation of step 6 is in progress.
 
 | Document | Content |
 | --- | --- |
@@ -111,8 +111,8 @@ launch gets without raising its limit on dynamic shared memory. Two tables, as `
 take 64.8 kB. Step 4 built that second pixel map, `StftBandBinMap`, and the launch path above 48
 kB, which raises a kernel's limit within what the device allows a block. One DFFR template, the
 table with the source constants and the settings, takes 32 672 bytes at 32 rows. The consumers
-that hold two templates are built for 32 rows and for 16. `STFTGBComputations` uses 32, and the
-A100 benchmarks of step 6 choose between them.
+that hold two templates are built for 32 rows and for 16. `STFTGBComputations` uses 32: on a full
+A100, 16 rows are 5 % to 17 % slower at 10 000 sources (`tests.md`, step 6).
 
 ## Source model and components
 
@@ -178,8 +178,7 @@ Limits:
 - XYZ channels only: a group or domain of another TDI set raises `ValueError`.
 - The combinations of `TDIConfig("1st generation")` or `("2nd generation")` only, in any order;
   others raise `ValueError`.
-- The Fisher matrix has not run on a GPU yet: its CUDA tests and its A100 timings belong to step
-  6.
+- The Fisher matrix uses 4 segment rows per pass on the GPU; the CPU uses one.
 - The two-template kernels (swap, its gradient, the F-statistic) use 32 segment rows per pass on
   the GPU; the CPU uses one.
 
@@ -208,12 +207,14 @@ Each stencil template equals the template that `fill_global_stft` writes for its
 parameters, bit for bit. The tests compare the kernel with `gbgpu.testing`'s reference Fisher,
 which differences those templates: they agree to 3.3e-15 of sqrt(F_ii F_jj) at most.
 
-The kernel, `dffr_information_matrix_kernel` in `lat_dffr_kernels.hh`, gives each stencil template
-its own segment table. The parameters that change no reception state share the windowed sums of the
+The kernel, `dffr_information_matrix_kernel` in `lat_dffr_kernels.hh`, keeps for each stencil
+template what its pixels read from a segment table. It builds these tables with the build of the
+tile (`dffr_build_rows`), straight into the Fisher tables, a wave of templates at a time, with all
+threads of a block. The parameters that change no reception state share the windowed sums of the
 unperturbed source at each pixel; for a galactic binary these are the amplitude, the phase offset,
 the inclination and the polarisation, which `GBDFFRSource` lists in `reception_invariant_params`.
 On the 8 parameters of the global fit, a pixel evaluates 17 sets of sums for 32 templates. On the
-GPU a pass holds 4 segment rows: 70 kB of shared memory on 8 parameters, 81 kB on 9.
+GPU a pass holds 4 segment rows: 66 kB of shared memory on 8 parameters, 77 kB on 9.
 
 - `linear_envelope` defaults to the group's setting, as for the gradients, and `astro_track` does
   not apply.
@@ -222,7 +223,9 @@ GPU a pass holds 4 segment rows: 70 kB of shared memory on 8 parameters, 81 kB o
   of f̈.
 - On the CPU with the installed build, the DFFR Fisher takes 0.82 to 1.13 of the time of the
   existing one: it costs per pixel, the existing one per segment. With GBGPU's CPU module compiled
-  at `-O3`, it takes 0.30 to 0.42. The A100 timings come in step 6.
+  at `-O3`, it takes 0.30 to 0.42.
+- On a full A100 it takes 0.51 to 0.63 of the time of the existing Fisher, from 1 to 10 000 sources
+  on a year of one-day segments (`tests.md`, step 6).
 
 The questions left open, and observations on the accuracy of the Fisher matrix, which a separate
 validation takes up, are listed in `plan.md` (Risks and observations).
