@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # * Step 6 of the DFFR integration (validation), the parts run so far: both responses against
 # * the STFT of a time-domain truth with both data windows (items 1 and 2, the second on the cases
-# * and grid of the step 0 truth), the checks behind that truth, and the likelihood surfaces of
-# * four waveforms against it (item 3).
+# * and grid of the step 0 truth), the checks behind that truth, the likelihood surfaces of four
+# * waveforms against it (item 3), and their mismatch, SNR and likelihood surfaces on the
+# * Mojito-light data (item 4).
 # What each part records, and the results, are in docs/response/dffr/tests.md.
 #
 # Usage: run_step6.sh --device cpu|gpu OUTPUT_ROOT [PART ...]
@@ -19,9 +20,13 @@
 #         surfaces           the likelihood surfaces of the 8 validation sources against the
 #                            truth of part accuracy (one process per source, SURFACE_PROCESSES
 #                            side by side), then the combined report and figures
+#         mojito             the 5 galactic binaries of highest frequency in the Mojito-light data
+#                            (MOJITO_FOLDER), preprocessed as the global fit does over 1.92 years:
+#                            mismatch, SNR and likelihood surfaces of the four waveforms
 # Environment: PYTHON (default python), DFFR_PYTHON (the Python of the standalone dffr
 #   environment, for the truth), DAYS (default 365), N_SIDE_BINS (default 60, side bins of the
-#   templates; production takes 10), SURFACE_PROCESSES (default 4, part surfaces).
+#   templates; production takes 10), SURFACE_PROCESSES (default 4, part surfaces), MOJITO_FOLDER
+#   (default /project/lisa_nlddpc/Data/mojito_light, part mojito).
 set -euo pipefail
 
 usage="usage: run_step6.sh --device cpu|gpu OUTPUT_ROOT [PART ...]"
@@ -38,6 +43,7 @@ dffr_python=${DFFR_PYTHON:-}
 days=${DAYS:-365}
 n_side_bins=${N_SIDE_BINS:-60}
 surface_processes=${SURFACE_PROCESSES:-4}
+mojito_folder=${MOJITO_FOLDER:-/project/lisa_nlddpc/Data/mojito_light}
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 accuracy_dir="$output_root/validation/accuracy"
 truth_dir="$accuracy_dir/truth"
@@ -149,10 +155,18 @@ surfaces() {
     "$python_bin" "$script_dir/likelihood_surfaces.py" --output "$surfaces_dir" --summarize-only
 }
 
+mojito() {
+    local mojito_dir="$output_root/validation/mojito"
+    mkdir -p "$mojito_dir"
+    # * The first run preprocesses the Mojito streams into $mojito_dir/data (about 10 GB of memory).
+    "$python_bin" "$script_dir/mojito_dffr_validation.py" --device "$device" \
+        --output "$mojito_dir" --mojito "$mojito_folder" > "$mojito_dir/run.log" 2>&1
+}
+
 for part in "${parts[@]}"; do
     echo "[step6] $(date +%T) part $part"
     case "$part" in
-    accuracy | truth_chains | accuracy_response | step0 | surfaces) "$part" ;;
+    accuracy | truth_chains | accuracy_response | step0 | surfaces | mojito) "$part" ;;
     *) echo "unknown part $part" >&2 && exit 2 ;;
     esac
 done
