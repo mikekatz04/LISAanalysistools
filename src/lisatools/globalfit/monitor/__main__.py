@@ -115,9 +115,10 @@ def _parser():
                          "In-run equivalent: GF_MONITOR_SNAPSHOT_SHORT=1.")
     ap.add_argument("--output-data", action="store_true",
                     help="build ONLY <RUN_DIR>_output_data.tar.gz: the store "
-                         "extract (every branch from the residual snapshot's "
-                         "row to the last row, full history of the small "
-                         "arrays), the residual snapshot and the run's WDM "
+                         "extract (every stored row of every cold chain and "
+                         "of the small arrays; the large tempered arrays from "
+                         "the residual snapshot's row to the last row), the "
+                         "residual snapshot and the run's WDM "
                          "lookup tables (wdm_lookup_*.h5). No logs, no page. "
                          "For postprocessing (LATW tutorial 09).")
     ap.add_argument("--snapshot-only", action="store_true",

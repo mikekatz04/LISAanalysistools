@@ -29,13 +29,18 @@ recipe and has no shell twin: ``<run_dir>_output_data.tar.gz`` holds the
 store extract, the residual snapshot and the run folder's WDM lookup
 tables (``wdm_lookup_*.h5``) and nothing else -- no logs, no page, no truth
 set, no warm start. It is what a postprocessing reader needs (LATW
-tutorial 09): every branch at the residual snapshot's row, the residual
-itself, the full history of the small arrays, and the tables the EMRI and
-SOBBH templates are built from. Its keep window
-runs from the snapshot's ``store_row`` to the store's last row, because the
-snapshot is written every ``GF_RESIDUAL_SNAPSHOT_EVERY`` rows and can sit a
-few rows behind the last one; a one-row window (``short``) would then drop
-the very row the residual belongs to.
+tutorial 09): every stored row of every cold chain (the posterior samples;
+the GB cold chain is ~1 MB per row compressed, ~1.6 GB for 1685 rows of the
+9-month run), the full history of the small arrays, the residual, and the
+tables the EMRI and SOBBH templates are built from. The large tempered
+arrays (the all-rung GB chain is ~12 MB per row) keep only the rows from
+the snapshot's ``store_row`` to the store's last row: the snapshot is
+written every ``GF_RESIDUAL_SNAPSHOT_EVERY`` rows and can sit a few rows
+behind the last one, so a one-row window (``short``) would drop the very
+row the residual belongs to. Its extract is written at gzip level 9 with
+HDF5's byte-shuffle filter (both built into HDF5): ~9 % smaller than the
+level-4 extract of the other recipes on the float chains; LZMA at its
+maximum gains only ~2 % more on the same data.
 """
 
 from __future__ import annotations
@@ -262,21 +267,25 @@ def _short_members(run_dir: str, store: str, young_bytes: int):
     return out
 
 
-def _output_data_keep(store: str, sidecar: str) -> int:
-    """Rows of the big chains an output-data extract keeps.
+def _output_data_rows(store: str, sidecar: Optional[str]):
+    """``(keep, cold_keep)`` of an output-data extract.
 
-    Enough to reach the residual snapshot's ``store_row`` from the store's
-    last row, plus one: a row the saver writes while the extract runs moves
-    the extract's window forward by one. At least 1.
+    ``cold_keep`` is every stored row: the cold chains are the posterior
+    samples. ``keep``, for the large tempered arrays, reaches the residual
+    snapshot's ``store_row`` from the last row (1 without a snapshot). Both
+    carry one row of margin: a row the saver writes while the extract runs
+    moves the extract's window forward by one.
     """
     import h5py
     import numpy as np
 
     with h5py.File(store, "r") as f:
         it = int(f["global_fit"].attrs["iteration"])
+    if sidecar is None:
+        return 1, it + 1
     with np.load(sidecar) as z:
         row = int(z["store_row"])
-    return max(1, it - row + 1)
+    return max(1, it - row + 1), it + 1
 
 
 def _members(run_dir: str, include_fstat: bool, skip_raw_log,
@@ -384,11 +393,11 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
 
     ``output_data=True`` builds ``<run_dir>_output_data.tar.gz``: the store
     extract, the residual snapshot and the run folder's WDM lookup tables
-    only (see the module docstring). Its
-    ``keep`` / ``cold_keep`` default to the rows from the snapshot's
-    ``store_row`` to the store's last row, plus one; without a snapshot
-    file it ships the extract alone, one row, with a warning. It cannot be
-    combined with ``short`` (returns ``None`` with a warning).
+    only (see the module docstring). Its ``cold_keep`` defaults to every
+    stored row (plus one) and its ``keep`` to the rows from the snapshot's
+    ``store_row`` to the store's last row, plus one; without a snapshot file
+    it ships the extract alone with a one-row ``keep``, and a warning. It
+    cannot be combined with ``short`` (returns ``None`` with a warning).
 
     Never raises: this runs on the writer rank, where a failed diagnostic
     must not become a failed run. A ``None`` return with a warning is the
@@ -429,14 +438,15 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
                                "%s; shipping the store extract alone",
                                sidecar)
                 sidecar = None
+            _keep, _cold_keep = _output_data_rows(store, sidecar)
             if keep is None:
-                keep = _output_data_keep(store, sidecar) if sidecar else 1
+                keep = _keep
             if cold_keep is None:
-                cold_keep = keep
+                cold_keep = _cold_keep
         from ._store_extract import extract
 
-        extract(store, store[:-3] + "_extract.h5", keep,
-                cold_keep=cold_keep)
+        extract(store, store[:-3] + "_extract.h5", keep, cold_keep=cold_keep,
+                **(dict(gzip_level=9, shuffle=True) if output_data else {}))
         if output_data:
             # the run's WDM lookup table(s): the EMRI direct template and the SOBBH
             # lookup likelihood read them, so regenerating those sources needs them

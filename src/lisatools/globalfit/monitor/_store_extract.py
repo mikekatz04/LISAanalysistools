@@ -80,8 +80,16 @@ def _wanted_rows(ds, keep, it):
     return lo, hi
 
 
-def extract(src_path, dst_path, keep, fallback_path=None, cold_keep=None):
+def extract(src_path, dst_path, keep, fallback_path=None, cold_keep=None,
+            gzip_level=4, shuffle=False):
+    # gzip_level / shuffle: the dataset filters. The output-data snapshot asks
+    # for 9 + shuffle (HDF5 built-ins, so every reader handles them): ~9 %
+    # smaller on the float chains; xz at its maximum gains only ~2 % more.
     cold_keep = keep if cold_keep is None else max(int(cold_keep), keep)
+
+    def _filters(obj):
+        return dict(compression="gzip", compression_opts=int(gzip_level),
+                    shuffle=bool(shuffle) and obj.dtype.kind in "biufc")
     src = h5py.File(src_path, "r")
     # A LIVE store is being written while we read: gzip'd chunks caught
     # mid-write fail with "filter returned failure during read"
@@ -146,8 +154,7 @@ def extract(src_path, dst_path, keep, fallback_path=None, cold_keep=None):
             val = _read(name, Ellipsis)
             if val is None:
                 val = np.zeros(obj.shape, dtype=obj.dtype)
-            d = dst.create_dataset(name, data=val,
-                                   compression="gzip", compression_opts=4)
+            d = dst.create_dataset(name, data=val, **_filters(obj))
             stats["full"] += 1
         else:
             chunks = (1,) + tuple(min(s, c) for s, c in
@@ -155,8 +162,7 @@ def extract(src_path, dst_path, keep, fallback_path=None, cold_keep=None):
                                       obj.chunks[1:] if obj.chunks
                                       else obj.shape[1:]))
             d = dst.create_dataset(name, shape=obj.shape, dtype=obj.dtype,
-                                   chunks=chunks, compression="gzip",
-                                   compression_opts=4, fillvalue=0)
+                                   chunks=chunks, fillvalue=0, **_filters(obj))
             this_keep = (cold_keep if any(name.endswith(s)
                                           for s in COLD_DEEP) else keep)
             lo, hi = _wanted_rows(obj, this_keep, it)

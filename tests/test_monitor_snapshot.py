@@ -461,8 +461,9 @@ class OutputDataSnapshotTest(unittest.TestCase):
                     "gb_fstat_fit/shared_search/epoch_0011/DONE.json"):
             _touch(os.path.join(self.run, rel), 256)
 
-    def _fake_extract(self, src, dst, keep, cold_keep=None):
+    def _fake_extract(self, src, dst, keep, cold_keep=None, **filters):
         self.seen_keep = (keep, cold_keep)
+        self.seen_filters = filters
         _touch(dst, 32)
 
     def _build(self, **kw):
@@ -486,11 +487,12 @@ class OutputDataSnapshotTest(unittest.TestCase):
         self.assertTrue(self._build(output_data=True)
                         .endswith("gf_run_output_data.tar.gz"))
 
-    def test_the_keep_window_reaches_the_snapshot_row(self):
-        """10 rows stored, snapshot at row 7: rows 7, 8, 9 plus one row of
-        margin for a save landing during the extract."""
+    def test_the_cold_chains_keep_every_row_and_the_tempered_window_reaches_the_snapshot_row(self):
+        """10 rows stored, snapshot at row 7: every row of the cold chains (the
+        posterior samples), the tempered arrays from row 7 to row 9; each
+        with one row of margin for a save landing during the extract."""
         self._build(output_data=True)
-        self.assertEqual(self.seen_keep, (4, 4))
+        self.assertEqual(self.seen_keep, (4, 11))
 
     def test_an_explicit_keep_still_wins(self):
         self._build(output_data=True, keep=2, cold_keep=3)
@@ -500,10 +502,60 @@ class OutputDataSnapshotTest(unittest.TestCase):
         os.remove(self.sidecar)
         self.assertEqual(self._names(), ["gf_prod_testing_extract.h5",
                                          "wdm_lookup_emri_cx_NF1440_DT2p5_TL32_fd8x0p01_nld2.h5"])
-        self.assertEqual(self.seen_keep, (1, 1))
+        self.assertEqual(self.seen_keep, (1, 11))
 
     def test_short_and_output_data_together_build_nothing(self):
         self.assertIsNone(self._build(output_data=True, short=True))
+
+    def test_the_extract_is_written_at_maximal_compression(self):
+        self._build(output_data=True)
+        self.assertEqual(self.seen_filters, {"gzip_level": 9, "shuffle": True})
+
+
+class ExtractFiltersTest(unittest.TestCase):
+    """``extract(gzip_level=, shuffle=)``: the output-data filters on a real
+    store; the default stays gzip level 4 without shuffle."""
+
+    def setUp(self):
+        import shutil as _shutil
+
+        import h5py
+        import numpy as np
+
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(_shutil.rmtree, self.d, ignore_errors=True)
+        self.src = os.path.join(self.d, "s_testing.h5")
+        self.chain = np.random.default_rng(1).normal(size=(6, 1, 1, 2, 3, 4))
+        with h5py.File(self.src, "w") as f:
+            g = f.create_group("global_fit")
+            g.attrs["iteration"] = 6
+            g.create_dataset("chain/mbh", data=self.chain)
+            g.create_dataset("saved_after", data=["in_model"] * 6,
+                             dtype=h5py.string_dtype())
+
+    def _extract(self, **kw):
+        import h5py
+
+        from lisatools.globalfit.monitor._store_extract import extract
+
+        dst = os.path.join(self.d, "s_testing_extract.h5")
+        with mock.patch("builtins.print"):
+            extract(self.src, dst, 1, **kw)
+        return h5py.File(dst, "r")
+
+    def test_level_9_with_shuffle_on_numbers_never_on_strings(self):
+        import numpy as np
+
+        with self._extract(gzip_level=9, shuffle=True) as f:
+            d = f["global_fit/chain/mbh"]
+            self.assertEqual((d.compression, d.compression_opts, d.shuffle), ("gzip", 9, True))
+            np.testing.assert_array_equal(d[...], self.chain)
+            self.assertFalse(f["global_fit/saved_after"].shuffle)
+
+    def test_the_default_is_unchanged(self):
+        with self._extract() as f:
+            d = f["global_fit/chain/mbh"]
+            self.assertEqual((d.compression_opts, d.shuffle), (4, False))
 
 
 class OutputDataCLITest(unittest.TestCase):
