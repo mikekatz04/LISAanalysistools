@@ -428,3 +428,108 @@ class ShortSnapshotTest(unittest.TestCase):
         self.assertNotIn("gf_artifacts/globalfit_run.log", n)
         self.assertNotIn("slurm_stdout_650_filtered.log", n)
         self.assertNotIn("slurm_stdout_650_tail.log", n)
+
+
+class OutputDataSnapshotTest(unittest.TestCase):
+    """``_output_data.tar.gz`` -- the store extract and the residual
+    snapshot, nothing else (user request 2026-10-20: "data only, no logs").
+
+    The keep window must reach the snapshot's ``store_row``: the snapshot is
+    written every few rows, so a one-row extract (the short tar) can miss
+    the row the residual belongs to.
+    """
+
+    def setUp(self):
+        import shutil as _shutil
+
+        import h5py
+        import numpy as np
+
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(_shutil.rmtree, self.d, ignore_errors=True)
+        self.run = os.path.join(self.d, "gf_run")
+        os.makedirs(self.run)
+        self.store = os.path.join(self.run, "gf_prod_testing.h5")
+        with h5py.File(self.store, "w") as f:
+            f.create_group("global_fit").attrs["iteration"] = 10
+        self.sidecar = os.path.join(self.run, "gf_prod_testing_residual_snapshot.npz")
+        np.savez(self.sidecar, store_row=7)
+        _touch(os.path.join(self.run, "wdm_lookup_emri_cx_NF1440_DT2p5_TL32_fd8x0p01_nld2.h5"), 64)
+        for rel in ("slurm_stdout_662.log", "run_settings.log", "gb_setup.log",
+                    "gf_prod_eigen_tables.pkl", "gb_truth_3to21.npz",
+                    "gf_artifacts/globalfit_run.log", "gpu_util_662.csv",
+                    "gb_fstat_fit/shared_search/epoch_0011/DONE.json"):
+            _touch(os.path.join(self.run, rel), 256)
+
+    def _fake_extract(self, src, dst, keep, cold_keep=None):
+        self.seen_keep = (keep, cold_keep)
+        _touch(dst, 32)
+
+    def _build(self, **kw):
+        with mock.patch(
+                "lisatools.globalfit.monitor._store_extract.extract",
+                side_effect=self._fake_extract):
+            return snap.build_snapshot(self.run, **kw)
+
+    def _names(self, **kw):
+        with tarfile.open(self._build(output_data=True, **kw)) as tf:
+            return sorted(n.replace("gf_run/", "", 1) for n in tf.getnames())
+
+    def test_it_ships_the_extract_the_residual_snapshot_and_the_lookup_table_only(self):
+        self.assertEqual(self._names(), [
+            "gf_prod_testing_extract.h5",
+            "gf_prod_testing_residual_snapshot.npz",
+            "wdm_lookup_emri_cx_NF1440_DT2p5_TL32_fd8x0p01_nld2.h5",
+        ])
+
+    def test_it_is_its_own_file(self):
+        self.assertTrue(self._build(output_data=True)
+                        .endswith("gf_run_output_data.tar.gz"))
+
+    def test_the_keep_window_reaches_the_snapshot_row(self):
+        """10 rows stored, snapshot at row 7: rows 7, 8, 9 plus one row of
+        margin for a save landing during the extract."""
+        self._build(output_data=True)
+        self.assertEqual(self.seen_keep, (4, 4))
+
+    def test_an_explicit_keep_still_wins(self):
+        self._build(output_data=True, keep=2, cold_keep=3)
+        self.assertEqual(self.seen_keep, (2, 3))
+
+    def test_without_a_snapshot_it_ships_the_extract_alone(self):
+        os.remove(self.sidecar)
+        self.assertEqual(self._names(), ["gf_prod_testing_extract.h5",
+                                         "wdm_lookup_emri_cx_NF1440_DT2p5_TL32_fd8x0p01_nld2.h5"])
+        self.assertEqual(self.seen_keep, (1, 1))
+
+    def test_short_and_output_data_together_build_nothing(self):
+        self.assertIsNone(self._build(output_data=True, short=True))
+
+
+class OutputDataCLITest(unittest.TestCase):
+    """``python -m lisatools.globalfit.monitor RUN_DIR --output-data``."""
+
+    def _main(self, *argv):
+        from lisatools.globalfit.monitor import __main__ as cli
+
+        with mock.patch.object(cli, "build_snapshot", return_value="x.tar.gz") as bs, \
+                mock.patch.object(cli, "build_monitor") as bm, \
+                mock.patch.object(cli, "build_short_monitor") as bsm, \
+                mock.patch.object(cli, "check_truth", return_value=(True, "ok")), \
+                mock.patch.object(cli, "describe_run", return_value=""), \
+                mock.patch.object(cli, "parse_add_info", return_value=[]):
+            rc = cli.main(list(argv))
+        return rc, bs, bm, bsm
+
+    def test_it_builds_the_data_tar_and_no_page(self):
+        rc, bs, bm, bsm = self._main("RUN", "--output-data")
+        self.assertEqual(rc, 0)
+        bm.assert_not_called()
+        bsm.assert_not_called()
+        self.assertTrue(bs.call_args.kwargs["output_data"])
+        self.assertFalse(bs.call_args.kwargs["short"])
+
+    def test_it_refuses_the_other_tar_and_page_flags(self):
+        for other in ("--short", "--short-page", "--snapshot"):
+            with self.assertRaises(SystemExit):
+                self._main("RUN", "--output-data", other)

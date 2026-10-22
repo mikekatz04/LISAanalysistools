@@ -67,6 +67,8 @@ USAGE = ("usage: python -m lisatools.globalfit.monitor [--snapshot] "
          "(repeatable)\n"
          "       --short-page   the SHORT page <RUN_DIR>_monitor_short.html "
          "instead of the full one\n"
+         "       --output-data  ONLY <RUN_DIR>_output_data.tar.gz: store extract + "
+         "residual snapshot + WDM lookup tables, no logs, no page\n"
          "       --build-truth  generate the truth set into RUN_DIR first\n"
          "       --keep N       keep N warm-chain iterations (default: 5, or 1 with --short)\n"
          "       --cold-keep N  keep N cold-chain iterations (default: 12, or 1 with --short)\n"
@@ -111,6 +113,13 @@ def _parser():
                          "files (keep=1, every oversized *.log reduced to "
                          "filtered + tail, nothing over 5 MB, no fstat). "
                          "In-run equivalent: GF_MONITOR_SNAPSHOT_SHORT=1.")
+    ap.add_argument("--output-data", action="store_true",
+                    help="build ONLY <RUN_DIR>_output_data.tar.gz: the store "
+                         "extract (every branch from the residual snapshot's "
+                         "row to the last row, full history of the small "
+                         "arrays), the residual snapshot and the run's WDM "
+                         "lookup tables (wdm_lookup_*.h5). No logs, no page. "
+                         "For postprocessing (LATW tutorial 09).")
     ap.add_argument("--snapshot-only", action="store_true",
                     help="build ONLY the tar, skip the page. The page can "
                          "then be rendered offline from it with "
@@ -182,6 +191,9 @@ def main(argv=None):
     if a.short_page and a.snapshot_only:
         ap.error("--short-page builds a page and --snapshot-only builds none; "
                  "use --short-page --snapshot for both")
+    if a.output_data and (a.short or a.short_page or a.snapshot):
+        ap.error("--output-data builds only the data tar; it does not combine "
+                 "with --short, --short-page or --snapshot")
     for _flag, _val in (("--catalogue", a.catalogue),
                         ("--l1-brick", a.l1_brick)):
         if _val:
@@ -228,7 +240,7 @@ def main(argv=None):
               + ", ".join(_shown)
               + ("" if add_info is not None else f"  (from {ADD_ENV})"))
 
-    if not a.snapshot_only:
+    if not (a.snapshot_only or a.output_data):
         st = time.perf_counter()
         if a.short_page:
             build_short_monitor(run_dir, out)
@@ -236,10 +248,11 @@ def main(argv=None):
             build_monitor(run_dir, out, in_process=not a.subprocess, add_info=add_info)
         print(f"[monitor] wrote {out} in {time.perf_counter() - st:.1f} s")
 
-    if a.snapshot or a.snapshot_only or a.short:
+    if a.snapshot or a.snapshot_only or a.short or a.output_data:
         st = time.perf_counter()
         tar = build_snapshot(run_dir, short=a.short, include_fstat=a.add_fstat,
-                             keep=a.keep, cold_keep=a.cold_keep)
+                             keep=a.keep, cold_keep=a.cold_keep,
+                             output_data=a.output_data)
         if tar:
             print(f"[monitor] wrote {tar} in {time.perf_counter() - st:.1f} s")
         else:
@@ -247,7 +260,7 @@ def main(argv=None):
             # that rather than reassuring the operator about a page that
             # was never asked for.
             print("[monitor] snapshot FAILED (see warnings above)"
-                  + ("" if a.snapshot_only else "; the page was still "
+                  + ("" if (a.snapshot_only or a.output_data) else "; the page was still "
                      "written"), file=sys.stderr)
             return 1
     return 0

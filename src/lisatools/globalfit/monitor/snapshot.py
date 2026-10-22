@@ -23,6 +23,19 @@ The recipe, unchanged:
      full-history file plus a raw tail (it grows ~0.5 MB/iteration and is
      the one file that outgrows the budget);
   4. ``tar -czf <run_dir>_snapshot.tar.gz``.
+
+``output_data=True`` (CLI ``--output-data``, 2026-10-20) is the third
+recipe and has no shell twin: ``<run_dir>_output_data.tar.gz`` holds the
+store extract, the residual snapshot and the run folder's WDM lookup
+tables (``wdm_lookup_*.h5``) and nothing else -- no logs, no page, no truth
+set, no warm start. It is what a postprocessing reader needs (LATW
+tutorial 09): every branch at the residual snapshot's row, the residual
+itself, the full history of the small arrays, and the tables the EMRI and
+SOBBH templates are built from. Its keep window
+runs from the snapshot's ``store_row`` to the store's last row, because the
+snapshot is written every ``GF_RESIDUAL_SNAPSHOT_EVERY`` rows and can sit a
+few rows behind the last one; a one-row window (``short``) would then drop
+the very row the residual belongs to.
 """
 
 from __future__ import annotations
@@ -249,6 +262,23 @@ def _short_members(run_dir: str, store: str, young_bytes: int):
     return out
 
 
+def _output_data_keep(store: str, sidecar: str) -> int:
+    """Rows of the big chains an output-data extract keeps.
+
+    Enough to reach the residual snapshot's ``store_row`` from the store's
+    last row, plus one: a row the saver writes while the extract runs moves
+    the extract's window forward by one. At least 1.
+    """
+    import h5py
+    import numpy as np
+
+    with h5py.File(store, "r") as f:
+        it = int(f["global_fit"].attrs["iteration"])
+    with np.load(sidecar) as z:
+        row = int(z["store_row"])
+    return max(1, it - row + 1)
+
+
 def _members(run_dir: str, include_fstat: bool, skip_raw_log,
              max_file_mb: Optional[int] = None, keep_products=()):
     """Archive members. ``skip_raw_log`` is one path or a set of them.
@@ -333,7 +363,8 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
                    short: bool = False,
                    young_bytes: Optional[int] = None,
                    max_file_mb: Optional[int] = None,
-                   tail_mb: int = 5) -> Optional[str]:
+                   tail_mb: int = 5,
+                   output_data: bool = False) -> Optional[str]:
     """Build ``<run_dir>_snapshot.tar.gz``. Returns the path, or ``None``.
 
     ``short=True`` builds ``<run_dir>_short.tar.gz`` instead: log
@@ -351,33 +382,69 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
     favour of a one-iteration one. A full snapshot of that run is
     ~330 MB compressed.
 
+    ``output_data=True`` builds ``<run_dir>_output_data.tar.gz``: the store
+    extract, the residual snapshot and the run folder's WDM lookup tables
+    only (see the module docstring). Its
+    ``keep`` / ``cold_keep`` default to the rows from the snapshot's
+    ``store_row`` to the store's last row, plus one; without a snapshot
+    file it ships the extract alone, one row, with a warning. It cannot be
+    combined with ``short`` (returns ``None`` with a warning).
+
     Never raises: this runs on the writer rank, where a failed diagnostic
     must not become a failed run. A ``None`` return with a warning is the
     contract.
     """
     run_dir = os.path.abspath(str(run_dir).rstrip("/"))
+    if short and output_data:
+        logger.warning("snapshot NOT built: short and output_data are two "
+                       "different tars; ask for one of them.")
+        return None
     # ⚠ REAL SENTINELS, not value comparison. These used to default to
     # 5 / 12 and short mode overrode them with ``if keep == 5``, which
     # makes an EXPLICIT keep=5 indistinguishable from the default and
     # silently demotes it to 1 -- caught by the test that asserts an
     # explicit kwarg still wins. ``None`` means "caller said nothing".
-    if keep is None:
-        keep = 1 if short else 5
-    if cold_keep is None:
-        cold_keep = 1 if short else 12
-    out_path = out_path or (
-        run_dir + ("_short.tar.gz" if short else "_snapshot.tar.gz"))
+    # output_data resolves its own defaults from the store, below.
+    if not output_data:
+        if keep is None:
+            keep = 1 if short else 5
+        if cold_keep is None:
+            cold_keep = 1 if short else 12
+    out_path = out_path or (run_dir + (
+        "_short.tar.gz" if short
+        else "_output_data.tar.gz" if output_data
+        else "_snapshot.tar.gz"))
     st = time.perf_counter()
     try:
         store = _live_store(run_dir)
         if store is None:
             logger.warning("snapshot: no live *testing*.h5 under %s", run_dir)
             return None
+        if output_data:
+            from ..residual_snapshot import snapshot_path
+
+            sidecar = snapshot_path(store)
+            if not os.path.exists(sidecar):
+                logger.warning("output-data snapshot: no residual snapshot "
+                               "%s; shipping the store extract alone",
+                               sidecar)
+                sidecar = None
+            if keep is None:
+                keep = _output_data_keep(store, sidecar) if sidecar else 1
+            if cold_keep is None:
+                cold_keep = keep
         from ._store_extract import extract
 
         extract(store, store[:-3] + "_extract.h5", keep,
                 cold_keep=cold_keep)
-        if short:
+        if output_data:
+            # the run's WDM lookup table(s): the EMRI direct template and the SOBBH
+            # lookup likelihood read them, so regenerating those sources needs them
+            tables = sorted(os.path.join(run_dir, fn) for fn in os.listdir(run_dir)
+                            if fn.startswith("wdm_lookup_") and fn.endswith(".h5"))
+            members = ([store[:-3] + "_extract.h5"] + ([sidecar] if sidecar else [])
+                       + tables)
+        elif short:
             # ALLOWLIST. No log filtering at all: the newest stdout
             # ships RAW (it gzips ~11x and is a superset of every other
             # log), and nothing writes _filtered/_tail products into
@@ -422,10 +489,10 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
             pass
         return None
     _mb = os.path.getsize(out_path) / 1048576.0
-    if short:
-        # THE MEMBER LIST, not just the size. A short tar is an
-        # allowlist, so "what did it decide to ship" is the thing that
-        # goes wrong, and it is invisible from the size alone.
+    if short or output_data:
+        # THE MEMBER LIST, not just the size. Both are allowlists, so
+        # "what did it decide to ship" is the thing that goes wrong, and
+        # it is invisible from the size alone.
         _rows = []
         for _p in members:
             try:
@@ -435,8 +502,9 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
                 continue
         _rows.sort(reverse=True)
         logger.info(
-            "short snapshot %s: %.1f MB compressed from %d member(s), "
-            "%.1f MB raw --\n%s", out_path, _mb, len(_rows),
+            "%s snapshot %s: %.1f MB compressed from %d member(s), "
+            "%.1f MB raw --\n%s", "short" if short else "output-data",
+            out_path, _mb, len(_rows),
             sum(r[0] for r in _rows),
             "\n".join(f"    {r[0]:8.2f} MB  {r[1]}" for r in _rows))
     logger.info("snapshot %s (%.1f MB) in %.1f s", out_path, _mb,
