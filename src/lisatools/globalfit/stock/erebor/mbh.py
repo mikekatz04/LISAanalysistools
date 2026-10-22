@@ -148,6 +148,24 @@ class MBHSettings(Settings):
     de_jump_mode_frac: float = dataclasses.field(
         default_factory=env_default("MBH_DE_JUMP_MODE_FRAC", 0.5, float)
     )
+    # The coordinates the inner moves PROPOSE in (user ruling 2026-10-19:
+    # "keep the same sampling/waveform parameters on the MBHB, but when we do
+    # the sampling moves, move in the LISA reference frame ... Only the move
+    # that produces the new coordinates should be moved in the LISA frame"):
+    # "sampling" (default: the ICRS sampling basis, bit-identical) or "lisa"
+    # (every inner move -- eigen, jump mixture, cross-walker jump, stretch --
+    # proposes in (lam_L, sinbeta_L, psi_L, t_L), mapped back to ICRS with
+    # the frame Jacobian in the Metropolis factor; the tables, the
+    # adaptation, the controller and the jump partners work in that frame;
+    # the sky-mode hops already do). Stamped onto the move with the frame
+    # map below (MBH_PROPOSAL_FRAME; ResidualAddOneRemoveOneMove._frame_proposal).
+    proposal_frame: str = dataclasses.field(
+        default_factory=env_default("MBH_PROPOSAL_FRAME", "sampling", str)
+    )
+    # The frame map of "lisa" (a LISAFrameMap on alpha / sin_delta / psi /
+    # t_plunge with the run's constellation phase); COMPUTED by
+    # source_runtime.prepare_mbh_branch (never an env knob).
+    proposal_frame_map: Optional[Any] = None
 
 
 

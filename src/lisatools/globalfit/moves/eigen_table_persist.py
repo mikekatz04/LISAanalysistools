@@ -110,7 +110,7 @@ def entry_key(branch, leaf):
 
 def make_entry(axes, sigmas, visits, *, scope, ndim, ntemps, nwalkers,
                x0=None, data_identity=None, store_iteration=None,
-               sigmas_fisher=None, axis_tune=None):
+               sigmas_fisher=None, axis_tune=None, frame="sampling"):
     """One sidecar entry: the table as the move consumes it + guards.
 
     ``axes``/``sigmas`` are stored in the EXACT shape the move holds in
@@ -132,6 +132,14 @@ def make_entry(axes, sigmas, visits, *, scope, ndim, ntemps, nwalkers,
     acceptance-driven controller's per-axis multiplier ``(ndim,)`` on the
     table's (adapted) sigma -- ``sigmas`` is already the tuned step that ran.
     Written only when given, same no-bump argument.
+
+    ``frame`` (``{BRANCH}_PROPOSAL_FRAME``, 2026-10-19): the coordinates the
+    table (and any adapted / tuned scale in it) lives in -- ``"sampling"``
+    (the sampling basis) or ``"lisa"`` (the MBH proposal frame). Written
+    only when it is not ``"sampling"``, so a knob-off entry is byte-for-byte
+    the old one; an entry without the key reads as ``"sampling"``, and
+    :func:`load_entry` discards an entry of another frame (a table built in
+    one frame is never adopted in the other: the next refresh rebuilds).
     """
     entry = {
         "axes": np.asarray(axes),
@@ -154,6 +162,8 @@ def make_entry(axes, sigmas, visits, *, scope, ndim, ntemps, nwalkers,
         entry["sigmas_fisher"] = np.asarray(sigmas_fisher)
     if axis_tune is not None:
         entry["axis_tune"] = np.asarray(axis_tune, dtype=float)
+    if frame is not None and str(frame) != "sampling":
+        entry["frame"] = str(frame)
     return entry
 
 
@@ -195,14 +205,15 @@ def load_sidecar(path):
 
 
 def _guards_ok(entry, key, *, scope, ndim, ntemps, nwalkers,
-               data_identity=None):
+               data_identity=None, frame="sampling"):
     """STRICT guards: only what makes the table wrong, not merely stale.
 
     Shapes (square axes of the right ``ndim``, ``sigmas`` matching, a
     per-(temp, walker) stash whose leading dims are the current ladder),
-    the metadata ``ndim``/``ntemps``/``nwalkers``/scope, and the data
-    identity when BOTH sides know it. A mismatch logs and discards the
-    entry so the caller rebuilds.
+    the metadata ``ndim``/``ntemps``/``nwalkers``/scope, the proposal frame
+    (an entry without one is ``"sampling"``), and the data identity when
+    BOTH sides know it. A mismatch logs and discards the entry so the
+    caller rebuilds.
     """
     def _bad(msg, *args):
         logger.warning(
@@ -260,6 +271,13 @@ def _guards_ok(entry, key, *, scope, ndim, ntemps, nwalkers,
         return _bad(
             "stored scope %r != %r", entry.get("scope"), scope
         )
+    stored_frame = str(entry.get("frame", "sampling"))
+    want_frame = "sampling" if frame is None else str(frame)
+    if stored_frame != want_frame:
+        return _bad(
+            "stored proposal frame %r != %r (a table, and its adapted scale, "
+            "never crosses frames)", stored_frame, want_frame,
+        )
     # a per-(temp, walker) stash must line up with the CURRENT ladder /
     # walker count row for row — the seam slices it with the proposal mask
     if axes.ndim >= 4 and axes.shape[:2] != (int(ntemps), int(nwalkers)):
@@ -279,7 +297,8 @@ def _guards_ok(entry, key, *, scope, ndim, ntemps, nwalkers,
 
 
 def load_entry(path, branch, leaf, *, scope, ndim, ntemps, nwalkers,
-               data_identity=None, return_fisher=False, return_tune=False):
+               data_identity=None, return_fisher=False, return_tune=False,
+               frame="sampling"):
     """``(axes, sigmas, visits)`` for one (branch, leaf), or ``None``.
 
     ``None`` means "build it" — no sidecar, no entry for this leaf, or
@@ -298,7 +317,8 @@ def load_entry(path, branch, leaf, *, scope, ndim, ntemps, nwalkers,
     if entry is None or not isinstance(entry, dict):
         return None
     if not _guards_ok(entry, key, scope=scope, ndim=ndim, ntemps=ntemps,
-                      nwalkers=nwalkers, data_identity=data_identity):
+                      nwalkers=nwalkers, data_identity=data_identity,
+                      frame=frame):
         return None
     out = (entry["axes"], entry["sigmas"], int(entry.get("visits", 0)))
     if return_fisher:

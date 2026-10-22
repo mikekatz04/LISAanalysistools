@@ -4919,6 +4919,33 @@ export EMRI_INNER_MOVE_KIND=eigen
 export MBH_SKY_MOVE_BOTH_WEIGHT=${MBH_SKY_MOVE_BOTH_WEIGHT:-0.02}
 export MBH_SKY_MOVE_LAT_WEIGHT=${MBH_SKY_MOVE_LAT_WEIGHT:-0.04}
 export MBH_SKY_MOVE_LONG_WEIGHT=${MBH_SKY_MOVE_LONG_WEIGHT:-0.02}
+# ---- MBH PROPOSALS IN THE LISA FRAME (2026-10-19) --------------------------
+# Mike 2026-10-19: "There are clear difficulties in the equatorial frame. Can
+# we keep the same sampling/waveform parameters on the MBHB, but when we do
+# the sampling moves, can we move in the LISA reference frame (similar to
+# what is needed for the MBHB sky move) ... Only the move that produces the
+# new coordinates should be moved in the LISA frame." The sampling basis and
+# the waveform stay ICRS (alpha / sin_delta / psi / t_plunge); every MBH inner
+# move (eigen, jump mixture, cross-walker jump) proposes in (lam_L, sinbeta_L,
+# psi_L, t_L) -- the constellation frame at the row's own orbital phase, the
+# sky-hops' map -- and the proposal is mapped back with the frame Jacobian in
+# the Metropolis factor (|det J| = 1 + O(Omega R / c), ln|det J| +-2-5e-5).
+# The eigen tables, the adaptation, the controller and the jump partners all
+# work in that frame; the sky hops keep converting themselves. Why (9mo job
+# 773, rows 858-1007, 600 cold samples per leaf): in ICRS t_plunge is a
+# near-deterministic, partly NONLINEAR function of the sky (R^2 of t on
+# alpha / sin_delta / psi: linear 0.87-0.998, quadratic 0.997-1.000; t widths
+# 3-243 s); in the LISA frame t_L is 20-75x narrower (0.17-3.2 s) and
+# decoupled (R^2 0.02-0.28); the standardized 4x4 condition number drops
+# 304 -> 3.7, 2314 -> 119, 2923 -> 556, 421 -> 9.8 (leaves 1-4). A Gaussian
+# step along a Fisher axis in ICRS leaves the curved t(sky) relation and is
+# rejected. Code default "sampling" (bit-identical); rollback
+# MBH_PROPOSAL_FRAME=sampling on the launch line. Log, once per leaf refresh:
+#   [MBH_EIGEN] leaf k: proposals in the LISA frame (t_L sigma 0.42 s vs
+#   t_plunge 31.00 s in the sampling basis)
+# A frame-tagged eigen-table sidecar entry is never adopted in the other
+# frame (the first refresh after a switch rebuilds).
+export MBH_PROPOSAL_FRAME=${MBH_PROPOSAL_FRAME:-lisa}
 # ---- EIGEN JUMP MIXTURE (2026-10-13) ---------------------------------------
 # A share of each branch's eigen inner-move proposals draws its axis step at
 # {BRANCH}_EIGEN_JUMP_FACTOR x the table width (lisatools.sampling.moves.

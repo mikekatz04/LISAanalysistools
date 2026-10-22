@@ -128,6 +128,12 @@ EMRI_AUDIT_LINE = {
     "MBH_DE_JUMP_MIX": "0.1", "SOBBH_DE_JUMP_MIX": "0.2",
 }
 EMRI_AUDIT_KNOBS = tuple(EMRI_AUDIT_LINE)
+# 2026-10-19 (Mike, "when we do the sampling moves, can we move in the LISA
+# reference frame ... Only the move that produces the new coordinates should be
+# moved in the LISA frame"): the MBH inner moves propose in the LISA frame
+# (code default "sampling").
+PROPOSAL_FRAME_LINE = {"MBH_PROPOSAL_FRAME": "lisa"}
+PROPOSAL_FRAME_KNOBS = tuple(PROPOSAL_FRAME_LINE)
 #: what the launchers leave at the CODE defaults on the MBH / SOBBH lines (the
 #: knobs exist): the controller band / factor and the jump's mode fraction
 EMRI_AUDIT_NOT_EXPORTED = tuple(f"{b}_{k}" for b in ("MBH", "SOBBH") for k in (
@@ -948,6 +954,9 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             # the acceptance controller, the cross-walker jump); code defaults
             # off / off / 0. EigenJumpMixLauncherTest pins the block.
             *EMRI_AUDIT_KNOBS,
+            # 2026-10-19: the MBH proposal frame (code default "sampling");
+            # EigenJumpMixLauncherTest pins it.
+            *PROPOSAL_FRAME_KNOBS,
             # 2026-10-13: the ladder caps (first ruling: EMRI T_max 100; second
             # ruling the same day: main-mode tempering -- EMRI T_max 6, MBH
             # T_max 10, the MBH lost-rung guard off, the EMRI guard at 50 nats);
@@ -1938,6 +1947,8 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             # 2026-10-18: the EMRI sampling audit block, same reason (no source
             # branch is armed in the 3mo v9 twin, which carries no EMRI export)
             *EMRI_AUDIT_KNOBS,
+            # 2026-10-19: the MBH proposal frame, same reason
+            *PROPOSAL_FRAME_KNOBS,
             # 2026-10-13: the ladder cap exports, mirrored in the 3mo twin
             "EMRI_LADDER_TMAX", "EMRI_LADDER_REANCHOR_NATS",
             "MBH_LADDER_TMAX", "MBH_LADDER_REANCHOR_NATS",
@@ -3339,6 +3350,32 @@ class EigenJumpMixLauncherTest(unittest.TestCase):
             for knob in EMRI_AUDIT_NOT_EXPORTED:
                 with self.subTest(script=os.path.basename(path), knob=knob):
                     self.assertNotIn(knob, exports)
+
+    def test_the_mbh_proposal_frame_is_lisa_in_every_v9_production_launcher(self):
+        """2026-10-19 (Mike, examining the MBHB sampling: "keep the same
+        sampling/waveform parameters on the MBHB, but when we do the sampling
+        moves, can we move in the LISA reference frame"): MBH_PROPOSAL_FRAME=lisa
+        in every v9 production launcher, overridable on the line (rollback
+        =sampling), placed in the MBH sky-hop block with the ruling and the
+        9mo numbers; the code default stays "sampling" (bit-identical)."""
+        for path in V9_PRODUCTION:
+            exports = _exports(path)
+            src = open(path).read()
+            for knob, want in PROPOSAL_FRAME_LINE.items():
+                with self.subTest(script=os.path.basename(path), knob=knob):
+                    self.assertEqual(exports.get(knob), want)
+                    self.assertRegex(
+                        src, rf"(?m)^export {knob}=\$\{{{knob}:-{want}\}}$")
+            block = src[src.index("# ---- MBH PROPOSALS IN THE LISA FRAME (2026-10-19)"):
+                        src.index("export MBH_PROPOSAL_FRAME=")]
+            for quote in ("Only the move that produces the", "304 -> 3.7",
+                          "20-75x narrower", "linear 0.87-0.998"):
+                with self.subTest(script=os.path.basename(path), quote=quote):
+                    self.assertIn(quote, block)
+            self.assertLess(src.index("export MBH_SKY_MOVE_LONG_WEIGHT="),
+                            src.index("export MBH_PROPOSAL_FRAME="))
+            for b in ("EMRI", "SOBBH"):
+                self.assertNotIn(f"{b}_PROPOSAL_FRAME", exports)
 
     def test_the_warm_self_refit_block_is_on_in_every_v9_production_launcher(self):
         """2026-10-13 (Mike): the GB warm-start SELF refit -- every v9

@@ -60,6 +60,8 @@ __all__ = [
     "empirical_axis_widths",
     "carried_axis_widths",
     "adapt_axis_sigmas",
+    "transform_information",
+    "table_covariance",
 ]
 
 logger = logging.getLogger(__name__)
@@ -608,6 +610,39 @@ def eigen_tables_from_ll_batch(call_ll, x0s, widths, *, eps_rel=1e-4,
             "using identity fallback tables", exc,
         )
         return _identity_tables(widths, x0s.shape[0])
+
+
+def transform_information(info, J):
+    """The information matrix in the coordinates ``y = F(x)``: ``J^-T F J^-1``.
+
+    ``info`` ``(..., d, d)`` is the matrix in ``x``; ``J`` ``(..., d, d)`` is
+    ``dy/dx`` at the expansion point. With ``dx = J^-1 dy`` the quadratic
+    form ``dx^T F_x dx`` is ``dy^T (J^-T F_x J^-1) dy``; the result is
+    symmetrized.
+
+    Exact for an expected-Fisher (Gram) matrix, which is built from first
+    derivatives. NOT how the add/remove move's proposal frame
+    (``{BRANCH}_PROPOSAL_FRAME``) builds its tables: a likelihood Hessian
+    (the ll route) is not a tensor away from the maximum (it carries the
+    gradient times the curvature of ``F``), and when ``y`` decouples what
+    ``x`` correlates (the MBH ``t_plunge`` vs the sky) the ``y`` entries are
+    small differences of large ``x`` entries, which amplifies any
+    finite-difference noise. The move takes ``F_y`` by perturbations in
+    ``y`` instead (``ResidualAddOneRemoveOneMove._build_eigen_table_frame``);
+    this function is the reference the tests check the Gram route against.
+    """
+    info = np.asarray(info, dtype=float)
+    Jinv = np.linalg.inv(np.asarray(J, dtype=float))
+    out = np.swapaxes(Jinv, -1, -2) @ info @ Jinv
+    return 0.5 * (out + np.swapaxes(out, -1, -2))
+
+
+def table_covariance(axes, sigmas):
+    """The Gaussian covariance an ``(axes, sigmas)`` table encodes,
+    ``sum_k sigma_k^2 a_k a_k^T`` (batched over leading axes)."""
+    a = np.asarray(axes, dtype=float)
+    s = np.asarray(sigmas, dtype=float)
+    return np.einsum("...ik,...k,...jk->...ij", a, s ** 2, a)
 
 
 def eigen_table_from_waveform(waveform_model, params, widths, *,

@@ -55,6 +55,12 @@ EIGEN_AXIS_ACC_FACTOR_DEFAULT = 2.0
 #: rung x 1/12 of the axis draws is ~20 per axis)
 EIGEN_AXIS_ACC_MIN_PROPOSALS = 8
 
+# ---- the proposal frame (ruling 2026-10-19) ---------------------------------
+#: {BRANCH}_PROPOSAL_FRAME values: "sampling" (the inner moves propose in the
+#: sampling basis; the default, bit-identical) and "lisa" (they propose in the
+#: LISA frame of the branch's frame map; MBH only)
+PROPOSAL_FRAMES = ("sampling", "lisa")
+
 
 def factor_capped_sigmas(sigmas_fisher, sigmas_adapted, max_factor):
     """``max(sigma_fisher, min(sigma_adapted, max_factor x sigma_fisher))`` per axis.
@@ -367,6 +373,18 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         ladder_top_snr_refresh_pe: allow that refresh in PE stages too
             (``None`` reads ``{BRANCH}_LADDER_TOP_SNR_REFRESH_PE``, then off:
             search stages only).
+        proposal_frame: the coordinates the inner moves PROPOSE in (user
+            ruling 2026-10-19): ``"sampling"`` (the sampling basis, the
+            default: bit-identical) or ``"lisa"`` (every inner move sees
+            ``y = F(x)``, its proposal is mapped back with ``F^-1`` and the
+            Metropolis factor gains ``ln|J_F(x)| - ln|J_F(x')|``; the tables,
+            the adaptation, the controller and the cross-walker jump all work
+            in ``y``). ``None`` reads ``{BRANCH}_PROPOSAL_FRAME``, then
+            ``"sampling"``. See :meth:`_frame_proposal`.
+        proposal_frame_map: the frame map ``F`` of ``"lisa"`` (a
+            :class:`~lisatools.sampling.moves.skymodehop.LISAFrameMap`; the
+            stock MBH build installs one). ``"lisa"`` without a map is
+            refused: the branch's basis has no frame columns.
         **kwargs: additional keyword arguments for the Move class.
     """
 
@@ -415,6 +433,8 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         ladder_tmax_min: float = None,
         ladder_top_snr_refresh: int = None,
         ladder_top_snr_refresh_pe: bool = None,
+        proposal_frame: str = None,
+        proposal_frame_map: Any = None,
         **kwargs,
     ):
 
@@ -536,6 +556,10 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         self.ladder_tmax_min = ladder_tmax_min
         self.ladder_top_snr_refresh = ladder_top_snr_refresh
         self.ladder_top_snr_refresh_pe = ladder_top_snr_refresh_pe
+        # the proposal frame (ruling 2026-10-19; kwarg > env > "sampling" at
+        # USE time; _frame_map, _frame_proposal)
+        self.proposal_frame = proposal_frame
+        self.proposal_frame_map = proposal_frame_map
 
         self._setup_debug()
 
@@ -620,6 +644,221 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             )
             return "walker_max"
         return val
+
+    # ------------------------------------------------------------------
+    # the proposal frame ({BRANCH}_PROPOSAL_FRAME, user ruling 2026-10-19)
+    # ------------------------------------------------------------------
+
+    def _proposal_frame(self):
+        """kwarg > ``{BRANCH}_PROPOSAL_FRAME`` env > ``"sampling"`` (lower-cased).
+
+        Ruling 2026-10-19 (Mike, examining the MBHB sampling): "keep the same
+        sampling/waveform parameters on the MBHB, but when we do the sampling
+        moves, move in the LISA reference frame ... Only the move that
+        produces the new coordinates should be moved in the LISA frame." On
+        the 9mo (job 773, rows 858-1007) ``t_plunge`` is a near-deterministic,
+        partly nonlinear function of the ICRS sky (R^2 of t on the sky:
+        linear 0.87-0.998, quadratic 0.997-1.000), while in the LISA frame
+        ``t_L`` is 20-75x narrower and decoupled (R^2 0.02-0.28). An empty
+        value counts as unset; anything outside :data:`PROPOSAL_FRAMES`
+        raises.
+        """
+        val = getattr(self, "proposal_frame", None)
+        if val is None:
+            val = os.environ.get(f"{str(self.branch_name).upper()}_PROPOSAL_FRAME", None)
+        if val is None or (isinstance(val, str) and not val.strip()):
+            return "sampling"
+        frame = str(val).strip().lower()
+        if frame not in PROPOSAL_FRAMES:
+            raise ValueError(
+                f"{str(self.branch_name).upper()}_PROPOSAL_FRAME must be one of "
+                f"{PROPOSAL_FRAMES}, got {val!r}.")
+        return frame
+
+    def _frame_map(self):
+        """The active proposal-frame map ``F`` (``None``: the sampling basis).
+
+        ``"lisa"`` needs the map the stock build installs on the MBH move
+        (``source_runtime.make_mbh_proposal_frame_map``: a
+        :class:`~lisatools.sampling.moves.skymodehop.LISAFrameMap` on the
+        ``alpha / sin_delta / psi / t_plunge`` columns, the constellation
+        phase read off the run's orbits). A branch without one (EMRI, SOBBH:
+        no frame columns) is refused with a ``ValueError``; the stock build
+        checks this before the run starts (``check_proposal_frame``).
+        """
+        frame = self._proposal_frame()
+        if frame == "sampling":
+            return None
+        fmap = getattr(self, "proposal_frame_map", None)
+        br = str(self.branch_name).upper()
+        if fmap is None:
+            raise ValueError(
+                f"{br}_PROPOSAL_FRAME={frame!r} refused: the {self.branch_name} sampling "
+                "basis has no LISA-frame columns installed (only the MBH branch carries "
+                "alpha / sin_delta / psi / t_plunge and a frame map); use 'sampling'.")
+        if str(getattr(fmap, "name", frame)) != frame:
+            raise ValueError(
+                f"{br}_PROPOSAL_FRAME={frame!r} but the installed frame map is "
+                f"{getattr(fmap, 'name', None)!r}.")
+        return fmap
+
+    def _frame_for_move(self, move_here):
+        """The frame map ``move_here``'s proposal is conjugated with, or ``None``.
+
+        ``None`` with the frame off, and for a move that converts to the LISA
+        frame itself (``conjugates_own_frame``: the ICRS
+        :class:`~lisatools.sampling.moves.skymodehop.SkyMove` hops). Those
+        stay in the sampling basis: a hop already IS ``F^-1 o S o F`` with its
+        own Jacobian factor, so conjugating it again would only re-apply
+        ``F`` around an identity, and leaving it out keeps the hops
+        bit-identical whichever frame the stack runs in (a hop proposes the
+        same ``x'`` either way to the inverse's precision:
+        ``tests/test_mbh_proposal_frame.py::SkyHopFrameTest``).
+        """
+        fmap = self._frame_map()
+        if fmap is None or getattr(move_here, "conjugates_own_frame", False):
+            return None
+        return fmap
+
+    def _frame_widths(self, widths):
+        """The box widths the eigen tables are whitened and capped with: the
+        prior box in the sampling basis, the proposal frame's box
+        (``LISAFrameMap.proposal_widths``: ``lam_L`` 2 pi, ``sinbeta_L`` 2,
+        ``psi_L`` pi, ``t_L`` the ``t_plunge`` width) with the frame on."""
+        fmap = self._frame_map()
+        return widths if fmap is None else fmap.proposal_widths(widths)
+
+    def _frame_forward(self, fmap, arr):
+        """``F`` on any ``(..., ndim)`` array (host numpy, a copy)."""
+        a = np.asarray(asnumpy(arr), dtype=float)
+        nd = a.shape[-1]
+        return fmap.forward(a.reshape(-1, nd)).reshape(a.shape)
+
+    def _frame_proposal(self, fmap, move_here, sets, split, random):
+        """One split's inner proposal made in the proposal frame.
+
+        ``y = F(x)`` for the split's rows (and, for a stretch move, the
+        complementary sets); the inner move proposes ``y'`` from ``y`` exactly
+        as it would in ``x`` (its tables, adapted / tempered / tuned steps
+        and the cross-walker partners all live in ``y``); ``x' = F^-1(y')``
+        (the refined inverse). Returns ``(x' (ntemps, n, ndim), factors,
+        y (ntemps, n, ndim), y' (ntemps, n, ndim), outside (ntemps * n,))``.
+
+        **The Metropolis factor.** The target is ``pi(x)``; the inner move's
+        proposal ``q_y(y' | y)`` carries its own factor ``f_y`` (0 for the
+        symmetric eigen / jump moves, the stretch's ``(d - 1) ln z``). The
+        induced proposal on ``x`` has density ``q_x(x' | x) = q_y(F(x') |
+        F(x)) |J_F(x')|``, so the Hastings ratio is
+
+            pi(x') q_x(x | x') / (pi(x) q_x(x' | x))
+              = pi(x') / pi(x) * [q_y(y | y') / q_y(y' | y)] * |J_F(x)| / |J_F(x')|,
+
+        i.e. ``factors = f_y + ln|J_F(x)| - ln|J_F(x')|`` per row, added
+        OUTSIDE the tempering (it is a proposal factor, not a likelihood
+        term: every rung's tempered target is still a density in ``x``).
+        ``ln|det J_F|`` is ``LISAFrameMap.log_abs_det_jacobian`` (central
+        differences, +-2-5e-5 on the 9mo MBH leaves).
+
+        **Rows with no preimage.** A ``y'`` outside the frame's domain
+        (``|sinbeta_L'| > 1``, an eigen step off the sphere) has no ``x'``:
+        the frame's target density is zero there, so the row is rejected
+        outright (``factors = -inf``, ``x' = x``, and ``propose_local`` gives
+        it an infinite prior so it is never scored).
+        """
+        name = self.branch_name
+        S = np.asarray(asnumpy(sets[split]), dtype=float)
+        nt, n_here = int(S.shape[0]), int(S.shape[1])
+        nd = int(S.shape[-1])
+        s = {name: self._frame_forward(fmap, S)}
+        if isinstance(move_here, StretchMove):
+            c = {name: [self._frame_forward(fmap, x) for x in sets[:split] + sets[split + 1:]]}
+            q, factors = move_here.get_proposal(s, c, random)
+        else:
+            q, factors = move_here.get_proposal(s, random)
+        y_old = s[name].reshape(nt, n_here, nd)
+        y_new = np.asarray(asnumpy(q[name]), dtype=float).reshape(nt, n_here, nd)
+        x_old = S.reshape(-1, nd)
+        x_new, ok = fmap.inverse(y_new.reshape(-1, nd), return_ok=True)
+        x_new = np.where(ok[:, None], x_new, x_old)
+        ldj = np.zeros(nt * n_here)
+        if np.any(ok):
+            # ln|J_F(x)| - ln|J_F(x')| (the docstring's Hastings ratio)
+            ldj[ok] = (self._frame_log_det(fmap, x_old[ok])
+                       - self._frame_log_det(fmap, x_new[ok]))
+        factors = np.asarray(asnumpy(factors), dtype=float).reshape(nt, n_here) + ldj.reshape(nt, n_here)
+        outside = ~ok
+        if np.any(outside):
+            factors = np.where(outside.reshape(nt, n_here), -np.inf, factors)
+        return x_new.reshape(nt, n_here, nd), factors, y_old, y_new, outside
+
+    def _frame_log_det(self, fmap, rows):
+        """``fmap.log_abs_det_jacobian(rows)``, memoized per exact row.
+
+        A pure function of the row, so the cache changes no value: it only
+        skips the central-difference sweep (8 frame maps per row) for the
+        current points, which repeat from proposal to proposal (a rejected
+        row keeps its point; an accepted one is the previous ``x'``). Cleared
+        at every leaf visit and capped at 4096 rows.
+        """
+        rows = np.ascontiguousarray(rows, dtype=float)
+        cache = getattr(self, "_frame_ldj_cache", None)
+        if cache is None or len(cache) > 4096:
+            cache = self._frame_ldj_cache = {}
+        keys = [r.tobytes() for r in rows]
+        todo = [i for i, k in enumerate(keys) if k not in cache]
+        if todo:
+            vals = fmap.log_abs_det_jacobian(rows[todo])
+            for i, v in zip(todo, np.asarray(vals, dtype=float)):
+                cache[keys[i]] = float(v)
+        return np.array([cache[k] for k in keys], dtype=float)
+
+    def _frame_bounds(self, fmap, lo, hi):
+        """The stencil box of an information-matrix build in the proposal frame.
+
+        The sampling box on the columns the frame leaves alone; on the frame
+        columns ``sinbeta_L`` in ``[-1, 1]`` and no bound on ``lam_L`` /
+        ``psi_L`` (periodic) or ``t_L`` (a stencil row is mapped back with
+        ``F^-1``, which always lands on the sphere; the time stays a free
+        retarded time, as ``t_plunge`` is for the waveform).
+        """
+        lo = np.array(lo, dtype=float, copy=True)
+        hi = np.array(hi, dtype=float, copy=True)
+        for c in fmap.columns:
+            lo[c], hi[c] = -np.inf, np.inf
+        sb = int(fmap.ind_map["sinbeta"])
+        lo[sb], hi[sb] = -1.0, 1.0
+        return lo, hi
+
+    def _log_frame_table(self, fmap, leaf, table, x0):
+        """``[MBH_EIGEN] leaf k: proposals in the LISA frame (t_L sigma 0.42 s
+        vs t_plunge 31.0 s in the sampling basis)``, once per refresh.
+
+        The marginal step widths along the time of the built table's Gaussian
+        covariance ``sum_k sigma_k^2 a_k a_k^T``: in ``y`` (``t_L``), and the
+        same covariance mapped back to ``x`` with ``J^-1`` at the expansion
+        point (``t_plunge``). A per-walker stash reports its cold walker 0.
+        """
+        try:
+            axes, sig = table
+            axes = np.asarray(asnumpy(axes), dtype=float)
+            sig = np.asarray(asnumpy(sig), dtype=float)
+            x0 = np.asarray(x0, dtype=float)
+            if axes.ndim == 4:
+                axes, sig = axes[0, 0], sig[0, 0]
+                x0 = x0.reshape(-1, x0.shape[-1])[0]
+            x0 = x0.reshape(-1)
+            C_y = eigen_refresh.table_covariance(axes, sig)
+            Jinv = np.linalg.inv(fmap.jacobian(x0[None, :])[0])
+            C_x = Jinv @ C_y @ Jinv.T
+            tc = int(fmap.time_column)
+            logger.info(
+                "[%s_EIGEN] leaf %d: proposals in the LISA frame (t_L sigma %.2f s vs "
+                "t_plunge %.2f s in the sampling basis)", str(self.branch_name).upper(),
+                int(leaf), float(np.sqrt(max(C_y[tc, tc], 0.0))),
+                float(np.sqrt(max(C_x[tc, tc], 0.0))))
+        except Exception as exc:  # noqa: BLE001 -- telemetry must not crash a refresh
+            logger.warning("[%s_EIGEN] leaf %d: proposal-frame log line failed (%r)",
+                           str(self.branch_name).upper(), int(leaf), exc)
 
     # ------------------------------------------------------------------
     # step-scale adaptation from the chain ({BRANCH}_EIGEN_AXIS_ADAPT)
@@ -962,8 +1201,16 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                     # buffer already holds every walker
                     pooled = self._eigen_ring_walkers("_eigen_adapt_buffer", leaf)
             emp, source = None, None
+            fmap = self._frame_map()
             if n_vis >= need:
                 inds, periods = self._eigen_periodic_columns()
+                if fmap is not None:
+                    # {BRANCH}_PROPOSAL_FRAME: the buffers hold sampling-basis
+                    # rows (own and pooled alike); the table's axes are in the
+                    # proposal frame, so are the deviations. The periodic
+                    # columns are the same indices with the same periods
+                    # (lam_L 2 pi, psi_L pi, phi_ref 2 pi).
+                    rungs = [(self._frame_forward(fmap, X), b) for X, b in rungs]
                 dev = eigen_refresh.cold_unit_deviations(rungs, inds, periods)
                 if dev is not None:
                     emp = eigen_refresh.empirical_axis_widths(axes_np, dev)
@@ -979,8 +1226,8 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                           f"{n_vis} of {need} visits")
             if emp is None or np.shape(emp) != floor.shape:
                 return table
-            widths = eigen_refresh.prior_box_widths(
-                self.priors[self.branch_name], self.ndim)
+            widths = self._frame_widths(eigen_refresh.prior_box_widths(
+                self.priors[self.branch_name], self.ndim))
             sig_box = eigen_refresh.adapt_axis_sigmas(axes_np, floor, emp, widths)
             mf = self._eigen_adapt_max_factor()
             sig_a = factor_capped_sigmas(floor, sig_box, mf)
@@ -1101,6 +1348,8 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         lines; every visit then fixes the cross-walker jump's partner spec
         (:meth:`_de_leaf_spec`) when one is in the stack.
         """
+        # the proposal frame's per-row ln|det J| memo is per leaf visit
+        self._frame_ldj_cache = None
         eigen_moves = self._eigen_inner_moves()
         if not eigen_moves:
             return
@@ -1192,12 +1441,15 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                 f"x{float(np.min(s)):.2f}..x{float(np.max(s)):.2f}")
 
     def _eigen_temper_widths(self):
-        """The prior-box widths the tempered steps are capped with (cached)."""
+        """The prior-box widths the tempered steps are capped with (cached;
+        the proposal frame's box with ``{BRANCH}_PROPOSAL_FRAME`` on)."""
         w = getattr(self, "_eigen_temper_box", None)
         if w is None:
             w = self._eigen_temper_box = eigen_refresh.prior_box_widths(
                 self.priors[self.branch_name], self.ndim)
-        return w
+        if self._frame_map() is None:
+            return w
+        return self._frame_widths(w)
 
     def _eigen_tempered_rows(self, axes, sigmas, scale):
         """``max(sigma, min(sigma x scale, cap))`` row by row.
@@ -1593,7 +1845,8 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             else:
                 upper = eigen_refresh.axis_caps(
                     np.asarray(asnumpy(axes), dtype=float),
-                    eigen_refresh.prior_box_widths(self.priors[self.branch_name], self.ndim))
+                    self._frame_widths(eigen_refresh.prior_box_widths(
+                        self.priors[self.branch_name], self.ndim)))
                 upper = np.maximum(upper, sig)
             ready = ctrl[0] >= EIGEN_AXIS_ACC_MIN_PROPOSALS
             acc = self._rates(ctrl[0], ctrl[1])
@@ -1737,6 +1990,13 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             if partner_w and np.any(active):
                 P = pool[:, partner_w, :].reshape(-1, pool.shape[-1])
                 P = P[np.all(np.isfinite(P), axis=1)]
+                fmap = self._frame_map()
+                if fmap is not None and P.size:
+                    # {BRANCH}_PROPOSAL_FRAME: the shipped partner states are
+                    # sampling-basis rows; the jump differences live in the
+                    # proposal frame with the rows they move
+                    P = fmap.forward(P)
+                    P = P[np.all(np.isfinite(P), axis=1)]
                 P = np.unique(P, axis=0) if P.size else P
                 if P.shape[0] >= 2:
                     spec = (active, P)
@@ -1818,14 +2078,24 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             return None
 
     def _eigen_persist_guards(self):
-        """The STRICT guard set shared by the load and the write."""
-        return dict(
+        """The STRICT guard set shared by the load and the write.
+
+        ``frame`` (``{BRANCH}_PROPOSAL_FRAME``, 2026-10-19): a table -- and
+        the adapted / tuned scale it carries -- lives in the coordinates it
+        was built in, so an entry is adopted only in the same frame (the
+        entry of a knob-off run carries no key and reads as ``"sampling"``).
+        """
+        guards = dict(
             scope=self._eigen_scope(),
             ndim=int(self.ndim),
             ntemps=int(self.ntemps),
             nwalkers=int(self.nwalkers),
             data_identity=self._eigen_data_identity(),
         )
+        frame = self._proposal_frame()
+        if frame != "sampling":
+            guards["frame"] = frame
+        return guards
 
     def _note_eigen_expansion_point(self, leaf, x0):
         """Record where a table was built (sidecar diagnostics only)."""
@@ -2014,6 +2284,11 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         widths = eigen_refresh.prior_box_widths(
             self.priors[self.branch_name], self.ndim
         )
+        fmap = self._frame_map()
+        if fmap is not None:
+            # {BRANCH}_PROPOSAL_FRAME (ruling 2026-10-19): the same routes,
+            # the table handed to the inner moves in the proposal frame
+            return self._build_eigen_table_frame(leaf, work, widths, fmap)
         builder = getattr(self, "eigen_table_builder", None)
         if builder is not None:
             try:
@@ -2039,6 +2314,104 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         if self._eigen_scope() == "per_walker":
             return self._build_eigen_tables_per_walker(leaf, work, widths)
         return self._build_eigen_table_walker_max(leaf, work, widths)
+
+    def _build_eigen_table_frame(self, leaf, work, widths, fmap):
+        """:meth:`_build_eigen_table` with ``{BRANCH}_PROPOSAL_FRAME`` on.
+
+        The same routes, with the information matrix taken by perturbations
+        IN THE PROPOSAL FRAME: the stencil rows are ``y0 +/- s_i e_i`` around
+        ``y0 = F(x0)`` (the same expansion point as with the frame off), each
+        mapped back with ``F^-1`` before it is scored (ll) or templated
+        (Gram), so the matrix comes out in ``y`` directly. Steps start at the
+        same fraction of the box (the frame's box: ``lam_L`` 2 pi,
+        ``sinbeta_L`` 2, ``psi_L`` pi, ``t_L`` the ``t_plunge`` width; the
+        Gram route then tunes them to its template target as always); the
+        stencil box is :meth:`_frame_bounds`. The table is whitened and
+        capped with the frame's box.
+
+        Why not ``J^-T F_x J^-1`` of the sampling-basis matrix
+        (:func:`eigen_refresh.transform_information`): the ll route's matrix
+        is the likelihood HESSIAN, which is not a tensor -- away from the
+        maximum it carries the gradient times the curvature of ``F``, which
+        the transform does not remove. On the curved target of the tests, at
+        six draws within ~1 sigma of the mode, the transformed ll matrix gave
+        marginal sky steps of 0.03-4.1 for true 0.15 / 0.1, the
+        ``y``-perturbed one the exact values (1e-7). The Gram matrix (first
+        derivatives of the templates) does transform as a tensor, and there
+        the two agree (``FrameInfoMatrixTest``: the real MBH move's Gram,
+        < 2e-2); perturbing in ``y`` also avoids amplifying the
+        finite-difference noise of ``x`` entries that cancel in ``y``.
+
+        A custom builder's sampling-basis table is pushed forward as the
+        Gaussian it encodes (``C_y = J C_x J^T`` at the leaf's cold walker 0,
+        per point for a per-walker stash). The fallbacks are the frame's
+        identity tables. Logs :meth:`_log_frame_table` once per refresh.
+        """
+        widths_y = fmap.proposal_widths(widths)
+        x0 = None
+        table = None
+        builder = getattr(self, "eigen_table_builder", None)
+        if builder is not None:
+            try:
+                axes, sig = builder(self, leaf, widths)
+                axes = np.asarray(asnumpy(axes), dtype=float)
+                sig = np.asarray(asnumpy(sig), dtype=float)
+                if axes.ndim == 4:
+                    pts = np.asarray(asnumpy(work.coords[: self.ntemps, :, leaf]), dtype=float)
+                    x0 = pts
+                    J = fmap.jacobian(pts.reshape(-1, pts.shape[-1])).reshape(axes.shape)
+                    C = eigen_refresh.table_covariance(axes, sig)
+                    info_y = np.linalg.inv(J @ C @ np.swapaxes(J, -1, -2))
+                    a, s = eigen_refresh._tables_from_info_batch(
+                        info_y.reshape(-1, *axes.shape[-2:]), widths_y)
+                    table = (a.reshape(axes.shape), s.reshape(sig.shape))
+                else:
+                    x0 = np.asarray(asnumpy(work.coords[0, 0, leaf]), dtype=float)
+                    J = fmap.jacobian(x0[None, :])[0]
+                    C = eigen_refresh.table_covariance(axes, sig)
+                    table = eigen_refresh._table_from_info(
+                        np.linalg.inv(J @ C @ J.T), widths_y)
+            except Exception as exc:  # degrade, never crash the sampler
+                eigen_refresh.logger.warning(
+                    "[eigen_refresh] %s leaf %d custom builder failed in the proposal "
+                    "frame (%r); using the identity fallback table",
+                    self.branch_name, leaf, exc,
+                )
+                return eigen_refresh._fallback_table(widths_y)
+        elif (self._eigen_info() == "gram"
+                and callable(getattr(self, "_gram_templates", None))):
+            try:
+                best, cold = self._eigen_best_walker(leaf, work)
+                t0 = time.perf_counter()
+                info, steps = self._gram_info(cold[best], best, widths,
+                                              return_steps=True, frame=fmap)
+                lo, hi = self._frame_bounds(fmap, *eigen_refresh.prior_box_bounds(
+                    self.priors[self.branch_name], cold.shape[-1]))
+                y0 = eigen_refresh.nudge_inside(
+                    fmap.forward(cold[best][None, :])[0], steps, lo, hi)
+                x0 = fmap.inverse(y0[None, :])[0]
+                self._note_eigen_expansion_point(leaf, x0)
+                eigen_refresh.logger.info(
+                    "[eigen_refresh] %s leaf %d Gram info matrix at walker %d in %.2f s "
+                    "(proposal frame %s)", self.branch_name, leaf, best,
+                    time.perf_counter() - t0, fmap.name)
+                table = eigen_refresh._table_from_info(info, widths_y)
+            except Exception as exc:  # degrade to the likelihood route
+                eigen_refresh.logger.warning(
+                    "[eigen_refresh] %s leaf %d Gram build failed (%r); "
+                    "using the likelihood second-difference route",
+                    self.branch_name, leaf, exc,
+                )
+                table = None
+        if table is None:
+            if self._eigen_scope() == "per_walker":
+                table = self._build_eigen_tables_per_walker(leaf, work, widths, frame=fmap)
+            else:
+                table = self._build_eigen_table_walker_max(leaf, work, widths, frame=fmap)
+            x0 = getattr(self, "_eigen_x0", {}).get(int(leaf))
+        if x0 is not None:
+            self._log_frame_table(fmap, leaf, table, x0)
+        return table
 
     def _eigen_best_walker(self, leaf, work):
         """``(walker, cold_rows)`` for ``leaf``: the max-lnL COLD walker and
@@ -2145,7 +2518,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                 f"{str(self.branch_name).upper()}_EIGEN_GRAM_TARGET", "1e-3")
         return float(val)
 
-    def _gram_info(self, x0, walker, widths, return_steps=False):
+    def _gram_info(self, x0, walker, widths, return_steps=False, frame=None):
         """Gram matrix ``<dh_a|dh_b>`` at sampling point ``x0``, scored with
         walker ``walker``'s noise.
 
@@ -2178,6 +2551,12 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             walker: walker whose container (data, PSD, device) scores it.
             widths: ``(ndim,)`` prior-box widths (the step unit).
             return_steps: also return the final steps (tests).
+            frame: a proposal-frame map ``F`` (``{BRANCH}_PROPOSAL_FRAME``):
+                the stencil is built around ``F(x0)`` in the frame, with the
+                frame's box widths and :meth:`_frame_bounds`, and each row is
+                mapped back with ``F^-1`` before it is templated -- the
+                matrix (and the steps) are then in the frame's coordinates.
+                ``None``: the sampling basis (unchanged).
 
         Returns:
             ``(ndim, ndim)`` matrix, or ``(matrix, steps)``.
@@ -2189,6 +2568,13 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         widths = np.asarray(widths, dtype=float)
         nd = int(x0.size)
         lo, hi = eigen_refresh.prior_box_bounds(self.priors[self.branch_name], nd)
+        to_rows = None
+        if frame is not None:
+            # the proposal frame: perturb y = F(x), template F^-1(rows)
+            x0 = frame.forward(x0[None, :])[0]
+            widths = frame.proposal_widths(widths)
+            lo, hi = self._frame_bounds(frame, lo, hi)
+            to_rows = frame.inverse
         steps = self._gram_eps_rel() * widths
         target = self._gram_target()
         # the scorers' inner-product kwargs, minus the PSD (passed explicitly
@@ -2213,6 +2599,8 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             for i in range(nd):
                 X[2 * i, i] += s[i]
                 X[2 * i + 1, i] -= s[i]
+            if to_rows is not None:
+                X = to_rows(X)
             arr, box = self._gram_templates(self._to_phys(X), best)
             h0 = WDMSignal(arr[2 * nd], box)
             _, _, psd = ac._slice_to_template(h0)
@@ -2259,18 +2647,40 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             )
         return (info, steps) if return_steps else info
 
-    def _build_eigen_table_walker_max(self, leaf, work, widths):
+    def _build_eigen_table_walker_max(self, leaf, work, widths, frame=None):
         """ONE shared table, built at the max-lnL COLD-chain walker.
 
         The corner sweep scores against that walker's own data/noise
         (``data_index``). Selection failure degrades to walker 0 with a
-        warning — never to a crash.
+        warning — never to a crash. ``frame`` (``{BRANCH}_PROPOSAL_FRAME``):
+        the corners are taken around ``F(x0)`` in the proposal frame and
+        mapped back with ``F^-1`` before scoring, with the frame's box
+        (:meth:`_build_eigen_table_frame`); the table is the frame's.
         """
         best, cold = self._eigen_best_walker(leaf, work)
         x0 = cold[best]
         eps_rel = self._eigen_eps_rel()
         bounds = eigen_refresh.prior_box_bounds(
             self.priors[self.branch_name], self.ndim)
+        if frame is not None:
+            widths = frame.proposal_widths(widths)
+            bounds = self._frame_bounds(frame, *bounds)
+            y0 = eigen_refresh.nudge_inside(
+                frame.forward(np.asarray(x0, dtype=float)[None, :])[0],
+                eps_rel * np.asarray(widths, dtype=float), *bounds)
+            self._note_eigen_expansion_point(leaf, frame.inverse(y0[None, :])[0])
+
+            def call_ll_y(y):
+                y = np.atleast_2d(y)
+                data_index = np.full(y.shape[0], best, dtype=np.int32)
+                return self.compute_like(
+                    self._to_phys(frame.inverse(np.asarray(y, dtype=float))),
+                    data_index=data_index,
+                )
+
+            return eigen_refresh.eigen_table_from_ll(
+                call_ll_y, y0, widths, eps_rel=eps_rel, bounds=bounds
+            )
         # the corners sit around x0 nudged inside the prior box (the
         # builder's bounds=); record that point, not the raw cold row
         self._note_eigen_expansion_point(leaf, eigen_refresh.nudge_inside(
@@ -2287,7 +2697,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             call_ll, x0, widths, eps_rel=eps_rel, bounds=bounds
         )
 
-    def _build_eigen_tables_per_walker(self, leaf, work, widths):
+    def _build_eigen_tables_per_walker(self, leaf, work, widths, frame=None):
         """Per-(temperature, walker) tables for the leaf, ONE batched sweep.
 
         Every point gets its OWN information matrix at its own coords
@@ -2296,7 +2706,8 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         per-walker ``data_index`` tiles by ``rows // n`` (the
         information_matrix_from_ll batching invariant). Returns the
         stashed ``(ntemps, nwalkers, ndim, ndim)`` / ``(..., ndim)`` form
-        the red/blue seam slices per split.
+        the red/blue seam slices per split. ``frame``: as in
+        :meth:`_build_eigen_table_walker_max`, point by point.
         """
         nt, nw = self.ntemps, self.nwalkers
         pts = np.asarray(
@@ -2306,15 +2717,25 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         eps_rel = self._eigen_eps_rel()
         bounds = eigen_refresh.prior_box_bounds(
             self.priors[self.branch_name], self.ndim)
+        to_x = None
+        if frame is not None:
+            widths = frame.proposal_widths(widths)
+            bounds = self._frame_bounds(frame, *bounds)
+            pts = frame.forward(pts)
+            to_x = frame.inverse
         # each point's corners sit around it nudged inside the prior box
-        self._note_eigen_expansion_point(leaf, eigen_refresh.nudge_inside(
-            pts, eps_rel * np.asarray(widths, dtype=float), *bounds
-        ).reshape(nt, nw, -1))
+        centres = eigen_refresh.nudge_inside(
+            pts, eps_rel * np.asarray(widths, dtype=float), *bounds)
+        if to_x is not None:
+            centres = to_x(centres)
+        self._note_eigen_expansion_point(leaf, centres.reshape(nt, nw, -1))
 
         def call_ll(x):
             x = np.atleast_2d(x)
             reps = x.shape[0] // point_walker.size
             data_index = np.tile(point_walker, reps)
+            if to_x is not None:
+                x = to_x(np.asarray(x, dtype=float))
             return self.compute_like(
                 self._to_phys(x), data_index=data_index
             )
@@ -4416,18 +4837,35 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                     # visit's active rows + partners (no-op for other moves)
                     self._install_de_split(move_here, leaf, S1)
 
-                    # Get the move-specific proposal.
-                    if isinstance(move_here, StretchMove):
-                        q, factors = move_here.get_proposal(s, c, model.random)
+                    # the proposal frame ({BRANCH}_PROPOSAL_FRAME=lisa, ruling
+                    # 2026-10-19): the inner move proposes in y = F(x) and
+                    # x' = F^-1(y'), the factor gains ln|J(x)| - ln|J(x')|
+                    # (None: off, or a move that converts frames itself)
+                    frame_map = self._frame_for_move(move_here)
+                    frame_outside = None
+                    if frame_map is None:
+                        # Get the move-specific proposal.
+                        if isinstance(move_here, StretchMove):
+                            q, factors = move_here.get_proposal(s, c, model.random)
 
+                        else:
+                            q, factors = move_here.get_proposal(s, model.random)
+
+                        new_points = q[self.branch_name].reshape((self.ntemps, nwalkers_here, ndim))
+                        # the points the per-axis accounting reads (the
+                        # coordinates the inner move proposed in)
+                        tally_old, tally_new = old_points, new_points
                     else:
-                        q, factors = move_here.get_proposal(s, model.random)
-
-                    new_points = q[self.branch_name].reshape((self.ntemps, nwalkers_here, ndim))
+                        (new_points, factors, tally_old, tally_new,
+                         frame_outside) = self._frame_proposal(
+                            frame_map, move_here, sets, split, model.random)
 
                     # Compute prior of the proposed position
                     # new_inds_prior is adjusted if product-space is used
                     logp = self.priors[self.branch_name].logpdf(new_points.reshape(-1, ndim))
+                    if frame_outside is not None and np.any(frame_outside):
+                        # no preimage in the sampling basis: never scored
+                        logp = np.where(frame_outside, -np.inf, logp)
                     in_prior = ~np.isinf(logp)
                     logl = np.full_like(logp, -1e300)
 
@@ -4486,7 +4924,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                     # {BRANCH}_EIGEN_AXIS_ACC_LOG / _TUNE off and no jump in
                     # the stack; draws no random numbers)
                     self._note_inner_outcome(move_here, leaf, temp_inds_here, keep,
-                                             old_points, new_points, S1)
+                                             tally_old, tally_new, S1)
 
                     temp_inds_update = temp_inds_here[keep.flatten()]
                     walker_inds_update = walker_inds_here[keep.flatten()]

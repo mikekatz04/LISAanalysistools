@@ -1199,6 +1199,8 @@ def prepare_mbh_branch(mbh, general_setup: GeneralSetup, gs):
         mbh.waveform_kwargs = dict()
     if mbh.inner_moves is None:
         mbh.inner_moves = make_mbh_inner_moves(mbh, general_setup, gs)
+    if getattr(mbh, "proposal_frame_map", None) is None:
+        mbh.proposal_frame_map = make_mbh_proposal_frame_map(mbh, general_setup, gs)
     mbh.nleaves_max = n
     mbh.nleaves_min = n
     return mbh
@@ -1302,6 +1304,76 @@ def make_mbh_inner_moves(mbh, general_setup, gs) -> list:
                 )
             )
     return moves
+
+
+def make_mbh_proposal_frame_map(mbh, general_setup, gs):
+    """The MBH proposal frame's map (``MBH_PROPOSAL_FRAME=lisa``, ruling 2026-10-19).
+
+    A :class:`~lisatools.sampling.moves.skymodehop.LISAFrameMap` on the stock
+    ICRS basis' ``alpha / sin_delta / psi / t_plunge`` columns
+    (:data:`MBH_SKY_MOVE_IND_MAP`) with the SAME constellation phase the
+    sky-mode hops use: borrowed from a hop in ``mbh.inner_moves`` when there
+    is one, else read off the run's orbits (``t_offset = mbh_waveform_t0``),
+    else the analytic phase (a warning: the map is still an exact bijection,
+    so every proposal stays valid, but its time is then not the arrival time
+    at the constellation). Built whatever the knob says (inert with
+    ``"sampling"``); ``None`` when the branch's basis is not the stock one
+    (the knob is then refused by ``check_proposal_frame``).
+    """
+    from lisatools.sampling.moves.skymodehop import ConstellationPhase, LISAFrameMap, SkyMove
+
+    transform = getattr(mbh, "transform", None)
+    basis = list(getattr(transform, "input_basis", []) or [])
+    if basis:
+        expect = {"cosinc": "cos_iota", "psi": "psi", "lam": "alpha",
+                  "sinbeta": "sin_delta", "t_ref": "t_plunge"}
+        got = {k: basis[i] if i < len(basis) else None for k, i in MBH_SKY_MOVE_IND_MAP.items()}
+        if got != expect:
+            logger.warning(
+                "MBH proposal frame: the transform's basis %s is not the stock ICRS basis; "
+                "no frame map (MBH_PROPOSAL_FRAME=lisa will be refused).", got)
+            return None
+    phase = None
+    for entry in getattr(mbh, "inner_moves", None) or []:
+        move = entry[0] if isinstance(entry, tuple) else entry
+        if isinstance(move, SkyMove) and move.constellation_phase is not None:
+            phase = move.constellation_phase
+            break
+    if phase is None:
+        orbits = getattr(general_setup, "orbits", None)
+        if orbits is not None:
+            phase = ConstellationPhase.from_orbits(
+                orbits, t_offset=float(getattr(gs, "mbh_waveform_t0", 0.0)))
+    fmap = LISAFrameMap(dict(MBH_SKY_MOVE_IND_MAP), coord_frame="icrs",
+                        constellation_phase=phase)
+    frame = str(getattr(mbh, "proposal_frame", "sampling") or "sampling").strip().lower()
+    if frame == "lisa":
+        if phase is None:
+            logger.warning(
+                "MBH proposal frame 'lisa' WITHOUT the run's orbits: the analytic "
+                "constellation phase alpha = Omega t is used (valid proposals, but t_L is "
+                "not the arrival time at the constellation).")
+        logger.info("MBH proposal frame: %s.", fmap.describe())
+    return fmap
+
+
+def check_proposal_frame(move) -> None:
+    """Refuse an impossible ``{BRANCH}_PROPOSAL_FRAME`` at build time.
+
+    Resolves the move's frame map (``ResidualAddOneRemoveOneMove._frame_map``)
+    once, so ``EMRI_PROPOSAL_FRAME=lisa`` / ``SOBBH_PROPOSAL_FRAME=lisa`` (no
+    frame columns in those bases) or an unknown value fails before the run
+    starts instead of at the branch's first propose. A no-op for moves outside
+    the add/remove family.
+    """
+    resolve = getattr(move, "_frame_map", None)
+    if callable(resolve):
+        fmap = resolve()
+        if fmap is not None:
+            logger.info("[%s] proposals in the %s frame (%s)",
+                        str(getattr(move, "branch_name", "?")).upper(),
+                        getattr(fmap, "name", "?"),
+                        fmap.describe() if hasattr(fmap, "describe") else type(fmap).__name__)
 
 
 def make_mbh_initialize_kwargs(mbh, general_setup: GeneralSetup, gs) -> dict:
@@ -2701,6 +2773,9 @@ def build_source_moves(curr, acs, priors, state, cfg) -> dict:
         stock_moves["sobbh_pe"] = build_sobbh_move_runtime(curr, acs, priors, state, cfg)
     for name, move in stock_moves.items():
         stamp_source_move_settings(move, curr.source_info[name[: -len("_pe")]])
+        # {BRANCH}_PROPOSAL_FRAME (ruling 2026-10-19): refuse a frame the
+        # branch's basis cannot carry before the run starts
+        check_proposal_frame(move)
     return stock_moves
 
 
@@ -2716,7 +2791,9 @@ SOURCE_MOVE_SETTINGS_ATTRS = ("eigen_adapt_pool", "eigen_temper_sigmas",
                               # per-axis acceptance log and controller
                               "eigen_axis_acc_log", "eigen_axis_acc_tune",
                               "eigen_axis_acc_min", "eigen_axis_acc_max",
-                              "eigen_axis_acc_factor")
+                              "eigen_axis_acc_factor",
+                              # 2026-10-19: the proposal frame (MBH) and its map
+                              "proposal_frame", "proposal_frame_map")
 
 
 def stamp_source_move_settings(move, info) -> None:

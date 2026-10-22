@@ -23,6 +23,12 @@ centre (~0.3 deg over a year for the ESA orbits; the data-start offset alone
 is tens of degrees), so :class:`ConstellationPhase` reads ``alpha(t)`` off the
 run's own orbits and the move pins each row's frame to the phase at that
 row's time.
+
+The frame conversion itself is :class:`LISAFrameMap` (factored out of
+:class:`SkyMove` 2026-10-19, SkyMove bit-identical): the same map serves the
+add/remove move's proposal frame (``{BRANCH}_PROPOSAL_FRAME=lisa``, MBH
+only; ``ResidualAddOneRemoveOneMove._frame_proposal``), where every inner
+move proposes in the LISA frame and the result is mapped back.
 """
 
 from __future__ import annotations
@@ -34,7 +40,48 @@ from eryn.moves import MHMove
 
 from ...utils.constants import EPS_RAD, YRSID_SI
 
-__all__ = ["SkyMove", "ConstellationPhase"]
+__all__ = ["SkyMove", "ConstellationPhase", "LISAFrameMap", "fd_log_abs_det_jacobian"]
+
+#: The four frame columns of a sampling basis, in ``ind_map`` key names.
+FRAME_COLUMNS = ("lam", "sinbeta", "psi", "t_ref")
+#: Central-difference steps per frame column (rad, -, rad, s).
+FRAME_FD_STEPS = (1e-6, 1e-7, 1e-6, 1.0)
+#: Wrap period of each OUTPUT frame column (``None``: not periodic).
+FRAME_FD_PERIODS = (2 * np.pi, None, np.pi, None)
+#: The LISA-frame (proposal-frame) box of the angular columns:
+#: ``lam_L`` 2 pi, ``sinbeta_L`` 2, ``psi_L`` pi (the time keeps its own).
+FRAME_BOX_WIDTHS = {"lam": 2 * np.pi, "sinbeta": 2.0, "psi": np.pi}
+
+
+def fd_log_abs_det_jacobian(coords, fn, cols, steps=FRAME_FD_STEPS, periods=FRAME_FD_PERIODS):
+    """``ln|det d fn / d x|`` over the columns ``cols`` by central differences.
+
+    ``fn`` maps ``(n, ndim)`` rows to ``(n, ndim)`` rows; the derivative of
+    output column ``cols[i]`` with respect to input column ``cols[j]`` is
+    taken with step ``steps[j]``, its difference unwrapped on ``periods[i]``.
+    """
+    return np.log(np.abs(np.linalg.det(fd_frame_jacobian(coords, fn, cols, steps, periods))))
+
+
+def fd_frame_jacobian(coords, fn, cols, steps=FRAME_FD_STEPS, periods=FRAME_FD_PERIODS):
+    """The ``(n, k, k)`` central-difference Jacobian of ``fn`` on ``cols``
+    (see :func:`fd_log_abs_det_jacobian`)."""
+    n = coords.shape[0]
+    k = len(cols)
+    J = np.empty((n, k, k))
+    for j, (c, h) in enumerate(zip(cols, steps)):
+        xp = coords.copy()
+        xm = coords.copy()
+        xp[:, c] += h
+        xm[:, c] -= h
+        yp = fn(xp)
+        ym = fn(xm)
+        for i, (ci, period) in enumerate(zip(cols, periods)):
+            d = yp[:, ci] - ym[:, ci]
+            if period is not None:
+                d = (d + period / 2) % period - period / 2
+            J[:, i, j] = d / (2 * h)
+    return J
 
 
 # ----------------------------------------------------------------------------
@@ -149,6 +196,279 @@ def _icrs_to_ecliptic_cartesian(xyz: np.ndarray) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------------
+# the frame map (SkyMove's conversion, and the add/remove proposal frame)
+# ----------------------------------------------------------------------------
+class LISAFrameMap:
+    """The sampling-basis <-> LISA-frame map on ``(lam, sinbeta, psi, t_ref)``.
+
+    ``forward(x) -> y`` replaces the four frame columns of each ``(n, ndim)``
+    row by their LISA-frame values ``(lam_L, sin beta_L, psi_L, t_L)`` (the
+    other columns are copied: for the stock MBH basis ``logM, Q, s1z, s2z,
+    dist, phi_ref, cos_iota`` -- ``phi_ref`` is the intrinsic phase at
+    coalescence and does not change with the frame); ``inverse(y) -> x``
+    undoes it. The conversion is the bbhx
+    :func:`~bbhx.utils.transform.SSB_to_LISA` / ``LISA_to_SSB`` pair, with
+    the ICRS sky and polarization rotated to the ecliptic first
+    (``coord_frame="icrs"``, the stock MBH basis; ``"ssb_ecliptic"``: the
+    columns are SSB ecliptic already; ``"lisa"``: the identity). Each row's
+    constellation phase is pinned to ``constellation_phase(t)`` at that row's
+    own time (a :class:`ConstellationPhase` read off the run's orbits), or
+    ``Omega (t + frame_t0 yr)`` without one.
+
+    **The inverse.** ``inverse_approx`` is the legacy SkyMove inverse
+    (bbhx ``LISA_to_SSB``, the phase pinned at the LISA-frame time and a
+    second-order retardation). On realistic MBH rows with the ESA orbit
+    phase its round trip ``F^-1(F(x)) - x`` reaches 9e-4 s in the time and
+    6e-6 rad on the sky (2026-10-19, 9mo extract), above 1e-3 of the
+    narrowest MBH posterior widths (t_L 0.17 s, sky 3e-3 rad). ``inverse``
+    therefore refines it by chord-Newton on ``F`` (the central-difference
+    Jacobian at the first guess, at most ``newton_steps`` steps): the
+    residual ``F(x) - y`` falls to ~1e-12 rad / ~1e-9 s, so a conjugated
+    proposal and its reverse use the same pair of points. A row whose
+    refinement does not reduce the residual keeps the first guess.
+
+    **The Jacobian.** ``|det dF/dx| = 1 + O(Omega R / c)``:
+    ``(lam, sin beta)`` are equal-area coordinates and the sky rotation is
+    area preserving, so only the time retardation (which mixes the sky and
+    the time) and the per-row phase pinning move it off 1 (``ln|det J|``
+    +- 2-5e-5 on the 9mo MBH leaves). :meth:`log_abs_det_jacobian` takes it by
+    central differences (:func:`fd_log_abs_det_jacobian`), as SkyMove always
+    did.
+
+    Picklable: the index map, two floats and the phase table.
+
+    Args:
+        ind_map: ``{"lam": col, "sinbeta": col, "psi": col, "t_ref": col,
+            ...}`` (extra keys are ignored here).
+        coord_frame: ``"icrs"``, ``"ssb_ecliptic"`` or ``"lisa"``.
+        frame_t0: Constant phase offset in years when no
+            ``constellation_phase`` is given.
+        constellation_phase: ``alpha(t) -> radians``, per row.
+        newton_steps: Chord-Newton steps of :meth:`inverse` (0 = the legacy
+            inverse).
+    """
+
+    #: the proposal-frame name (the add/remove move's ``{BRANCH}_PROPOSAL_FRAME``)
+    name = "lisa"
+    _ALLOWED_FRAMES = ("lisa", "ssb_ecliptic", "icrs")
+
+    def __init__(self, ind_map, coord_frame="icrs", frame_t0=0.0,
+                 constellation_phase: Optional[Callable] = None, newton_steps: int = 3):
+        if not isinstance(ind_map, dict):
+            raise ValueError("ind_map must be a dict.")
+        if coord_frame not in self._ALLOWED_FRAMES:
+            raise ValueError(
+                f"coord_frame must be one of {self._ALLOWED_FRAMES}, got {coord_frame!r}."
+            )
+        if coord_frame != "lisa":
+            missing = [k for k in FRAME_COLUMNS if k not in ind_map]
+            if missing:
+                raise ValueError(
+                    f"ind_map lacks the frame column(s) {missing} (the SSB <-> LISA "
+                    "conversion mixes the reference time with the sky position)."
+                )
+        if constellation_phase is not None and not callable(constellation_phase):
+            raise ValueError("constellation_phase must be callable (alpha(t_ref) -> radians).")
+        self.ind_map = ind_map
+        self.coord_frame = coord_frame
+        self.frame_t0 = float(frame_t0)
+        self.constellation_phase = constellation_phase
+        self.newton_steps = int(newton_steps)
+
+    # ---- bookkeeping -----------------------------------------------------
+    @property
+    def columns(self):
+        """The four frame columns ``[lam, sinbeta, psi, t_ref]`` of the basis."""
+        return [int(self.ind_map[k]) for k in FRAME_COLUMNS]
+
+    @property
+    def time_column(self):
+        return int(self.ind_map["t_ref"])
+
+    def describe(self) -> str:
+        phase = ("orbit phase table" if self.constellation_phase is not None
+                 else f"analytic phase, frame_t0 {self.frame_t0:g} yr")
+        return f"LISA frame from {self.coord_frame} ({phase})"
+
+    def proposal_widths(self, widths):
+        """The proposal-frame box widths: ``widths`` with ``lam_L`` 2 pi,
+        ``sinbeta_L`` 2, ``psi_L`` pi (``t_L`` keeps the sampling time's)."""
+        out = np.array(widths, dtype=float, copy=True)
+        if self.coord_frame == "lisa":
+            return out
+        for key, w in FRAME_BOX_WIDTHS.items():
+            out[int(self.ind_map[key])] = w
+        return out
+
+    def frame_t0_years(self, t_ref):
+        """Per-row ``t0`` (years) for the bbhx transforms such that
+        ``Omega * (t_ref + t0 * YRSID_SI) == alpha(t_ref)``."""
+        from bbhx.utils.constants import ConstOmega
+
+        if self.constellation_phase is None:
+            return self.frame_t0
+        alpha = np.asarray(self.constellation_phase(t_ref), dtype=float)
+        return (alpha - ConstOmega * np.asarray(t_ref, dtype=float)) / ConstOmega / YRSID_SI
+
+    # ---- the map -----------------------------------------------------------
+    def forward(self, coords):
+        """``(lam, sinbeta, psi, t_ref)`` columns -> the LISA frame (a copy)."""
+        if self.coord_frame == "lisa":
+            return coords
+
+        from bbhx.utils.transform import SSB_to_LISA
+
+        temp = coords.copy()
+        lam = temp[:, self.ind_map["lam"]]
+        beta = np.arcsin(np.clip(temp[:, self.ind_map["sinbeta"]], -1.0, 1.0))
+        psi = temp[:, self.ind_map["psi"]]
+        t_ref = temp[:, self.ind_map["t_ref"]]
+
+        if self.coord_frame == "icrs":
+            from ...sources.utils import icrs_to_ecliptic
+
+            # (ra, dec, psi_icrs) -> (lam, beta, psi_ecl): one analytic
+            # fixed-obliquity convention for the sky AND the polarization.
+            lam, beta, psi = icrs_to_ecliptic(np.asarray(lam), np.asarray(beta), np.asarray(psi))
+
+        t_L, lam_L, beta_L, psi_L = SSB_to_LISA(
+            t_ref, lam, beta, psi, t0=self.frame_t0_years(t_ref)
+        )
+
+        temp[:, self.ind_map["lam"]] = lam_L % (2 * np.pi)
+        temp[:, self.ind_map["sinbeta"]] = np.sin(beta_L)
+        temp[:, self.ind_map["psi"]] = psi_L % np.pi
+        temp[:, self.ind_map["t_ref"]] = t_L
+        return temp
+
+    def inverse_approx(self, coords):
+        """The legacy inverse (SkyMove's, bit for bit): bbhx ``LISA_to_SSB``
+        with the phase pinned at the LISA-frame time."""
+        if self.coord_frame == "lisa":
+            return coords
+
+        from bbhx.utils.transform import LISA_to_SSB
+
+        temp = coords.copy()
+        lam_L = temp[:, self.ind_map["lam"]]
+        beta_L = np.arcsin(np.clip(temp[:, self.ind_map["sinbeta"]], -1.0, 1.0))
+        psi_L = temp[:, self.ind_map["psi"]]
+        t_L = temp[:, self.ind_map["t_ref"]]
+
+        # the phase is pinned at the LISA-frame time; the SSB time differs by
+        # at most R/c ~ 500 s, over which alpha moves by ~1e-4 rad --
+        # the same Omega-linear extrapolation the forward call makes.
+        t_ref, lam, beta, psi = LISA_to_SSB(
+            t_L, lam_L, beta_L, psi_L, t0=self.frame_t0_years(t_L)
+        )
+
+        if self.coord_frame == "icrs":
+            from ...sources.utils import ecliptic_to_icrs
+
+            lam, beta, psi = ecliptic_to_icrs(np.asarray(lam), np.asarray(beta), np.asarray(psi))
+
+        temp[:, self.ind_map["lam"]] = lam % (2 * np.pi)
+        temp[:, self.ind_map["sinbeta"]] = np.sin(beta)
+        temp[:, self.ind_map["psi"]] = psi % np.pi
+        temp[:, self.ind_map["t_ref"]] = t_ref
+        return temp
+
+    def _frame_residual(self, x, y):
+        """``F(x) - y`` on the frame columns, angles wrapped: ``(n, 4)``."""
+        cols = self.columns
+        r = self.forward(x)[:, cols] - y[:, cols]
+        for i, period in enumerate(FRAME_FD_PERIODS):
+            if period is not None:
+                r[:, i] = (r[:, i] + period / 2) % period - period / 2
+        return r
+
+    def valid(self, coords):
+        """Rows that lie in the LISA-frame domain: finite, ``|sinbeta_L| <= 1``."""
+        coords = np.asarray(coords, dtype=float)
+        ok = np.all(np.isfinite(coords), axis=-1)
+        if self.coord_frame != "lisa":
+            ok &= np.abs(coords[..., self.ind_map["sinbeta"]]) <= 1.0
+        return ok
+
+    def inverse(self, coords, refine: bool = True, return_ok: bool = False):
+        """The LISA frame -> the sampling basis, exact to ~1e-12 rad / 1e-9 s.
+
+        ``refine=False`` is :meth:`inverse_approx`. With refinement the first
+        guess is corrected by chord-Newton on :meth:`forward` (see the class
+        docstring). ``return_ok=True`` also returns the rows in the domain
+        (:meth:`valid`); a row outside it (``|sinbeta_L| > 1``, which a
+        proposal in the LISA frame can produce) has no preimage, and its
+        returned row is not meaningful.
+        """
+        coords = np.asarray(coords, dtype=float)
+        ok = self.valid(coords)
+        if self.coord_frame == "lisa":
+            out = coords
+            return (out, ok) if return_ok else out
+        x = self.inverse_approx(coords)
+        if refine and self.newton_steps > 0 and coords.shape[0] > 0:
+            x = self._refine(x, coords, ok)
+        return (x, ok) if return_ok else x
+
+    def _refine(self, x0, y, ok):
+        cols = self.columns
+        x = x0.copy()
+        live = ok & np.all(np.isfinite(x0), axis=-1)
+        if not np.any(live):
+            return x
+        xi, yi = x[live], y[live]
+        r0 = self._frame_residual(xi, yi)
+        scale = np.array([1.0, 1.0, 1.0, 1e3])        # 1 rad ~ 1e3 s in the retardation
+        err0 = np.max(np.abs(r0) / scale, axis=1)
+        J = fd_frame_jacobian(xi, self.forward, cols)
+        try:
+            Jinv = np.linalg.inv(J)
+        except np.linalg.LinAlgError:
+            return x
+        best, err_best = xi.copy(), err0
+        cur, r = xi.copy(), r0
+        for _ in range(self.newton_steps):
+            step = np.einsum("nij,nj->ni", Jinv, r)
+            cur = cur.copy()
+            cur[:, cols] -= step
+            cur[:, self.ind_map["lam"]] %= 2 * np.pi
+            cur[:, self.ind_map["psi"]] %= np.pi
+            r = self._frame_residual(cur, yi)
+            err = np.max(np.abs(r) / scale, axis=1)
+            better = np.isfinite(err) & (err < err_best) & (
+                np.abs(cur[:, self.ind_map["sinbeta"]]) <= 1.0)
+            best[better] = cur[better]
+            err_best = np.where(better, err, err_best)
+            if np.all(err_best < 1e-15):
+                break
+        x[live] = best
+        return x
+
+    def frame_jacobian(self, coords):
+        """``(n, 4, 4)`` ``dF/dx`` on the frame columns (central differences)."""
+        coords = np.asarray(coords, dtype=float)
+        if self.coord_frame == "lisa":
+            return np.broadcast_to(np.eye(4), (coords.shape[0], 4, 4)).copy()
+        return fd_frame_jacobian(coords, self.forward, self.columns)
+
+    def jacobian(self, coords):
+        """``(n, ndim, ndim)`` ``dF/dx``: the frame block, identity elsewhere."""
+        coords = np.atleast_2d(np.asarray(coords, dtype=float))
+        n, nd = coords.shape
+        J = np.broadcast_to(np.eye(nd), (n, nd, nd)).copy()
+        cols = np.asarray(self.columns)
+        J[np.ix_(np.arange(n), cols, cols)] = self.frame_jacobian(coords)
+        return J
+
+    def log_abs_det_jacobian(self, coords):
+        """``ln|det dF/dx|`` per row (0 in the LISA frame itself)."""
+        coords = np.asarray(coords, dtype=float)
+        if self.coord_frame == "lisa":
+            return np.zeros(coords.shape[0])
+        return fd_log_abs_det_jacobian(coords, self.forward, self.columns)
+
+
+# ----------------------------------------------------------------------------
 # the move
 # ----------------------------------------------------------------------------
 class SkyMove(MHMove):
@@ -225,11 +545,11 @@ class SkyMove(MHMove):
     """
 
     _ALLOWED_FRAMES = ("lisa", "ssb_ecliptic", "icrs")
-    _FRAME_COLUMNS = ("lam", "sinbeta", "psi", "t_ref")
+    _FRAME_COLUMNS = FRAME_COLUMNS
     # central-difference steps per frame column (rad, -, rad, s) and the
     # wrap period of the corresponding OUTPUT column (None: not periodic)
-    _FD_STEPS = (1e-6, 1e-7, 1e-6, 1.0)
-    _FD_PERIODS = (2 * np.pi, None, np.pi, None)
+    _FD_STEPS = FRAME_FD_STEPS
+    _FD_PERIODS = FRAME_FD_PERIODS
 
     def __init__(
         self,
@@ -276,82 +596,45 @@ class SkyMove(MHMove):
         super(SkyMove, self).__init__(**kwargs)
 
     # ------------------------------------------------------------------
-    # Frame conversion machinery (only used when coord_frame != "lisa")
+    # Frame conversion machinery (only used when coord_frame != "lisa"):
+    # :class:`LISAFrameMap` since 2026-10-19 (bit-identical; the legacy
+    # inverse is ``LISAFrameMap.inverse_approx``)
     # ------------------------------------------------------------------
+    @property
+    def frame_map(self) -> LISAFrameMap:
+        """The move's frame conversion, built from its CURRENT attributes."""
+        return LISAFrameMap(
+            self.ind_map, coord_frame=self.coord_frame, frame_t0=self.frame_t0,
+            constellation_phase=self.constellation_phase,
+        )
+
+    @property
+    def conjugates_own_frame(self) -> bool:
+        """True when the move converts to the LISA frame itself.
+
+        The add/remove move's proposal frame (``{BRANCH}_PROPOSAL_FRAME=lisa``)
+        then leaves it in the sampling basis rather than conjugating it a
+        second time: a hop here is already ``F^-1 o S o F`` with its own
+        Jacobian factor."""
+        return self.coord_frame != "lisa"
+
     def _frame_t0_years(self, t_ref):
         """Per-row ``t0`` (years) for the bbhx transforms such that
         ``Omega * (t_ref + t0 * YRSID_SI) == alpha(t_ref)``."""
-        from bbhx.utils.constants import ConstOmega
-
-        if self.constellation_phase is None:
-            return self.frame_t0
-        alpha = np.asarray(self.constellation_phase(t_ref), dtype=float)
-        return (alpha - ConstOmega * np.asarray(t_ref, dtype=float)) / ConstOmega / YRSID_SI
+        return self.frame_map.frame_t0_years(t_ref)
 
     def _to_lisa_frame(self, coords):
         """Convert ``(lam, sinbeta, psi, t_ref)`` columns to the LISA frame.
 
         No-op when ``coord_frame == "lisa"``. Operates on a copy of the 2D
-        ``(n, ndim)`` coordinate array.
+        ``(n, ndim)`` coordinate array (:meth:`LISAFrameMap.forward`).
         """
-        if self.coord_frame == "lisa":
-            return coords
-
-        from bbhx.utils.transform import SSB_to_LISA
-
-        temp = coords.copy()
-        lam = temp[:, self.ind_map["lam"]]
-        beta = np.arcsin(np.clip(temp[:, self.ind_map["sinbeta"]], -1.0, 1.0))
-        psi = temp[:, self.ind_map["psi"]]
-        t_ref = temp[:, self.ind_map["t_ref"]]
-
-        if self.coord_frame == "icrs":
-            from ...sources.utils import icrs_to_ecliptic
-
-            # (ra, dec, psi_icrs) -> (lam, beta, psi_ecl): one analytic
-            # fixed-obliquity convention for the sky AND the polarization.
-            lam, beta, psi = icrs_to_ecliptic(np.asarray(lam), np.asarray(beta), np.asarray(psi))
-
-        t_L, lam_L, beta_L, psi_L = SSB_to_LISA(
-            t_ref, lam, beta, psi, t0=self._frame_t0_years(t_ref)
-        )
-
-        temp[:, self.ind_map["lam"]] = lam_L % (2 * np.pi)
-        temp[:, self.ind_map["sinbeta"]] = np.sin(beta_L)
-        temp[:, self.ind_map["psi"]] = psi_L % np.pi
-        temp[:, self.ind_map["t_ref"]] = t_L
-        return temp
+        return self.frame_map.forward(coords)
 
     def _from_lisa_frame(self, coords):
-        """Inverse of :meth:`_to_lisa_frame` (applied after the mode hop)."""
-        if self.coord_frame == "lisa":
-            return coords
-
-        from bbhx.utils.transform import LISA_to_SSB
-
-        temp = coords.copy()
-        lam_L = temp[:, self.ind_map["lam"]]
-        beta_L = np.arcsin(np.clip(temp[:, self.ind_map["sinbeta"]], -1.0, 1.0))
-        psi_L = temp[:, self.ind_map["psi"]]
-        t_L = temp[:, self.ind_map["t_ref"]]
-
-        # the phase is pinned at the LISA-frame time; the SSB time differs by
-        # at most R/c ~ 500 s, over which alpha moves by ~1e-4 rad --
-        # the same Omega-linear extrapolation the forward call makes.
-        t_ref, lam, beta, psi = LISA_to_SSB(
-            t_L, lam_L, beta_L, psi_L, t0=self._frame_t0_years(t_L)
-        )
-
-        if self.coord_frame == "icrs":
-            from ...sources.utils import ecliptic_to_icrs
-
-            lam, beta, psi = ecliptic_to_icrs(np.asarray(lam), np.asarray(beta), np.asarray(psi))
-
-        temp[:, self.ind_map["lam"]] = lam % (2 * np.pi)
-        temp[:, self.ind_map["sinbeta"]] = np.sin(beta)
-        temp[:, self.ind_map["psi"]] = psi % np.pi
-        temp[:, self.ind_map["t_ref"]] = t_ref
-        return temp
+        """Inverse of :meth:`_to_lisa_frame` (applied after the mode hop):
+        the legacy :meth:`LISAFrameMap.inverse_approx`."""
+        return self.frame_map.inverse_approx(coords)
 
     def _log_abs_det_jacobian(self, coords, fn=None):
         """``ln|det d fn / d x|`` over the four frame columns, by central
@@ -362,21 +645,7 @@ class SkyMove(MHMove):
             return np.zeros(coords.shape[0])
         fn = self._to_lisa_frame if fn is None else fn
         cols = [self.ind_map[k] for k in self._FRAME_COLUMNS]
-        n = coords.shape[0]
-        J = np.empty((n, 4, 4))
-        for j, (c, h) in enumerate(zip(cols, self._FD_STEPS)):
-            xp = coords.copy()
-            xm = coords.copy()
-            xp[:, c] += h
-            xm[:, c] -= h
-            yp = fn(xp)
-            ym = fn(xm)
-            for i, (ci, period) in enumerate(zip(cols, self._FD_PERIODS)):
-                d = yp[:, ci] - ym[:, ci]
-                if period is not None:
-                    d = (d + period / 2) % period - period / 2
-                J[:, i, j] = d / (2 * h)
-        return np.log(np.abs(np.linalg.det(J)))
+        return fd_log_abs_det_jacobian(coords, fn, cols, self._FD_STEPS, self._FD_PERIODS)
 
     # ------------------------------------------------------------------
     # LISA-frame mode-hop transforms

@@ -726,6 +726,9 @@ class EveryOtherKnobIsTheNineMonthsTest(unittest.TestCase):
                 "MBH_EIGEN_AXIS_ACC_TUNE": "1", "SOBBH_EIGEN_AXIS_ACC_TUNE": "1",
                 "MBH_DE_JUMP_MIX": "0.1", "SOBBH_DE_JUMP_MIX": "0.2",
                 "SOBBH_LADDER_REANCHOR_NATS": "60",
+                # 2026-10-19 (Mike, "move in the LISA reference frame"): the MBH
+                # inner moves propose in the LISA frame
+                "MBH_PROPOSAL_FRAME": "lisa",
                 "GALFOR_FK_PRIOR": "0.8e-3,1e-2", "GALFOR_F1_PRIOR": "1e-4,1e-2",
                 "GALFOR_F2_PRIOR": "0.8e-3,1e-2", "NWALKERS": "4", "GB_NTEMPS": "24",
                 "MOJITO_PSD_REFERENCE_FIT_UNEQUAL_ARM": "1", "UNEQUAL_ARM": "1"}
