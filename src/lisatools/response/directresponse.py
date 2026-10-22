@@ -642,6 +642,14 @@ class pyResponseTDI(LISAToolsParallelModule):
         t_arr = (self.xp.arange(num_inputs_per_source, dtype=self.xp.float64) * self.dt
                  + t0_shift_to_data)
         t_arr, input_in = self._data_time_check(t_arr, input_in, t0_arr)
+        # A waveform LONGER than the data grid is cut to num_pts (2026-10-19:
+        # FEW on the 7.5 d all_sources_lite grid returns num_pts + 1 samples,
+        # and the TDI stage requires the projection grid to be exactly num_pts
+        # long -- "t_arr: ... Should be 129600. It's length is 129601"). Both
+        # kernels only ever read EARLIER samples, so a trailing extra sample
+        # could never have contributed to the output.
+        t_arr = t_arr[: self.num_pts]
+        input_in = input_in[:, : self.num_pts]
         num_inputs_per_source = input_in.shape[1]
 
         assert num_inputs_per_source >= self.num_pts
@@ -711,7 +719,9 @@ class pyResponseTDI(LISAToolsParallelModule):
         self.t_arr_proj = t_arr
         self.t0_arr = t0_arr
         self.y_gw_flat = y_gw
-        self.y_gw_length = self.num_pts
+        # The per-link stride the kernel above wrote y_gw with; TDI_delay reads
+        # input_links at ``link * num_inputs + jj`` with this as num_inputs.
+        self.y_gw_length = num_inputs_per_source
 
     @property
     def XYZ(self):
