@@ -584,6 +584,16 @@ def dense_phase_eval(t_k, C, t):
     return c[..., 0] + s * (c[..., 1] + s1 * (c[..., 2] + s * (c[..., 3] + s1 * (c[..., 4] + s * (c[..., 5] + s1 * (c[..., 6] + s * c[..., 7]))))))
 
 
+#: Fewest points a template's response grid may have (:meth:`EMRIDirectWDM._dense_response`
+#: refuses fewer, as a domain error). The response splines are fitted on the run's backend;
+#: on the GPU that is GBT's ``CubicSplineInterpolant`` -> cuSPARSE ``gtsv2StridedBatch``,
+#: which rejects a system of fewer than 3 points, and GBT then calls ``exit(-1)``: no
+#: traceback, the MPI job torn down (9mo jobs 795, 798 and 808, 2026-10-20/22, a hot-rung row
+#: whose trajectory ended within the delay margins of its start, so
+#: :func:`sparse_response_grid` returned its 2-point fallback).
+MIN_RESPONSE_POINTS = 4
+
+
 def sparse_response_grid(knots, a, b, sparse_dt, margin):
     """Sparse response times over ``[a, b]``, kept where the response is COMPLETE.
 
@@ -1260,10 +1270,24 @@ class EMRIDirectWDM:
 
         ``t_grid`` (FEW clock): one array shared by every template, or one array per template
         (padded to a common length inside its span, :func:`pad_grid`). With ``response_grid="sparse"`` the result is
-        an :class:`ExactPhaseTDIOutput`, else the kernel's splined ``TDTDIOutput``."""
+        an :class:`ExactPhaseTDIOutput`, else the kernel's splined ``TDTDIOutput``.
+
+        Raises:
+            WaveformDomainError: When the (common) grid has fewer than
+                :data:`MIN_RESPONSE_POINTS` points, before any kernel or spline runs."""
         n_temp = len(items)
         if isinstance(t_grid, (list, tuple)):
             N = max(int(np.size(g)) for g in t_grid)
+        else:
+            N = int(np.size(t_grid))
+        if N < MIN_RESPONSE_POINTS:
+            from ...utils.exceptions import WaveformDomainError
+
+            raise WaveformDomainError(
+                f"EMRI direct response grid of {N} point(s) (fewer than {MIN_RESPONSE_POINTS}): "
+                "the trajectory is too short against the TDI delay margin for the response "
+                "splines")
+        if isinstance(t_grid, (list, tuple)):
             t_eval = np.stack([pad_grid(g, N) for g in t_grid])
         else:
             t_eval = np.tile(np.asarray(t_grid, dtype=float), (n_temp, 1))

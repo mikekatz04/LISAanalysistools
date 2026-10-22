@@ -338,6 +338,91 @@ class DirectWDMResponseGridTest(unittest.TestCase):
             self.assertEqual(self._direct("sparse").response_grid, "sparse")   # explicit wins
 
 
+class ShortResponseGridTest(unittest.TestCase):
+    """A trajectory that ends within the delay margins of its start leaves the sparse grid its
+    2-point fallback. On the GPU the response-spline fit (GBT CubicSplineInterpolant ->
+    cuSPARSE gtsv2StridedBatch, at least 3 points) then called exit(-1) and the MPI job was
+    torn down with no traceback (9mo jobs 795 / 798 / 808, a hot-rung EMRI row near the
+    separatrix). On the CPU the same 2-point fit runs, so only a guard catches it:
+    ``_dense_response`` refuses the grid as a domain error before any kernel or spline runs,
+    and ``batch`` turns that into a refused row."""
+
+    _direct = DirectWDMResponseGridTest._direct
+    _items = DirectWDMResponseGridTest._items
+
+    def test_a_short_trajectory_leaves_the_two_point_fallback(self):
+        from lisatools.sources.emri.wdm_direct import MIN_RESPONSE_POINTS, sparse_response_grid
+
+        g = sparse_response_grid(np.array([0.0, 400.0, 1000.0]), -1e5, 3e5, 43200.0, 600.0)
+        self.assertEqual(g.size, 2)
+        self.assertLess(g.size, MIN_RESPONSE_POINTS)
+
+    def _kernel_times(self, d, items, grid):
+        """The absolute times ``_dense_response`` hands the kernel (it is stopped right there,
+        so no compiled kernel is needed)."""
+        from unittest import mock
+
+        class _Reached(Exception):
+            pass
+
+        seen = []
+
+        def kernel(its, t_abs):
+            seen.append(np.asarray(t_abs))
+            raise _Reached
+
+        with mock.patch.object(d, "_dense_kernel", side_effect=kernel):
+            with self.assertRaises(_Reached):
+                d._dense_response(items, grid)
+        return seen[0]
+
+    def test_the_response_refuses_a_grid_too_short_for_the_splines(self):
+        from unittest import mock
+
+        from lisatools.utils.exceptions import WaveformDomainError
+
+        d = self._direct("sparse")
+        items, _ = self._items()
+        two = np.array([600.0, 601.0])
+        with mock.patch.object(d, "_dense_kernel", side_effect=AssertionError("kernel ran")):
+            for its, grid in ((items[:1], two), (items[:1], [two]), (items, [two, two])):
+                with self.assertRaises(WaveformDomainError):
+                    d._dense_response(its, grid)
+        t = self._kernel_times(d, items[:1], np.linspace(600.0, 1800.0, 4))   # 4 points: built
+        self.assertEqual(t.shape, (1, 4))
+
+    def test_one_short_template_beside_a_long_one_is_padded_not_refused(self):
+        d = self._direct("sparse")
+        items, t_k = self._items()
+        long = np.linspace(t_k[0] + 600, t_k[-1] - 600, 11)
+        t = self._kernel_times(d, items, [long, np.array([600.0, 601.0])])
+        self.assertEqual(t.shape, (2, 11))
+        self.assertEqual((t[1, 0], t[1, -1]), (1.0e7 + 600.0, 1.0e7 + 601.0))
+
+    def test_batch_turns_it_into_a_refused_row(self):
+        from unittest import mock
+
+        from lisatools.utils.exceptions import WaveformDomainError
+
+        d = self._direct("sparse")
+        items, _ = self._items()
+
+        def mode_list(p, kw):
+            return [(2, 2, 0, 0)], 0.0                      # hands off: built alone
+
+        def call_knots(p, kw, modes, reuse=None):
+            return d._dense_response(items[:1], np.array([600.0, 601.0]))
+
+        with mock.patch("lisatools.sources.emri.emritdionfly.EMRITDIonFly"), \
+                mock.patch.object(d, "_mode_list", side_effect=mode_list), \
+                mock.patch.object(d, "_call_knots", side_effect=call_knots):
+            arr = d.batch([np.zeros(14)], skip_domain_errors=True)
+            self.assertEqual(d.last_failed_rows, [0])
+            self.assertFalse(np.any(np.asarray(arr)))
+            with self.assertRaises(WaveformDomainError):
+                d.batch([np.zeros(14)])
+
+
 if __name__ == "__main__":
     unittest.main()
 
