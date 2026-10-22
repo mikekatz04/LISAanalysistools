@@ -17,6 +17,7 @@ from ..domains import (
     STFTSettings,
     WDMSettings,
 )
+from ..utils.utility import asnumpy
 from . import midit_checkpoint
 from .plot import RunResultsProduction
 from .state import (
@@ -66,6 +67,11 @@ def _domain_attr_value(v):
         return v
     if isinstance(v, np.ndarray):
         return v
+    if type(v).__module__.split(".")[0] == "cupy":
+        # A GPU run's WDM ``window`` / ``omega``: store the host copy. Before
+        # 2026-10-19 these fell through to the ``str`` below, which wrote a
+        # truncated repr ("[0. 0. 0. ... 0. 0. 0.]") that no reader can use.
+        return asnumpy(v)
     # Fall back to string repr for backends / orbits / etc. The user can
     # reconstruct those separately; we just want the round-trip to not
     # crash.
@@ -96,6 +102,10 @@ def _write_domain_settings(group: h5py.Group, settings: DomainSettingsBase) -> N
 
     kwargs_group = ds_group.create_group("kwargs")
     for key, val in settings.kwargs.items():
+        if key == "force_backend":
+            # The device is the READER's choice (read_domain_settings'
+            # ``force_backend``); a stored backend object is only a repr.
+            continue
         coerced = _domain_attr_value(val)
         if coerced is None:
             continue
@@ -144,6 +154,15 @@ def _read_domain_settings(
         kwargs[key] = val
     for key in kwargs_group.keys():
         kwargs[key] = kwargs_group[key][...]
+    # Stores written by a GPU run before 2026-10-19 carry the backend object
+    # and the WDM ``window`` / ``omega`` arrays as string reprs. Drop them:
+    # the reader picks the device, and WDMSettings rebuilds the window and
+    # omega from (Nf, Nt, dt, oversample) when neither is given.
+    if isinstance(kwargs.get("force_backend"), str) and kwargs["force_backend"].startswith("<"):
+        del kwargs["force_backend"]
+    if isinstance(kwargs.get("window"), str) or isinstance(kwargs.get("omega"), str):
+        kwargs.pop("window", None)
+        kwargs.pop("omega", None)
     if force_backend is not None:
         kwargs["force_backend"] = force_backend
     return cls(*args, **kwargs)
