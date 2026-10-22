@@ -56,19 +56,6 @@ def windowfun(winType, N, alpha=0.01, xp=None):
     N       = int(N)
     winType = winType.lower() # Be a little more robust on the inputs
 
-    # Tukey window
-    def tukey(N, alpha):
-        # alpha -- parameter the defines the shape of the window
-        w         = xp.zeros(N, dtype=float)
-        i         = xp.arange(0,N,1)
-        r         = (2.0*i)/(alpha*(N-1))
-        l1        = int(xp.rint((alpha*(N-1))/2.0))
-        l2        = int(xp.rint((N-1)*(1.0-alpha/2.0)))
-        w[0:l1]   = 0.5*(1.0 + xp.cos(xp.pi*(r[0:l1] - 1.0)))
-        w[l1:l2]  = 1.0
-        w[l2:N-1] = 0.5*(1+xp.cos(xp.pi*(r[l2:N-1] - 2.0/alpha + 1.0)))
-        return w
-
     # planck window
     def planck(N, epsilon):
         # alpha -- parameter the defines the shape of the window
@@ -138,7 +125,7 @@ def windowfun(winType, N, alpha=0.01, xp=None):
     if winType == 'blackman-harris' or winType == 'bh92':
         winvals = bh(z)
     elif winType == 'tukey':
-        winvals = tukey(N,alpha)
+        winvals = tukey(N, alpha, xp=xp)
     elif winType == 'planck':
         winvals = planck(N, alpha)
     elif winType == 'hamming':
