@@ -663,6 +663,14 @@ class VGBSettings(GBSettings):
     fixed_params: typing.Optional[typing.Any] = None
     # (nleaves, ndim) sampling-basis truth rows (seeds the fixed-leaf start).
     injection: typing.Optional[typing.Any] = None
+    # RESUME: True puts every VGB leaf, walker and rung back at this launch's
+    # catalogue injection (the rows above) before the first iteration (Mike
+    # 2026-10-22). One launch only, armed by
+    # scripts/flagship/relaunch_sources_at_injection.sh; inert on a fresh
+    # store. See lisatools.globalfit.source_reset.
+    reset_to_injection_on_resume: bool = dataclasses.field(
+        default_factory=env_default("VGB_RESET_TO_INJECTION_ON_RESUME", False, bool)
+    )
     # VGB band separations DEFAULT to the same per-WDM-layer edges as the GB
     # branch (GBSetup.init_band_structure) for ease; this knob coarsens them
     # to L layers per band. Only bands that actually contain VGB leaves do

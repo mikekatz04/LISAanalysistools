@@ -513,7 +513,10 @@ class ParentChainTest(unittest.TestCase):
                 e = self.ex[name]
                 self.assertEqual(e["GF_SEED_STORE"], p.seed_store)
                 self.assertEqual(e["GB_WARM_START_SOURCE_STORE"], e["GF_SEED_STORE"])
-                self.assertEqual(e["SOURCE_WARM_START_STORE"], e["GF_SEED_STORE"])
+                # 2026-10-22 (Mike): the non-GB sources always start at the
+                # catalogue injection -- the parent-run source warm start is
+                # OFF by default (opt in with SOURCE_WARM_START_STORE on the line)
+                self.assertEqual(e["SOURCE_WARM_START_STORE"], "")
                 self.assertEqual(int(e["GB_WARM_START_SOURCE_TOBS"]), p.days * 86400)
                 self.assertEqual(e["GB_WARM_START_LAST_K"], "300")
                 self.assertTrue(e["GB_WARM_START_COMPONENTS"].endswith(

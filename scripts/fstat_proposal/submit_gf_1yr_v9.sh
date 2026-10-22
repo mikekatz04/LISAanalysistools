@@ -5351,8 +5351,13 @@ export VGB_START_FACTOR=0.0
 # and the warm / truth decision):
 #   python -m lisatools.globalfit.warmstart.sources --store $GF_SEED_STORE \
 #       --branch mbh --ids 2,5,16,18
-# SOURCE_WARM_START_STORE= (explicitly empty) turns it off.
-export SOURCE_WARM_START_STORE=${SOURCE_WARM_START_STORE-${GF_SEED_STORE}}
+# OFF BY DEFAULT SINCE 2026-10-22 (Mike: the non-GB sources "always start at
+# the catalog injected values rather than the last run's values"): every
+# source leaf starts at exact truth (*_START_FACTOR=0 above). Opt back in for
+# one launch with SOURCE_WARM_START_STORE=$GF_SEED_STORE on the line; to push a
+# stopped run's sources back to the injection use
+# scripts/flagship/relaunch_sources_at_injection.sh.
+export SOURCE_WARM_START_STORE=${SOURCE_WARM_START_STORE-}
 export SOURCE_WARM_START_SNR_MIN=${SOURCE_WARM_START_SNR_MIN:-10}
 export MBH_SOURCE_WARM_START_IDS=${MBH_SOURCE_WARM_START_IDS:-2,5,16,18}
 export EMRI_SOURCE_WARM_START_IDS=${EMRI_SOURCE_WARM_START_IDS:-0,1,2,3,4,5,6,7}

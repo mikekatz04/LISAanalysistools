@@ -4966,8 +4966,15 @@ export VGB_START_FACTOR=0.0
 # and the warm / truth decision):
 #   python -m lisatools.globalfit.warmstart.sources --store $GF_SEED_STORE \
 #       --branch mbh --ids {{PARENT_MBHB_IDS}}
-# SOURCE_WARM_START_STORE= (explicitly empty) turns it off.
-export SOURCE_WARM_START_STORE=${SOURCE_WARM_START_STORE-${GF_SEED_STORE}}
+# ⚠ OFF BY DEFAULT SINCE 2026-10-22 (Mike: "We want those [VGB, MBHB, SOBHB,
+# EMRI] to always start at the catalog injected values rather than the last
+# run's values"): every source leaf starts at exact truth (*_START_FACTOR=0
+# above), like the no-parent launchers. Opt back in for one launch with
+# SOURCE_WARM_START_STORE=$GF_SEED_STORE on the line; the id lists below are
+# kept for that and are inert otherwise. A RESUMED run keeps its chain; to push
+# a stopped run's sources back to the injection use
+# scripts/flagship/relaunch_sources_at_injection.sh.
+export SOURCE_WARM_START_STORE=${SOURCE_WARM_START_STORE-}
 export SOURCE_WARM_START_SNR_MIN=${SOURCE_WARM_START_SNR_MIN:-10}
 export MBH_SOURCE_WARM_START_IDS=${MBH_SOURCE_WARM_START_IDS:-{{PARENT_MBHB_IDS}}}   # the PARENT's MBHB_IDS (runs.py)
 export EMRI_SOURCE_WARM_START_IDS=${EMRI_SOURCE_WARM_START_IDS:-{{PARENT_EMRI_IDS}}}

@@ -1287,6 +1287,9 @@ class GlobalFit:
                 )),
             )
 
+        # Whether this launch builds the state (fresh) or loaded it from a
+        # store: the source reset at the end applies to a loaded state only.
+        _fresh_start = state is None
         if state is None:
             self.logger.info(
                 "FRESH START: no resumable backend (missing, empty, or "
@@ -1636,6 +1639,22 @@ class GlobalFit:
             for _name, _sub in state.sub_states.items():
                 if _sub is not None and not _sub.tempered_initialized:
                     _sub.pull_from_main(state, _name)
+
+        # SOURCE RESET TO THE INJECTION (Mike 2026-10-22): a loaded state's
+        # VGB / MBHB / EMRI / SOBBH leaves go back to this launch's catalogue
+        # injection rows, every walker and rung, when the branch's
+        # {BRANCH}_RESET_TO_INJECTION_ON_RESUME=1 (one launch, armed by
+        # scripts/flagship/relaunch_sources_at_injection.sh). The resume's
+        # setup_acs rebuild then derives the residual and lnL from them.
+        from .source_reset import maybe_reset_on_resume
+
+        maybe_reset_on_resume(
+            state, self.curr.source_info, fresh_start=_fresh_start,
+            logger=self.logger, store_path=backend_path,
+            stored_iteration=_stored_it,
+            job_id=os.environ.get("SLURM_JOB_ID") or None,
+            restart_count=os.environ.get("SLURM_RESTART_COUNT") or None,
+            ckpt_meta=(_ckpt[1] if _ckpt is not None else None))
 
         return state
 

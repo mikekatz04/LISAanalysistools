@@ -227,6 +227,7 @@ the cadence knob also sets the adaptation cadence.
 | `GFHDFBackend`, `ModuleSubBackend` | `globalfit/hdfbackend.py` | the store writer/reader; `save_step`, `add_recipe`, `completed_recipe_step` (stage stamps, routed through the saver since 5bf31e7b), `write_saved_after`, `_validate_resume_readable`, the running backup copy. |
 | the store layout | section 5 | |
 | `midit_checkpoint.py` | `globalfit/` | mid-iteration pickle of the state (`MIDIT_CHECKPOINT`; OFF on the legged search launch lines). The rewind trap is in its docstring. |
+| `source_reset.py` | `globalfit/` | the one-launch push of a STOPPED run's non-GB sources back to the catalogue injection (Mike 2026-10-22: they "always start at the catalog injected values rather than the last run's values"). Knobs `{VGB,MBH,EMRI,SOBBH}_RESET_TO_INJECTION_ON_RESUME` (Settings fields `reset_to_injection_on_resume`, off; never exported by a launcher, armed for one launch by `scripts/flagship/relaunch_sources_at_injection.sh LAUNCHER [BRANCHES]`). `GlobalFit.load_info` calls `maybe_reset_on_resume` last, on a LOADED state only: every leaf, walker and rung of the main state and the sub-state ladder go to this launch's `source_info[b].injection` (exact; the rows a fresh start uses), inds on; the `setup_acs` rebuild then derives the residual and lnL; their `d_h` / `h_h` read NaN until the move runs and their `<store>_eigen_tables.pkl` entries are dropped (backup `.pre_source_reset_<job>`). Refuses a missing injection, rows that do not match the stored `(nleaves, ndim)` exactly, an absent branch; warns on a knob for an unconfigured branch; a fresh start is reported, not reset. Requeue-safe through `<store>_source_reset.json` (job id, `SLURM_RESTART_COUNT`, stored row, time: the same job requeued onto a later row or a post-reset mid-iteration checkpoint skips; equal restart counts = a deliberate relaunch, applied). Log: `[SOURCE-RESET] <b>: N leaves x W walkers set to the catalogue injection ...` |
 | `residual_snapshot.py` | `globalfit/` | `<store>_residual_snapshot.npz` every `GF_RESIDUAL_SNAPSHOT_EVERY` rows (default 3, not in the launcher; 0 = off), every cold walker since 1f1289cf; what the monitor's residual panels draw. |
 | `legs.py` | `globalfit/` | `LegCursor`, `leg_ends_from_names`; resume by the saved-after NAME. |
 | `noise_ratchet.py` | `globalfit/` | the galfor ratchet (nudge / hold / release). Dropped from production 2026-10-03; the 6mo store's `gb_search_3` still carries it. |
@@ -253,7 +254,9 @@ cold rows) -> `match_referee.py` -> `referee_apply.py` -> the npz under
 `noise_pin.py` (psd + galfor start from the parent's max-lnL walker,
 `GF_SEED_STORE`; point it at the parent's `*_running_backup_copy.h5` when the
 parent job is still writing); `sources.py` (MBH / EMRI / SOBBH leaves with parent SNR > 10
-start at the parent's cold chain, `SOURCE_WARM_START_STORE`); `opt_snr.py`,
+start at the parent's cold chain, `SOURCE_WARM_START_STORE`; OFF by default
+since 2026-10-22, when the non-GB sources start at the catalogue injection --
+opt in with the store on the launch line); `opt_snr.py`,
 `basis.py`. The launcher's `[WARMSTART]` block prints the three by-hand
 commands for a login-node pre-build. Design: `docs/superpowers/specs/2026-09-18-warmstart-observable-basis-design.md`.
 

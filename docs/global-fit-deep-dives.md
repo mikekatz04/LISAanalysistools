@@ -690,6 +690,31 @@ Point-in-time; use them to recognise an order of magnitude, not as a spec.
 - `NULL_CHECK_ONLY=1` twice (old vs new waveform path) on a store copy is
   the way to prove a path switch is lnL-neutral before it goes live
   (`|delta| <~ 1 nat per walker`).
+- Pushing a stopped run's non-GB sources (VGB, MBHB, SOBBH, EMRI) back to the
+  catalogue injection (Mike 2026-10-22: they "always start at the catalog
+  injected values rather than the last run's values"):
+  `scripts/flagship/relaunch_sources_at_injection.sh LAUNCHER [BRANCHES]`
+  (e.g. `STAGE_SKIP_NOISE=1 scripts/flagship/relaunch_sources_at_injection.sh
+  scripts/flagship/submit_gf_12mo.sh`). It arms
+  `{BRANCH}_RESET_TO_INJECTION_ON_RESUME=1` for that one launch; at the resume
+  `lisatools.globalfit.source_reset` puts every leaf, walker and rung of the
+  main state and the branch sub-state at this launch's own injection rows
+  (exact, no `START_FACTOR` scatter), clears their per-leaf `d_h` / `h_h`
+  (NaN until the move runs) and drops their entries from
+  `<store>_eigen_tables.pkl` (backup `.pre_source_reset_<job>`), and the
+  `setup_acs` rebuild derives the residual and lnL. No file is edited before
+  the job starts. Read one `[SOURCE-RESET] <branch>: N leaves x W walkers set
+  to the catalogue injection ...` line per branch (with the cold chain's
+  largest |change| per leaf) and the sidecar line; a row-count or column
+  mismatch against the stored leaves refuses the launch (the leaf ORDER
+  follows this launch's sorted ids, as on any resume). Requeue-safe:
+  `<store>_source_reset.json` records the job, its restart count, the row
+  and the time, so the same job REQUEUED after saving a row, or resuming a
+  mid-iteration checkpoint written after the reset, skips (`[SOURCE-RESET]
+  skipped`); if the job dies before its first saved row, rerun the script
+  rather than relaunch bare. A later bare relaunch resumes normally. New runs start there anyway: the
+  parent-run source warm start is off by default since the same date
+  (`SOURCE_WARM_START_STORE` empty).
 
 ---
 

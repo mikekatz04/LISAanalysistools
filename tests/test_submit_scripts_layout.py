@@ -2636,8 +2636,13 @@ _RECIPE_REPLACEMENTS = (
      "# and the warm / truth decision):\n"
      "#   python -m lisatools.globalfit.warmstart.sources --store $GF_SEED_STORE \\\n"
      "#       --branch mbh --ids 2,5,16,18\n"
-     "# SOURCE_WARM_START_STORE= (explicitly empty) turns it off.\n"
-     "export SOURCE_WARM_START_STORE=${SOURCE_WARM_START_STORE-${GF_SEED_STORE}}\n"
+     "# OFF BY DEFAULT SINCE 2026-10-22 (Mike: the non-GB sources \"always start at\n"
+     "# the catalog injected values rather than the last run's values\"): every\n"
+     "# source leaf starts at exact truth (*_START_FACTOR=0 above). Opt back in for\n"
+     "# one launch with SOURCE_WARM_START_STORE=$GF_SEED_STORE on the line; to push a\n"
+     "# stopped run's sources back to the injection use\n"
+     "# scripts/flagship/relaunch_sources_at_injection.sh.\n"
+     "export SOURCE_WARM_START_STORE=${SOURCE_WARM_START_STORE-}\n"
      "export SOURCE_WARM_START_SNR_MIN=${SOURCE_WARM_START_SNR_MIN:-10}\n"
      "export MBH_SOURCE_WARM_START_IDS=${MBH_SOURCE_WARM_START_IDS:-2,5,16,18}\n"
      "export EMRI_SOURCE_WARM_START_IDS=${EMRI_SOURCE_WARM_START_IDS:-0,1,2,3,4,5,6,7}\n"
@@ -2741,8 +2746,9 @@ def _assert_the_recipe(test, exports, six, text):
         if knob != "GB_SEARCH_SEED_ITERS":
             test.assertRegex(text, rf"(?m)^export {knob}=\$\{{{knob}:-{want}\}}", knob)
     test.assertEqual(exports["GALFOR_RATCHET"], "0")
-    # the source warm start reads the SAME store the GB warm start + noise pin do
-    test.assertEqual(exports["SOURCE_WARM_START_STORE"], exports["GF_SEED_STORE"])
+    # the source warm start is OFF by default since 2026-10-22 (Mike: the non-GB
+    # sources always start at the catalogue injection); opt in on the launch line
+    test.assertEqual(exports["SOURCE_WARM_START_STORE"], "")
     test.assertNotIn("SOURCE_WARM_START_STORE", six)
     test.assertEqual(exports["GB_SEARCH_SOURCE_EVERY"], six["GB_SEARCH_SOURCE_EVERY"])
     for knob in exports:
@@ -2879,7 +2885,7 @@ class OneYearV9TwinTest(unittest.TestCase):
             # 2026-10-08: the warm-start fit takes the last 300 rows x 4
             # walkers = 1,200 samples of the 6mo (the 6mo took 10 rows of the 3mo)
             "GB_WARM_START_LAST_K",
-            "SOURCE_WARM_START_STORE",      # 2026-10-08: the source warm start (= GF_SEED_STORE)
+            "SOURCE_WARM_START_STORE",      # 2026-10-08: the source warm start (empty = off since 2026-10-22)
             "GF_MONITOR_ADD_INFO",          # 2026-10-12: the 6mo run on this run's page (1YR-10)
         } | set(_RECIPE_EXPORTS)          # the 2026-10-07 recipe (1YR-6)
         keys = (set(self.one) | set(self.six)) - {"_", "SHLVL", "PWD"}
