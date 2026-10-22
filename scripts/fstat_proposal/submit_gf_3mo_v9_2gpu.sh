@@ -4378,9 +4378,14 @@ export GB_SEARCH_SEED_ITERS=0
 # gb_search_2 in-model budget (Mike 2026-10-16; the 6mo v9 source carries the
 # note): repeats per pass 25 -> 15, group window 3 -> 2 passes, newborn polish
 # window 250 -> 100 in gb_search_2 only; the other stages run the moves as built.
-export GB_SEARCH_2_NUM_REPEAT_PROPOSALS=${GB_SEARCH_2_NUM_REPEAT_PROPOSALS:-15}
-export GB_SEARCH_2_INMODEL_GROUP_ITERS=${GB_SEARCH_2_INMODEL_GROUP_ITERS:-2}
+# 2026-10-19 (Mike): fewer, fatter passes, 15 x 2 -> 30 x 1 (the same 30-repeat
+# group test; the 6mo v9 source carries the note).
+export GB_SEARCH_2_NUM_REPEAT_PROPOSALS=${GB_SEARCH_2_NUM_REPEAT_PROPOSALS:-30}
+export GB_SEARCH_2_INMODEL_GROUP_ITERS=${GB_SEARCH_2_INMODEL_GROUP_ITERS:-1}
 export GB_SEARCH_2_INMODEL_CONVERGE_ITERS=${GB_SEARCH_2_INMODEL_CONVERGE_ITERS:-100}
+# F-stat refit every second cycle in gb_search_2 (Mike 2026-10-19; the 6mo v9
+# source carries the note); gb_search_1 keeps GB_FSTAT_REFIT_EVERY.
+export GB_SEARCH_2_FSTAT_REFIT_EVERY=${GB_SEARCH_2_FSTAT_REFIT_EVERY:-4}
 # GB_SEARCH_3_WARM_EVERY IS DELETED WITH IT. It cadences rj_warm_search inside
 # gb_search_3, and there is no warm move to cadence -- leaving it exported
 # would be a knob that resolves and reaches nothing, which is the recurring

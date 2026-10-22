@@ -1262,6 +1262,84 @@ def apply_inmodel_budget(gb_moves, budget, tag: str = "gb_search") -> dict:
     return changed
 
 
+def apply_fstat_refit_every(gb_moves, every, tag: str = "gb_search") -> dict:
+    """Set a stage's F-stat refit cadence on its grid moves; restore the built one otherwise.
+
+    Mike, 2026-10-19: "Make the fstat refit every 2 cycles during gb search
+    2." ``GB_FSTAT_REFIT_EVERY`` is one value for every search stage, so a
+    stage that wants its own cadence carries it in its profile
+    (``fstat_refit_every``, filled from ``GB_SEARCH_{N}_FSTAT_REFIT_EVERY``)
+    and this writes it on the stage's F-stat grid moves at EVERY entry of
+    the stage (a resume included), before the peak-floor block, so a forced
+    refit armed at the same entry judges staleness against the stage's own
+    cadence.
+
+    UNITS are the refit clock's (``GBSpecialRJFStatGridMove._fstat_clock``):
+    global-fit ITERATIONS, one per stored row. Under ``GB_SEARCH_LEGS=1`` a
+    search cycle is three rows (one per in-model leg ender) and the refit is
+    decided at the cycle's one ``rj_fstat_search`` propose, so the ages it
+    sees are 3, 6, 9, ...: a cadence of 2 or 3 refits every cycle and 4 to 6
+    every second cycle (the 1yr flagship's epoch clocks 47, 50, 53, ... at
+    cadence 2, 2026-10-19).
+
+    Only moves BUILT with a positive cadence are touched: a grid move built
+    with ``fstat_refit_every <= 0`` fits once (or never fits) by design, and
+    a stage profile must not turn it into a refitting move. The decision
+    itself lives on the head (``_fstat_fit_decision``); the ranks install
+    the epoch the head ships, so nothing rides ``GB_RANK_LIVE_ATTRS``.
+
+    ``every`` None restores every move's built cadence (stashed on the move
+    at the first call), so a stage without the key -- ``gb_search_1`` --
+    runs the launcher's ``GB_FSTAT_REFIT_EVERY``; the move objects are
+    shared across stages and a later stage must not inherit an earlier
+    one's cadence.
+
+    Args:
+        gb_moves (list): The stage's GB band moves (:func:`gb_moves_in_tree`).
+        every (int, optional): The stage's cadence in refit-clock ticks,
+            >= 1; None restores the built cadence.
+        tag: Stage label for the log line.
+
+    Returns:
+        dict: ``{"<move>.fstat_refit_every": (old, new)}`` for what changed.
+
+    Raises:
+        ValueError: ``every`` below 1.
+    """
+    want = None
+    if every is not None:
+        want = int(every)
+        if want < 1:
+            raise ValueError(
+                f"fstat_refit_every={every!r} must be >= 1 (0 would make the "
+                "search grid fit once and never again).")
+    changed = {}
+    for m in gb_moves:
+        if not hasattr(m, "fstat_refit_every"):
+            continue
+        built = getattr(m, "_fstat_refit_every_built", None)
+        if built is None:
+            built = int(m.fstat_refit_every)
+            try:
+                m._fstat_refit_every_built = built
+            except AttributeError:   # a frozen stand-in: nothing to restore later
+                pass
+        if built <= 0:
+            continue
+        new = built if want is None else want
+        old = int(m.fstat_refit_every)
+        if old != new:
+            m.fstat_refit_every = new
+            changed[f"{getattr(m, 'name', type(m).__name__)}.fstat_refit_every"] = (old, new)
+    if changed:
+        logger.info("[V9-STAGE %s] F-stat refit cadence set on entry (%s): %s "
+                    "(refit-clock ticks = stored rows; 3 per search cycle under "
+                    "legs).", tag,
+                    "the stage's value" if want is not None else "the built value restored",
+                    ", ".join(f"{k} {o} -> {n}" for k, (o, n) in changed.items()))
+    return changed
+
+
 class ReplicaPERecipeStep(PERecipeStep):
     """full_pe's twin that ENDS when the large-scale metrics converge.
 
@@ -2049,7 +2127,8 @@ class SearchStageProfileStep(RJRecipeStep):
         self.profile = dict(profile or {})
         _unknown = sorted(set(self.profile) - {
             "phase_maximize", "opt_snr", "peak_min_snr", "reset_band_max",
-            "prior_births", "reset_valves", "inmodel_budget"})
+            "prior_births", "reset_valves", "inmodel_budget",
+            "fstat_refit_every"})
         if _unknown:
             raise ValueError(
                 f"SearchStageProfileStep({stage_name!r}): unknown profile "
@@ -2973,6 +3052,12 @@ class SearchStageProfileStep(RJRecipeStep):
         # (apply_inmodel_budget). ``GB_SEARCH_{N}_NUM_REPEAT_PROPOSALS`` /
         # ``_INMODEL_GROUP_ITERS`` / ``_INMODEL_CONVERGE_ITERS`` fill it.
         apply_inmodel_budget(gb_moves, prof.get("inmodel_budget"), tag)
+
+        # The stage's F-stat refit cadence, on EVERY entry and BEFORE the
+        # peak-floor block below, so a forced refit armed at this entry judges
+        # staleness against this stage's cadence (apply_fstat_refit_every;
+        # GB_SEARCH_{N}_FSTAT_REFIT_EVERY fills it, Mike 2026-10-19).
+        apply_fstat_refit_every(gb_moves, prof.get("fstat_refit_every"), tag)
 
         peak = prof.get("peak_min_snr")
         if peak is not None:

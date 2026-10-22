@@ -174,13 +174,19 @@ COLD_TO_HOT_KNOBS = tuple(COLD_TO_HOT_LINE)
 
 # 2026-10-16 (Mike): gb_search_2 spends less time in the in-model steps, the
 # checkers (group rule, per-row polish rule) kept and their windows shortened
-# in that stage only; gb_search_1 as built (25 / 3 / 250).
+# in that stage only; gb_search_1 as built (25 / 3 / 250). 2026-10-19 (Mike):
+# fewer, fatter passes, 15 x 2 -> 30 x 1 (the same 30-repeat group test).
 SEARCH2_INMODEL_LINE = {
-    "GB_SEARCH_2_NUM_REPEAT_PROPOSALS": "15",
-    "GB_SEARCH_2_INMODEL_GROUP_ITERS": "2",
+    "GB_SEARCH_2_NUM_REPEAT_PROPOSALS": "30",
+    "GB_SEARCH_2_INMODEL_GROUP_ITERS": "1",
     "GB_SEARCH_2_INMODEL_CONVERGE_ITERS": "100",
 }
 SEARCH2_INMODEL_KNOBS = tuple(SEARCH2_INMODEL_LINE)
+
+# 2026-10-19 (Mike): the F-stat refit every second cycle in gb_search_2
+# (stage profile fstat_refit_every; refit-clock ticks, 3 per cycle).
+SEARCH2_FSTAT_REFIT_LINE = {"GB_SEARCH_2_FSTAT_REFIT_EVERY": "4"}
+SEARCH2_FSTAT_REFIT_KNOBS = tuple(SEARCH2_FSTAT_REFIT_LINE)
 
 # 2026-10-16 (Mike): the search F-stat epochs cycle through the cold walkers
 # (code default rotate; min = the 2026-09-21 min-lnL rule), exported for
@@ -973,6 +979,8 @@ class SixMonthV9DeltaTest(unittest.TestCase):
             # 2026-10-16: the gb_search_2 in-model budget (stage profile
             # inmodel_budget; unset = as built).
             *SEARCH2_INMODEL_KNOBS,
+            # 2026-10-19: the gb_search_2 F-stat refit cadence
+            *SEARCH2_FSTAT_REFIT_KNOBS,
             # 2026-10-16: the search F-stat epochs rotate through the walkers
             *FSTAT_SEARCH_REF_KNOBS,
             # 2026-10-17: the valve's all-walker rule
@@ -1962,6 +1970,8 @@ class ThreeMonthV9TwinTest(unittest.TestCase):
             # 2026-10-16: the gb_search_2 in-model budget, mirrored in the
             # 3mo twin
             *SEARCH2_INMODEL_KNOBS,
+            # 2026-10-19: the gb_search_2 F-stat refit cadence, mirrored
+            *SEARCH2_FSTAT_REFIT_KNOBS,
             # 2026-10-16: the rotating search F-stat reference, mirrored
             *FSTAT_SEARCH_REF_KNOBS,
             # 2026-10-17: the valve's all-walker rule, mirrored

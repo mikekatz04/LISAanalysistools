@@ -4557,9 +4557,37 @@ export GB_SEARCH_2_RESET_VALVES=${GB_SEARCH_2_RESET_VALVES:-1}
 # group 4.0/(2 x 15) = 0.133 lnL/repeat (was 0.053), newborn 4.0/100 = 0.04
 # (was 0.016) -- looser, which is the direction asked for. Unset any of the
 # three on the line to keep that knob as built.
-export GB_SEARCH_2_NUM_REPEAT_PROPOSALS=${GB_SEARCH_2_NUM_REPEAT_PROPOSALS:-15}
-export GB_SEARCH_2_INMODEL_GROUP_ITERS=${GB_SEARCH_2_INMODEL_GROUP_ITERS:-2}
+# FEWER, FATTER PASSES (Mike 2026-10-19, "faster ... I really do not want to
+# sacrifice accuracy"): 15 x 2 -> 30 x 1. The group test is unchanged -- the
+# best cold gain over the last 30 repeats <= D/2 -- and is judged at 60 / 90 /
+# 120 repeats instead of 45 / 60 / 75 / 90, a subset, so no band runs fewer
+# repeats than before (a flat band 60 instead of 45, a band shut by the pass-1
+# static test 30 instead of 15); the vertical swaps (opening sweep + one per
+# ~25-repeat refit tick) go from 1 to 2 per pass. MEASURED on the 1yr job 804
+# against job 780 (2026-10-21): 4.8 passes per rank instead of 7.8, but a pass
+# at 30 repeats costs ~1.6x one at 15 at equal open bands, so the leg's wall is
+# UNCHANGED (~12 min). It buys mixing per band at equal cost, not speed. (The
+# 10-19 prediction of ~6 min per leg came from a pass-cost fit across jobs 774
+# and 780 that read the pass wall as repeat-independent; job 804 shows it is
+# not.)
+export GB_SEARCH_2_NUM_REPEAT_PROPOSALS=${GB_SEARCH_2_NUM_REPEAT_PROPOSALS:-30}
+export GB_SEARCH_2_INMODEL_GROUP_ITERS=${GB_SEARCH_2_INMODEL_GROUP_ITERS:-1}
 export GB_SEARCH_2_INMODEL_CONVERGE_ITERS=${GB_SEARCH_2_INMODEL_CONVERGE_ITERS:-100}
+# F-STAT REFIT EVERY SECOND CYCLE IN gb_search_2 (Mike 2026-10-19: "Make the
+# fstat refit every 2 cycles during gb search 2"); gb_search_1 keeps
+# GB_FSTAT_REFIT_EVERY below (every cycle -- its population moves fast, the
+# 2026-09-25 ruling). Same units as that knob: refit-clock ticks, one per
+# stored row, and under GB_SEARCH_LEGS=1 a cycle is three rows, so the ages
+# the one rj_fstat_search propose per cycle sees are 3, 6, 9: 4 refits every
+# second cycle and stays there if a relaunch drops a tick or two. Why: on the
+# 1yr job 780 the fit was 11 min of rj_fstat_search's 30 (epoch 27, falling
+# as bands shut on every walker) while each walker added ~35 of ~1,275 peaks'
+# sources per cycle, so a grid one cycle old has lost ~3 % of its peaks; the
+# rotation keeps each walker's own grid in use a quarter of the time (two
+# cycles in eight). Applied at every entry of the stage; the entry line reads
+# "F-stat refit cadence set on entry ... rj_fstat_search.fstat_refit_every 2
+# -> 4", and the epoch "starting" lines come every second cycle.
+export GB_SEARCH_2_FSTAT_REFIT_EVERY=${GB_SEARCH_2_FSTAT_REFIT_EVERY:-4}
 {{#if HAS_PARENT}}
 export GB_SEARCH_3_WARM_EVERY=5
 {{#else}}

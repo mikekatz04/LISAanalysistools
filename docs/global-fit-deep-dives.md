@@ -215,7 +215,17 @@ the next.
   ~26 % off the cycle; the first tar after it should show the `[GB_IMGROUP]`
   armed line at `window 2 pass(es) ... 15 repeats` and the `[GB_IMCONV]`
   armed line at `window 100` once the stage is entered, and `gb_search_1`
-  unchanged at 25 / 3 / 250.
+  unchanged at 25 / 3 / 250. Since 2026-10-19 the pure in-model legs run
+  fewer, fatter passes, `GB_SEARCH_2_NUM_REPEAT_PROPOSALS=30` and
+  `_INMODEL_GROUP_ITERS=1`: the same 30-repeat group test judged at a subset
+  of the old points, so no band runs fewer repeats. Read it as the armed line
+  at `window 1 pass(es) ... 30 repeats` and the open count dropping after pass
+  2 instead of pass 3. Measured (1yr job 804 against job 780): 4.8 passes per
+  rank instead of 7.8, but a 30-repeat pass costs about 1.6x a 15-repeat one at
+  equal open bands (full pass 203 s at 214 open bands vs 122 s at 153), so the
+  leg stays at about 12 min: the change buys mixing per band, not speed. More
+  open bands (after a valve change) raise every pass, roughly as
+  ln(1 + open bands), so compare legs at equal open counts.
 - Timings that are NOT a regression: the first call of a batched MBH or
   EMRI move pays JAX / CUDA JIT (minutes per rank per process); a job's
   first source block is 10x its steady state. The first 10 rounds of a
@@ -227,7 +237,13 @@ the next.
   run of the same walker on consecutive epochs means `min` is set); before
   that it was the min-lnL walker, which on the 1yr job 774 fitted walker 1
   on five consecutive search-2 epochs while the fewest-leaf walker never
-  got a grid. PE draws a seeded random walker. `DONE.json` per epoch
+  got a grid. PE draws a seeded random walker. Since 2026-10-19
+  `gb_search_2` refits every SECOND cycle (`GB_SEARCH_2_FSTAT_REFIT_EVERY=4`,
+  refit-clock ticks = stored rows, three per cycle; `gb_search_1` every
+  cycle): consecutive epochs' `DONE.json` `clock` values step by 6 instead
+  of 3, each walker's grid is in use for two cycles running, and the
+  F-stat cold births per propose on the second cycle of an epoch measure
+  what the older grid costs. `DONE.json` per epoch
   (`wall_seconds`, `n_peaks`, `clock`), the `[stageA]` line (nodes x sky evaluations; at 9mo 996k f0
   nodes x adaptive sky up to 512 = 22 min before the shut-band skip, 2.3-7.7
   min after) and stage B (per-peak grids, ~1 min at a few hundred peaks, 13

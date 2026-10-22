@@ -919,6 +919,32 @@ def search_stage_inmodel_budget(name: str):
     return out or None
 
 
+def search_stage_fstat_refit_every(name: str):
+    """``GB_SEARCH_{N}_FSTAT_REFIT_EVERY``: the stage's F-stat refit cadence.
+
+    Mike 2026-10-19: "Make the fstat refit every 2 cycles during gb search 2."
+    ``GB_FSTAT_REFIT_EVERY`` is one value for every search stage; this gives
+    one stage its own, written on the profile as ``fstat_refit_every`` and
+    applied at every entry of the stage by ``recipe.apply_fstat_refit_every``
+    (a stage without it runs the launcher's ``GB_FSTAT_REFIT_EVERY``). Same
+    units as that knob -- refit-clock ticks, one per stored row; under
+    ``GB_SEARCH_LEGS=1`` a search cycle is three rows, so 4 refits every
+    second cycle. None when unset.
+    """
+    knob = _stage_knob(name, "FSTAT_REFIT_EVERY")
+    raw = (os.environ.get(knob) or "").strip() if knob else ""
+    if not raw:
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        raise ValueError(f"{knob}={raw!r} must be an integer >= 1.") from None
+    if n < 1:
+        raise ValueError(f"{knob}={n} must be >= 1 (0 would make the search grid "
+                         f"fit once and never again).")
+    return n
+
+
 def search_stage_noise_max_rounds(name: str) -> int:
     """``GB_SEARCH_{N}_NOISE_MAX_ROUNDS``: the cycle-end convergence's ceiling."""
     knob = _stage_knob(name, "NOISE_MAX_ROUNDS")
@@ -1101,6 +1127,17 @@ def search_stage_profiles():
                   f"and group window in passes, the RJ moves' newborn polish window "
                   f"in repeats; the other stages run the moves as built)", flush=True)
             prof = dict(prof, inmodel_budget=budget)
+        # fstat_refit_every (2026-10-19): written only when the knob is set,
+        # so the other profile dicts stay byte-identical; applied at EVERY
+        # entry of the stage by SearchStageProfileStep.
+        refit = search_stage_fstat_refit_every(name)
+        if refit:
+            _num = name.rpartition("_")[2]
+            print(f"[V9-STAGE {name}] profile fstat_refit_every={refit} from "
+                  f"GB_SEARCH_{_num}_FSTAT_REFIT_EVERY (refit-clock ticks, one per "
+                  f"stored row; the other search stages keep GB_FSTAT_REFIT_EVERY)",
+                  flush=True)
+            prof = dict(prof, fstat_refit_every=refit)
         out.append((name, prof, sampled))
     return tuple(out)
 
@@ -2125,7 +2162,7 @@ def build_fit():
                       peak_min_snr, reset_band_max=False, warm_every=1,
                       seed_only=False, prior_births=None, reset_valves=False,
                       source_every=None, noise_max_rounds=_CYCLE_END_MAX_ROUNDS,
-                      inmodel_budget=None):
+                      inmodel_budget=None, fstat_refit_every=None):
         # the stage profile as the step sees it; reset_band_max is only
         # written when set so the other stages' dicts stay byte-identical
         _profile = dict(phase_maximize=phase_maximize, opt_snr=opt_snr,
@@ -2137,6 +2174,10 @@ def build_fit():
             # _INMODEL_CONVERGE_ITERS (2026-10-16): applied by the step at
             # EVERY entry of the stage; written only when set
             _profile["inmodel_budget"] = dict(inmodel_budget)
+        if fstat_refit_every:
+            # GB_SEARCH_{N}_FSTAT_REFIT_EVERY (2026-10-19): applied by the step
+            # at EVERY entry of the stage; written only when set
+            _profile["fstat_refit_every"] = int(fstat_refit_every)
         if prior_births is not None:
             # move-scoped: what the shared rj_prior_removal proposes HERE
             _profile["prior_births"] = bool(prior_births)

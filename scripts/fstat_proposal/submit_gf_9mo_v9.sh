@@ -4984,10 +4984,19 @@ export GB_SEARCH_2_RESET_VALVES=${GB_SEARCH_2_RESET_VALVES:-1}
 # about zero and half of each leg was warm-up passes; the newborn polish ran
 # 255 repeats per row for a median gain of 0.2 nats. The flagship template
 # carries the full note. Unset any of the three on the line to keep that
-# knob as built.
-export GB_SEARCH_2_NUM_REPEAT_PROPOSALS=${GB_SEARCH_2_NUM_REPEAT_PROPOSALS:-15}
-export GB_SEARCH_2_INMODEL_GROUP_ITERS=${GB_SEARCH_2_INMODEL_GROUP_ITERS:-2}
+# knob as built. 2026-10-19 (Mike): fewer, fatter passes, 15 x 2 -> 30 x 1 --
+# the same 30-repeat group test, judged at a subset of the old points, so no
+# band runs fewer repeats. Measured on the 1yr job 804: the leg's wall is
+# unchanged (4.8 instead of 7.8 passes per rank, each ~1.6x the cost), so it
+# buys mixing per band, not speed; the flagship template carries the note.
+export GB_SEARCH_2_NUM_REPEAT_PROPOSALS=${GB_SEARCH_2_NUM_REPEAT_PROPOSALS:-30}
+export GB_SEARCH_2_INMODEL_GROUP_ITERS=${GB_SEARCH_2_INMODEL_GROUP_ITERS:-1}
 export GB_SEARCH_2_INMODEL_CONVERGE_ITERS=${GB_SEARCH_2_INMODEL_CONVERGE_ITERS:-100}
+# F-stat refit every second cycle in gb_search_2 (Mike 2026-10-19; the
+# flagship template carries the note): refit-clock ticks, one per stored row,
+# three rows per cycle under legs, so 4 = every second cycle; gb_search_1 keeps
+# GB_FSTAT_REFIT_EVERY (every cycle).
+export GB_SEARCH_2_FSTAT_REFIT_EVERY=${GB_SEARCH_2_FSTAT_REFIT_EVERY:-4}
 export GB_SEARCH_3_WARM_EVERY=5
 
 # ---- MID-ITERATION CHECKPOINTS (user ask 2026-09-24: "make sure there are
