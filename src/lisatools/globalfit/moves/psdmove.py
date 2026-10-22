@@ -2413,8 +2413,15 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         return None
 
     def _fancy_swap_fires(self, move_i, nwalkers):
-        """Walker-permuting swap cadence; never with one walker (identity permutation)."""
-        return (int(move_i) % int(self.permute_every) == 0) and int(nwalkers) > 1
+        """Walker-permuting swap cadence; never with one walker (identity permutation).
+
+        ``permute_every <= 0`` (e.g. -1) disables it; the check runs before the modulo.
+        """
+        return (
+            int(self.permute_every) > 0
+            and int(move_i) % int(self.permute_every) == 0
+            and int(nwalkers) > 1
+        )
 
     def fanout_knob_prefix(self):
         return str((self.sampled_branches or ["psd"])[0]).upper()

@@ -153,6 +153,9 @@ class PSDRowsTest(unittest.TestCase):
         m.permute_every = 2
         self.assertFalse(m._fancy_swap_fires(1, 4))
         self.assertTrue(m._fancy_swap_fires(2, 4))
+        for off in (-1, 0):  # explicitly off; -1 used to fire every move_i, 0 divided by zero
+            m.permute_every = off
+            self.assertFalse(any(m._fancy_swap_fires(i, 4) for i in range(6)))
 
     def test_single_process_paths_are_direct(self):
         m = _stub(1.0)
