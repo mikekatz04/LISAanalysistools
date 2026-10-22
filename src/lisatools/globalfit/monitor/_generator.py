@@ -5776,7 +5776,7 @@ try:
 except Exception as _e:
     MISSING.append(f"RJ-per-band panel unavailable: {type(_e).__name__}: {_e}")
 
-if RSC:
+if RSC and "share_walkers" in RSC:
     _S = RSC
     cap_fgD = (
         f"<strong>The ratchet's scorecard.</strong> Catalogue sources with SNR &gt; 7 (frozen set) "
