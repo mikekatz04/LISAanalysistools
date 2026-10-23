@@ -256,16 +256,19 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     galfor_injection: typing.Sequence[float] = dataclasses.field(
         default_factory=lambda: list(GALFOR_INJECTION)
     )
-    # Foreground time modulation: None (default) => stationary; set a path
-    # (or GALFOR_MODULATION_PATH) to load a tabulated GalForTimeModulation.
+    # Foreground time modulation: "auto" (default) => the packaged
+    # modulation_unequal.dat anchored at the data start when the data are
+    # mojito and a galfor branch is fit, stationary otherwise; None / "none"
+    # => stationary; a path (or GALFOR_MODULATION_PATH) => that table.
     galfor_modulation_path: typing.Optional[str] = dataclasses.field(
-        default_factory=env_default("GALFOR_MODULATION_PATH", None, str)
+        default_factory=env_default("GALFOR_MODULATION_PATH", "auto", str)
     )
     # Epoch of the modulation table's time column: None (default) keeps a
-    # table already written relative to the data start unchanged; the string
-    # "data" anchors the table at the data's first sample time (mission-clock
-    # tables such as scripts/noise/modulation_unequal.dat), resolved once the
-    # data has been processed; a float is an explicit absolute epoch [s].
+    # table already written relative to the data start unchanged (the "auto"
+    # table resolves it to "data"); the string "data" anchors the table at the
+    # data's first sample time (mission-clock tables such as
+    # modulation_unequal.dat), resolved once the data has been processed; a
+    # float is an explicit absolute epoch [s].
     galfor_modulation_t0: typing.Optional[str] = dataclasses.field(
         default_factory=env_default("GALFOR_MODULATION_T0", None, str)
     )
@@ -721,6 +724,23 @@ class AllSourcesGlobalFit(EreborFit):
         if gs.wdm_psd_method:
             # Backend-wide policy (instrument, foreground, SGWB together).
             extra["wdm_psd_method"] = gs.wdm_psd_method
+
+        # Modulation table: "auto" -> the packaged mission-clock table,
+        # anchored at the data start, when the data are mojito (after the
+        # missing-folder fallback) and the foreground is fit; else stationary.
+        # The resolved values are written back onto this build-time copy.
+        mod_path = gs.galfor_modulation_path
+        if isinstance(mod_path, str) and mod_path.strip().lower() in ("", "none"):
+            mod_path = None
+        elif isinstance(mod_path, str) and mod_path.strip().lower() == "auto":
+            mod_path = None
+            if gs.data_mode == "mojito" and "galfor" in self._branch_names:
+                from lisatools.sensitivity import packaged_galfor_modulation_path
+
+                mod_path = packaged_galfor_modulation_path()
+                if gs.galfor_modulation_t0 in (None, ""):
+                    gs.galfor_modulation_t0 = "data"
+        gs.galfor_modulation_path = mod_path
 
         # Modulation epoch: 0.0 (table already in the data frame), an explicit
         # absolute epoch, or "data" -> deferred to the engine, which anchors

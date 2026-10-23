@@ -21,9 +21,11 @@ import numpy as np
 from lisatools.globalfit.engine import GeneralSetup
 from lisatools.globalfit.stock import erebor
 from lisatools.sensitivity import (
+    GALFOR_MODULATION_TABLE,
     GalForTimeModulation,
     LinkDelayTable,
     UnequalArmInstrumentNoise,
+    packaged_galfor_modulation_path,
 )
 
 L0 = 8.339  # ~equal-arm light travel time, seconds
@@ -261,6 +263,77 @@ class UnequalArmKnobWiringTest(unittest.TestCase):
         self.assertFalse(identity["unequal_arm"])
         self.assertEqual(identity["instrument_component"], "InstrumentNoise")
         self.assertEqual(identity["wdm_psd_method"], "fold")
+
+
+#: the mojito data start; the packaged table's first epoch
+MOJITO_DATA_T0 = 97729939.827664
+
+
+class PackagedModulationTableTest(unittest.TestCase):
+    """The installed ``modulation_unequal.dat`` and the ``all_sources`` default."""
+
+    def test_the_table_is_the_one_the_live_stores_recorded(self):
+        # name + digest are what the resume guard compares; the 9mo / 12mo
+        # stores were sampled under scripts/noise/modulation_unequal.dat
+        self.assertTrue(os.path.isfile(packaged_galfor_modulation_path()))
+        mod = GalForTimeModulation(GALFOR_MODULATION_TABLE)
+        self.assertEqual(mod.path, packaged_galfor_modulation_path())
+        stub = _engine_stub(data_t0=MOJITO_DATA_T0, tobs=360 * 86400.0)
+        GeneralSetup._resolve_deferred_noise_model(
+            stub, {"galfor_modulation": mod, "galfor_modulation_anchor": "data_t0"}
+        )
+        identity = stub.noise_model_identity
+        self.assertEqual(identity["galfor_modulation"], "modulation_unequal.dat")
+        self.assertEqual(identity["galfor_modulation_digest"], "2fd5af9aaf893724")
+        self.assertEqual(identity["galfor_modulation_t0"], MOJITO_DATA_T0)
+        t = mod._table()[:, 0]
+        self.assertEqual(mod._table().shape, (199, 7))
+        self.assertEqual(t[0], MOJITO_DATA_T0)
+        self.assertGreater(t[-1] - t[0], 1.99 * 365.25 * 86400.0)
+
+    def test_a_bare_name_not_packaged_is_left_alone(self):
+        self.assertEqual(GalForTimeModulation("no_such_table.dat").path, "no_such_table.dat")
+
+    def _finalized(self, data_mode="mojito", drop_galfor=False, **kwargs):
+        fit = erebor.all_sources(lite=True, **kwargs)
+        if drop_galfor:
+            fit.remove_branch("galfor")
+        fit.general.data_mode = data_mode
+        fit.finalize_general(fit.general)
+        return fit.general
+
+    def test_mojito_defaults_to_the_packaged_table_at_the_data_start(self):
+        if os.environ.get("GALFOR_MODULATION_PATH"):
+            self.skipTest("GALFOR_MODULATION_PATH is set in this environment")
+        self.assertEqual(erebor.all_sources(lite=True).general.galfor_modulation_path, "auto")
+        gs = self._finalized()
+        sik = gs.sensitivity_init_kwargs
+        self.assertIsInstance(sik["galfor_modulation"], GalForTimeModulation)
+        self.assertEqual(sik["galfor_modulation"].path, packaged_galfor_modulation_path())
+        self.assertEqual(sik["galfor_modulation_anchor"], "data_t0")
+        self.assertEqual(gs.galfor_modulation_path, packaged_galfor_modulation_path())
+        self.assertEqual(gs.galfor_modulation_t0, "data")
+
+    def test_auto_is_stationary_off_mojito_or_without_galfor(self):
+        for kw in (dict(data_mode="synthetic"), dict(drop_galfor=True)):
+            with self.subTest(**kw):
+                gs = self._finalized(galfor_modulation_path="auto", **kw)
+                self.assertIsNone(gs.sensitivity_init_kwargs["galfor_modulation"])
+                self.assertNotIn("galfor_modulation_anchor", gs.sensitivity_init_kwargs)
+                self.assertIsNone(gs.galfor_modulation_path)
+
+    def test_none_turns_it_off_on_mojito(self):
+        for off in (None, "none", "None"):
+            with self.subTest(off=off):
+                gs = self._finalized(galfor_modulation_path=off)
+                self.assertIsNone(gs.sensitivity_init_kwargs["galfor_modulation"])
+                self.assertNotIn("galfor_modulation_anchor", gs.sensitivity_init_kwargs)
+
+    def test_an_explicit_epoch_wins_over_the_auto_anchor(self):
+        gs = self._finalized(galfor_modulation_path="auto", galfor_modulation_t0="123.0")
+        mod = gs.sensitivity_init_kwargs["galfor_modulation"]
+        self.assertEqual(mod.t0, 123.0)
+        self.assertNotIn("galfor_modulation_anchor", gs.sensitivity_init_kwargs)
 
 
 if __name__ == "__main__":

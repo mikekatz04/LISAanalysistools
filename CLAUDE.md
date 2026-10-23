@@ -178,6 +178,7 @@ In Python code, the `xp` pattern is used widely — modules do `try: import cupy
   - **Domains are never communicated by string** — `GeneralSettings.domain_settings` takes a `DomainSettingsBase` instance or a `(times, dt, force_backend)` factory (`FDSettings/STFTSettings/WDMSettings.make_factory`); all dispatch is `isinstance` on the settings class.
 - `utils/` — `constants.py` (re-exports `lisaconstants`-derived values like `YRSID_SI`), array helpers (`get_array_module`, `AET`), exceptions.
 - `orbit_files/` — packaged orbit data files.
+- `galfor_modulation/` — packaged galactic-foreground modulation table (`modulation_unequal.dat`, the `all_sources` mojito default; `lisatools.sensitivity.packaged_galfor_modulation_path`).
 - `scripts/` — dev / validation / benchmark / diagnostics scripts (`gb_chunked_het/`, `gb_lookup/`, `sobbh/`, `mbh/`, `emri/`, `wdm/`, `validation/`, `benchmark/`, `diagnostics/`, `notes/`). Migrated from the umbrella workspace root at Phase 2.
 
 ## Stock global fits — no new settings files (LISA Analysis Tools–wide rule)

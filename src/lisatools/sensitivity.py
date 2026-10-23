@@ -3809,6 +3809,26 @@ def modulation_from_elements(
     return _mod
 
 
+#: File name of the packaged galactic-foreground modulation table
+#: (``lisatools/galfor_modulation/``): the unequal-arm TDI-2 response of the mojito
+#: constellation to the anisotropic galaxy, on the absolute mission clock (first epoch
+#: 97729939.83 s = the mojito data start, 199 epochs 3.69 d apart, 2.0 yr). The stock
+#: ``all_sources`` fit uses it by default on mojito data.
+GALFOR_MODULATION_TABLE = "modulation_unequal.dat"
+
+
+def packaged_galfor_modulation_path(name: str = GALFOR_MODULATION_TABLE) -> str:
+    """Absolute path of a modulation table shipped in ``lisatools/galfor_modulation/``.
+
+    Args:
+        name: File name inside that directory. Default :data:`GALFOR_MODULATION_TABLE`.
+
+    Returns:
+        str: The absolute path (existence is not checked).
+    """
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "galfor_modulation", name)
+
+
 class GalForTimeModulation:
     """Per-element galactic-foreground time modulation loaded from a table file.
 
@@ -3826,11 +3846,21 @@ class GalForTimeModulation:
     object still moves cleanly across MPI ranks.
 
     Args:
-        path: Path to the whitespace-delimited modulation table.
+        path: Path to the whitespace-delimited modulation table. A bare file name that
+            does not exist in the working directory resolves to the packaged copy in
+            ``lisatools/galfor_modulation/`` (:func:`packaged_galfor_modulation_path`)
+            when one exists.
     """
 
     def __init__(self, path: str, t0: float = 0.0):
-        self.path = str(path)
+        path = str(path)
+        # A bare name (what a store's noise identity records) that is not in the
+        # working directory means the packaged table.
+        if os.path.basename(path) == path and not os.path.exists(path):
+            packaged = packaged_galfor_modulation_path(path)
+            if os.path.isfile(packaged):
+                path = packaged
+        self.path = path
         # Subtracted from the table's time column, i.e. the absolute epoch the
         # table is written against. Tables tabulated on an ABSOLUTE mission
         # clock need this, because the domains hand out a 0-based ``t_arr``

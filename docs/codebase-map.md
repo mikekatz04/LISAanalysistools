@@ -56,6 +56,7 @@ package.
 | `globalfit/moves/psdmove.py` (PSD_BATCH) | The walker-batched noise scorer (`PSD_BATCH`, default 1) builds one covariance stack per shard (`_batched_covariance`, shared with the noise Fisher). Since 290c1902 (2026-10-06) its galfor / SGWB magnitudes follow the backend's `WDM_PSD_METHOD` (`_batched_stochastic_mag`: `fold` = the batched exact fold, anything else -- production `layer_calibrated` -- per row through the per-walker components' `_wdm_stationary_psd_column`), so the noise moves score the same model as every other move. Parity `tests/test_psd_move_batched.py` (rtol 1e-12, fold and layer_calibrated). |
 | `utils/` | `parallelbase.py` (`LISAToolsParallelModule`), `constants.py`, `utility.py` (`get_array_module`, `AET`, `asnumpy`), `typing.py`, `exceptions.py` (`LISAToolsException`, `WaveformDomainError`, `BatchNotLaunchable`), `stagetimer.py` (device-synced stage timers for the MBH TDI-on-the-fly path, inert unless `MBHTDIONFLY_TIMING=1`). |
 | `orbit_files/` | Packaged orbit data. |
+| `galfor_modulation/` | Packaged galactic-foreground modulation table `modulation_unequal.dat` (unequal-arm TDI-2, mojito mission clock, 2.0 yr from 97729939.83 s). The `all_sources` default on mojito data (`galfor_modulation_path="auto"`, anchored at the data start); `GalForTimeModulation("modulation_unequal.dat")` resolves to it. `scripts/noise/modulation_unequal.dat` is a symlink kept for old launchers. |
 
 ---
 

@@ -547,7 +547,7 @@ export BASE_FILE_NAME=gf_noise_galfor_2yr
 export UNEQUAL_ARM=1
 export UNEQUAL_ARM_STRIDE=200
 export WDM_PSD_METHOD=layer_calibrated
-export GALFOR_MODULATION_PATH="$PWD/scripts/noise/modulation_unequal.dat"
+export GALFOR_MODULATION_PATH="$PWD/src/lisatools/galfor_modulation/modulation_unequal.dat"
 export GALFOR_MODULATION_T0=data
 echo "[V8-NOISE] UNEQUAL_ARM=${UNEQUAL_ARM} stride=${UNEQUAL_ARM_STRIDE} wdm_psd_method=${WDM_PSD_METHOD}"
 echo "[V8-NOISE] modulation=${GALFOR_MODULATION_PATH} t0=${GALFOR_MODULATION_T0}"

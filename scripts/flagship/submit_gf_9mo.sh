@@ -532,7 +532,7 @@ export UNEQUAL_ARM_STRIDE=200
 # check on the 6-month grid: 4e-4 lnL at the galfor estimate, up to 0.3 lnL
 # across wide prior draws).
 export WDM_PSD_METHOD=layer_calibrated
-export GALFOR_MODULATION_PATH="$PWD/scripts/noise/modulation_unequal.dat"
+export GALFOR_MODULATION_PATH="$PWD/src/lisatools/galfor_modulation/modulation_unequal.dat"
 export GALFOR_MODULATION_T0=data
 # PIN THE RESUMABLE NOISE IDENTITY OF THIS STORE (2026-09-23). 36e2319e made
 # the NOISE-brick scalar fit use the brick's own link delays, which moves the
