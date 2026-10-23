@@ -707,9 +707,13 @@ Point-in-time; use them to recognise an order of magnitude, not as a spec.
   how far every walker sits from it (`CHECK` = far on every walker: MBHB 10,
   the prior-only leaf, shows it). Eigen-sidecar entries of leaves reset on
   every walker are dropped (backup `.srcinj.bak`); the resume rebuilds the
-  residual and lnL. Expect extra GB band REOPENS in the first cycle after
-  it: the moved sources shift every walker's band residuals against the
-  valve's stored per-band best (more search, not a bias). New runs start
+  residual and lnL. In a `gb_search_*` stage the GB valve then judges the
+  shifted band residuals against each band's ALL-TIME best: a rise reopens
+  the band on every walker, a drop (the usual case) reads as converged and
+  keeps or reaches its RJ shut, so GB leaves that absorbed a lost source's
+  power can stay until the band revive (`full_pe` is unaffected). If the
+  open hangs on `/shared`, set `HDF5_USE_FILE_LOCKING=FALSE` as the
+  launchers do. New runs start
   there anyway: the parent-run source warm start is off by default since
   the same date (`SOURCE_WARM_START_STORE` empty).
 

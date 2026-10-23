@@ -406,6 +406,51 @@ class ResetTest(_Base):
         self.assertIn("FAILED", out)
 
 
+class FailurePathTest(_Base):
+    """A failed write or verify stops there: nothing after it is edited, and
+    the message says how to get back."""
+
+    def _setup(self):
+        twin = T.sidecar_paths(self.path)["backup"]
+        shutil.copy2(self.path, twin)
+        eig = T.eigen_path(self.path)
+        with open(eig, "wb") as fp:
+            pickle.dump({"format": 3, "entries": {"mbh:1": {"scope": "walker_max"}}}, fp)
+        midit = T.sidecar_paths(self.path)["midit"]
+        with open(midit, "wb") as fp:
+            fp.write(b"x")
+        old = time.time() - 3600.0
+        for p in (twin, midit):
+            os.utime(p, (old, old))
+        return twin, eig, midit
+
+    def test_a_write_exception(self):
+        twin, eig, midit = self._setup()
+        h_twin, h_eig = md5(twin), md5(eig)
+
+        def boom(path, plan):
+            raise OSError("disk went away")
+
+        with mock.patch.object(T, "apply_reset", boom):
+            with self.assertRaises(OSError):
+                self.run_tool("--branch", "mbh", "--all-walkers", "--leaf", 1,
+                              "--also-backup", "--reset-midit", apply=True)
+        self.assertEqual((md5(twin), md5(eig)), (h_twin, h_eig))
+        self.assertTrue(os.path.exists(self.path + T.BACKUP_SUFFIX))
+
+    def test_a_store_verify_failure_edits_nothing_after_it(self):
+        twin, eig, midit = self._setup()
+        h_twin, h_eig = md5(twin), md5(eig)
+        with mock.patch.object(T, "verify_reset", return_value=["forced"]):
+            rc, out = self.run_tool("--branch", "mbh", "--all-walkers", "--leaf", 1,
+                                    "--also-backup", "--reset-midit", apply=True)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("running backup twin was NOT edited", out)
+        self.assertIn("move " + midit + ".stale-", out)        # the way back names the midit
+        self.assertIn(self.path + T.BACKUP_SUFFIX, out)
+        self.assertEqual((md5(twin), md5(eig)), (h_twin, h_eig))
+
+
 class SidecarTest(_Base):
     def _eigen(self, keys=("mbh:0", "mbh:1", "mbh:2", "emri:0")):
         path = T.eigen_path(self.path)
@@ -618,6 +663,9 @@ class SettingsTest(unittest.TestCase):
                  "Phi_phi0", "Phi_r0"]
         self.assertEqual([T._column_key(n) for n in ours], [T._column_key(n) for n in store])
         self.assertNotEqual(T._column_key("phiS"), T._column_key("phiK"))
+        # a cosine and its angle stay distinct (only EMRI's qS / qK are aliased)
+        for cos, ang in (("cos_iota", "iota"), ("cosinc", "inc"), ("sin_delta", "delta")):
+            self.assertNotEqual(T._column_key(cos), T._column_key(ang))
 
     def test_the_vgb_basis(self):
         self.assertEqual(T.vgb_basis_for(6), "chirp")

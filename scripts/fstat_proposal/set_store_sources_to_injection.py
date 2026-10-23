@@ -78,12 +78,17 @@ What is NOT written, and why that is safe
   (``band_num_binaries``) do not change, and VGB has no birth / death move
   that reads its per-band lnL records.
 * The GB and noise branches, every other walker and leaf, every other row.
-  Expected side effect: moving these sources changes every walker's GB band
-  residuals, so the GB valve's stored per-band best cold lnL
-  (``band_cold_logl_max_w`` / ``band_shutoff_best_w``) is compared against a
-  shifted residual at the first judges. A band that improves on one walker
-  counts as not converged and, under the all-walker rule, REOPENS on every
-  walker: more search, never a bias. Expect extra reopens in the first cycle.
+  Side effect on a search stage with the GB valve live (``gb_search_*``):
+  moving these sources changes every walker's GB band residuals, and the
+  judge compares each band against its ALL-TIME best cold lnL
+  (``band_cold_logl_max_w``, never released) plus a tolerance. A band whose
+  lnL rises above that best counts as improved and, under the all-walker
+  rule, reopens on every walker. A band whose lnL DROPS (the usual case: the
+  injection point scores below a walker's best) reads as converged, so it
+  keeps, or reaches, its RJ shut. Where GB leaves had absorbed a lost
+  source's power, putting the source back can leave those bands shut with
+  the doubled power until the periodic band revive lets their deaths run.
+  ``full_pe`` (valve released) is not affected.
 * The store's ``key_order`` names are compared with the injection's columns
   (mbh, emri, sobbh; VGB records column numbers), so a same-width basis
   change refuses instead of writing values into the wrong columns.
@@ -114,7 +119,13 @@ Usage (12mo flagship; dry run first)::
 exists; ``--no-backup`` skips it), writes in place, re-reads and verifies
 every written slice, and runs lisatools' resume-readability check.
 ``--verify`` alone is a read-only check that the chosen pairs already hold
-the injection.
+the injection. Then relaunch with the run's usual launch line (the 12mo:
+``STAGE_SKIP_NOISE=1 scripts/flagship/submit_gf_12mo.sh``).
+
+If the open hangs on ``/shared`` (h5py blocks, it does not error, when it
+cannot take the HDF5 file lock there), run with
+``HDF5_USE_FILE_LOCKING=FALSE`` as the launchers do; the run being down is
+then guarded by the ``lsof`` and modification-time checks alone.
 """
 
 import argparse
@@ -370,11 +381,16 @@ def _pick(values, n, label, all_flag):
     return req
 
 
+#: Stored ``key_order`` spellings that name the same column differently:
+#: EMRI stores ``qS`` / ``qK`` for the sampled ``cosqS`` / ``cosqK``.
+COLUMN_ALIASES = {"qs": "cosqs", "qk": "cosqk"}
+
+
 def _column_key(name):
-    """A column name with case, underscores and a ``cos`` prefix ignored: the
-    store's ``key_order`` spells EMRI's ``cosqS`` as ``qS``."""
+    """A column name with case and underscores ignored and the EMRI aliases
+    (:data:`COLUMN_ALIASES`) applied; a cosine and an angle stay distinct."""
     n = str(name).lower().replace("_", "")
-    return n[3:] if n.startswith("cos") else n
+    return COLUMN_ALIASES.get(n, n)
 
 
 def stored_columns(root, branch):
@@ -425,12 +441,16 @@ def plan_branch(root, ra, branch, inj, row, walkers, leaves, *, all_walkers=Fals
             f"{branch}: the catalogue gives {inj.shape[0] if inj.ndim else 0} rows x "
             f"{inj.shape[-1] if inj.ndim else 0} columns, the store holds {nl} leaves x {nd} "
             "columns. Wrong id list (the run's MBH merger-window filter may have dropped "
-            "ids: pass --ids with the ids it kept) or wrong basis; refusing rather than put "
-            "a source into the wrong leaf.")
+            f"ids: run --branch {branch} on its own with --ids naming the ids it kept) or "
+            "wrong basis; refusing rather than put a source into the wrong leaf.")
     bp.inj = inj
     stored = stored_columns(root, branch)
     if names is not None and stored is not None:
-        if [_column_key(n) for n in names] != [_column_key(n) for n in stored]:
+        keys = [_column_key(n) for n in names]
+        if len(set(keys)) != len(keys):
+            raise ValueError(f"{branch}: the injection column names {list(names)} are not "
+                             "unique; the key_order check cannot place them.")
+        if keys != [_column_key(n) for n in stored]:
             raise ValueError(
                 f"{branch}: the injection columns {list(names)} do not match the store's "
                 f"key_order {stored}; refusing rather than write values into the wrong "
@@ -873,9 +893,11 @@ def main(argv=None):
 
     if args.run_settings is None:
         cands = find_run_settings(store)
-        if len(cands) != 1 and not (args.l1_folder and args.ids):
+        ids_known = bool(args.ids) or branches == ["vgb"]    # vgb needs no ids
+        if len(cands) != 1 and not (args.l1_folder and ids_known):
             print(f"REFUSING: {len(cands)} run_settings.log candidates next to the store "
-                  f"({cands}); pass --run-settings (or both --l1-folder and --ids)")
+                  f"({cands}); pass --run-settings, or --l1-folder plus (except for "
+                  "--branch vgb) --ids")
             return 2
         args.run_settings = cands[0] if len(cands) == 1 else None
     settings = {"l1_folder": None, "source_ids": {}}
@@ -981,18 +1003,28 @@ def main(argv=None):
             bak = p.store + BACKUP_SUFFIX
             print(f"\n  copying {os.path.getsize(p.store) / MB:.1f} MB -> {bak} ...")
             shutil.copy2(p.store, bak)
+    moved = None
     if os.path.exists(midit):
-        dest = CSL._free_name(f"{midit}.stale-{ts}")
-        os.rename(midit, dest)
-        print(f"\n  moved aside: {midit} -> {dest} (move it back if you restore the backup)")
-    restore = (f"restore {BACKUP_SUFFIX} over the store before resuming"
-               if not args.no_backup else "the store has no backup (--no-backup)")
-    for p in targets:
+        moved = CSL._free_name(f"{midit}.stale-{ts}")
+        os.rename(midit, moved)
+        print(f"\n  moved aside: {midit} -> {moved}")
+
+    def restore(path):
+        how = (f"restore {path + BACKUP_SUFFIX} over {path}" if not args.no_backup
+               else f"{path} has no backup (--no-backup)")
+        if moved:
+            how += f", and move {moved} back to {midit}"
+        return how
+
+    for i, p in enumerate(targets):
+        later = ("; the running backup twin was NOT edited"
+                 if i == 0 and len(targets) > 1 else "")
         print(f"\n  writing {p.store}:")
         try:
             written = apply_reset(p.store, p)
         except Exception as exc:  # noqa: BLE001 -- reported with the way back, then re-raised
-            print(f"    FAILED while writing ({type(exc).__name__}: {exc}) -- {restore}.")
+            print(f"    FAILED while writing ({type(exc).__name__}: {exc}) -- {restore(p.store)}"
+                  f" before resuming{later}; the eigen sidecar is untouched.")
             raise
         per_ds = {}
         for path, _sel, n in written:
@@ -1007,8 +1039,8 @@ def main(argv=None):
         print(f"    {msg}")
         if problems or not ok:
             status = 1
-            print(f"    FAILED -- {restore}. Nothing further is written (no twin edit, the "
-                  "eigen sidecar untouched).")
+            print(f"    FAILED -- {restore(p.store)} before resuming{later}; the eigen "
+                  "sidecar is untouched.")
             break
         else:
             print("    VERIFY OK: every chosen pair holds the injection on every rung at row "
