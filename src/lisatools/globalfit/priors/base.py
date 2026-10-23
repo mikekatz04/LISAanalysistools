@@ -1,3 +1,13 @@
+"""Work-in-progress generic 1-D prior base (Bilby-style; not wired into anything).
+
+:class:`Prior` holds a named, bounded 1-D distribution interface (``rvs`` /
+``pdf`` / ``logpdf`` left to subclasses, a generic trapezoid ``cdf``, LaTeX
+labels, a Bilby-derived argument-string parser); :class:`PriorException` is
+its exception base. Nothing in src, scripts, tests or the tutorials imports
+this module; the eryn priors (:mod:`eryn.priors`) are what the global fit
+uses.
+"""
+
 from importlib import import_module
 import json
 import os
@@ -10,6 +20,7 @@ import numpy as np
 from scipy.interpolate import interp1d
 
 
+# TODO check: keep/remove/document -- module never imported (WIP generic-prior infrastructure)
 class Prior(object):
     _default_latex_labels = {}
 
@@ -267,5 +278,6 @@ class Prior(object):
         return val
 
 
+# TODO check: keep/remove/document -- never raised or imported anywhere
 class PriorException(Exception):
     """ General base class for all prior exceptions """

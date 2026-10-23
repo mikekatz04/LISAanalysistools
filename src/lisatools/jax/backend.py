@@ -11,11 +11,14 @@ subclass :class:`Backend` directly (not :class:`CpuBackend`) so the
 ``_check_module_installed`` importlib check is skipped; ``import jax``
 is what we verify instead.
 
-Stubs are provided for any cutils-side wrap slots that don't have a
-JAX implementation yet (e.g. ``SensitivityMatrixWrap``,
-``check_orbits``). They raise ``NotImplementedError`` with a clear
-message on first use, so orchestration code that doesn't touch them
-still works.
+The methods filled in are ``OrbitsWrap`` / ``Orbits``
+(:class:`~lisatools.jax.orbits.OrbitsWrapJAX`), ``check_orbits`` (a no-op
+stub) and ``xp`` (``jax.numpy``); every other
+:class:`~lisatools.cutils.LISAToolsBackendMethods` slot keeps its default.
+:func:`_unimplemented` builds stand-in classes that raise
+``NotImplementedError`` on construction; it is not used at present (the
+``SensitivityMatrixWrap`` entry is commented out). Constructing the backend
+calls :func:`_check_jax`, which turns on ``jax_enable_x64``.
 """
 from __future__ import annotations
 
@@ -26,6 +29,11 @@ from ..cutils import LISAToolsBackend, LISAToolsBackendMethods
 
 
 def _check_jax():
+    """Import jax, enable 64-bit mode (``jax_enable_x64``) and return ``jax.numpy``.
+
+    Raises:
+        gpubackendtools.exceptions.MissingDependency: jax is not installed.
+    """
     try:
         import jax  # noqa: F401
         import jax.numpy as jnp
@@ -40,7 +48,9 @@ def _check_jax():
     return jnp
 
 
+# TODO check: keep/remove/document -- no callers (its use in _jax_methods_loader is commented out)
 def _unimplemented(name):
+    """Return a stand-in class named ``name`` whose constructor raises ``NotImplementedError``."""
     class _NotImpl:
         def __init__(self, *args, **kwargs):
             raise NotImplementedError(
@@ -65,6 +75,11 @@ def _check_orbits_jax(*args, **kwargs):
 
 
 def _jax_methods_loader() -> LISAToolsBackendMethods:
+    """Build the JAX backend's method table (``OrbitsWrap``, ``Orbits``, ``check_orbits``, ``xp``).
+
+    Returns:
+        LISAToolsBackendMethods: The table; slots not listed keep their defaults.
+    """
     jnp = _check_jax()
     from .orbits import OrbitsWrapJAX
 
@@ -78,7 +93,29 @@ def _jax_methods_loader() -> LISAToolsBackendMethods:
 
 
 class LISAToolsJaxBackend(Backend, LISAToolsBackend):
-    """JAX backend object plugged into ``Globals().backends_manager``."""
+    """JAX backend object plugged into ``Globals().backends_manager``.
+
+    Registered as ``"lisatools_jax"`` by ``lisatools/__init__`` when the
+    :mod:`lisatools.jax` import succeeds; resolve it with
+    ``lisatools.get_backend("jax")`` or pick it per object with
+    ``force_backend="jax"``. ``xp`` is ``jax.numpy`` and ``OrbitsWrap`` is
+    :class:`~lisatools.jax.orbits.OrbitsWrapJAX`. There is no compiled module,
+    so :meth:`_check_module_installed` is a no-op.
+
+    Args:
+        *args: Ignored.
+        **kwargs: Ignored.
+
+    Raises:
+        gpubackendtools.exceptions.MissingDependency: jax is not installed.
+
+    Example:
+        .. code-block:: python
+
+            import lisatools
+            backend = lisatools.get_backend("jax")
+            backend.name   # "lisatools_jax"
+    """
 
     _backend_name: str = "lisatools_backend_jax"
     _name = "lisatools_jax"
@@ -95,4 +132,5 @@ class LISAToolsJaxBackend(Backend, LISAToolsBackend):
 
     @staticmethod
     def _check_module_installed(*args, **kwargs):
+        """No-op: there is no compiled module to check (jax is checked at construction)."""
         return None

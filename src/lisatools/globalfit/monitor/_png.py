@@ -12,6 +12,9 @@ where FASTOCTREE moved channels by up to 12/255.
 
 ``GF_MONITOR_PNG_QUANTIZE=0`` turns it off. Any failure, or a palette PNG that
 comes out larger, returns the original bytes.
+
+Used by the full-page generator for every embedded figure and by the short
+page (:mod:`lisatools.globalfit.monitor._short`).
 """
 
 from __future__ import annotations
@@ -23,7 +26,20 @@ __all__ = ["shrink_png"]
 
 
 def shrink_png(raw: bytes) -> bytes:
-    """``raw`` (a PNG) re-encoded as a 256-colour palette PNG, when smaller."""
+    """``raw`` (a PNG) re-encoded as a 256-colour palette PNG, when smaller.
+
+    The image is converted to RGB first (alpha dropped), quantized with
+    Pillow's MAXCOVERAGE method and no dithering, and saved with
+    ``optimize=True``.
+
+    Args:
+        raw: PNG file bytes.
+
+    Returns:
+        bytes: The palette PNG when it is smaller, else ``raw`` unchanged
+        (also when ``GF_MONITOR_PNG_QUANTIZE`` is ``0`` / ``false`` / ``no``
+        / ``off``, or Pillow fails).
+    """
     if os.environ.get("GF_MONITOR_PNG_QUANTIZE", "1").strip() in ("0", "false", "no", "off"):
         return raw
     try:

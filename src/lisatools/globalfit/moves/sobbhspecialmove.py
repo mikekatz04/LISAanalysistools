@@ -1,12 +1,29 @@
-"""SOBBH add/remove move scored by the chunked-heterodyne WDM likelihood.
+"""SOBBH add/remove move scored by a fast WDM likelihood comp (lookup or chunked-heterodyne).
 
 :class:`SOBBHChunkedLikeMove` keeps ALL of :class:`ResidualAddOneRemoveOneMove`'s
 choreography (per-leaf expose/fold, in-model repeats, per-leaf tempering,
-cold-chain bookkeeping) and swaps ONLY the proposal-scoring path: instead of
+cold-chain bookkeeping) and swaps the proposal-scoring path: instead of
 one full-duration TD waveform + full TD->WDM transform per ``(temp, walker)``
 row through the per-container Python loop, every batch is ONE vectorized
-``SOBBHWDMComputations.get_ll_wdm`` call (BBHx ``sobbhcomps`` over LAT
-``chunked_het``) directly against the ACA's live WDM residual buffers.
+``get_ll_wdm`` call of its ``chunked_comp`` directly against the ACA's live WDM
+residual buffers.
+
+ONE class, two comps (``SOBBH_LIKELIHOOD``, ``SourceSOBBHSettings.likelihood``):
+
+* ``lookup`` (stock default since 2026-10-03; the 9mo / 12mo runs):
+  ``chunked_comp`` is the ``SOBBHLookupRouter`` over per-device
+  ``SOBBHLookupComputations`` (batched TDI-on-the-fly response on a sparse grid +
+  a WDM lookup table; ``docs/sobbh-wdm-lookup.md``);
+* ``chunked``: a ``bbhx.sobbhcomps.SOBBHWDMComputations`` (BBHx ``sobbhcomps`` over
+  LAT ``chunked_het``).
+
+There is no lookup-vs-chunked branch in this module: both comps expose the same
+``get_ll_wdm`` / ``fill_global_wdm`` / ``d_h_out`` / ``h_h_out`` surface, and
+``source_runtime.build_sobbh_move_runtime`` picks the comp
+(``SOBBH_LIKELIHOOD=full`` builds the base class instead). Stock name ``sobbh_pe``;
+it runs in ``source_search``, every cycle of ``gb_search_1`` / ``gb_search_2`` and in
+``full_pe``. The text below says "chunked" for the comp's fast path whichever
+comp is installed.
 
 Convention bridge (load-bearing): the container path scores
 ``-1/2 (d_d + h_h - 2 d_h)`` [+ the per-walker noise term when the run fits a
@@ -28,8 +45,13 @@ expose a leaf and 24 more to fold it back (32 s per build on the 6-mo grid
 chunked truncation into the residual, where the move previously kept the
 residual bit-identical to the stock path and approximated only scoring; the
 trade was measured first (6-mo removal-null: residual 6e-4 of ``<h|h>`` at
-the ``Nt_sub=32`` defaults). ``SOBBH_CHUNKED_FILL=0`` restores the exact
-dense pass. The built-in fast-vs-slow cross-check (``_verify_prev_logl``)
+the ``Nt_sub=32`` defaults). ``SOBBH_CHUNKED_FILL=0`` restores the base's
+per-row pass through the container's installed generator. On the stock path
+that is the branch's
+:class:`~lisatools.globalfit.stock.erebor.source_runtime.SourceSignalGen`,
+i.e. the same fast comp's fill one row at a time, not the exact generator
+(``waveform_gen`` serves only a container that lacks the branch). The
+built-in fast-vs-slow cross-check (``_verify_prev_logl``)
 recomputes through the slow container path at MATCHING convention with a
 tolerance knob ``SOBBH_CHECK_LL_TOL``.
 """
@@ -49,25 +71,76 @@ __all__ = ["SOBBHChunkedLikeMove"]
 
 
 class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
-    """Add/remove move for the SOBBH branch scored via chunked-heterodyne.
+    """Add/remove move for the SOBBH branch scored through a fast WDM comp.
+
+    The ``propose(model, state)`` contract is the base class's
+    (:meth:`ResidualAddOneRemoveOneMove.propose_local` on every compute rank's walker
+    block, through the :class:`~lisatools.globalfit.moves.walkerfanout.WalkerFanoutMixin`
+    ``propose``): per leaf, expose the cold-chain source (:meth:`_apply_cold_chain_sources`),
+    :meth:`setup_likelihood_here`, score ``prev_logl`` and the in-model repeats through
+    :meth:`compute_like_local`, swap the per-leaf ladder, record ``<d|h>`` / ``<h|h>``,
+    fold back. The tempered ensemble is the ``sobbh`` sub-state; the base writes it and
+    mirrors row 0 into the main state (``_sync_cold_row``).
 
     Args:
         *args: Positional arguments of :class:`ResidualAddOneRemoveOneMove`
             (``branch_name, coords_shape, waveform_gen, ...``). The
-            ``waveform_gen`` stays the SLOW exact generator — it still owns
-            the residual expose/fold and the cross-check/debug paths.
-        chunked_comp: A built ``bbhx.sobbhcomps.SOBBHWDMComputations``
-            constructed with ``d_d=0.0`` on the SAME ``WDMSettings``/orbits/
-            TDI config as the run's data (see
-            ``stock/erebor/source_runtime.get_sobbh_chunked_comp``).
-        m_band_half_width: Narrow-band half-width (WDM layers) around each
-            chunk's carrier — the chunked path's one live accuracy/speed
-            knob (``SOBBH_M_BAND_HALF_WIDTH``).
+            ``waveform_gen`` stays the SLOW exact generator: the
+            cross-check/debug paths and the fallback for a container that
+            lacks the branch. The ``SOBBH_CHUNKED_FILL=0`` per-row expose/fold
+            goes through the container's installed generator instead (on the
+            stock path the fast comp's fill).
+        chunked_comp: The fast comp. With ``SOBBH_LIKELIHOOD=lookup`` (stock
+            default, production) the ``SOBBHLookupRouter``
+            (``stock/erebor/source_runtime.get_sobbh_lookup_router``); with
+            ``chunked`` a built ``bbhx.sobbhcomps.SOBBHWDMComputations``
+            (``get_sobbh_chunked_comp``). Either way on the SAME
+            ``WDMSettings`` / orbits / TDI config as the run's data, and its
+            ``d_d`` must be 0 (the move adds ``-1/2 <r|r>`` itself). Required.
+        m_band_half_width (int): Narrow-band half-width (WDM layers) around each
+            chunk's carrier — the chunked scoring path's one live accuracy/speed
+            knob (``SOBBH_M_BAND_HALF_WIDTH``; ctor and settings default 1,
+            launchers 3). Inert under ``lookup`` (production): the lookup comp
+            ignores it and uses its ``lookup_num_m_layers`` band.
         **kwargs: Keyword arguments of :class:`ResidualAddOneRemoveOneMove`.
             ``dcga`` must be ``None`` — the chunked kernel scores against
             the ACA buffers directly (multi-GPU walker shards are handled
             by per-split routing inside :meth:`compute_like_local`, not by the
             DCGA replica machinery).
+
+    Raises:
+        ValueError: ``dcga`` given, ``chunked_comp`` missing, or a comp whose
+            ``d_d`` is not 0.
+
+    Attributes:
+        comp: The ``chunked_comp``.
+        m_band_half_width (int): See ``m_band_half_width``.
+        check_ll_tol (float): ``SOBBH_CHECK_LL_TOL`` (default ``0.5`` nat).
+
+    Note:
+        Env knobs read by this class or by the base with the ``SOBBH`` prefix:
+        ``SOBBH_CHUNKED_FILL`` (default ``1``; anything else uses the dense
+        per-row expose / fold), ``SOBBH_CHECK_LL`` (base default
+        ``ADDREMOVE_CHECK_LL`` then ``1``; launchers ``0``), ``SOBBH_CHECK_LL_EVERY``
+        (base default every visit), ``SOBBH_CHECK_LL_TOL``, ``SOBBH_RECORD_DH``
+        (class default ``1``) and, in the base's repeat loop,
+        ``SOBBH_SINGLE_CALL`` (default ``1``: one full-ensemble scoring call per
+        repeat).
+
+    Example:
+        Built by the stock layer (``source_runtime.build_sobbh_move_runtime``):
+
+        .. code-block:: python
+
+            from lisatools.globalfit.recipe import SOBBHChunkedMoveBuilder
+
+            comp = get_sobbh_fast_comp(curr.general_info, cfg)   # lookup router
+            _, moves = SOBBHChunkedMoveBuilder(
+                wave_gen=wave_gen,                 # exact SOBBH wrap
+                chunked_comp=comp,
+                m_band_half_width=3,
+            ).build(None, curr, acs, priors, state)
+            sobbh_pe = moves[0]
     """
 
     #: Column permutation from the stock SOBBH waveform basis
@@ -163,6 +236,14 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
         Output columns (``SOBBHTDIonTheFly``/chunked order):
         ``(m1, m2, s1, s2, dist[pc], f_low, phi_c, inc, psi, lam, beta)``.
         Sky angles pass through unchanged (both sides in the orbits frame).
+
+        Args:
+            coords_in: Waveform-basis rows, shape ``(n, 11)`` (a single row is
+                promoted to ``(1, 11)``).
+
+        Returns:
+            np.ndarray: ``(n, 11)`` float64 chunked-basis rows (a copy; distance
+            Gpc -> pc).
         """
         coords_in = np.atleast_2d(np.asarray(coords_in, dtype=np.float64))
         out = coords_in[:, SOBBHChunkedLikeMove._CHUNKED_PERM].copy()
@@ -232,6 +313,7 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
                      "sync", "pull")
 
     def _ll_stats_reset(self):
+        """Start a fresh ``[SOBBH_LL_TIMING]`` accumulation window."""
         self._ll_stats = {"calls": 0, "rows": 0, "host_s": 0.0,
                           "kernel_s": 0.0, "total_s": 0.0,
                           "shard_calls": 0, "groups": 0}
@@ -250,6 +332,7 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
             st[key + "_s"] = st.get(key + "_s", 0.0) + float(spans.get(key, 0.0))
 
     def _flush_ll_stats(self):
+        """Log the finished leaf window's two ``[SOBBH_LL_TIMING]`` lines, then reset."""
         st = getattr(self, "_ll_stats", None)
         if not st or st["calls"] == 0:
             return
@@ -288,6 +371,7 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
         self._ll_stats_reset()
 
     def _ll_stats_add(self, rows, t0, t_host, t_kernel):
+        """Count one :meth:`compute_like_local` call (``rows`` rows, host / kernel seconds)."""
         st = getattr(self, "_ll_stats", None)
         if st is None:
             self._ll_stats_reset()
@@ -320,13 +404,19 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
         an override point.
 
         Args:
-            coords_in: ``(N, 11)`` already-transformed waveform-basis rows
-                (all walkers x temps under the current leaf).
-            data_index: ``(N,)`` physical-walker index per row.
+            coords_in (xp.ndarray): ``(N, 11)`` already-transformed waveform-basis
+                rows (all walkers x temps under the current leaf).
+            data_index (xp.ndarray): ``(N,)`` physical-walker index per row.
 
         Returns:
-            ``(N,)`` log-likelihoods in the container convention
-            (``-1e300`` for invalid rows).
+            np.ndarray: ``(N,)`` log-likelihoods in the container convention
+            (``-1e300`` for invalid rows: non-finite, or ``f_low`` outside the
+            comp's band). Side outputs ``self._last_d_h`` / ``self._last_h_h``
+            (NaN where not scored).
+
+        Raises:
+            RuntimeError: Called before :meth:`setup_likelihood_here` armed the
+                exposed-residual offset.
         """
         if self._dcga is not None:  # unreachable (ctor guard); keep loud
             raise NotImplementedError("SOBBHChunkedLikeMove has no DCGA path.")
@@ -370,11 +460,13 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
         """One chunked-het scoring pass, shard-routed when the ACA is split.
 
         Args:
-            params: ``(N, 11)`` chunked-basis host rows (all valid).
-            idx: ``(N,)`` GLOBAL walker indices.
+            params (np.ndarray): ``(N, 11)`` chunked-basis host rows (all valid).
+            idx (np.ndarray): ``(N,)`` GLOBAL walker indices.
 
         Returns:
-            ``(ll, d_h, h_h)`` host arrays in row order.
+            tuple[np.ndarray, np.ndarray, np.ndarray]: ``(ll, d_h, h_h)`` host
+            arrays in row order; ``ll`` is the source piece ``d_h - 1/2 h_h``
+            (the caller adds the exposed-residual offset).
         """
         # TODO(sobbh scoring speed) -- REAL, but for much later. Measured on
         # the 6-mo probe (job 373, 12 temps x 24 walkers x 10 repeats, 2
@@ -550,6 +642,7 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
         return MBHBatchedLikeMove._split_rows_static(self.acs, idx)
 
     def _device_context(self, device):
+        """cupy device context on ``device`` (a null context on numpy or ``None``)."""
         from ...utils.device import device_context
 
         return device_context(getattr(self.acs, "xp", None), device)
@@ -639,7 +732,11 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
         itself, where the stock move kept it bit-identical and approximated
         only the scoring. That trade was measured before it was taken (the
         6-mo removal-null sweep: residual 6e-4 of <h|h> at the Nt_sub=32
-        defaults). ``SOBBH_CHUNKED_FILL=0`` restores the exact dense pass.
+        defaults). ``SOBBH_CHUNKED_FILL=0`` restores the base's per-row pass,
+        which builds each row through the container's installed generator: on
+        the stock path the same fast comp's fill
+        (:func:`~lisatools.globalfit.stock.erebor.source_runtime.get_sobbh_chunked_signal_gen`),
+        not the exact generator.
         """
         _what = "EXPOSE (r += h)" if sign > 0 else "FOLD-BACK (r -= h)"
         if os.environ.get("SOBBH_CHUNKED_FILL", "1").strip() != "1":

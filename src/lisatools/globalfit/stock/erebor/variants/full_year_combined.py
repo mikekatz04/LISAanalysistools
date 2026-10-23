@@ -16,14 +16,33 @@ env-overridable via ``USE_TDIONFLY`` (which flips both).
 The per-branch settings blocks + branch resolution + engine-side
 ``signal_gen`` adapters + runtime move builders now live in the shared
 ``..source_runtime`` module so ``all_sources`` composes the identical
-source setup; this variant is a thin wiring layer over them.
+source setup; this variant is a thin wiring layer over them. On a WDM / XYZ
+run the per-branch ``likelihood`` knobs default to the fast scoring paths
+(``MBH_LIKELIHOOD=auto`` batched, ``EMRI_LIKELIHOOD=auto`` direct-to-WDM,
+``SOBBH_LIKELIHOOD=lookup``; see
+:mod:`~lisatools.globalfit.stock.erebor.source_runtime`).
+
+NOT the production variant: the 9mo / 12mo runs use :mod:`.all_sources`
+(same source branches plus GB, VGB and the fitted psd / galfor noise).
+Here the noise is FIXED: an analytic instrument PSD (``LISAModel`` on
+``DefaultOrbits``, levels ``noise_soms_d`` / ``noise_sa_a``) plus an
+annually modulated foreground (the fixed
+``FittedHyperbolicTangentGalacticForeground`` model), and no noise is added
+to the data unless ``add_instrument_noise`` is set.
+
+Branches: ``mbh``, ``emri``, ``sobbh``; a branch whose
+``mojito_source_ids`` list is empty is removed at construction. Recipe:
+stage ``full_pe`` with ``sobbh_pe``, ``mbh_pe``, ``emri_pe``.
 
 Usage::
 
     from lisatools.globalfit.stock import erebor
 
-    fit = erebor.full_year_combined()
-    fit.general.mojito_source_ids = {"MBHB": [0], "EMRI": [1], "SOBHB": []}
+    # construct (not clone) so the empty SOBHB list drops the sobbh branch
+    fit = erebor.get_stock(
+        "full_year_combined",
+        mojito_source_ids={"MBHB": [0], "EMRI": [1], "SOBHB": []},
+    )
     fit.mbh.use_tdionfly = True            # swap the MBH waveform path
     fit.build(); fit.run()
 """
@@ -82,7 +101,60 @@ FullYearSOBBHSettings = SourceSOBBHSettings
 
 @dataclasses.dataclass
 class FullYearGeneralSettings(EreborGeneralSettings):
-    """General block for ``full_year_combined``."""
+    """General block for ``full_year_combined``.
+
+    Subclass of :class:`~lisatools.globalfit.stock.erebor.fit.EreborGeneralSettings`
+    (inherited fields documented there).
+
+    Attributes:
+        dt: Sample spacing [s]. Default ``2.5``.
+        tobs_target: Target span [s]. ``None`` (default) -> resolved at
+            construction: one year, or with ``chop_window`` 48 d (MBHB) /
+            half a year (EMRI, SOBBH); env ``TOBS_TARGET`` wins.
+        wavelet_duration_min: Env ``WAVELET_DURATION_MIN``. Default
+            ``40000.0`` s.
+        wavelet_duration_max: Env ``WAVELET_DURATION_MAX``. Default
+            ``48000.0`` s.
+        min_freq: Data-band floor [Hz]. Env ``MIN_FREQ``. Default ``1e-4``.
+        max_freq: Data-band ceiling [Hz]. Env ``MAX_FREQ``. Default ``2.5e-2``.
+        window_tukey_alpha: Default ``0.0``.
+        edge_crop_wavelets: Env ``EDGE_CROP_WAVELETS``. Default ``20``.
+        nwalkers: Env ``NWALKERS``. Default ``6``.
+        file_store_dir: Env ``FILE_STORE_DIR``. Default ``"./gf_output/"``.
+        base_file_name: Env ``BASE_FILE_NAME``. Default
+            ``"full_year_combined_run"``.
+        data_mode: ``"mojito"`` or ``"synthetic"``. Env ``DATA_MODE``.
+            Default ``"mojito"``.
+        mojito_source_ids: ``{"MBHB": [...], "EMRI": [...], "SOBHB": [...]}``.
+            Default ``{"MBHB": [], "EMRI": [1], "SOBHB": []}``, each list
+            overridden by env ``MBHB_IDS`` / ``EMRI_IDS`` / ``SOBHB_IDS``
+            (``source_runtime.default_source_ids``); lengths are the
+            injection counts in synthetic mode; at least one id overall.
+        chop_window: Single-source snippet run (exactly one class with ids).
+            Env ``CHOP_WINDOW``. Default ``False``.
+        synthetic_injection_backend: Backend of the synthetic injection
+            build: ``"cpu"`` (default), ``"auto"`` / ``"gpu"`` (the run's GPU
+            backend) or an explicit name. Env
+            ``SYNTHETIC_INJECTION_BACKEND``.
+        merger_frac: Chopped MBH window: merger at this fraction of the
+            window. Default ``0.72``.
+        likelihood_source_only: Default ``True`` (fixed noise).
+        add_instrument_noise: ``False`` (default) adds none; ``True`` auto
+            (mojito NOISE brick, else synthetic); ``"mojito"`` /
+            ``"synthetic"`` force one.
+        noise_soms_d: Fixed ``Soms_d`` (sqrt units); ``None`` -> NOISE-brick
+            fit, else ``15e-12``.
+        noise_sa_a: Fixed ``Sa_a``; ``None`` -> NOISE-brick fit, else
+            ``3e-15``.
+        noise_seed: Default ``12345``.
+        add_galactic_foreground: Add a synthetic foreground realization to
+            the data. Default ``False``.
+        foreground_params: Foreground model parameters; ``None`` ->
+            ``(Tobs,)`` for the fitted tanh model.
+        foreground_seed: Default ``67890``.
+        annual_amp: Annual modulation amplitude. Default ``0.10``.
+        annual_phase0: Annual modulation phase. Default ``0.0``.
+    """
 
     dt: float = 2.5
     # tobs_target=None -> resolved from chop_window / active source at
@@ -184,11 +256,13 @@ class FullYearGeneralSettings(EreborGeneralSettings):
 
     @property
     def active_source(self) -> typing.Optional[str]:
+        """The single class with ids, or ``None`` when zero or several have."""
         active = [k for k, v in self.mojito_source_ids.items() if v]
         return active[0] if len(active) == 1 else None
 
     @property
     def n_injections(self) -> typing.Dict[str, int]:
+        """``{class: len(ids)}`` of :attr:`mojito_source_ids`."""
         return {k: len(v) for k, v in self.mojito_source_ids.items()}
 
     @property
@@ -205,7 +279,46 @@ class FullYearGeneralSettings(EreborGeneralSettings):
 
 
 class FullYearCombinedGlobalFit(EreborFit):
-    """Multi-leaf MBH+EMRI+SOBBH fit on the full-year mojito (or synthetic) data."""
+    """Multi-leaf MBH+EMRI+SOBBH fit on the full-year mojito (or synthetic) data.
+
+    Not the production variant (that is ``all_sources``). Branches ``mbh``,
+    ``emri``, ``sobbh`` (the
+    :class:`~lisatools.globalfit.stock.erebor.source_runtime.SourceMBHSettings`
+    family, aliased ``FullYear*Settings``), fixed sensitivity, stage
+    ``full_pe``. Registered as ``full_year_combined`` (laptop twin
+    ``full_year_combined_lite``).
+
+    Construction validates ``data_mode``, requires at least one source id,
+    requires a single active class with ``chop_window``, resolves
+    ``tobs_target`` and removes every branch with no ids (only at
+    construction: a clone via ``erebor.full_year_combined(...)`` does not
+    re-run it, use ``erebor.get_stock`` to change the branch set).
+
+    Args:
+        **knobs: Forwarded to
+            :class:`~lisatools.globalfit.stock.base.StockGlobalFit`.
+
+    Raises:
+        ValueError: On an unknown ``data_mode``, no source ids at all, or
+            ``chop_window`` with several active classes.
+
+    Attributes:
+        option_name: ``"full_year_combined"``.
+        setup_classes: ``mbh`` MBHSetup, ``emri`` EMRISetup, ``sobbh``
+            SOBBHSetup.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.stock import erebor
+
+            fit = erebor.get_stock("full_year_combined", data_mode="synthetic",
+                                   tobs_target=30 * 86400.0)
+            # default ids are EMRI [1] only, so full_pe keeps just emri_pe
+            print(fit.list_moves())
+            fit.build()
+            fit.run()
+    """
 
     option_name = "full_year_combined"
     description = (
@@ -217,6 +330,7 @@ class FullYearCombinedGlobalFit(EreborFit):
     setup_classes = {"mbh": MBHSetup, "emri": EMRISetup, "sobbh": SOBBHSetup}
 
     def __init__(self, **knobs):
+        """Construct, validate, resolve ``tobs_target``, drop id-less branches (see the class)."""
         super().__init__(**knobs)
         gs: FullYearGeneralSettings = self.general
         if gs.data_mode not in ("mojito", "synthetic"):
@@ -254,6 +368,7 @@ class FullYearCombinedGlobalFit(EreborFit):
     # -- default blocks -------------------------------------------------------
 
     def default_branches(self) -> typing.Dict[str, Settings]:
+        """``mbh``, ``emri``, ``sobbh`` blocks."""
         return {
             "mbh": FullYearMBHSettings(),
             "emri": FullYearEMRISettings(),
@@ -261,6 +376,7 @@ class FullYearCombinedGlobalFit(EreborFit):
         }
 
     def default_recipe(self) -> Recipe:
+        """Stage ``full_pe`` with ``sobbh_pe``, ``mbh_pe``, ``emri_pe``."""
         return Recipe(
             [
                 Stage(
@@ -285,7 +401,13 @@ class FullYearCombinedGlobalFit(EreborFit):
     # -- general resolution -----------------------------------------------------
 
     def _mbh_chop_window_offset(self) -> float:
-        """Seconds from the L1 file start at which to begin a chopped MBH window."""
+        """Seconds from the L1 file start at which to begin a chopped MBH window.
+
+        ``max(0, t_plunge - merger_frac * Tobs)`` from the MBHB catalogue
+        (``TimeCoalescencePhenomTPHMSSBFrame`` of the single MBHB id); ``0``
+        unless ``chop_window`` with MBHB active, or when no catalogue file is
+        found.
+        """
         gs: FullYearGeneralSettings = self.general
         if not (gs.chop_window and gs.active_source == "MBHB"):
             return 0.0
@@ -315,6 +437,7 @@ class FullYearCombinedGlobalFit(EreborFit):
         return offset
 
     def adjust_general(self, gs: FullYearGeneralSettings) -> None:
+        """Resolve the instrument-noise source and the fixed noise levels."""
         gs.add_instrument_noise = self.resolve_noise_source(gs)
         # Noise levels: explicit > NOISE-brick fit > stock analytic. The same
         # levels drive the fixed sensitivity AND (synthetic mode) the injected
@@ -330,6 +453,15 @@ class FullYearCombinedGlobalFit(EreborFit):
                 gs.noise_sa_a = sa_a
 
     def set_default_processor(self, gs: FullYearGeneralSettings) -> None:
+        """Mojito: ``L1ProcessingStepWithSyntheticNoise``; synthetic: ``SyntheticDataProcessor``.
+
+        Both get the noise / foreground options; mojito also the chopped-MBH
+        window offset, synthetic the stock injections and the MBH phenom
+        kwargs.
+
+        Args:
+            gs: The build-time general block (mutated in place).
+        """
         force_backend = gs.gpu_backend if gs.gpus is not None else "cpu"
         tobs = self.wdm_grid[3]
         common = dict(
@@ -405,6 +537,7 @@ class FullYearCombinedGlobalFit(EreborFit):
             )
 
     def default_preprocess_kwargs(self) -> dict:
+        """No highpass / trim (both processors emit exactly ``Nf * Nt`` samples)."""
         # Both processors emit exactly Tobs = Nf*Nt*dt samples (the mojito
         # loader trims at load via its Tobs kwarg); skip the engine's
         # default highpass + edge-trim + Tobs trim so the WDM shape stays
@@ -412,6 +545,15 @@ class FullYearCombinedGlobalFit(EreborFit):
         return dict(highpass_kwargs=None, trim_kwargs=None, Tobs=None, normalize=False)
 
     def finalize_general(self, gs: FullYearGeneralSettings) -> None:
+        """Bake the fixed noise into the sensitivity: instrument + modulated foreground.
+
+        Unless ``sensitivity_init_kwargs`` already carries
+        ``extra_components``: an ``InstrumentNoise`` on
+        ``LISAModel(noise_soms_d**2, noise_sa_a**2, DefaultOrbits())`` and a
+        ``GalacticForeground`` with ``AnnualCovarianceModulation(annual_amp,
+        annual_phase0)``; then ``fixed_psd_kwargs`` is set so no second
+        instrument PSD is added.
+        """
         # Fixed instrument noise + annually-modulated foreground baked into
         # the sensitivity model (no psd / galfor branches).
         if gs.sensitivity_init_kwargs is None or (
@@ -466,6 +608,7 @@ class FullYearCombinedGlobalFit(EreborFit):
     # -- branch resolution --------------------------------------------------------
 
     def prepare_branch_settings(self, name: str, general_setup: GeneralSetup) -> Settings:
+        """Erebor completion, then the ``source_runtime`` prep of ``mbh`` / ``emri`` / ``sobbh``."""
         settings = super().prepare_branch_settings(name, general_setup)
         gs: FullYearGeneralSettings = self.general
         if name == "emri":
@@ -510,6 +653,18 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     Moves only: residual generation/subtraction already ran under the hood
     in the engine (``setup_acs(rebuild_residuals=True)`` consuming each
     branch's registered ``signal_gen``).
+
+    Args:
+        recipe (Recipe): The fit's recipe.
+        engine_info: The engine settings.
+        curr: The built current info.
+        acs: The rank's ``AnalysisContainerArray``.
+        priors (dict): Per-branch priors.
+        state (GFState): The starting state.
+
+    Raises:
+        RuntimeError: When no ``SourceSignalGen`` is attached (fit not built
+            through :meth:`FullYearCombinedGlobalFit.build`).
     """
     general_info = curr.general_info
     nwalkers, ntemps = general_info.nwalkers, general_info.ntemps

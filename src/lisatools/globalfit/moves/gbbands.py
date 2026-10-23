@@ -1,20 +1,112 @@
 """Band-level infrastructure for the GB special moves.
 
 This module owns the sub-band machinery that the GB proposal moves in
-:mod:`gbspecialstretch` drive:
+:mod:`lisatools.globalfit.moves.gbspecialstretch` drive (every GB and VGB
+move of the 9mo/12mo runs: ``in_model*``, ``rj_*``, ``vgb_pe``):
 
 * :func:`pack_special_index` / :func:`unpack_special_index` -- the single
   home of the ``(temp * nwalkers + walker) * 1e6 + band`` encoding used to
   identify a (temperature, walker, band) cell of the ensemble.
+* :class:`BandSorter` -- flat per-source view of the eryn GB branch
+  (coords / inds / temp / walker / leaf / band index arrays) with subset
+  and RJ pre-draw machinery, deferred cell relabels for the tempering and
+  vertical swaps, and :meth:`BandSorter.get_buffer`, which loads cells into a
+  buffer.
+* :class:`BandScheduler` -- which cells occupy the buffer's slots during
+  one band unit, and which pending cells replace finished ones.
 * :class:`SubBandBuffer` -- the per-cell residual / PSD / template scratch
   buffer. It **is** an :class:`~lisatools.analysiscontainer.AnalysisContainerArray`
   (one :class:`~lisatools.analysiscontainer.AnalysisContainer` per active
   cell) extended with fast GB source injection/removal through a
-  :class:`~lisatools.globalfit.moves.gb_likelihood.BandLikelihoodEngine`.
+  ``gbgpu.gb_likelihood`` band likelihood engine (``BandLikelihoodEngine``).
   ``Buffer`` is kept as a back-compat alias.
-* :class:`BandSorter` -- flat per-source view of the eryn GB branch
-  (coords / inds / temp / walker / leaf / band index arrays) with subset
-  and RJ pre-draw machinery.
+* :func:`make_routed_band_engine` / ``_RoutedBandEngine`` -- the shard
+  router in front of that engine (a passthrough with one GPU per process),
+  plus the classmethod routes the F-stat fit and the proposal Cholesky use
+  (``route_fstat_ll``, ``route_sighet_fstat``, ``route_information_matrix``).
+* :func:`check_band_support_separation` / :func:`band_support_halfwidths`
+  -- the band-grid separation guard the stock GB/VGB setup and the moves run.
+
+Pipeline position: each propose of a GB move builds a :class:`BandSorter`
+from the GB branch, visits the band units in turn, and for each unit builds a
+:class:`BandScheduler` over the unit's cells and binds them into a
+:class:`SubBandBuffer` (``GBSpecialBase._run_band_unit``); the RJ step and the
+in-model repeats then score sources through the buffer.
+
+Index conventions:
+
+* ``band_edges``: ascending band-edge frequencies in Hz, shape
+  ``(num_bands + 1,)``; band ``b`` is ``[band_edges[b], band_edges[b + 1])``.
+  The grid is built by the stock GB setup (``stock/erebor/gb.py``,
+  ``band_edges_mode`` / ``GB_SUBBAND_DIVISOR``). The 9mo/12mo runs use the
+  uniform mode with ``GB_SUBBAND_DIVISOR=8``: each WDM layer is split into 8
+  bands of width ``layer_df / 8``. ``band_N_vals`` holds one FD sample count
+  per band (bins at ``df = 1/Tobs``).
+* A source's band is ``searchsorted(band_edges, f0_Hz, side="right") - 1``,
+  computed once when the sorter is built and frozen for the whole propose.
+* A cell is one ``(temp, walker, band)`` triple; its special index is
+  ``(temp * nwalkers + walker) * 10**6 + band`` (bands must stay below
+  ``10**6``).
+* A slot is one position ``0 .. num_bands_now - 1`` of a
+  :class:`SubBandBuffer`; it holds one cell, ``unique_band_combos[slot]`` is
+  that cell's ``[temp, walker, band]`` and ``now_index`` maps sources to
+  slots.
+* Band units: the move partitions bands into ``band_units`` classes by
+  ``band % band_units`` (``GB_BAND_UNIT_STRIDE``; stock default 2 = the
+  legacy even/odd parity, the launchers set 9). A unit's cells run
+  concurrently; :func:`check_band_support_separation` validates the stride.
+  The per-walker start and direction of the class sweep
+  (``GB_BAND_UNIT_START_PER_WALKER`` / ``GB_BAND_UNIT_DIR_PER_WALKER``,
+  launchers 1/1) live in ``gbspecialstretch``.
+* Slot count: ``GB_N_SUBBANDS`` slots per run device (stock default 1024,
+  launchers 4096) times the number of run devices is the move's
+  ``num_band_preload_total`` (rounded down to a multiple of ``ntemps`` when
+  vertical swaps are on), which is the ``n_subbands`` of
+  :class:`BandScheduler`.
+* Band-to-GPU: with several devices in one process (``gb.gpus``) the buffer
+  slots are grouped by band and the bands are spread round-robin over the
+  devices (:func:`~lisatools.analysiscontainer.band_gpu_assignment`). The
+  9mo/12mo runs place one walker and one GPU on each compute rank, so every
+  buffer is single-shard and every router method takes its passthrough.
+
+Environment knobs read in this module (code default; launcher value). A
+single value means the 9mo/12mo launchers leave the knob unset or export
+the default:
+
+* ``GB_BAND_WINDOW_STRICT`` (``0``; ``1``): exact sub-band RJ windows
+  (:func:`rj_band_window`).
+* ``GB_ORTHO_SEP_FACTOR`` (``1.0``): safety factor of
+  :func:`check_band_support_separation`.
+* ``GB_INDEX_ASSERTS`` (``0``): per-call index-bound asserts.
+* ``GB_CELL_LABEL_DEFERRED`` (``1``): deferred cell relabels
+  (:meth:`BandSorter.begin_cell_label_window`).
+* ``GB_ROUTER_DEVICE_RESIDENT`` (``1``) / ``GB_ROUTER_THREADED`` (``1``) /
+  ``GB_MULTIGPU_SYNC_DEBUG`` (``0``): multi-shard router staging, threading
+  and a debug fence (inert at one GPU per process).
+* ``FSTAT_SIGHET_MULTIDEV`` (``0``; ``1``) and ``GB_FSTAT_NM_LANE_WEIGHTS``
+  (unset): multi-device F-stat scorers (inert at one GPU per process).
+* ``GB_OPT_SNR_LIMIT`` (``5.0``): buffer SNR rejection floor when the caller
+  passes none. The GB moves resolve the same knob themselves and always
+  pass a value through :class:`BandSorter`.
+* ``GB_SLAB_SUPPORT_CHECK`` (``1``): an explicit slab narrower than the FD
+  support raises (``0`` downgrades to a warning).
+* ``GB_BAND_LL_CHUNK`` (``1024``, capped at 128 in shared-psd mirror mode) /
+  ``GB_FILL_CHUNK`` (``2048``): slots per pass of
+  :meth:`SubBandBuffer.likelihood` and of the buffer fill.
+* ``GB_PSD_SHARED_MIRROR`` is read here only for a log line; the switch is
+  the ``psd_shared_mirror`` constructor argument.
+
+Knobs that reach this module through constructor arguments (read by the
+stock GB settings or by the move, then passed to :class:`BandSorter` /
+:class:`SubBandBuffer` / :class:`BandScheduler`):
+``GB_WDM_BAND_SLAB_LAYERS`` (``wdm_band_slab_layers``; stock default 0 =
+auto, launchers 5), ``GB_WDM_SLAB_GUARD_LAYERS`` (stock default 1),
+``GB_PSD_SHARED_MIRROR`` (stock default off, launchers 1),
+``GB_PSD_MIRROR_PARITY_PROPOSES`` (launchers 0) /
+``GB_PSD_MIRROR_PARITY_ROWS`` (stock default 64),
+``GB_BUFFER_FIXED_CAPACITY`` (read by the move; ``alloc_capacity``; code
+default and launchers 1) and ``{BRANCH}_TEMPER_CELL_ORDER``
+(``cell_order``; move default ``"band"``).
 """
 
 from __future__ import annotations
@@ -112,6 +204,28 @@ def fstat_nm_lane_bounds(n, lanes, weights=None):
     Anything malformed (wrong length, non-integer, negative, all-zero)
     falls back to the equal split: this is operator input read on a
     production node, and a typo must not stop a run.
+
+    Called by ``_RoutedBandEngine.make_fstat_nm_lanes`` (once, for the split
+    in its log line) and by its ``call_NM`` closure (every batch); both run
+    in multi-device processes only.
+
+    Args:
+        n (int): Number of rows in the batch.
+        lanes (int): Number of device lanes.
+        weights (list[int] or str, optional): Per-lane integer weights in
+            ``holder.gpus`` order, or their comma-separated string. Default
+            ``None`` = the equal split.
+
+    Returns:
+        np.ndarray: ``(lanes + 1,)`` ascending integer row boundaries,
+        ``bounds[0] == 0`` and ``bounds[-1] == n``.
+
+    Example:
+        >>> from lisatools.globalfit.moves.gbbands import fstat_nm_lane_bounds
+        >>> fstat_nm_lane_bounds(10, 2).tolist()
+        [0, 5, 10]
+        >>> fstat_nm_lane_bounds(10, 2, "3,1").tolist()
+        [0, 7, 10]
     """
     lanes = int(lanes)
     n = int(n)
@@ -141,13 +255,14 @@ def fstat_nm_lane_bounds(n, lanes, weights=None):
 
 
 def _band_window_strict() -> bool:
-    """``GB_BAND_WINDOW_STRICT`` (default ``"0"`` -- today's behaviour).
+    """Return whether ``GB_BAND_WINDOW_STRICT=1`` (code default ``"0"``).
 
-    OFF (default) reproduces the legacy expression to the bit. ON makes
-    :func:`rj_band_window` return the EXACT sub-band, so the only N/4
-    widening left anywhere is the in-model bin gate in
-    ``_run_in_model_repeats`` -- which is already expressed in the MOVE's
-    df. See that function's docstring for why this matters.
+    OFF (the code default) reproduces the legacy expression to the bit. ON
+    (set by the 9mo/12mo launchers) makes :func:`rj_band_window` return the
+    EXACT sub-band, so the only N/4 widening left anywhere is the in-model
+    bin gate in ``_run_in_model_repeats`` -- which is already expressed in
+    the MOVE's df. See that function's docstring for why this matters. Read
+    on every call.
     """
     return os.environ.get("GB_BAND_WINDOW_STRICT", "0") == "1"
 
@@ -180,16 +295,22 @@ def rj_band_window(band_edges, band_N_vals, band_inds, df, is_rj):
     strict, the in-model gate's own ``n4_s`` -- already in move-df bins
     -- supplies that N/4 and nothing double-counts it.
 
+    Called by the :class:`SubBandBuffer` ``special_indices_unique`` setter,
+    which stores the result as ``frequency_lims``.
+
     Args:
-        band_edges: Ascending band-edge frequencies (Hz).
-        band_N_vals: Per-band FD sample counts (bins at ``1/Tobs``).
-        band_inds: Band index of each slot.
-        df: The BUFFER's df (FD bin width, or ``layer_df`` on WDM).
-        is_rj: Truthy on RJ-provenance buffers (the sorter's
+        band_edges (xp.ndarray): ``(num_bands + 1,)`` ascending band-edge
+            frequencies (Hz).
+        band_N_vals (xp.ndarray): ``(num_bands,)`` per-band FD sample counts
+            (bins at ``1/Tobs``).
+        band_inds (xp.ndarray): Band index of each slot.
+        df (float): The BUFFER's df (FD bin width, or ``layer_df`` on WDM).
+        is_rj (object): Truthy on RJ-provenance buffers (the sorter's
             ``rj_prop``), which are the only ones ever widened.
 
     Returns:
-        ``[lower_f_lim, higher_f_lim]``, fresh arrays in both branches.
+        list[xp.ndarray]: ``[lower_f_lim, higher_f_lim]`` in Hz, one value
+        per slot; fresh arrays in both branches.
     """
     lower = band_edges[band_inds]
     upper = band_edges[band_inds + 1]
@@ -214,6 +335,21 @@ def band_support_halfwidths(
     for that band, so per band the half-support (overhang) is evaluated
     at ``f_hi_b``. This array is the single source of truth for the
     leakage bookkeeping checks (separation guard + slab coverage).
+
+    Called by :func:`check_band_support_separation`,
+    :meth:`SubBandBuffer.recommend_band_slab_layers`, the explicit-slab
+    check of :attr:`SubBandBuffer.band_slab_Nf` and the stock GB band setup.
+
+    Args:
+        band_edges: Ascending band-edge frequencies (Hz), any array-like
+            (cupy accepted), shape ``(num_bands + 1,)``.
+        Tobs: Observation time (s); ``df = 1/Tobs``.
+        oversample: Forwarded to ``get_N``. Default ``4``.
+        amp: Amplitude forwarded to ``get_N``. Default ``1e-30``.
+
+    Returns:
+        np.ndarray: ``(num_bands,)`` half-supports in Hz,
+        ``get_N(amp, band_edges[b + 1], Tobs, oversample) / Tobs``.
     """
     from gbgpu.utils.utility import get_N
 
@@ -277,6 +413,10 @@ def check_band_support_separation(
     explicit overrides) can genuinely fail at stride 2 -- that is what
     ``min_safe_stride`` in the returned summary reports.
 
+    Callers: the stock GB and VGB band setup (``stock/erebor/gb.py``,
+    ``stock/erebor/vgb.py``) and the GB move constructor, which validates its
+    ``band_units`` stride against the move's band grid.
+
     Args:
         band_edges: Ascending band-edge frequencies (Hz), free-floating
             (any array-like; cupy accepted).
@@ -285,17 +425,20 @@ def check_band_support_separation(
             ``GB_BAND_UNIT_STRIDE``).
         sep_factor: Safety factor on the overhang sum. ``None`` resolves
             from ``GB_ORTHO_SEP_FACTOR`` (default 1.0).
-        oversample / amp: Forwarded to ``get_N`` (the production sizing
-            call convention).
+        oversample: Forwarded to ``get_N`` (the production sizing call
+            convention). Default ``4``.
+        amp: Amplitude forwarded to ``get_N``. Default ``1e-30``.
         context: Label prepended to the error message.
         enforce: ``True`` -> raise ``ValueError`` on failure; ``False``
             -> only report (diagnostic mode).
 
     Returns:
-        dict with ``passes`` (bool at ``stride``), ``min_safe_stride``
+        dict: ``passes`` (bool at ``stride``), ``min_safe_stride``
         (smallest stride in [2, 16] passing, or ``None``), ``worst``
-        ``(b, gap_hz, need_hz)`` for the tightest pair at ``stride``,
-        and ``support_hz`` (the per-band edge half-supports).
+        ``(b, gap_hz, need_hz)`` for the tightest pair at ``stride``
+        (``None`` when no same-unit pair exists, i.e. at most ``stride``
+        bands), ``support_hz`` (the per-band
+        edge half-supports, Hz) and ``sep_factor`` (the factor used).
 
     Raises:
         ValueError: When ``enforce`` and any same-unit pair violates the
@@ -368,14 +511,51 @@ def check_band_support_separation(
 def pack_special_index(temp_inds, walker_inds, band_inds, nwalkers: int):
     """Pack ``(temp, walker, band)`` triplets into scalar special indices.
 
-    ``special = (temp * nwalkers + walker) * 1e6 + band``. Works
-    elementwise on array inputs of any matching shape.
+    ``special = (temp * nwalkers + walker) * 10**6 + band`` (integer base
+    ``_SPECIAL_INDEX_BASE``). Works elementwise on scalars or array inputs
+    of any matching shape (numpy or cupy). The inverse is
+    :func:`unpack_special_index`. Used by :class:`BandSorter`,
+    :class:`SubBandBuffer` and the GB moves to name a cell.
+
+    Args:
+        temp_inds (int or xp.ndarray): Temperature (rung) index.
+        walker_inds (int or xp.ndarray): Walker index, ``< nwalkers``.
+        band_inds (int or xp.ndarray): Band index, ``< 10**6``.
+        nwalkers: Number of walkers of the ensemble the indices refer to.
+
+    Returns:
+        int or xp.ndarray: The packed special index (same shape as the
+        inputs).
+
+    Example:
+        >>> from lisatools.globalfit.moves.gbbands import pack_special_index
+        >>> pack_special_index(1, 2, 3, nwalkers=4)
+        6000003
     """
     return (temp_inds * nwalkers + walker_inds) * _SPECIAL_INDEX_BASE + band_inds
 
 
 def unpack_special_index(special_band_inds, nwalkers: int) -> tuple:
-    """Recover ``(temp, walker, band)`` arrays from packed special indices."""
+    """Recover ``(temp, walker, band)`` arrays from packed special indices.
+
+    The inverse of :func:`pack_special_index`. The array module follows the
+    input (numpy or cupy).
+
+    Args:
+        special_band_inds (xp.ndarray): Packed special indices.
+        nwalkers: Number of walkers used when packing.
+
+    Returns:
+        tuple[xp.ndarray, xp.ndarray, xp.ndarray]: Integer ``(temp_inds,
+        walker_inds, band_inds)``, each shaped like ``special_band_inds``.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.globalfit.moves.gbbands import unpack_special_index
+        >>> t, w, b = unpack_special_index(np.array([6000003]), nwalkers=4)
+        >>> int(t[0]), int(w[0]), int(b[0])
+        (1, 2, 3)
+    """
     # input-driven array module (NOT the module-level cp): this helper runs
     # on numpy inputs during CPU-resolved runs on cupy-installed machines.
     xp = get_array_module(special_band_inds)
@@ -397,7 +577,11 @@ def _tspan(tm, name: str):
 
 
 def return_x(x):
-    """Identity helper used as a no-op replacement for :func:`copy.deepcopy`."""
+    """Identity helper used as a no-op replacement for :func:`copy.deepcopy`.
+
+    :class:`BandSorter` uses it in place of ``deepcopy`` when built with
+    ``copy=False``; ``gbspecialstretch`` imports it too.
+    """
     return x
 
 
@@ -483,13 +667,20 @@ class BandScheduler:
       finishes (:meth:`advance` returns the ``(inds_fill, new_specials)``
       pair that :meth:`SubBandBuffer` loading consumes).
 
-    Cells are ordered by ascending source count so short cells retire early
-    and the buffer stays densely packed with work.
+    Built once per band unit by ``GBSpecialBase._run_band_unit`` (its only
+    constructor site), with ``n_subbands = num_band_preload_total``
+    (``GB_N_SUBBANDS`` per run device) and ``cell_order`` = the move's
+    ``temper_cell_order``.
+
+    With ``cell_order="count"`` cells are ordered by ascending source count
+    so short cells retire early and the buffer stays densely packed with
+    work.
 
     ``cell_order`` (2026-08-18) selects that ordering:
 
     ``"count"``
-        The historical default above -- best slot packing.
+        The constructor default and the historical behaviour described
+        above -- best slot packing.
     ``"band"``
         Sort by ``(band, walker, temp)`` -- temperature LAST -- so a
         vertical partner pair ``(t, w, b)`` / ``(t-1, w, b)`` lands in
@@ -531,6 +722,42 @@ class BandScheduler:
         on the simulation. Still worth watching the ``pick`` / ``advance``
         spans on the first real run -- the simulation models occupancy, not
         kernel cost.
+
+        This is what the GB moves use: ``{BRANCH}_TEMPER_CELL_ORDER``
+        resolves to ``"band"`` by default (``_resolve_temper_cell_order``
+        in ``gbspecialstretch``; the launchers export
+        ``GB_TEMPER_CELL_ORDER=band``). Under ``"band"`` the scheduler is
+        COLUMN-ATOMIC (``column_atomic``): the ``ntemps`` cells of one
+        ``(walker, band)`` column are staged and retired together, so a
+        vertical partner pair is always resident at the same time. A buffer
+        narrower than one column falls back to per-cell staging.
+
+    Args:
+        special_band_inds (xp.ndarray): Special index of every schedulable
+            source row (one entry per row; the distinct values are the
+            cells and their multiplicities the per-cell finish budgets).
+        n_subbands (int): Number of buffer slots available
+            (``num_band_preload_total``).
+        xp (module, optional): Array module of ``special_band_inds``
+            (numpy or cupy). Default ``numpy``. Only a flag is stored.
+        cell_order (str, optional): ``"count"`` (default) or ``"band"``.
+        nwalkers (int, optional): Number of walkers; required for
+            ``cell_order="band"`` (to decode the special index).
+
+    Attributes:
+        cell_specials (xp.ndarray): ``(n_cells,)`` special index of each
+            cell, in staging order. Written once; see the note in
+            ``__init__`` on vertical-swap relabels.
+        cell_counts (xp.ndarray): ``(n_cells,)`` finish budget of each cell.
+        cell_run (xp.ndarray): ``(n_cells,)`` picks consumed so far.
+        slot_cell (xp.ndarray): ``(n_slots,)`` cell position held by each
+            buffer slot.
+        slot_active (xp.ndarray): ``(n_slots,)`` bool, slot still working.
+        column_atomic (bool): Whether whole columns are staged/retired.
+
+    Raises:
+        ValueError: For an unknown ``cell_order``, or ``"band"`` without
+            ``nwalkers``.
     """
 
     #: Ordering modes accepted by ``cell_order``.
@@ -612,7 +839,7 @@ class BandScheduler:
         # ``cell_specials`` (the lexsort's primary key is band, then
         # walker, then temp), which is what makes whole-column staging a
         # slice rather than a gather. Under "count" ordering they are
-        # scattered, so the mode is only available there.
+        # scattered, so the mode is only available under "band".
         # ``n_cells == 0`` (nothing to schedule at all) would make the
         # boolean mask below shorter than ``_is_new`` and raise; the
         # per-cell path already handles it by staging zero slots.
@@ -658,6 +885,7 @@ class BandScheduler:
 
     @property
     def n_slots(self) -> int:
+        """Number of buffer slots this scheduler manages."""
         return len(self.slot_cell)
 
     @property
@@ -671,10 +899,16 @@ class BandScheduler:
         return self.slot_specials[self.slot_active]
 
     def any_active(self) -> bool:
+        """Return True while at least one slot still has work."""
         return bool(self.xp.any(self.slot_active))
 
     def record_picks(self, picked_specials) -> None:
-        """Count one consumed source for each cell that got a pick."""
+        """Count one consumed source for each cell that got a pick.
+
+        Args:
+            picked_specials (xp.ndarray): Special index of each picked
+                source this round (at most one per cell).
+        """
         self.cell_run[self._cells_of(picked_specials)] += 1
 
     def add_counts(self, specials, deltas) -> None:
@@ -689,6 +923,14 @@ class BandScheduler:
         sequence of free/re-cap transitions -- no deadlock, no slot
         hogging. ``specials`` must be unique (at most one accept per cell
         per round guarantees this at the call site).
+
+        Called from the RJ step (``GBSpecialBase._run_rj_step``) only when
+        an accept frees or re-caps a capped cell (the leaf-cap budget).
+
+        Args:
+            specials (xp.ndarray): Unique special indices of the cells to
+                adjust.
+            deltas (xp.ndarray): Signed change of each cell's finish budget.
         """
         self.cell_counts[self._cells_of(specials)] += deltas
 
@@ -705,6 +947,19 @@ class BandScheduler:
         buffer slot until the flush runs. Passing the frozen set lets the
         caller stage new cells into the OTHER finished slots so the pool
         keeps accumulating toward a full-width in-model block.
+
+        Under column-atomic staging a column retires only when all its
+        active slots are finished, and only whole pending columns are
+        staged.
+
+        Args:
+            frozen_specials (xp.ndarray, optional): Special indices of cells
+                that must not retire this call. Default ``None``.
+
+        Returns:
+            tuple[xp.ndarray, xp.ndarray]: ``(inds_fill, new_specials)`` --
+            the slot positions to rebind and the special index of the cell
+            to load into each (both empty when nothing finished).
         """
         xp = self.xp
         finished = self.slot_active & (
@@ -802,6 +1057,10 @@ class BandScheduler:
         Without this, ``record_picks`` on the new label credited the wrong
         model and ``advance`` retired slots on the wrong budget (2026-09-10).
         Labels that did not change are a no-op.
+
+        Args:
+            slots (xp.ndarray): Buffer slot positions whose label changed.
+            new_specials (xp.ndarray): New special index of each slot.
         """
         xp = self.xp
         slots = xp.asarray(slots)
@@ -848,6 +1107,14 @@ class _ShardHolderView:
     must live exactly as long as its shard buffers: the router stores views
     on the holder itself (``holder._shard_holder_views``), which dies with
     the holder at proposal teardown (memory-lifecycle rule).
+
+    Only built for multi-shard holders (several GPUs in one process); the
+    9mo/12mo runs (one GPU per rank) never construct one.
+
+    Args:
+        parent (AnalysisContainerArray): The multi-shard holder (a
+            :class:`SubBandBuffer` or the parent residual ACA).
+        split_index (int): Which GPU split of ``parent`` this view exposes.
     """
 
     def __init__(self, parent, split_index: int):
@@ -880,30 +1147,37 @@ class _ShardHolderView:
 
     @property
     def linear_data_arr(self):
+        """One-element list: this split's flat residual buffer (zero-copy)."""
         return [self._parent.linear_data_arr[self._split]]
 
     @property
     def linear_psd_arr(self):
+        """One-element list: this split's flat inverse-PSD buffer."""
         return [self._parent.linear_psd_arr[self._split]]
 
     @property
     def data_shaped(self):
+        """One-element list: this split's shaped residual buffer."""
         return [self._parent.data_shaped[self._split]]
 
     @property
     def psd_shaped(self):
+        """One-element list: this split's shaped inverse-PSD buffer."""
         return [self._parent.psd_shaped[self._split]]
 
     @property
     def xp(self):
+        """The parent's array module."""
         return self._parent.xp
 
     @property
     def min_freq_inds(self):
+        """Per-row window starts sliced to this shard (int32), or ``None``."""
         return self._min_freq_inds_view
 
     @property
     def start_freq_ind(self):
+        """Per-row start frequency index sliced to this shard, or ``None``."""
         return self._start_freq_ind_view
 
     @property
@@ -1065,6 +1339,21 @@ class FStatRefRowHolder:
     the router's replica plumbing (``_comp_for``) accepts it as a view.
     Lives only in the returned ``call_fstat`` closure -- it dies with the
     fit, and the copies never reach the settings tree.
+
+    In the 9mo/12mo runs it is built by the multi-rank F-stat fit in
+    ``gbspecialstretch`` (one per compute rank, from the rows
+    :func:`snapshot_ref_rows` extracted on the reference walker's owner
+    rank). Every other public attribute delegates to ``parent`` (names
+    starting with ``_`` raise ``AttributeError``).
+
+    Args:
+        parent (AnalysisContainerArray): The parent residual ACA (settings,
+            ``shape_sens``, ``nchannels``, ... are read from it).
+        device (int or None): CUDA device the rows live on; ``None`` on CPU.
+        data_row (xp.ndarray): The reference walker's flat residual row
+            (full active band), on ``device``.
+        psd_row (xp.ndarray): The reference walker's flat inverse-PSD row,
+            on ``device``.
     """
 
     def __init__(self, parent, device, data_row, psd_row):
@@ -1077,6 +1366,7 @@ class FStatRefRowHolder:
 
     @property
     def xp(self):
+        """The parent's array module."""
         return self._parent.xp
 
     def __len__(self) -> int:
@@ -1101,6 +1391,7 @@ _FStatRefRowHolder = FStatRefRowHolder
 _PARITY_CHAIN_MAX_DEPTH = 8
 
 
+# TODO check: keep/remove/document -- parity gate; no-op unless GB_PSD_MIRROR_PARITY_PROPOSES>0
 def _parity_target(holder):
     """Resolve the shared-psd MIRROR parity gate that owns an engine call.
 
@@ -1174,7 +1465,25 @@ def _fire_psd_mirror_parity(holder, entry, params_phys, data_index,
     Called at the TOP of the routed entry points -- before the production
     kernel runs -- so the shadow scoring can never clobber the accumulators
     (``comp.d_h_out`` & co.) the caller is about to read. This is a
-    diagnostic: it must not change a single likelihood value.
+    diagnostic: it must not change a single likelihood value. With
+    ``GB_PSD_MIRROR_PARITY_PROPOSES=0`` (code default and launchers) no
+    buffer is armed, so it never checks: it returns at the hot-path escape
+    for a buffer or the parent ACA, and after a short :func:`_parity_target`
+    walk that finds no armed gate for a view holder (e.g.
+    :class:`FStatRefRowHolder`).
+
+    Args:
+        holder (object): The engine call's holder (buffer, shard view or
+            parent ACA).
+        entry (str): Gate entry name (``"get_ll"``, ``"swap_ll"``,
+            ``"fstat"``).
+        params_phys (xp.ndarray): Physical parameters of the call's rows.
+        data_index (xp.ndarray or None): Data rows in the holder's index
+            space.
+        noise_index (xp.ndarray, optional): Noise rows; ``None`` = same as
+            ``data_index``.
+        **check_kwargs: Forwarded to
+            ``SubBandBuffer._psd_mirror_parity_check``.
     """
     # Hot-path escape (this runs on EVERY routed engine call): a holder that
     # neither carries an armed gate nor sits on a ``_parent`` chain -- the
@@ -1223,6 +1532,26 @@ def snapshot_ref_rows(holder, view, intra_data, intra_noise, *, xp,
     site used to inline its own ``np.ascontiguousarray(asnumpy(...))`` slice
     and had BOTH gaps -- it was mirror-blind, and on the CPU backend its
     "snapshot" aliased the live residual.
+
+    Args:
+        holder (AnalysisContainerArray): The holder that owns ``view``
+            (supplies ``xp``, ``shape_sens``, ``nchannels``).
+        view (object): The shard view, or ``holder`` itself when single-shard.
+        intra_data (int): Intra-shard row of the walker's residual.
+        intra_noise (int): Intra-shard row of the walker's inverse PSD (or,
+            in shared-psd mirror mode, the slot whose ``psd_row_index``
+            entry names the walker row).
+        xp (module): Array module used to view the device buffers.
+        device (int, optional): Device to slice on; default ``None`` = the
+            view's ``device``.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: Host copies ``(data_row, psd_row)``,
+        each flat and C-contiguous, never aliasing the live buffers.
+
+    Raises:
+        RuntimeError: When a mirror plane does not split into whole
+            per-walker rows or the mapped row is out of range.
     """
     n_slabs = int(view.acs_total_entries)
     dev = getattr(view, "device", None) if device is None else device
@@ -1305,13 +1634,24 @@ def exact_scoring_context(engines):
     value. Within one rung the MH ratio differences two sig-het values
     against the SAME reference, so the anchor-level offset cancels; between
     two cells it does not, and against an exactly-measured (cached) rung it
-    is the whole error. End-of-block audit: block-max |sig-het - exact|
+    is the whole error. End-of-block audit: block-max ``|sig-het - exact|``
     p90 40-77 nats, max 43,000 (hot rungs), and the cold chain lost
     ~1,400 lnL per walker per prior-RJ iteration.
 
-    ``engines``: band likelihood engines (anything with ``gb_comps``);
-    duplicates and engines without a sig-het comp are ignored, so the
-    context is a no-op on chunked-het / FD configurations.
+    Callers: :meth:`SubBandBuffer.get_add_ll_exact` (``GB_VERT_EXACT_PRICE=1``
+    only) and, through ``_RoutedBandEngine.exact_scoring``, the GB
+    para-search scorer (``GB_PARA_SEARCH``); neither is on in the 9mo/12mo
+    runs.
+
+    Args:
+        engines (iterable): Band likelihood engines (anything with
+            ``gb_comps``); duplicates and engines without a sig-het comp are
+            ignored, so the context is a no-op on chunked-het / FD
+            configurations.
+
+    Yields:
+        None: The routing flags stay parked for the body of the ``with``
+        block and are restored on exit (also on error).
     """
     saved = []
     seen = set()
@@ -1358,6 +1698,21 @@ class _RoutedBandEngine:
     :meth:`_comp_for`. The prototype's own device reuses the existing engine
     object, so single-shard / primary-shard behaviour is unchanged and
     allocates nothing.
+
+    Built by :func:`make_routed_band_engine` for every :class:`SubBandBuffer`
+    and for the GB move's parent-ACA engine. In the 9mo/12mo runs (one GPU
+    per rank) every holder is single-shard, so every instance method is a
+    passthrough to the wrapped engine and the classmethod routes call the
+    raw comp directly. Unknown public attributes delegate to the wrapped
+    engine.
+
+    Args:
+        engine (object): The single-shard prototype engine
+            (``gbgpu.gb_likelihood.make_band_likelihood_engine`` product).
+        engine_factory (callable, optional): ``engine_factory(device,
+            primary) -> engine`` rebuilding the engine around device-local
+            comps for a non-prototype device. Default ``None`` = every shard
+            uses ``engine`` (safe only on one device).
     """
 
     #: fill_template kwargs holding one value PER BUFFER SLOT — sliced to the
@@ -1498,10 +1853,17 @@ class _RoutedBandEngine:
 
     @staticmethod
     def _is_multi(holder) -> bool:
+        """True when ``holder`` has more than one GPU split (shard)."""
         return len(holder.linear_data_arr) > 1
 
     @staticmethod
     def _shard_views(holder):
+        """Persistent per-split :class:`_ShardHolderView` list of ``holder``.
+
+        Built on first use and cached on the holder
+        (``holder._shard_holder_views``); later calls refresh each view's
+        row metadata in place.
+        """
         views = getattr(holder, "_shard_holder_views", None)
         n = len(holder.linear_data_arr)
         if views is None or len(views) != n:
@@ -1746,6 +2108,26 @@ class _RoutedBandEngine:
 
     def fill_template(self, holder, params_phys, params_index, N_vals, *,
                       factor, waveform_kwargs, **kwargs):
+        """Write (``factor=+1``) or subtract (``-1``) GB templates into ``holder``.
+
+        Single-shard holders call the wrapped engine's ``fill_template``
+        directly. Multi-shard holders are partitioned by the owning split of
+        each row of ``params_index``; per-slot kwargs (``slab_min_f``) are
+        sliced to each shard's rows.
+
+        Args:
+            holder (AnalysisContainerArray): Target buffer (a
+                :class:`SubBandBuffer`, its template twin, or the parent ACA).
+            params_phys (xp.ndarray): ``(n, ndim_phys)`` physical parameters.
+            params_index (xp.ndarray): ``(n,)`` holder row (slot) of each
+                source.
+            N_vals (xp.ndarray or None): ``(n,)`` per-source FD sample counts.
+            factor (int): ``+1`` adds the template to the holder's arrays,
+                ``-1`` subtracts it.
+            waveform_kwargs (dict): Forwarded to the engine.
+            **kwargs: Forwarded to the engine (e.g. ``band_slab_Nf``,
+                ``slab_min_f``).
+        """
         if not self._is_multi(holder):
             return self._engine.fill_template(
                 holder, params_phys, params_index, N_vals,
@@ -1806,6 +2188,28 @@ class _RoutedBandEngine:
 
     def get_ll(self, holder, params_phys, *, data_index, noise_index,
                N_vals, phase_maximize=False, waveform_kwargs, **kwargs):
+        """Per-source log-likelihood against ``holder``'s residual rows.
+
+        Fires the shared-psd mirror parity gate first (a no-op unless it is
+        armed), then calls the wrapped engine (single shard) or routes the
+        rows per shard and reassembles ``d_h_out`` / ``h_h_out`` /
+        ``phase_angle`` / ``kept_out`` / ``non_marg_d_h`` on this router.
+
+        Args:
+            holder (AnalysisContainerArray): The buffer or parent ACA.
+            params_phys (xp.ndarray): ``(n, ndim_phys)`` physical parameters.
+            data_index (xp.ndarray): ``(n,)`` holder row of each source.
+            noise_index (xp.ndarray): ``(n,)`` inverse-PSD row of each source.
+            N_vals (xp.ndarray or None): ``(n,)`` per-source FD sample counts.
+            phase_maximize (bool, optional): Maximise over the initial phase.
+                Default ``False``.
+            waveform_kwargs (dict): Forwarded to the engine.
+            **kwargs: Forwarded to the engine.
+
+        Returns:
+            xp.ndarray: ``(n,)`` log-likelihoods (``-1e300`` for rows no
+            shard produced).
+        """
         # Shared-psd mirror parity gate, hooked where PRODUCTION calls land
         # (no-op unless the owning buffer's gate is armed). Fires before the
         # kernel so the shadow scoring cannot clobber the accumulators the
@@ -1911,11 +2315,42 @@ class _RoutedBandEngine:
             )
         return ll
 
+    # TODO check: keep/remove/document -- only src caller is the GB_ORTHO_CHECK=1 premise check
     def get_swap_ll(self, holder, params_remove_phys, params_add_phys, *,
                     data_index, noise_index, N_vals, phase_maximize=False,
                     waveform_kwargs, **kwargs):
-        # Shared-psd mirror parity gate (see get_ll). The RJ production path
-        # calls the ROUTED entry, never SubBandBuffer.get_swap_ll, so the
+        """Log-likelihood change of swapping a removed source for an added one.
+
+        The RJ step does not use it (it scores births and deaths from one
+        :meth:`SubBandBuffer.get_ll` call); the only caller in ``src`` is
+        ``GBSpecialBase._run_ortho_premise_check`` (``GB_ORTHO_CHECK=1``).
+        Single-shard holders pass straight through; multi-shard holders are
+        routed per shard and every ``SwapLLResult`` field is reassembled.
+
+        Args:
+            holder (AnalysisContainerArray): The holder scored against: the
+                parent residual ACA in the ``GB_ORTHO_CHECK`` caller, or a
+                sub-band buffer.
+            params_remove_phys (xp.ndarray): ``(n, ndim_phys)`` physical
+                parameters of the side leaving the model.
+            params_add_phys (xp.ndarray): ``(n, ndim_phys)`` physical
+                parameters of the side entering the model (row-aligned).
+            data_index (xp.ndarray): ``(n,)`` holder row of each row (walker
+                row on the parent ACA, slot on a buffer).
+            noise_index (xp.ndarray): ``(n,)`` inverse-PSD row of each row.
+            N_vals (xp.ndarray or None): ``(n,)`` per-row FD sample counts.
+            phase_maximize (bool, optional): Maximise the added side over its
+                initial phase. Default ``False``.
+            waveform_kwargs (dict): Forwarded to the engine.
+            **kwargs: Forwarded to the engine.
+
+        Returns:
+            SwapLLResult: ``gbgpu.gb_likelihood.SwapLLResult`` with
+            ``ll_diff``, the add/remove inner products, ``opt_snr_add``,
+            ``phase_angle`` and ``kept`` per row.
+        """
+        # Shared-psd mirror parity gate (see get_ll). Callers use the
+        # ROUTED entry, never SubBandBuffer.get_swap_ll, so the
         # "swap_ll" entry never fired before this hook existed. The remove
         # rows are row-aligned with the add rows, which is what the check's
         # sampled-row subset assumes.
@@ -2009,6 +2444,25 @@ class _RoutedBandEngine:
         its own comp, so each takes the fresh-build branch against its own
         residual slabs. Without one, the collision is refused loudly rather
         than computed wrongly.
+
+        Called through :meth:`SubBandBuffer.setup_in_model_likelihood` once
+        per in-model repeat block.
+
+        Args:
+            holder (SubBandBuffer): The bound buffer.
+            params_phys (xp.ndarray): ``(n, ndim_phys)`` physical parameters
+                of the block's sources.
+            data_index (xp.ndarray): ``(n,)`` buffer slot of each source.
+            N_vals (xp.ndarray, optional): ``(n,)`` FD sample counts.
+
+        Returns:
+            bool or None: The engine hook's value on a single shard (truthy
+            when sig-het references were built; ``None`` from no-op hooks);
+            on a multi-shard holder, whether any shard built references.
+
+        Raises:
+            NotImplementedError: When two shards resolve to the same engine
+                and both build references.
         """
         if not self._is_multi(holder):
             return self._engine.setup_in_model(
@@ -2095,6 +2549,7 @@ class _RoutedBandEngine:
         return exact_scoring_context(
             [self._engine, *self._engine_by_device.values()])
 
+    # TODO check: keep/remove/document -- no callers in src/ or scripts/ (only get_ll_grad/hessian)
     def _route_matrix(self, method_name, holder, params_phys, *, data_index,
                       noise_index, N_vals, **kwargs):
         """Shared row-wise routing for matrix-valued outputs (grad/hessian)."""
@@ -2141,14 +2596,18 @@ class _RoutedBandEngine:
         with _tspan(_rtm, "route_assemble"):
             return assemble([p for p in pieces if p is not None], 0.0)
 
+    # TODO check: keep/remove/document -- no callers; the gradient/NUTS in-model move is not wired
     def get_ll_grad(self, holder, params_phys, *, data_index, noise_index,
                     N_vals, **kwargs):
+        """Routed per-source likelihood gradient (see :meth:`SubBandBuffer.get_ll_grad`)."""
         return self._route_matrix(
             "get_ll_grad", holder, params_phys, data_index=data_index,
             noise_index=noise_index, N_vals=N_vals, **kwargs)
 
+    # TODO check: keep/remove/document -- no callers; the gradient/NUTS in-model move is not wired
     def hessian(self, holder, params_phys, *, data_index, noise_index,
                 N_vals, **kwargs):
+        """Routed per-source likelihood Hessian (see :meth:`SubBandBuffer.hessian`)."""
         return self._route_matrix(
             "hessian", holder, params_phys, data_index=data_index,
             noise_index=noise_index, N_vals=N_vals, **kwargs)
@@ -2195,6 +2654,31 @@ class _RoutedBandEngine:
         forwarding global slots would hit the wrong replica in the wrong
         slot space (the GBGPU-side guards raise on it). The chunked/raw-comp
         leg (``data_index=None``) keeps the walker partition unchanged.
+
+        Called by ``GBSpecialBase._compute_proposal_cholesky`` (the per-block
+        exact info matrices of ``GB_INFOMAT_PER_BLOCK=1`` / ``SIGHET_INFOMAT=1``
+        and the ``GB_CHOL_CACHE`` refreshes and misses).
+
+        Args:
+            comp (object): The raw GB comp (``gb_wdm_comp`` / ``gb_fd_comp``, or the
+                sig-het wrapper) exposing ``information_matrix``.
+            holder (AnalysisContainerArray): Holder whose rows
+                ``noise_index`` addresses (the buffer or the parent ACA).
+            params_phys (xp.ndarray): ``(num_bin, ndim_phys)`` physical
+                parameters (a 1-D row is promoted on the multi-shard path).
+            inds (array-like): Physical output slots the matrix is taken
+                over (the move's ``_infomat_phys_inds``), forwarded to
+                ``information_matrix``.
+            noise_index (xp.ndarray): Walker (inverse-PSD) row of each binary.
+            data_index (xp.ndarray, optional): Per-source buffer slot for the
+                sig-het fast route; default ``None`` = chunked route.
+            slot_holder (SubBandBuffer, optional): The buffer whose slot
+                shards ``data_index`` lives in (multi-shard fast route).
+            **swap_kwargs: Forwarded to ``information_matrix``.
+
+        Returns:
+            xp.ndarray: ``(num_bin, nd, nd)`` information matrices on the
+            caller's device.
         """
         if (data_index is not None and slot_holder is not None
                 and cls._is_multi(slot_holder)):
@@ -2369,6 +2853,35 @@ class _RoutedBandEngine:
         against ONE reference walker, so in practice every row lands on that
         walker's shard, which is exactly the case that reads foreign
         device pointers when the comp is shared.
+
+        Callers: ``GBSpecialBase._fstat_NM`` (the chunked F-stat scorer: the
+        epoch-fit fallback when the sig-het scorer is unavailable, and the
+        distance-birth centres; neither path is taken by the 9mo/12mo runs)
+        and the para-search scorer (``_make_move_para_scorer``,
+        ``GB_PARA_SEARCH``) in ``gbspecialstretch``.
+
+        Args:
+            comp (object): Raw single-shard GB comp.
+            method_name (str): ``"get_fstat_ll_wdm"`` or ``"get_fstat_ll_fd"``.
+            holder (AnalysisContainerArray): The parent residual ACA, or a
+                :class:`FStatRefRowHolder` (the multi-rank fit's replicated
+                reference row, scored at row 0).
+            params_phys (xp.ndarray): ``(num_bin, ndim_phys)`` physical
+                parameters of the candidates.
+            data_index (xp.ndarray or None): Residual row of each candidate
+                (the reference walker); required on multi-shard holders.
+            noise_index (xp.ndarray, optional): Inverse-PSD rows; default
+                ``None`` lets the comp use its own default.
+            **kwargs: Forwarded to the comp method (e.g. ``fstat_fold``).
+
+        Returns:
+            tuple[xp.ndarray, xp.ndarray]: ``(N, M_upper)`` with shapes
+            ``(num_bin, 4)`` and ``(num_bin, 10)``.
+
+        Raises:
+            ValueError: Multi-shard holder without ``data_index``.
+            NotImplementedError: Multi-shard holder carrying narrow-slab
+                metadata.
         """
         # Shared-psd mirror parity gate on a mirror-mode buffer (no-op unless
         # armed; the production F-stat holders are the parent ACA, which has
@@ -2476,12 +2989,41 @@ class _RoutedBandEngine:
         ``FSTAT_SIGHET_MULTIDEV=1`` fans the scorer out over ALL of them
         (:meth:`_sighet_fstat_multidevice`): the F-stat is single-shard by
         contract, so the pinned form leaves every other GPU idle for the
-        whole comb + stage-B fit. OPT-IN (default 0) until the on-GPU
-        parity gate passes; ``FSTAT_SIGHET_MULTIDEV=check`` runs the
+        whole comb + stage-B fit. OPT-IN (code default ``0``); the on-GPU
+        parity gate passed on 2026-08-13 (see the comment in the body) and
+        the 9mo/12mo launchers set ``1``, which is inert there because each
+        process holds one GPU. ``FSTAT_SIGHET_MULTIDEV=check`` runs the
         fan-out WITH a pinned single-device shadow scorer and hard-compares
         every batch (the on-cluster bisector for the observed GPU
         divergence). CPU and single-GPU holders never take the fan-out
         path at all.
+
+        Callers: ``GBSpecialRJFStatGridMove._fstat_call`` (the epoch F-stat
+        fit of the 9mo/12mo runs) and the para-search scorer
+        (``_make_move_para_scorer``, ``GB_PARA_SEARCH``) in
+        ``gbspecialstretch``.
+
+        Args:
+            comp (object): The sig-het wrapper (``GBSignalHetComputations``).
+            holder (AnalysisContainerArray): The parent residual ACA (or a
+                :class:`FStatRefRowHolder`).
+            xp (module): Array module of the candidates and outputs.
+            Tobs (float): Observation time (s).
+            f0_lims_hz (array-like): Frequency limits (Hz) forwarded to
+                :func:`~lisatools.sampling.fstat_gridfit.build_sighet_call_fstat`.
+            data_index (int or None): Reference walker's residual row;
+                required on multi-shard holders.
+            noise_index (int, optional): Reference walker's inverse-PSD row.
+            **build_kwargs: Forwarded to ``build_sighet_call_fstat``.
+
+        Returns:
+            callable: ``call_fstat(params) -> (N, M)``, ``N`` of shape
+            ``(n, 4)`` and ``M`` of shape ``(n, 10)`` on ``xp``.
+
+        Raises:
+            ValueError: Multi-shard holder without ``data_index``.
+            NotImplementedError: Multi-shard holder carrying narrow-slab
+                metadata.
         """
         from ...sampling.fstat_gridfit import build_sighet_call_fstat
 
@@ -2778,9 +3320,26 @@ class _RoutedBandEngine:
         thread pool and accumulating into a shared dict from several threads
         would race.
 
-        Returns ``call_NM(params_phys) -> (N, M)`` on the caller's array
-        module, or ``None`` for single-shard holders (caller keeps the
-        pinned path).
+        Called once per band unit by ``GBSpecialBase._run_band_unit`` when
+        ``GB_FSTAT_NM_MULTIDEV`` is not ``0`` and the parent ACA spans more
+        than one GPU; with one GPU per rank (9mo/12mo) the gate is never
+        met, and a single-shard holder returns ``None`` here as well.
+
+        Args:
+            comp (object): Raw single-shard GB comp.
+            method_name (str): F-stat entry of ``comp``
+                (``"get_fstat_ll_wdm"`` / ``"get_fstat_ll_fd"``).
+            holder (AnalysisContainerArray): The parent residual ACA.
+            walker_ref (int): Global row of the reference walker.
+            check (bool, optional): Shadow-compare every batch against the
+                pinned scorer. Default ``False``.
+            timer (_ProposeTimer, optional): Timer for the sub-spans above.
+            **kwargs: Forwarded to the comp method.
+
+        Returns:
+            callable or None: ``call_NM(params_phys) -> (N, M)`` on the
+            caller's array module, or ``None`` for single-shard holders
+            (caller keeps the pinned path).
         """
         if not cls._is_multi(holder):
             return None
@@ -2932,6 +3491,29 @@ def make_routed_band_engine(basis_settings, *, xp, gb_wdm_comp=None,
     Replicas are module-cached and allocate-once; they deliberately do NOT
     follow the holder's proposal lifetime (rebuilding a ``GBTDIonTheFly`` per
     proposal would be ruinous) and never reach the settings tree.
+
+    Callers: :meth:`SubBandBuffer.rebuild_likelihood_engine` (every buffer)
+    and the GB move's parent-ACA engine in ``gbspecialstretch``.
+
+    Args:
+        basis_settings (DomainSettingsBase): Domain the engine scores in;
+            :class:`~lisatools.domains.WDMSettings` selects the WDM engine,
+            :class:`~lisatools.domains.FDSettings` the FD engine.
+        xp (module): Array module (numpy or cupy); used for the device
+            context of the per-device replicas.
+        gb_wdm_comp (object, optional): WDM-domain GB computation object
+            (chunked-het or sig-het); required on WDM. Default ``None``.
+        gb_fd_comp (object, optional): FD-domain GB computation object;
+            required on FD. Default ``None``.
+        **engine_kwargs: Forwarded to
+            ``gbgpu.gb_likelihood.make_band_likelihood_engine`` (e.g.
+            ``gb``, ``nchannels``, ``tdi_channel_setup``, ``df``,
+            ``start_freq_inds``, ``data_length``, ``opt_snr_rej_samp_limit``,
+            ``snr_rej_detected``).
+
+    Returns:
+        _RoutedBandEngine: Router wrapping the prototype engine, with an
+        ``engine_factory`` for per-device replicas.
     """
     from gbgpu.gb_likelihood import make_band_likelihood_engine
 
@@ -2983,6 +3565,16 @@ class _MirrorPsdSlots:
     :attr:`_shards` hands out one such object per split. A global object on
     a multi-shard buffer routes each slot to its owning split and
     concatenates through the host (debug readers only).
+
+    The 9mo/12mo runs use this layout (``GB_PSD_SHARED_MIRROR=1``): it is
+    what :attr:`SubBandBuffer.psd_buffer` returns, read by
+    :meth:`SubBandBuffer.likelihood`.
+
+    Args:
+        buf (SubBandBuffer): The mirror-mode buffer (after
+            :meth:`SubBandBuffer.bind_psd_mirror`).
+        split (int, optional): GPU split to index intra-shard; default
+            ``None`` = global slot ids.
     """
 
     def __init__(self, buf, split=None):
@@ -2991,11 +3583,13 @@ class _MirrorPsdSlots:
 
     @property
     def _n(self) -> int:
+        """Number of addressable slots (bound slots, or this split's rows)."""
         if self._split is None:
             return int(self._buf.num_bands_now)
         return int(len(self._buf.gpu_splits[self._split]))
 
     def _slab_geometry(self):
+        """``(Nf_active, Nt_active, ind_min_f, W)`` of the buffer's slabs."""
         buf = self._buf
         ws = buf._basis_settings
         Nf_active = int(ws.Nf_active)
@@ -3005,15 +3599,18 @@ class _MirrorPsdSlots:
 
     @property
     def shape(self) -> tuple:
+        """``(n_slots, *shape_sens, W, Nt_active)``, the per-slot layout."""
         _, Nt_active, _, W = self._slab_geometry()
         return (self._n,) + tuple(self._buf.shape_sens) + (W, Nt_active)
 
     @property
     def ndim(self) -> int:
+        """Number of axes of :attr:`shape`."""
         return len(self.shape)
 
     @property
     def dtype(self):
+        """Element dtype of the replica plane."""
         return self._buf.linear_psd_arr[0].dtype
 
     def __len__(self) -> int:
@@ -3021,6 +3618,7 @@ class _MirrorPsdSlots:
 
     @property
     def _shards(self):
+        """One split-local :class:`_MirrorPsdSlots` per GPU split."""
         return [_MirrorPsdSlots(self._buf, split=s)
                 for s in range(len(self._buf.linear_psd_arr))]
 
@@ -3116,6 +3714,7 @@ class _MirrorPsdSlots:
             "there is no per-slot psd to write)")
 
 
+# TODO check: keep/remove/document -- parity gate; only with GB_PSD_MIRROR_PARITY_PROPOSES>0
 class _PsdParityHolder:
     """Throwaway single-shard holder for the shared-psd mirror PARITY GATE.
 
@@ -3175,6 +3774,106 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
     ``data - sum(templates)``. Removing a source from the model therefore
     means *adding* its template back into the buffer (``factor=+1``);
     adding a source to the model subtracts it (``factor=-1``).
+
+    Built (or rebound, see :meth:`resize_to` / :meth:`update_special_indices`)
+    by :meth:`BandSorter.get_buffer`, which the GB moves reach through
+    ``GBSpecialBase._cached_get_buffer``; ``get_buffer`` passes the
+    sorter's settings and forwards its own ``**kwargs`` (e.g.
+    ``use_template_arr``, ``alloc_capacity``). In the 9mo/12mo runs the
+    basis is WDM with XYZ channels, the inverse PSD is read through the
+    shared per-walker mirror (``psd_shared_mirror=True``), GB slabs span 5
+    WDM layers (``GB_WDM_BAND_SLAB_LAYERS=5``), RJ proposal buffers are
+    fixed-capacity, and the tempering buffers carry the template twin
+    (``use_template_arr=True``).
+
+    Per-slot shapes (WDM): residual ``(nchannels, W, Nt_active)`` with
+    ``W = band_slab_Nf`` (or ``Nf_active`` when narrow slabs are off); the
+    inverse PSD ``(nchannels, nchannels, W, Nt_active)`` for XYZ, else
+    ``(nchannels, W, Nt_active)``. FD: ``(nchannels, data_length)``
+    complex residual windows.
+
+    Args:
+        is_rj (object or None): The sorter's RJ proposal
+            (``BandSorter.rj_prop``) or ``None``; truthy marks an
+            RJ-provenance buffer (see :func:`rj_band_window`).
+        nwalkers (int): Number of walkers of the ensemble (special-index
+            packing).
+        gb (object): The GBGPU waveform object; its backend must match this buffer's
+            and its ``gpus`` (cupy only) selects multi-GPU sharding.
+        band_edges (xp.ndarray): ``(num_bands + 1,)`` band edges (Hz).
+        band_N_vals (xp.ndarray): ``(num_bands,)`` per-band FD sample counts.
+        unique_band_combos (xp.ndarray): ``(num_bands_now, 3)``
+            ``[temp, walker, band]`` per slot (recomputed from
+            ``special_indices_unique``).
+        params_interest (xp.ndarray): Sampling-basis coordinates of every
+            source in the bound cells (``(n_src, ndim)``).
+        num_bands_now (int): Number of bound slots.
+        nchannels (int): Number of TDI channels (3 for XYZ).
+        data_length (int): FD cell window length in bins (the sorter's
+            ``max_data_store_size``); ignored on WDM.
+        special_indices_unique (xp.ndarray): ``(num_bands_now,)`` special
+            index of the cell in each slot.
+        transform_fn (TransformContainer): Sampling -> physical transform.
+        waveform_kwargs (dict): Waveform kwargs; must carry
+            ``"tdi_channel_setup"`` (``"XYZ"`` or an A/E setup).
+        df (float): FD bin width, or ``layer_df`` on WDM (band-index math).
+        sources_now_map (xp.ndarray): Main-sorter rows of every source in the
+            bound cells.
+        sources_inject_now_map (xp.ndarray): The alive subset of those rows
+            (injected into the residual or template twin).
+        special_band_inds (xp.ndarray): Special index of each source of
+            ``params_interest`` (row-aligned).
+        opt_snr_rej_samp_limit (float or np.ndarray, optional): Optimal-SNR
+            floor of the swap clamp; scalar or ``(nwalkers, num_bands)``
+            table. Default ``None`` reads ``GB_OPT_SNR_LIMIT`` (``5.0``).
+        snr_rej_detected (bool, optional): Also clamp on the detected SNR.
+            Default ``False``.
+        force_backend (str, optional): Backend name. Default ``"gpu"``.
+        use_template_arr (bool, optional): Allocate the template twin.
+            Default ``False``.
+        basis_settings: Parent domain settings; ``None`` builds
+            ``FDSettings(N=data_length, df=df)``.
+        gb_wdm_comp (object, optional): WDM GB computation object (required
+            on WDM). Default ``None``.
+        gb_fd_comp (object, optional): FD GB computation object (required on
+            FD). Default ``None``.
+        keep_sens_mat: Allocate the forward sensitivity matrix per slot.
+            Default ``False`` (zero-storage broadcast view).
+        wdm_band_slab_layers: ``None`` = full active band, ``0`` = auto
+            (:meth:`recommend_band_slab_layers`), ``N > 0`` = exactly ``N``
+            layers (``GB_WDM_BAND_SLAB_LAYERS``).
+        wdm_slab_guard_layers: Guard layers per side for the auto size.
+            Default ``1``.
+        alloc_capacity: Fixed slot capacity (``>= num_bands_now``); default
+            ``None`` allocates exactly ``num_bands_now`` slots.
+        psd_shared_mirror: Read the inverse PSD from the parent's
+            per-device replica instead of per-slot copies (WDM only).
+            Default ``False``.
+        psd_mirror_parity_proposes: Number of unit fills the mirror parity
+            gate stays armed. Default ``0`` (off).
+        psd_mirror_parity_rows: Rows sampled per parity check. Default ``64``.
+        *args: Accepted and ignored.
+        **kwargs: Accepted and ignored.
+
+    Attributes:
+        unique_band_combos (xp.ndarray): ``(num_bands_now, 3)``
+            ``[temp, walker, band]`` of each slot.
+        now_index (xp.ndarray): Slot of each source of ``special_band_inds``
+            (int32).
+        frequency_lims (list[xp.ndarray]): Per-slot ``[lower, upper]`` band
+            window (Hz), from :func:`rj_band_window`.
+        start_freq_inds (xp.ndarray): Per-slot FD window start bin.
+        parent_acs (AnalysisContainerArray): The parent ACA of the last fill
+            (set by :meth:`BandSorter.get_buffer`).
+        d_h_out (xp.ndarray): ``<d|h>`` per row of the last :meth:`get_ll`
+            call; ``h_h_out``, ``phase_angle`` and ``kept_out`` hold that
+            call's ``<h|h>``, maximising phase and bounds mask.
+
+    Raises:
+        ValueError: ``alloc_capacity < num_bands_now``.
+        NotImplementedError: Shared-psd mirror on a non-WDM basis or on JAX.
+        RuntimeError: Shared-psd mirror with a GBGPU build lacking the
+            mirror kernel arguments.
     """
 
     @property
@@ -3201,11 +3900,20 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
     @classmethod
     def supported_backends(cls):
-        """List the GPU backend names this buffer supports."""
+        """List the backend names this buffer supports (CUDA flavours, then CPU)."""
         return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def get_index(self, special_inds_test):
-        """Map a special-index test value to its position inside the buffer."""
+        """Map special indices to their slot positions inside the buffer.
+
+        Args:
+            special_inds_test (xp.ndarray): Special indices of bound cells.
+
+        Returns:
+            xp.ndarray: int32 slot of each entry. There is no membership
+            check: an unbound index maps to the slot of the largest bound
+            special not above it, so callers pass bound cells only.
+        """
         # Fixed-capacity resize contract: between ``resize_to(k)`` and the
         # mandatory FULL ``update_special_indices`` rebind the specials map
         # holds placeholders — a searchsorted over it would silently return
@@ -3702,6 +4410,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         )
 
     def _flat_or_raise(self, acs, kind: str):
+        """Flat single-shard data/psd array of ``acs``; raise where none exists."""
         if kind == "psd" and acs is self and getattr(self, "_psd_shared_mirror", False):
             raise RuntimeError(
                 "psd_buffer_tmp has no per-slot flat layout in shared-psd mirror "
@@ -3724,11 +4433,13 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
     @property
     def band_buffer(self):
-        """Per-band residual buffer indexable by global band id.
+        """Per-slot residual buffer indexable by global slot id.
 
-        Single-GPU: returns the ``(num_bands_now, nchannels, data_length)``
-        reshape directly. Multi-GPU: returns a :class:`BandView` that
-        routes per-band reads/writes through the owning shard.
+        Single-GPU: returns the bound front of the shaped array directly,
+        ``(num_bands_now, nchannels, data_length)`` on FD or
+        ``(num_bands_now, nchannels, W, Nt_active)`` on WDM. Multi-GPU:
+        returns a :class:`~lisatools.analysiscontainer.BandView` that routes
+        per-slot reads/writes through the owning shard.
         """
         return self._shaped_or_view(self, "data")
 
@@ -3739,9 +4450,11 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
     @property
     def psd_buffer(self):
-        """Per-band inverse-PSD buffer indexable by global band id.
+        """Per-slot inverse-PSD buffer indexable by global slot id.
 
-        Same single-GPU / multi-GPU behaviour as :attr:`band_buffer`.
+        Same single-GPU / multi-GPU behaviour as :attr:`band_buffer`. In
+        shared-psd mirror mode it is a read-only :class:`_MirrorPsdSlots`
+        gatherer over the parent's per-device replica instead.
         """
         return self._shaped_or_view(self, "psd")
 
@@ -3752,9 +4465,10 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
     @property
     def template_buffer(self):
-        """Per-band template buffer indexable by global band id.
+        """Per-slot template-twin buffer indexable by global slot id.
 
-        Same single-GPU / multi-GPU behaviour as :attr:`band_buffer`.
+        Same single-GPU / multi-GPU behaviour as :attr:`band_buffer`; exists
+        only with ``use_template_arr=True``.
         """
         return self._shaped_or_view(self._acs_template_buffer, "data")
 
@@ -3797,6 +4511,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
     # ``__dict__`` — no sentinel objects, so deepcopy/pickle stay safe.)
 
     def _invalidate_slab_metadata_cache(self) -> None:
+        """Drop the per-bind caches (slab origins, psd row map, WDM starts)."""
         # ``_band_slab_Nf_cached`` is deliberately NOT dropped here (2026-08-28
         # shared-overhead audit). ``_compute_band_slab_Nf`` reads only
         # ``_wdm_band_slab_layers``, ``_basis_settings``, ``df`` and
@@ -3842,6 +4557,14 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         return out
 
     def _compute_band_slab_Nf(self) -> Optional[int]:
+        """Uncached :attr:`band_slab_Nf` (explicit size checked, or auto size).
+
+        Raises:
+            ValueError: An explicit ``GB_WDM_BAND_SLAB_LAYERS`` narrower than
+                the widest band plus the kernel window, or (with
+                ``GB_SLAB_SUPPORT_CHECK=1``) narrower than the band grid's FD
+                support.
+        """
         if self._wdm_band_slab_layers is None:
             return None
         if not isinstance(self._basis_settings, WDMSettings):
@@ -3969,7 +4692,24 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
         This is what ``wdm_band_slab_layers=0`` (auto) resolves to;
         ``check_wdm_band_slab.py`` prints it alongside a measured
-        leakage estimate.
+        leakage estimate. The stock GB default ``GB_WDM_BAND_SLAB_LAYERS=0``
+        takes this path; the 9mo/12mo launchers set an explicit 5.
+
+        Args:
+            band_edges (array-like): ``(num_bands + 1,)`` band edges (Hz).
+            layer_df (float): WDM layer width (Hz).
+            leakage (int, optional): Minimum margin per side in layers.
+                Default ``_WDM_SLAB_LEAKAGE_LAYERS`` (2).
+            guard (int, optional): Extra guard layers per side. Default ``1``.
+            xp (module, optional): Unused (kept for call compatibility).
+            Tobs (float, optional): Observation time (s); enables the FD
+                support margin. Default ``None`` = leakage-only margins.
+            oversample (int, optional): Forwarded to ``get_N``. Default ``4``.
+            amp (float, optional): Forwarded to ``get_N``. Default ``1e-30``.
+
+        Returns:
+            int: Recommended slab extent in WDM layers (before the clamp to
+            the parent ``Nf_active``).
         """
         edges = np.asarray(asnumpy(band_edges), dtype=float)
         ldf = float(layer_df)
@@ -4011,6 +4751,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         return out
 
     def _compute_slab_min_f(self):
+        """Uncached :attr:`slab_min_f`: centred, clamped, capacity-padded int32."""
         slab_Nf = self.band_slab_Nf
         if slab_Nf is None:
             return None
@@ -4074,6 +4815,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         return out
 
     def _compute_psd_row_index(self):
+        """Uncached :attr:`psd_row_index` (int32, padded with zeros)."""
         xp = self.xp
         rows = xp.asarray(self.unique_band_combos[:, 1]).astype(xp.int32)
         n_alloc = int(self._n_slots_alloc)
@@ -4094,6 +4836,16 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         walker row must exist in the plane and every slab must lie inside the
         parent active band, so the kernels can never read outside the
         replica.
+
+        Args:
+            acs (AnalysisContainerArray): The parent residual ACA (one
+                inverse-PSD row per walker, full active band).
+
+        Raises:
+            RuntimeError: Mirror mode off, or no bound slots.
+            NotImplementedError: Non-WDM basis.
+            ValueError: A walker row, slab origin or row layout outside the
+                parent plane.
         """
         if not getattr(self, "_psd_shared_mirror", False):
             raise RuntimeError("bind_psd_mirror called on a buffer with the "
@@ -4164,6 +4916,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
                     "[GB_PSD_MIRROR parity] gate retired after %d proposes, "
                     "no divergence", unit)
 
+    # TODO check: keep/remove/document -- parity gate; only with GB_PSD_MIRROR_PARITY_PROPOSES>0
     @staticmethod
     def _psd_mirror_parity_fail(tag, what, a, b, slots, rows_h, smf_h):
         """Raise with the first differing element located (row -> slot ->
@@ -4210,6 +4963,12 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
         One INFO line per check; ``RuntimeError`` naming the first differing
         element on any mismatch (the GB_ORTHO lesson: never a warning).
+
+        Called by :meth:`get_ll`, :meth:`get_swap_ll`,
+        :meth:`setup_in_model_likelihood` and the router entry points (via
+        ``_fire_psd_mirror_parity``); it returns immediately while the gate
+        is not armed, which is every call under
+        ``GB_PSD_MIRROR_PARITY_PROPOSES=0`` (the 9mo/12mo setting).
         """
         if not getattr(self, "_psd_mirror_parity", False):
             return
@@ -4461,9 +5220,16 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
         Returns ``(ac_list, aca_kwargs)`` ready to be fed into
         ``AnalysisContainerArray.__init__`` (either on ``self`` or on the
-        template twin). Branches on the parent basis domain: FD buffers are
-        complex with ``complex_psd=True`` (XYZ CSD support); WDM buffers are
-        real-valued slabs over the full active grid.
+        template twin). Branches on the parent basis domain: FD residual
+        windows are complex with a REAL per-slot inverse PSD
+        (``complex_psd=False`` for both domains); WDM buffers are
+        real-valued slabs of ``band_slab_Nf`` layers (the full active grid
+        when narrow slabs are off). ``_n_slots_alloc`` containers are
+        allocated; with several GPUs (``gb.gpus``) they are grouped by band
+        and spread over the devices
+        (:func:`~lisatools.analysiscontainer.band_gpu_assignment`), and in
+        shared-psd mirror mode no per-slot inverse PSD is stored
+        (``psd_storage="none"``).
         """
         per_band_settings = self._build_per_band_basis_settings()
         data_shape = self._per_band_data_shape
@@ -4554,6 +5320,20 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         return ac_list, aca_kwargs
 
     def update_special_indices(self, new_special_indices, inds_fill=None):
+        """Rebind slots ``inds_fill`` to the cells ``new_special_indices``.
+
+        Runs the :attr:`special_indices_unique` setter, which rebuilds the
+        sort table, ``unique_band_combos``, window starts and
+        ``frequency_lims``. Called by :meth:`BandSorter.get_buffer` before
+        the slab fill; after :meth:`resize_to` the first call must cover
+        every bound slot.
+
+        Args:
+            new_special_indices (xp.ndarray): Special index of each rebound
+                slot.
+            inds_fill (xp.ndarray, optional): Slot positions to rebind;
+                default ``None`` = every bound slot.
+        """
         if inds_fill is None:
             inds_fill = cp.arange(self.num_bands_now)
 
@@ -4636,6 +5416,13 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
     @property
     def special_indices_unique(self):
+        """``(num_bands_now,)`` special index of the cell bound to each slot.
+
+        Setting it rebinds the buffer: it invalidates the slab metadata
+        cache and recomputes the sort table, ``unique_band_combos``, the FD
+        window starts (``buffer_start_index`` / ``start_freq_inds``) and the
+        per-slot ``frequency_lims``.
+        """
         return self._special_indices_unique
 
     @special_indices_unique.setter
@@ -4737,11 +5524,11 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         """Per-slot minimum-frequency index, unified across domains.
 
         FD: absolute FD bin where each cell's residual window starts
-        (``buffer_start_index``). WDM: the start layer of each cell's slab --
-        currently the parent grid's ``ind_min_f`` for every slot, until the
-        WDM kernel takes per-band layer offsets. The likelihood engines read
-        this off the buffer at every call, so it never goes stale across
-        band swap-outs.
+        (``buffer_start_index``). WDM: the parent grid's ``ind_min_f`` for
+        every slot (int32, allocated length); the per-slot layer origins of
+        narrow slabs travel separately in :attr:`slab_min_f`. The likelihood
+        engines read this off the buffer at every call, so it never goes
+        stale across band swap-outs.
         """
         if isinstance(self._basis_settings, WDMSettings):
             # ALLOCATED length (== bound length without fixed capacity): the
@@ -4766,6 +5553,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
     @property
     def special_indices_unique_sort(self):
+        """Argsort of :attr:`special_indices_unique` (used by :meth:`get_index`)."""
         return self._special_indices_unique_sort
 
     @staticmethod
@@ -4809,6 +5597,37 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         slot's own axis) instead of the whole slab. The GB per-walker RJ
         valve observes the band's OWN window this way (user ruling
         2026-10-10): the slab also carries its neighbours' pixels.
+
+        Each cell value is ``-0.5 * <r|r>`` with ``<a|b> = 4 * dc *
+        sum(conj(a) * invC * b)`` over the cell's slab (``dc`` = the
+        basis measure, ``settings.differential_component``), where ``r`` is
+        the residual, minus the template twin when ``use_template_arr``.
+        Slots are reduced ``GB_BAND_LL_CHUNK`` (default 1024; at most 128 in
+        mirror mode) at a time. Also available as ``band_likelihoods`` (the
+        name the GB moves call).
+
+        Args:
+            source_only: Return only the per-cell source term. Default
+                ``False``.
+            noise_only: Return only the summed PSD term,
+                ``-sum(log|1/invC|)`` over the nonzero inverse-PSD entries.
+                Default ``False``. Not available for XYZ.
+            slots (xp.ndarray, optional): Slot subset (``source_only`` only).
+            windows (tuple, optional): ``(lo, hi)`` host int arrays aligned
+                with ``slots``.
+
+        Returns:
+            xp.ndarray or float: ``(num_bands_now,)`` (or ``(len(slots),)``)
+            per-cell values with ``source_only``; the float PSD term with
+            ``noise_only``; otherwise the per-cell source term plus the
+            scalar ``-sum(log|invC|)`` over the nonzero inverse-PSD entries
+            (a warning is raised for XYZ, where that term is not correct).
+            The GB moves call it with ``source_only=True``.
+
+        Raises:
+            ValueError: ``slots`` without ``source_only``, or ``windows``
+                without ``slots``.
+            NotImplementedError: ``noise_only`` with XYZ channels.
         """
         assert not (source_only and noise_only)
         if slots is not None and not source_only:
@@ -5045,6 +5864,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         """
         return self.transform_fn.both_transforms(params, xp=cp, leaf_inds=leaf_inds)
 
+    # TODO check: keep/remove/document -- no callers; production goes through get_ll / the router
     def get_swap_ll(self, params_remove, params_add, data_index, N_vals, phase_maximize=False,
                     leaf_inds=None):
         """Per-proposal swap log-likelihood difference.
@@ -5136,6 +5956,27 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         phase_angle)`` instead. The raw inner products also land on
         :attr:`d_h_out` / :attr:`h_h_out`, and :attr:`phase_angle` carries
         the maximising rotation when ``phase_maximize=True``.
+
+        The RJ step (``GBSpecialBase._run_rj_step``) scores births and deaths
+        from one such call through the ``d_h`` / ``h_h`` outputs.
+
+        Args:
+            params (xp.ndarray): ``(n, ndim)`` sampling-basis parameters
+                (transformed to physical here).
+            data_index (xp.ndarray): ``(n,)`` buffer slot of each source.
+            noise_index (xp.ndarray): ``(n,)`` inverse-PSD slot of each
+                source (the same slots in practice).
+            N_vals (xp.ndarray): ``(n,)`` per-source FD sample counts.
+            phase_maximize (bool, optional): Maximise over the initial phase.
+                Default ``False``.
+            return_inner_products (bool, optional): Also return the inner
+                products. Default ``False``.
+            leaf_inds (xp.ndarray, optional): Per-row leaf indices (needed by
+                per-leaf-fill containers, e.g. VGB).
+
+        Returns:
+            xp.ndarray or tuple: ``(n,)`` log-likelihoods, or
+            ``(ll, d_h, h_h, phase_angle)`` with ``return_inner_products``.
         """
         # Speed-diagnosis spans (user directive 2026-08-15: production runs
         # 20-100x slower than the kernel benches; decompose every hot call).
@@ -5187,7 +6028,20 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
         Returns the engine hook's value: truthy when a sig-het reference
         is now active (the move uses this to arm its mid-block drift
-        refresh), ``None`` from the no-op hooks."""
+        refresh), ``None`` from the no-op hooks. The sig-het engine is the
+        in-model likelihood of the 9mo/12mo runs
+        (``GB_SIGHET_INMODEL_WINDOWED=1``).
+
+        Args:
+            params (xp.ndarray): ``(n, ndim)`` sampling-basis parameters of
+                the block's sources.
+            data_index (xp.ndarray): ``(n,)`` buffer slot of each source.
+            N_vals (xp.ndarray, optional): ``(n,)`` FD sample counts.
+            leaf_inds (xp.ndarray, optional): Per-row leaf indices.
+
+        Returns:
+            bool or None: The engine hook's value (see above).
+        """
         params_phys = self._to_phys(params, leaf_inds=leaf_inds)
         out = self._likelihood_engine.setup_in_model(
             self, params_phys, data_index, N_vals=N_vals)
@@ -5213,6 +6067,18 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         :attr:`phase_angle` is available after the call when
         ``phase_maximize=True``. Sources rejected by the engine's bounds
         check (:attr:`kept_out`) come back as ``-1e300``.
+
+        Args:
+            params (xp.ndarray): ``(n, ndim)`` sampling-basis parameters.
+            data_index (xp.ndarray): ``(n,)`` buffer slot of each source.
+            noise_index (xp.ndarray): ``(n,)`` inverse-PSD slot of each source.
+            N_vals (xp.ndarray): ``(n,)`` per-source FD sample counts.
+            phase_maximize (bool, optional): Maximise over the initial phase.
+                Default ``False``.
+            leaf_inds (xp.ndarray, optional): Per-row leaf indices.
+
+        Returns:
+            xp.ndarray: ``(n,)`` real log-likelihood deltas.
         """
         self.get_ll(params, data_index, noise_index, N_vals, phase_maximize=phase_maximize,
                     leaf_inds=leaf_inds)
@@ -5220,6 +6086,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         delta[~self.kept_out] = -1e300
         return delta
 
+    # TODO check: keep/remove/document -- only with GB_VERT_EXACT_PRICE=1 (default 0; launchers 0)
     def get_add_ll_exact(self, params, data_index, noise_index, N_vals,
                          leaf_inds=None):
         """:meth:`get_add_ll` through the EXACT engine, mid-block.
@@ -5231,6 +6098,9 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         (``d_h_out`` / ``h_h_out`` / ``phase_angle`` / ``kept_out``) so code
         that reads the last in-model call's outputs sees them unchanged. On
         an engine with no sig-het comp this is plain ``get_add_ll``.
+
+        Called by ``GBSpecialBase._run_in_model_repeats`` to price vertical
+        swaps when ``GB_VERT_EXACT_PRICE=1``.
         """
         eng = self._likelihood_engine
         ctx = getattr(eng, "exact_scoring", None)
@@ -5244,6 +6114,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             for k, v in stash.items():
                 setattr(self, k, v)
 
+    # TODO check: keep/remove/document -- only caller is the GB_DEBUG verifier _debug_verify_rj_step
     def get_removal_ll(self, params, data_index, noise_index, N_vals, leaf_inds=None):
         """Log-likelihood delta of REMOVING a source that is in the residual.
 
@@ -5287,9 +6158,24 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         bounds-rejected rows come back ``-1e300`` (see the ``replace_kept_*``
         attributes).
 
+        Called by ``GBSpecialBase._run_replace_step`` (``rj_replace`` moves:
+        ``GB_SEARCH_RJ_REPLACE`` / ``GB_PE_RJ_REPLACE``, both on by code
+        default and set to 0 by the 9mo/12mo launchers).
+
+        Args:
+            params_old (xp.ndarray): ``(n, ndim)`` sampling-basis parameters
+                of the in-model sources being replaced.
+            params_new (xp.ndarray): ``(n, ndim)`` replacement proposals.
+            data_index (xp.ndarray): ``(n,)`` buffer slot of each row.
+            noise_index (xp.ndarray): ``(n,)`` inverse-PSD slot of each row.
+            N_vals (xp.ndarray): ``(n,)`` per-row FD sample counts.
+            phase_maximize (bool, optional): Phase-maximise both halves.
+                Default ``False``.
+            leaf_inds (xp.ndarray, optional): Per-row leaf indices.
+
         Returns:
-            ``(delta_old, delta_new, phase_angle_new, delta_old_actual)``:
-            add-deltas of the old and new rows vs ``r'``;
+            tuple: ``(delta_old, delta_new, phase_angle_new,
+            delta_old_actual)``: add-deltas of the old and new rows vs ``r'``;
             ``phase_angle_new`` is the per-row maximizing rotation of the
             NEW half (``None`` unless ``phase_maximize``);
             ``delta_old_actual`` is the old row's add-delta at its ACTUAL
@@ -5352,6 +6238,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         self.replace_kept_new = kept[n:]
         return delta[:n], delta[n:], phase_angle_new, delta_old_actual
 
+    # TODO check: keep/remove/document -- no callers; the gradient/NUTS in-model move is not wired
     def get_ll_grad(self, params, data_index, noise_index, N_vals,
                      *, param_eps=None, chunk=None, leaf_inds=None):
         """Per-source gradient of ``L = <d|h> - 0.5 <h|h>`` w.r.t. params.
@@ -5361,8 +6248,9 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         raises NotImplementedError. Returns ``(num_proposals, nparams)``
         on the engine's xp module.
 
-        Used by the in-model NUTS / gradient move (the chunked-het
-        replacement for the legacy info-matrix Cholesky proposal). The
+        Intended for an in-model NUTS / gradient move (the chunked-het
+        replacement for the legacy info-matrix Cholesky proposal); no GB
+        move calls it today. The
         buffer must hold the source-of-interest's *clean* residual --
         i.e. ``remove_sources_from_band_buffer`` has been called for
         that source already -- before invoking this.
@@ -5385,6 +6273,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             waveform_kwargs=self.waveform_kwargs,
         )
 
+    # TODO check: keep/remove/document -- no callers; the gradient/NUTS in-model move is not wired
     def hessian(self, params, data_index, noise_index, N_vals,
                  *, chunk=None,
                  psd_fix=False, psd_floor_rel=1e-30, leaf_inds=None):
@@ -5420,11 +6309,13 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         )
 
     def reset_residual_buffers(self, inds_fill=None):
+        """Zero the residual slabs of slots ``inds_fill`` (default: all bound)."""
         if inds_fill is None:
             inds_fill = cp.arange(self.num_bands_now)
         self.band_buffer[inds_fill] = 0.0
 
     def reset_psd_buffers(self, inds_fill=None):
+        """Zero the per-slot inverse-PSD slabs (no-op in shared-psd mirror mode)."""
         if getattr(self, "_psd_shared_mirror", False):
             # Mirror mode: no per-slot psd storage to reset.
             return
@@ -5453,6 +6344,21 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
     def fill_buffer_residual_and_psd_from_acs(
         self, acs: AnalysisContainerArray, inds_fill: Optional[cp.ndarray] = None
     ) -> None:
+        """Copy each slot's residual (and inverse-PSD) window out of ``acs``.
+
+        For every slot of ``inds_fill`` the residual slab is zeroed and then
+        filled from the parent walker row ``unique_band_combos[slot, 1]``
+        over the slot's window (:meth:`_get_fill_buffer_ind_map`). The
+        per-slot inverse-PSD copy follows, except in shared-psd mirror mode,
+        where the slots read the parent's replica bound by
+        :meth:`bind_psd_mirror`. Runs in ``GB_FILL_CHUNK`` (default 2048)
+        slot chunks. Called by :meth:`BandSorter.get_buffer`.
+
+        Args:
+            acs: The parent residual ACA (one row per walker).
+            inds_fill: Slot positions to fill; default ``None`` = every bound
+                slot.
+        """
         # CHUNKED (2026-08-14): each tuple-fancy gather below materialises a
         # rows x slab temporary -- for the XYZ invC that is ~763 KB/slot, so
         # a 16,384-row gather is 12.5 GB in ONE allocation (job-183 OOM on a
@@ -5534,6 +6440,28 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
     def _get_fill_buffer_ind_map(
         self, acs: AnalysisContainerArray, inds_fill: Optional[cp.ndarray] = None, is_psd: bool = False
     ) -> Tuple[cp.ndarray, cp.ndarray, cp.ndarray]:
+        """Tuple-fancy index into the parent's shaped arrays for the fill.
+
+        Indexing ``acs.data_shaped_view()`` (or ``psd_shaped_view()`` with
+        ``is_psd``) with the returned tuple gives the slots' windows in this
+        buffer's per-slot layout. Axis 0 is the parent walker row
+        (``unique_band_combos[:, 1]``). WDM: then channel(s), the slot's
+        layers ``slab_min_f[slot] - ind_min_f + arange(W)`` (or the full
+        active band) and all ``Nt_active`` times -- 4 arrays, or 5 for the
+        XYZ inverse PSD. FD: channel(s) and the slot's bins from
+        ``buffer_start_index`` -- 3 arrays, or 4 for the XYZ inverse PSD.
+
+        Args:
+            acs: The parent ACA.
+            inds_fill: Slot positions; default ``None`` = every bound slot.
+            is_psd: Build the inverse-PSD map instead of the data map.
+
+        Returns:
+            tuple: Broadcastable integer index arrays (3 to 5 of them).
+
+        Raises:
+            NotImplementedError: Basis neither FD nor WDM.
+        """
 
         if isinstance(self._basis_settings, WDMSettings):
             # WDM fill index map: pick each band's slab out of the parent ACA.
@@ -5637,10 +6565,29 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
         return inds1, inds2, inds3
 
+    # TODO check: keep/remove/document -- no callers (twin of add_sources_to_template_buffer)
     def remove_sources_from_template_buffer(self, *args, **kwargs) -> None:
+        """Subtract templates from the template twin (``factor=-1``).
+
+        Args:
+            *args: ``(params, params_index, N_vals)``, forwarded to
+                :meth:`_adjust_via_engine`.
+            **kwargs: Forwarded to :meth:`_adjust_via_engine` (``leaf_inds``).
+        """
         self._adjust_via_engine(-1, self._acs_template_buffer, *args, **kwargs)
 
     def add_sources_to_template_buffer(self, *args, **kwargs) -> None:
+        """Add templates into the template twin (``factor=+1``).
+
+        Used by :meth:`BandSorter.get_buffer` to build the per-cell template
+        sums of tempering buffers (``use_template_arr=True``).
+
+        Args:
+            *args: ``(params, params_index, N_vals)``: sampling-basis
+                parameters, buffer slot and FD sample count of each source,
+                forwarded to :meth:`_adjust_via_engine`.
+            **kwargs: Forwarded to :meth:`_adjust_via_engine` (``leaf_inds``).
+        """
         self._adjust_via_engine(+1, self._acs_template_buffer, *args, **kwargs)
 
     def swap_template_slots(self, slots_a, slots_b) -> None:
@@ -5649,6 +6596,11 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         Used by the tempering stage to swap a temperature pair's per-cell
         templates -- and, called again with the rejected subset, to revert
         the swaps that failed the acceptance draw.
+
+        Args:
+            slots_a (xp.ndarray): Slot positions of one side.
+            slots_b (xp.ndarray): Slot positions of the other side
+                (element-aligned with ``slots_a``).
         """
         buf = self.template_buffer
         if isinstance(buf, BandView):
@@ -5671,7 +6623,18 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         ``target_aca`` selects which AnalysisContainerArray to write into
         (the buffer itself for residuals, or the template twin). Both share
         the same per-band geometry, so the engine doesn't need to know which
-        one it's filling.
+        one it's filling. On narrow WDM slabs ``band_slab_Nf`` and
+        ``slab_min_f`` are forwarded too.
+
+        Args:
+            factor (int): ``+1`` or ``-1``.
+            target_aca (AnalysisContainerArray): ``self`` or the template twin.
+            params (xp.ndarray): ``(n, ndim)`` sampling-basis parameters.
+            params_index (xp.ndarray): ``(n,)`` buffer slot of each source.
+            N_vals (xp.ndarray): ``(n,)`` per-source FD sample counts.
+            *args: Ignored.
+            leaf_inds (xp.ndarray, optional): Per-row leaf indices.
+            **kwargs: Ignored.
         """
         assert isinstance(factor, int) and (factor == -1 or factor == +1)
         params_phys = self._to_phys(params, leaf_inds=leaf_inds)
@@ -5694,6 +6657,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             **_slab_kwargs,
         )
 
+    # TODO check: keep/remove/document -- back-compat shim; no callers in src/, scripts/, tests/
     def adjust_sources_in_band_buffer(
         self, factor, input_array, params, params_index, N_vals, *args, **kwargs
     ) -> None:
@@ -5715,12 +6679,26 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         self._adjust_via_engine(factor, target_aca, params, params_index, N_vals, *args, **kwargs)
 
     def remove_sources_from_band_buffer(self, *args, **kwargs) -> None:
+        """Remove sources from the model: ADD their templates to the residual.
+
+        Args:
+            *args: ``(params, params_index, N_vals)``, forwarded to
+                :meth:`_adjust_via_engine` with ``factor=+1``.
+            **kwargs: Forwarded to :meth:`_adjust_via_engine` (``leaf_inds``).
+        """
         # NOTE: sign is +1 because band_buffer holds the residual
         # (= data - sum(templates)). Removing a source from the model means
         # ADDING it back to the residual, hence factor=+1 here.
         self._adjust_via_engine(+1, self, *args, **kwargs)
 
     def add_sources_to_band_buffer(self, *args, **kwargs) -> None:
+        """Add sources to the model: SUBTRACT their templates from the residual.
+
+        Args:
+            *args: ``(params, params_index, N_vals)``, forwarded to
+                :meth:`_adjust_via_engine` with ``factor=-1``.
+            **kwargs: Forwarded to :meth:`_adjust_via_engine` (``leaf_inds``).
+        """
         # See remove_sources_from_band_buffer note; sign is flipped for the
         # residual-tracking band_buffer.
         self._adjust_via_engine(-1, self, *args, **kwargs)
@@ -5728,9 +6706,11 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
     def get_special_band_index(
         self, temp_inds: np.ndarray, walker_inds: np.ndarray, band_inds: np.ndarray
     ) -> np.ndarray:
+        """:func:`pack_special_index` with this object's ``nwalkers``."""
         return pack_special_index(temp_inds, walker_inds, band_inds, self.nwalkers)
 
     def get_separate_inds_from_special_index(self, special_band_inds: np.ndarray) -> tuple:
+        """:func:`unpack_special_index` with this object's ``nwalkers``."""
         return unpack_special_index(special_band_inds, self.nwalkers)
 
 
@@ -5748,14 +6728,99 @@ class BandSorter(LISAToolsParallelModule):
     domain settings), pre-draws RJ proposals for the ``inds=False`` slots
     when ``rj_prop`` is given, and provides subset / packing machinery for
     the per-band proposal loop and band-temperature swaps.
+
+    Built once per propose of every GB/VGB move (the session sorter of the
+    rank's walker block, plus a rebuild after the proposal), and as a
+    subset copy by :meth:`get_subset`. Row layout:
+
+    * with ``rj_prop`` and ``keep_all_inds=True`` (RJ moves): one row per
+      leaf slot, ``ntemps * nwalkers * nleaves_max`` rows; dead slots
+      (``inds`` False) get fresh draws from ``rj_prop`` (the birth
+      candidates) and ``factors`` is ``-logpdf`` for dead rows, ``+logpdf``
+      for alive rows;
+    * with ``rj_prop`` and ``keep_all_inds=False``: alive leaves only,
+      ``factors = +logpdf``;
+    * without ``rj_prop`` (in-model moves): alive leaves only, ``factors``
+      all ones.
+
+    ``band_inds`` is computed from each row's frequency when the sorter is
+    built and stays frozen for the propose; ``special_band_inds`` packs
+    ``(temp, walker, band)`` (:func:`pack_special_index`).
+
+    Passing another :class:`BandSorter` as ``gb_branch`` is the copy
+    constructor: every per-row array is sliced to ``inds_subset`` (deep
+    copies unless ``copy=False``), the other attributes are copied, and the
+    GB objects and ``rj_prop`` are shared.
+
+    Args:
+        gb_branch: The eryn GB branch (``coords`` ``(ntemps, nwalkers,
+            nleaves_max, ndim)``, ``inds``), or a :class:`BandSorter` to copy.
+        band_edges: ``(num_bands + 1,)`` band edges (Hz); required unless
+            copying.
+        band_N_vals: ``(num_bands,)`` per-band FD sample counts; required
+            unless copying.
+        force_backend: Backend name (e.g. ``"cuda12x"``, ``"cpu"``). Default
+            ``None`` picks the first loadable entry of
+            :meth:`supported_backends`.
+        transform_fn: Sampling -> physical transform; also locates the f0
+            column (sampled f0 is in mHz) or the per-leaf f0 fill.
+        copy: Copy constructor only: deep-copy the sliced arrays. Default
+            ``True``.
+        inds_subset: Copy constructor only: row ids of the source sorter to
+            keep (default all).
+        inds_main_band_sorter: Row ids of these rows in the main sorter.
+        gb (object, optional): The GBGPU waveform object, forwarded to
+            buffers.
+        gb_wdm_comp (object, optional): WDM GB computation object, forwarded
+            to buffers.
+        gb_fd_comp (object, optional): FD GB computation object, forwarded
+            to buffers.
+        waveform_kwargs (dict, optional): Waveform kwargs forwarded to
+            buffers. Default ``{}``.
+        main_band_sorter (BandSorter, optional): The full sorter a subset
+            refers to; ``None`` = this sorter is the main one.
+        max_data_store_size: FD cell window length (bins) for buffers.
+            Default ``6000``.
+        rj_prop (object, optional): RJ proposal distribution (``rvs`` /
+            ``logpdf``); ``None`` for in-model moves.
+        keep_all_inds (bool, optional): Keep dead slots as rows (see above).
+            Default ``True``.
+        wdm_band_slab_layers: Narrow-slab setting forwarded to buffers
+            (``None`` = full active band).
+        wdm_slab_guard_layers: Auto-slab guard layers. Default ``1``.
+        opt_snr_rej_samp_limit (float or np.ndarray, optional): Buffer SNR
+            clamp; scalar or ``(nwalkers, num_bands)`` table. Default ``5.0``.
+        snr_rej_detected: Also clamp on the detected SNR. Default ``False``.
+        psd_shared_mirror: Forwarded to buffers (``GB_PSD_SHARED_MIRROR``).
+        psd_mirror_parity_proposes: Forwarded to buffers.
+        psd_mirror_parity_rows: Forwarded to buffers.
+        source_uid: ``(ntemps, nwalkers, nleaves_max)`` per-leaf
+            ``GB_CHOL_CACHE`` source IDs (``GBState.source_uid``, ``-1`` =
+            none), gathered row-for-row like ``coords``; ``None`` = no ID
+            column.
+
+    Attributes:
+        coords (xp.ndarray): ``(num_sources, ndim)`` sampling-basis rows.
+        inds (xp.ndarray): ``(num_sources,)`` bool, row is an alive source.
+        temp_inds (xp.ndarray): Per-row rung label; ``walker_inds``,
+            ``leaf_inds`` and ``band_inds`` hold the walker, leaf slot and
+            band of each row. ``temp_inds`` / ``walker_inds`` change on
+            label exchanges.
+        special_band_inds (xp.ndarray): Per-row packed cell index.
+        freqs (xp.ndarray): Per-row frequency (Hz) at build time.
+        factors (xp.ndarray): Per-row RJ proposal log-density factor.
+        source_uid (xp.ndarray or None): Per-row int64 source ID.
+        num_sources (int): Number of rows.
     """
 
     @property
     def xp(self) -> Union[ModuleType, numpy, cupy]:
+        """Array module of the sorter's backend (numpy or cupy)."""
         return self.backend.xp
 
     @classmethod
     def supported_backends(cls):
+        """List the backend names this sorter supports (CUDA flavours, then CPU)."""
         return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def __init__(
@@ -6045,6 +7110,15 @@ class BandSorter(LISAToolsParallelModule):
         return None
 
     def set_main_band_sorter_info(self, main_band_sorter, inds_main_band_sorter):
+        """Record the main sorter and this sorter's row ids inside it.
+
+        Args:
+            main_band_sorter (BandSorter or None): The main sorter; ``None``
+                makes this sorter its own main sorter (row ids
+                ``arange(num_sources)``).
+            inds_main_band_sorter (xp.ndarray or None): Row ids in the main
+                sorter (ignored when ``main_band_sorter`` is ``None``).
+        """
         if main_band_sorter is None:
             self.inds_main_band_sorter = self.xp.arange(self.num_sources)
         else:
@@ -6054,6 +7128,7 @@ class BandSorter(LISAToolsParallelModule):
 
     @property
     def coords_in(self) -> np.ndarray:
+        """All rows transformed to the physical (waveform input) basis."""
         # leaf_inds is ignored by scalar-fill containers and required by
         # per-leaf-fill ones (Eryn per-leaf fill_dict).
         return self.transform_fn.both_transforms(
@@ -6063,13 +7138,20 @@ class BandSorter(LISAToolsParallelModule):
     def get_special_band_index(
         self, temp_inds: np.ndarray, walker_inds: np.ndarray, band_inds: np.ndarray
     ) -> np.ndarray:
+        """:func:`pack_special_index` with this object's ``nwalkers``."""
         return pack_special_index(temp_inds, walker_inds, band_inds, self.nwalkers)
 
     def get_separate_inds_from_special_index(self, special_band_inds: np.ndarray) -> tuple:
+        """:func:`unpack_special_index` with this object's ``nwalkers``."""
         return unpack_special_index(special_band_inds, self.nwalkers)
 
     @property
     def special_index_check(self) -> bool:
+        """True when ``special_band_inds`` matches the per-row labels.
+
+        The standing regression alarm for label exchanges; asserts first
+        that no deferred relabel is pending.
+        """
         # The standing alarm must judge FLUSHED state: with relabels still
         # pending it would be checking the pre-swap table and pass
         # vacuously, which is the one way this invariant could go quiet.
@@ -6282,6 +7364,17 @@ class BandSorter(LISAToolsParallelModule):
         With a deferred window open (:meth:`begin_cell_label_window`) this
         composes into the window instead and the table is untouched until
         the flush; the observable end state is identical.
+
+        Args:
+            specials_a (xp.ndarray): Special indices of the ``a`` cells.
+            temp_a (int): Rung label shared by the ``a`` cells.
+            walkers_a (xp.ndarray): Walker label of each ``a`` cell.
+            specials_b (xp.ndarray): Special indices of the ``b`` cells
+                (element-aligned with ``specials_a``).
+            temp_b (int): Rung label shared by the ``b`` cells.
+            walkers_b (xp.ndarray): Walker label of each ``b`` cell.
+            bands (xp.ndarray, optional): Band of each pair, checked only
+                with ``GB_INDEX_ASSERTS=1``.
         """
         if self._deferred_labels is not None:
             self._defer_exchange(specials_a, temp_a, walkers_a,
@@ -6352,6 +7445,16 @@ class BandSorter(LISAToolsParallelModule):
         carries its own ``ar_slot`` map permuted on accept for exactly
         this reason. See the note at ``cell_specials`` for why this is
         recorded rather than fixed.
+
+        Args:
+            specials_a (xp.ndarray): ``(K,)`` special indices of one side.
+            temps_a (xp.ndarray): ``(K,)`` rung labels of that side.
+            walkers_a (xp.ndarray): ``(K,)`` walker labels of that side.
+            specials_b (xp.ndarray): ``(K,)`` special indices of the partners.
+            temps_b (xp.ndarray): ``(K,)`` rung labels of the partners.
+            walkers_b (xp.ndarray): ``(K,)`` walker labels of the partners.
+            bands (xp.ndarray, optional): ``(K,)`` band of each pair, checked
+                only with ``GB_INDEX_ASSERTS=1``.
         """
         if self._deferred_labels is not None:
             self._defer_exchange(specials_a, temps_a, walkers_a,
@@ -6385,13 +7488,31 @@ class BandSorter(LISAToolsParallelModule):
 
     @property
     def N_vals(self) -> np.ndarray:
+        """Per-row FD sample count: ``band_N_vals`` of the row's band."""
         return self.band_N_vals[self.band_inds]
 
+    # TODO check: keep/remove/document -- no callers in src/, scripts/ or tests/
     @property
     def unique_N(self) -> np.ndarray:
+        """Distinct values of :attr:`N_vals`."""
         return self.xp.unique(self.N_vals)
 
     def get_subset(self, *args, **kwargs):
+        """Return a :class:`BandSorter` copy holding only the selected rows.
+
+        Rows are selected by :meth:`get_subset_bool` (same arguments). The
+        copy keeps this sorter's main sorter and the matching
+        ``inds_main_band_sorter`` row ids, so buffers built from it address
+        the main sorter's rows. Asserts that no deferred relabel is pending.
+
+        Args:
+            *args: Forwarded to :meth:`get_subset_bool`.
+            **kwargs: Forwarded to :meth:`get_subset_bool`.
+
+        Returns:
+            BandSorter or None: The subset sorter, or ``None`` when no row is
+            selected.
+        """
         # A subset COPIES the label arrays (the __dict__ loop above), so a
         # relabel still pending in a deferred window would never reach it.
         self._assert_cell_labels_flushed("get_subset")
@@ -6411,6 +7532,7 @@ class BandSorter(LISAToolsParallelModule):
         return subset
 
     def get_subset_inds(self, *args, **kwargs):
+        """Row ids selected by :meth:`get_subset_bool` (same arguments)."""
         subset_bool = self.get_subset_bool(*args, **kwargs)
         return self.xp.arange(len(subset_bool))[subset_bool]
 
@@ -6427,6 +7549,29 @@ class BandSorter(LISAToolsParallelModule):
         extra_bool: Optional[np.ndarray] = None,
         full_bool: Optional[np.ndarray] = None,
     ) -> np.ndarray:
+        """Boolean row mask combining the given filters (logical AND).
+
+        The GB moves select one band unit with ``units`` / ``remainder``
+        (``band % units == remainder``).
+
+        Args:
+            units: Band-unit stride (with ``remainder``; ignored when
+                ``band`` is given).
+            remainder: Band-unit class, ``0 <= remainder < units``.
+            temp: Keep rows of this rung.
+            walker: Keep rows of this walker.
+            leaf: Keep rows of this leaf slot.
+            band: Keep rows of this band.
+            apply_inds: Keep alive rows only. Default ``False``.
+            special_band_inds: Keep rows of this cell (int) or of these
+                cells (array).
+            extra_bool: Extra ``(num_sources,)`` mask.
+            full_bool: A complete ``(num_sources,)`` mask that replaces every
+                other filter.
+
+        Returns:
+            xp.ndarray: ``(num_sources,)`` bool mask.
+        """
 
         self._assert_cell_labels_flushed("get_subset_bool")
         inds_keep = self.xp.ones_like(self.band_inds, dtype=bool)
@@ -6472,6 +7617,7 @@ class BandSorter(LISAToolsParallelModule):
 
     @property
     def main_band_sorter(self):
+        """The full sorter this one indexes into (``self`` for a main sorter)."""
         main_band_sorter = self if self._main_band_sorter is None else self._main_band_sorter
         return main_band_sorter
 
@@ -6504,6 +7650,35 @@ class BandSorter(LISAToolsParallelModule):
         and never inject into (the tempering stage's sourceless rows; see
         ``GBSpecialBase.run_tempering`` / ``GB_TEMPER_SKIP_EMPTY``).
         ``None`` (default) fills every bound slot -- today's behavior.
+
+        Steps: build a new buffer (``inds_fill=None``) or rebind
+        ``buffer_obj`` (resize first when ``allow_resize`` and the cell count
+        changed); bind the shared-psd mirror when on; copy the residual (and
+        per-slot inverse PSD) windows from ``acs``; inject every alive source
+        of the bound cells -- into the residual (``add_sources_to_band_buffer``)
+        or, with a template twin, into the twin after zeroing it. The GB moves
+        call it through ``GBSpecialBase._cached_get_buffer``.
+
+        Args:
+            acs (AnalysisContainerArray): The parent residual ACA (one row
+                per walker); its ``settings`` select FD or WDM.
+            special_indices_unique (xp.ndarray): Special index of the cell
+                for each slot to bind (the scheduler's ``slot_specials`` or
+                ``advance`` output).
+            inds_fill (xp.ndarray, optional): Slots of ``buffer_obj`` to
+                rebind; default ``None`` builds a fresh buffer.
+            buffer_obj (SubBandBuffer, optional): Buffer to rebind (required
+                with ``inds_fill``).
+            allow_resize: Permit a fixed-capacity resize-rebind. Default
+                ``False``.
+            timer (_ProposeTimer, optional): Timer for the sub-spans above.
+            fill_slots (xp.ndarray, optional): See above.
+            **kwargs: Extra :class:`SubBandBuffer` constructor arguments for a
+                fresh build (e.g. ``use_template_arr``, ``alloc_capacity``).
+
+        Returns:
+            SubBandBuffer: The built or rebound buffer, filled and with its
+            sources injected.
         """
 
         num_band_preload = len(special_indices_unique)
@@ -6705,6 +7880,7 @@ class BandSorter(LISAToolsParallelModule):
     # Group-stretch friends
     # ------------------------------------------------------------------
 
+    # TODO check: keep/remove/document -- no callers (superseded by build_friend_table)
     def build_friend_index(self, nfriends: int) -> bool:
         """Build the sorted cold-chain frequency table + per-source friend windows.
 
@@ -6721,13 +7897,27 @@ class BandSorter(LISAToolsParallelModule):
         table = self.build_friend_table(nfriends)
         return self.index_friends(table, nfriends)
 
+    # TODO check: keep/remove/document -- legacy stretch; only with GB_STRETCH_PROBABILITY>0 (unset)
     def build_friend_table(self, nfriends: int):
         """The frequency-sorted cold-chain coordinate table, or ``None``.
 
         Split out of :meth:`build_friend_index` so the table can be built ONCE
         per larger iteration and shared across the GB moves of a cycle, while
         :meth:`index_friends` still runs per proposal (each proposal's sorter
-        holds a different set of sources).
+        holds a different set of sources). The GB moves build it in
+        ``_ensure_proposal_tables`` only when ``stretch_probability > 0``
+        (constructor default ``0.0``, env ``GB_STRETCH_PROBABILITY``, which no
+        launcher sets) and the move keeps its friend table; the VGB move
+        switches the table off (its ``_build_friend_table`` flag). The
+        9mo/12mo runs therefore never build it.
+
+        Args:
+            nfriends: Window width (friends per source).
+
+        Returns:
+            xp.ndarray or None: Cold-chain (``temp == 0``, alive) coordinate
+            rows sorted by sampling column 1 (f0), or ``None`` when fewer
+            than ``max(2, nfriends)`` such sources exist.
         """
         self._assert_cell_labels_flushed("build_friend_table")
         cold = self.inds & (self.temp_inds == 0)
@@ -6737,8 +7927,23 @@ class BandSorter(LISAToolsParallelModule):
         order = self.xp.argsort(cold_coords[:, 1])
         return cold_coords[order].copy()
 
+    # TODO check: keep/remove/document -- legacy stretch; only with GB_STRETCH_PROBABILITY>0 (unset)
     def index_friends(self, friends_coords_sorted, nfriends: int) -> bool:
-        """Window every source into ``friends_coords_sorted`` (per proposal)."""
+        """Window every source into ``friends_coords_sorted`` (per proposal).
+
+        Sets ``friend_start_inds``: for each row, the start of an
+        ``nfriends``-wide window centred on the row's f0 in the sorted table
+        (clamped at the edges).
+
+        Args:
+            friends_coords_sorted (xp.ndarray or None): Output of
+                :meth:`build_friend_table`.
+            nfriends: Window width.
+
+        Returns:
+            bool: False (and ``friend_start_inds = None``) when the table is
+            missing or too short.
+        """
         self.nfriends = int(nfriends)
         if friends_coords_sorted is None or len(friends_coords_sorted) < max(
             2, self.nfriends
@@ -6759,10 +7964,22 @@ class BandSorter(LISAToolsParallelModule):
         )
         return True
 
+    # TODO check: keep/remove/document -- legacy stretch; only with GB_STRETCH_PROBABILITY>0 (unset)
     def draw_friends(self, source_ids):
         """One random friend (coordinate row) per source in ``source_ids``.
 
-        Requires :meth:`build_friend_index` to have been run this proposal.
+        Requires :meth:`index_friends` (directly, or via
+        :meth:`build_friend_index`) to have run this proposal. Called by the
+        group-stretch branch of the GB in-model proposal, which runs only
+        when ``stretch_probability > 0`` and the friend index exists (see
+        :meth:`build_friend_table`); the draw uses ``xp.random`` (not the
+        sampler's random state).
+
+        Args:
+            source_ids (xp.ndarray): Sorter row ids.
+
+        Returns:
+            xp.ndarray: ``(len(source_ids), ndim)`` friend coordinates.
         """
         starts = self.friend_start_inds[source_ids]
         deviation = self.xp.random.randint(0, self.nfriends, size=len(starts))
@@ -6786,6 +8003,19 @@ class BandSorter(LISAToolsParallelModule):
 
         Returns ``False`` (and clears the index) when the supplied table is
         empty, so the caller can fall back to computing factors directly.
+
+        This is the shared-table route of ``_ensure_proposal_tables``, taken
+        when ``GB_INFOMAT_PER_BLOCK`` is off (its code default); the
+        9mo/12mo launchers set ``GB_INFOMAT_PER_BLOCK=1`` and never build it.
+
+        Args:
+            infomat_freqs_sorted (xp.ndarray or None): ``(n_tab,)`` ascending
+                table frequencies, in the units of sampling column 1.
+            infomat_chol_sorted (xp.ndarray): ``(n_tab, ndim, ndim)``
+                Cholesky factors in the same order.
+
+        Returns:
+            bool: Whether ``infomat_take_inds`` was set.
         """
         if infomat_freqs_sorted is None or len(infomat_freqs_sorted) == 0:
             self.infomat_take_inds = None
@@ -6813,11 +8043,23 @@ class BandSorter(LISAToolsParallelModule):
         Requires :meth:`build_infomat_index` to have been run this proposal;
         mirrors :meth:`draw_friends`, but the pick is deterministic (nearest)
         rather than a uniform draw from a window.
+
+        Args:
+            source_ids (xp.ndarray): Sorter row ids.
+
+        Returns:
+            xp.ndarray: ``(len(source_ids), ndim, ndim)`` Cholesky factors.
         """
         take = self.infomat_take_inds[source_ids]
         return self.infomat_chol_sorted[take]
 
     def get_band_info(self):
+        """Count the alive sources of every ``(temp, walker, band)`` cell.
+
+        Returns:
+            dict: ``{"band_counts": np.ndarray}`` with an int host array of
+            shape ``(ntemps, nwalkers, num_bands)``.
+        """
 
         self._assert_cell_labels_flushed("get_band_info")
         uni_special, uni_special_counts = cp.unique(

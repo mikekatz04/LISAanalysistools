@@ -1,3 +1,16 @@
+"""Galactic-binary prior helpers.
+
+The one function on the production path is :func:`get_fdot_mojito`: the
+frequency-dependent ``fdot`` envelopes that set ``GBSettings.fdot_lims`` in
+:meth:`~lisatools.globalfit.stock.erebor.gb.GBSetup.init_band_structure` (and
+the VGB equivalent), and the legacy-``fdot``-basis third-column search bounds of
+:class:`~lisatools.globalfit.moves.gbspecialstretch.GBSpecialRJSerialSearchMCMC`.
+:class:`GalacticBinaryPrior` (built on
+:class:`~lisatools.globalfit.priors.gfpriors.BaseSourcePrior`) and
+:func:`f_Hz_to_mHz` have no callers; the stock GB priors are built directly in
+``GBSetup.init_sampling_info``.
+"""
+
 from typing import Any, Callable, Dict, List, Tuple, Optional
 import numpy as np
 
@@ -7,6 +20,7 @@ from eryn.utils.transform import TransformContainer
 from .gfpriors import BaseSourcePrior
 
 
+# TODO check: keep/remove/document -- no caller anywhere; stock GB priors are built in GBSetup
 class GalacticBinaryPrior(BaseSourcePrior):
     """Galactic Binary specific prior infrastructure.
 
@@ -20,8 +34,8 @@ class GalacticBinaryPrior(BaseSourcePrior):
             ``(f0, Mc) -> (f0, fdot)`` map computed via
             :func:`gbgpu.utils.utility.get_fdot` -- so the physical basis still
             receives ``fdot`` while the sampler operates in chirp mass. Off by
-            default for backward compatibility; the stock erebor GB recipe
-            flips it on where appropriate.
+            default for backward compatibility. (The stock erebor GB branch
+            does not use this class.)
     """
 
     def __init__(
@@ -101,22 +115,43 @@ class GalacticBinaryPrior(BaseSourcePrior):
         )
 
 
+# TODO check: keep/remove/document -- no caller anywhere
 def f_Hz_to_mHz(f_Hz):
     """Convert frequency from Hz to mHz."""
     return f_Hz * 1e3
 
 def get_fdot_mojito(f, sign="+"):
-    """Get fdot of GW according to predetermined lisa priors for mojito    
+    r"""Upper or lower ``fdot`` envelope of the mojito GB prior at frequency ``f``.
+
+    .. math::
+
+        \dot f_+ = 3\times10^{-21}\,(f / 10^{-4}\,{\rm Hz})^{11/3},
+        \qquad
+        \dot f_- = -2\times10^{-20}\,(f / 4\times10^{-4}\,{\rm Hz})^{16/3}
+        \quad [{\rm Hz\,s^{-1}}].
+
+    The stock GB and VGB setups evaluate both envelopes at the top of the
+    ``f0`` prior range (``f0_lims[1]``) to set ``fdot_lims``.
 
     Args:
-        f (xp.ndarray): Frequency of gravitational wave in Hz.
-        sign (str): Either positive or negative fdot bound.
+        f (float or xp.ndarray): GW frequency [Hz].
+        sign (str): ``"+"`` (default) for the upper envelope, ``"-"`` for
+            the lower one.
 
     Returns:
-        xp.ndarray: fdot.
+        float or xp.ndarray: ``fdot`` [Hz/s], same shape and array module as
+        ``f``.
 
     Raises:
-        ValueError: Inputs are incorrect.
+        ValueError: ``sign`` is neither ``"+"`` nor ``"-"``.
+        AssertionError: ``f`` is ``None``.
+
+    Example:
+        >>> from lisatools.globalfit.priors.gbpriors import get_fdot_mojito
+        >>> get_fdot_mojito(1e-4)
+        3e-21
+        >>> get_fdot_mojito(4e-4, sign="-")
+        -2e-20
     """
     assert f is not None
     

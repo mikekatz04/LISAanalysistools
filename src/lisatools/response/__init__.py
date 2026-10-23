@@ -3,18 +3,22 @@
 Absorbed from ``lisa-on-gpu`` / ``fastlisaresponse`` at Phase 3 of the
 sprint reorg. Public symbols:
 
-- :class:`LISAToolsParallelModule` — backend-dispatch base (response
-  classes inherit this directly; ``FastLISAResponseParallelModule`` /
-  ``LISAToolsResponseParallelModule`` are backward-compat aliases of it)
-- :class:`TDIConfig`                       — TDI generation config
-- :class:`Response` / :class:`ResponseWrapper` / :func:`pyResponseTDI`
-  — direct (frequency-domain) response (was ``fastlisaresponse.response``)
-- :class:`TDIonTheFly` family               — on-the-fly TDI generators
-  (was ``fastlisaresponse.tdionfly``)
+- :class:`~lisatools.utils.parallelbase.LISAToolsParallelModule`: the
+  backend-dispatch base (response classes inherit it directly;
+  ``FastLISAResponseParallelModule`` / ``LISAToolsResponseParallelModule``
+  are backward-compat aliases of it, see :mod:`lisatools.response.parallelbase`).
+- :class:`~lisatools.response.tdiconfig.TDIConfig`: the TDI combination
+  configuration (``"1st generation"`` / ``"2nd generation"`` or a custom list).
+- :class:`~lisatools.response.directresponse.pyResponseTDI` /
+  :class:`~lisatools.response.directresponse.ResponseWrapper` /
+  :func:`~lisatools.response.directresponse.ecliptic_to_icrs`: the direct
+  time-domain projection + TDI response (was ``fastlisaresponse.response``).
+- :mod:`lisatools.response.tdionfly`: the TDI-on-the-fly generator family
+  (was ``fastlisaresponse.tdionfly``).
 
-Backend registration (``fastlisaresponse_cpu``, ``..._cuda{11,12,13}x``,
-``..._jax``) still lives in ``fastlisaresponse.__init__``. We trigger it
-on first import so users of ``lisatools.response`` do not need to know.
+The backends these classes dispatch to (``lisatools_cpu``,
+``lisatools_cuda{11,12,13}x``, ``lisatools_jax``) are the ones registered by
+``lisatools/__init__``; choose one per object with ``force_backend=``.
 """
 
 # ruff: noqa: E402,F401

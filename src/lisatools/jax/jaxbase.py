@@ -1,19 +1,18 @@
-"""
-jaxbase.py
-==========
-Base class and utilities for JAX-based subclasses. It includes a mixin for
-JAX-backed waveform/computation classes that (a) bridges host/cupy inputs
-into JAX arrays on the caller's target GPU via DLPack, and (b) implements a threading-safety protocol by tracking a per-(callable, device)
-compile-shape registry.
+"""JAX array-bridge mixin for JAX-backed waveform / computation classes.
 
-The mixin exists so `DomainComputationGroupArray` (DCGA) can dispatch a
-JAX-tracing callable concurrently across multiple GPUs without tripping
-XLA's per-device compile lock. Callers consult the protocol methods
-(`supports_threaded`, `record_completion`) on the callable's owner before
-every threaded dispatch and auto-falls-back to serial on novel shapes.
-Non-JAX callables (cupy-only, C++, pure NumPy) do not need this mixin;
-they are treated as default-safe.
-The main consumer of the protocol is the :class:`DomainComputationGroupArray` in ``domaincomputation.py``.
+Holds :class:`JaxBase`, whose two helpers move inputs into JAX
+(:meth:`JaxBase._to_jax`: a cupy array zero-copy through DLPack, a host
+scalar / numpy array with ``jax.device_put`` onto a chosen device) and
+outputs back to the consumer's array module (:meth:`JaxBase._from_jax`:
+numpy, or cupy through DLPack when the consumer's ``xp`` is cupy). Its
+global-fit user is the phentax MBH generator
+:class:`~lisatools.sources.bbh.waveform.PhenomTHMWaveformBase` (production
+MBH waveforms). :mod:`lisatools.utils.jaxbase` re-exports it. Importing the
+module turns on ``jax_enable_x64`` when jax is available.
+
+(An earlier version also carried a per-(callable, device) compile-shape
+registry for threaded multi-GPU dispatch; those protocol methods are no
+longer in this class.)
 
 Preconditions for correct JAX placement via DLPack:
   - JAX and cupy must enumerate CUDA devices in the same order. Defaults
@@ -23,8 +22,8 @@ Preconditions for correct JAX placement via DLPack:
   - DLPack handoff assumes the producer stream has synchronized. For
     host -> cupy via ``cp.asarray(numpy_array)``, this is effectively
     synchronous (pageable memory). For device-resident cupy arrays
-    produced on non-default streams, ``_jax_from_host`` syncs the array's
-    device before the bridge as a defensive measure.
+    produced on non-default streams, pass ``do_synchronize=True`` to
+    :meth:`JaxBase._to_jax` to sync the array's device before the bridge.
 """
 from __future__ import annotations
 
@@ -53,13 +52,35 @@ except (ImportError, ModuleNotFoundError):
 
 
 class JaxBase:
-    """Base class for JAX-backed waveforms and computations.
+    """Mixin for JAX-backed waveforms and computations: array bridging to and from JAX.
 
-    This provides common logic for JAX-based subclasses and their interaction with array libraries.
+    Subclasses call ``JaxBase.__init__(self)`` (which only checks that jax
+    imports) and use :meth:`_to_jax` / :meth:`_from_jax`. :meth:`_from_jax`
+    reads the subclass's ``xp`` attribute (numpy when it has none) to pick
+    the output array module.
+
+    Raises:
+        ImportError: jax is not available (at construction).
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.jax.jaxbase import JaxBase
+
+            class MyJaxWaveform(JaxBase):
+                xp = cupy                       # the consumer's array module
+
+                def __init__(self):
+                    JaxBase.__init__(self)
+
+                def __call__(self, params):
+                    p = self._to_jax(params)    # cupy -> jax via DLPack
+                    out = my_jax_fn(p)
+                    return self._from_jax(out)  # jax -> cupy
     """
 
     def __init__(self) -> None:
-        """Initialize the JaxBase instance."""
+        """Check that jax is available (raises ``ImportError`` otherwise)."""
         if not jax_available:
             raise ImportError("JAX is required for JaxBase but is not available.")
         
@@ -67,7 +88,25 @@ class JaxBase:
                 x: float | np.ndarray | cp.ndarray, 
                 device_id: Optional[int] = None, 
                 do_synchronize: bool = False) -> jnp.ndarray:
-        """Convert input to a JAX array, optionally synchronizing if it's a CuPy array."""
+        """Convert input to a JAX array, optionally synchronizing if it's a CuPy array.
+
+        Args:
+            x: A cupy array (zero-copy through DLPack, on the array's own
+                device), or a Python ``float`` / ``int`` / numpy array
+                (``jax.device_put``).
+            device_id: Index into ``jax.devices()`` of the default platform for
+                host inputs; ``None`` (default) leaves placement to JAX. Ignored
+                for cupy inputs.
+            do_synchronize: Synchronize a cupy array's device first. Default
+                ``False``.
+
+        Returns:
+            jnp.ndarray: The JAX array.
+
+        Raises:
+            TypeError: Any other input type (including a JAX array or a numpy
+                integer scalar, which is not an ``int``).
+        """
         if isinstance(x, cp.ndarray) and cupy_available:
             if do_synchronize:
                 x.device.synchronize()
@@ -90,6 +129,16 @@ class JaxBase:
         that its numpy response then rejects. Callers rely on this: they index
         the result against other ``_from_jax`` outputs and pass it straight into
         ``xp=self.xp`` helpers.
+
+        Args:
+            x: The JAX array.
+            do_synchronize: ``block_until_ready`` first. Default ``False``.
+            to_host: Force a numpy result. Default ``False``.
+
+        Returns:
+            np.ndarray or cupy.ndarray: numpy unless cupy is importable,
+            ``to_host`` is ``False`` and ``self.xp`` is not numpy; then cupy
+            (zero-copy through DLPack when possible, else through the host).
         """
         if do_synchronize:
             x.block_until_ready()

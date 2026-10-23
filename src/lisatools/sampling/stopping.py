@@ -1,4 +1,20 @@
-"""Stopping criteria for ``eryn``-based LISA samplers."""
+"""Stopping criteria for ``eryn``-based LISA samplers.
+
+Each class is an ``eryn`` stopping hook: pass an instance as
+``stopping_fn=`` to :class:`~eryn.ensemble.EnsembleSampler` and
+:meth:`~eryn.ensemble.EnsembleSampler.run_mcmc` calls it as
+``stopping_fn(i, state, sampler)`` every ``stopping_iterations`` stored steps;
+a ``True`` return ends the run.
+
+Live classes: :class:`SNRStopping` (stop once the SNR blob of the best sample
+clears a limit; LATW tutorial 07) and :class:`SearchConvergeStopping` (stop
+when the best log-likelihood plateaus; used by the dev MBH search
+:mod:`lisatools.globalfit.mbhsearch` and the legacy
+:mod:`lisatools.globalfit.moves.mbhspecialmove`). The 9mo / 12mo global-fit
+runs use none of them (their stages stop through the recipe's own stopping
+functions, and production MBH runs ``MBH_LIKELIHOOD=batched``, not the legacy
+MBH move). The other classes have no callers.
+"""
 
 import time
 
@@ -12,14 +28,30 @@ logger = logging.getLogger(__name__)
 
 
 class SNRStopping(Stopping):
-    """Stop sampling once the best in-chain SNR exceeds a threshold.
+    """Stop sampling once the SNR of the best sample exceeds a threshold.
 
-    The SNR is read from the first column of the sampler blobs.
+    At each call the stored sample with the highest log-likelihood (over all
+    stored steps, temperatures and walkers) is found, and its SNR is read
+    from the first column of the sampler blobs, so the likelihood must
+    return the SNR as blob 0.
 
     Args:
-        snr_limit: SNR threshold above which sampling should be stopped.
-        verbose: If ``True``, print the current best SNR and log-likelihood
-            on each call.
+        snr_limit (float, optional): SNR threshold above which sampling should
+            be stopped. Default ``100.0``.
+        verbose (bool, optional): If ``True``, log the best sample's SNR and
+            log-likelihood on each call. Default ``False``.
+
+    Example:
+        >>> from lisatools.sampling.stopping import SNRStopping
+        >>> stop = SNRStopping(snr_limit=12.0)
+        >>> stop.snr_limit
+        12.0
+
+        Then pass it to the sampler:
+
+        .. code-block:: python
+
+            sampler = EnsembleSampler(..., stopping_fn=stop, stopping_iterations=10)
     """
 
     def __init__(self, snr_limit=100.0, verbose=False):
@@ -27,17 +59,19 @@ class SNRStopping(Stopping):
         self.verbose = verbose
 
     def __call__(self, iter, sample, sampler):
-        """Return ``True`` once the maximum SNR seen exceeds ``self.snr_limit``.
+        """Return ``True`` once the best sample's SNR exceeds ``self.snr_limit``.
 
         Args:
-            iter: Current sampler iteration index (unused; kept for the
+            iter (int): Current sampler iteration index (unused; kept for the
                 ``eryn`` stopping API).
-            sample: Latest sample (unused; kept for the ``eryn`` stopping API).
-            sampler: Active ``eryn`` sampler from which to read log-likelihoods
-                and blobs.
+            sample (eryn.state.State): Latest sample (unused; kept for the
+                ``eryn`` stopping API).
+            sampler (eryn.ensemble.EnsembleSampler): Active sampler from which
+                to read log-likelihoods and blobs (blob 0 = SNR).
 
         Returns:
-            ``True`` if the best SNR exceeds the threshold, ``False`` otherwise.
+            bool: ``True`` if the SNR at the maximum log-likelihood sample
+            exceeds the threshold, ``False`` otherwise.
         """
 
         ind = sampler.get_log_like().argmax()
@@ -66,6 +100,7 @@ class SNRStopping(Stopping):
             return False
 
 
+# TODO check: keep/remove/document -- no callers (src, tests, scripts, LATW); LATW 07: unused
 class NLeavesSearchStopping:
     """Stop a search once the maximum leaf count stops growing.
 
@@ -135,15 +170,29 @@ class SearchConvergeStopping(Stopping):
     Tracks the best log-likelihood seen so far and increments a consecutive
     counter every time the new best differs from the previous best by less
     than ``diff``. The counter is reset whenever a meaningful improvement is
-    seen.
+    seen. When the counter reaches ``n_iters`` the call returns ``True`` and
+    the counter is reset to 0 (so the instance can be reused for the next
+    search). ``start_iteration`` is only the number of stored steps
+    DISCARDED before the maximum is taken; unlike
+    :class:`eryn.utils.stopping.SearchConvergeStopping` (which also returns
+    ``False`` for calls with ``iter < start_iteration``), every call is
+    evaluated.
 
     Args:
-        n_iters: Number of consecutive non-improving calls required to stop.
-        diff: Absolute log-likelihood threshold below which a change is
-            considered insignificant.
-        verbose: If ``True``, print convergence diagnostics on each call.
-        start_iteration: Number of leading iterations to discard before
-            evaluating the best log-likelihood.
+        n_iters (int, optional): Number of consecutive non-improving calls
+            required to stop. Default ``30``.
+        diff (float, optional): Absolute log-likelihood threshold below which
+            a change is considered insignificant. Default ``1.0``.
+        verbose (bool, optional): If ``True``, log convergence diagnostics on
+            each call. Default ``False``.
+        start_iteration (int, optional): Number of leading stored steps to
+            discard before evaluating the best log-likelihood. Default ``0``.
+
+    Example:
+        >>> from lisatools.sampling.stopping import SearchConvergeStopping
+        >>> stop = SearchConvergeStopping(n_iters=30, diff=1.0, start_iteration=0)
+        >>> stop.iters_consecutive
+        0
     """
 
     def __init__(self, n_iters=30, diff=1.0, verbose=False, start_iteration=0):
@@ -155,7 +204,18 @@ class SearchConvergeStopping(Stopping):
         self.start_iteration = start_iteration
 
     def __call__(self, iter, sample, sampler):
-        """Return ``True`` when the best log-likelihood has converged."""
+        """Return ``True`` when the best log-likelihood has converged.
+
+        Args:
+            iter (int): Sampler iteration index (unused).
+            sample (eryn.state.State): Latest sample (unused).
+            sampler (eryn.ensemble.EnsembleSampler): Sampler whose stored
+                log-likelihoods are read.
+
+        Returns:
+            bool: ``True`` after ``n_iters`` consecutive calls without a change
+            of at least ``diff`` in the best log-likelihood.
+        """
 
         like_best = sampler.get_log_like(discard=self.start_iteration).max()
 
@@ -186,6 +246,7 @@ class SearchConvergeStopping(Stopping):
 # MultiGPUDataHolder it consumed (parallel-resources plan P4).
 
 
+# TODO check: keep/remove/document -- no callers (src, tests, scripts, LATW); LATW 07: unused
 class SearchConvergeStopping2(Stopping):
     """Variant of :class:`SearchConvergeStopping` with a circular look-back buffer.
 
@@ -283,6 +344,7 @@ class SearchConvergeStopping2(Stopping):
             return False
 
 
+# TODO check: keep/remove/document -- no callers; work in progress (always returns False)
 class EvidenceStopping(Stopping):
     """Stopping criterion based on the parallel-tempering log-evidence estimate.
 
@@ -305,7 +367,7 @@ class EvidenceStopping(Stopping):
         self.verbose = verbose
 
     def __call__(self, iter, sample, sampler):
-        """Compute and print the current log-evidence; always returns ``False``."""
+        """Compute and log the current log-evidence; always returns ``False``."""
 
         betas = sampler.get_betas()[-1]
         logls = sampler.get_log_like().mean(axis=(0, 2))
@@ -333,6 +395,7 @@ class EvidenceStopping(Stopping):
             return False
 
 
+# TODO check: keep/remove/document -- no callers (src, tests, scripts, LATW); LATW 07: unused
 class MPICommunicateStopping(Stopping):
     """Stopping wrapper that broadcasts a stop decision over MPI.
 

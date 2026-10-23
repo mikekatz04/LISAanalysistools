@@ -3,17 +3,21 @@
 Absorbed from ``fastlisaresponse.jax.wdm`` at Phase 3 of the sprint
 reorg. Only the *generic* (waveform-family-agnostic) bits live here:
 
-* :class:`WaveletLookupTableWrapJAX` — JAX port of the C++
-  ``WaveletLookupTable``.
-* :class:`WDMSettingsWrapJAX` — POD config (Nf, Nt, dt, ...).
-* :class:`WDMDomainWrapJAX` — observed-data WDM coefficient container.
-* :func:`fast_wdm_inner_jax` — per-pixel projection + frequency
-  estimator (was ``fastlisaresponse.jax.wdm.fast_inner.fast_wdm_inner_jax``).
+* :class:`~lisatools.jax.wdm.wavelet_lookup.WaveletLookupTableWrapJAX` — JAX
+  port of the C++ ``WaveletLookupTable``.
+* :class:`~lisatools.jax.wdm.wdm_settings.WDMSettingsWrapJAX` — POD config
+  (layer ``df`` / ``dt``, ``Nf``, ``Nt``, channels, active band).
+* :class:`~lisatools.jax.wdm.wdm_domain.WDMDomainWrapJAX` — observed-data WDM
+  coefficient container.
+* :func:`~lisatools.jax.wdm.fast_inner.fast_wdm_inner_jax` — per-pixel
+  projection + frequency estimator (was
+  ``fastlisaresponse.jax.wdm.fast_inner.fast_wdm_inner_jax``).
 
 GB-specific kernels (``gb_wdm_get_ll`` / ``gb_wdm_fill_global`` /
 ``gb_wdm_swap_ll`` and their heterodyne variants) live in
-:mod:`gbgpu.jax` after Phase 3F; SOBBH-specific equivalents are
-in :mod:`bbhx.jax` after Phase 3G.
+``gbgpu.jax`` (``gbgpu.jax.wdm``) after Phase 3F; SOBBH-specific
+equivalents are in ``bbhx.jax`` after Phase 3G. The global-fit runs (CUDA
+WDM path) do not use this subpackage.
 
 Subpackage import is gated on ``import jax`` at :mod:`lisatools.jax`.
 """

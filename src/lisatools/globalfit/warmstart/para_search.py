@@ -49,6 +49,49 @@ from the GLOBAL numpy / cupy random state. Every search runs inside
 :func:`seeded_global_rng`, which seeds it and restores the caller's state on
 exit, so a search is reproducible from its seed and the run's own global
 streams are untouched.
+
+WHERE IT SITS. A documented stock option, OFF by default and OFF in the
+9mo / 12mo production runs (``GB_PARA_SEARCH`` unset -> ``gb.para_search``
+False -> no move object exists). With ``GB_PARA_SEARCH=1``
+``recipe.build_gb_moves`` builds the ``rj_para_search_pe`` move
+(``gbspecialstretch.GBParaSearchRJMove``: its RJ container is a
+:class:`ParaSearchHolder`, its scorer a :class:`ResidualScorer` subclass)
+and :func:`compose_para_search` slots it after ``rj_prior_pe`` in every PE
+stage carrying that move (it proposes nothing outside the PE stages and in
+``replica_pe``, :func:`para_search_stage_ok`). Every ``every_pe`` PE
+iterations (:class:`ParaSearchClock`)
+each compute rank searches its own walker's residual
+(:meth:`ParaSearchBuilder.run`), the head merges the finds
+(:func:`merge_finds`) and writes an epoch under
+``<run_dir>/warmstart/parasearch/epoch_NNNN/`` (:func:`write_epoch`, the
+epoch protocol of :mod:`.self_refit`), and the move's RJ births draw from the
+adopted epoch. Units: the sampling basis has f0 in mHz; band edges, the
+scorer and the finds' ``f0_hz`` are in Hz.
+
+KNOBS (:class:`ParaSearchConfig`; ``GBSettings.para_search_*`` fields with
+the same defaults, env ``GB_PARA_SEARCH_<FIELD>``): ``EVERY_PE`` 100,
+``NTEMPS`` 8, ``NWALKERS`` 16 (even, >= 4), ``SNR_MIN`` 5.0, ``DET_FRAC``
+0.7, ``CONVERGE_TOL`` 0.5, ``CONVERGE_WINDOW`` 50, ``MIN_STEPS`` 100,
+``MAX_STEPS`` 600, ``STAGE2_STEPS`` 100, ``SPLIT_BINS`` 4.0,
+``CLUSTER_RUNGS`` 2, ``SCORER`` ``auto``, ``GROUP_BANDS`` 0, ``INIT``
+``comb``, ``INIT_NSKY_MIN`` 8, ``INIT_NSKY_MAX`` 64, ``STAGE2_NTEMPS`` 4,
+``MAX_FINDS`` 512. The sig-het scorer also reads
+``FSTAT_SIGHET_REF_SPACING_HZ`` (reference spacing override),
+``FSTAT_SIGHET_REF_BLOCK`` (512) and ``FSTAT_BATCH``.
+
+Example:
+    The offline CLI on one walker of a store snapshot (needs
+    ``<store>_residual_snapshot.npz`` beside the store; source the run's
+    launcher exports first so the stock GB settings resolve):
+
+    .. code-block:: bash
+
+        python -m lisatools.globalfit.warmstart.para_search \\
+            --store gf_prod_9mo_testing.h5 --walker 0 --bands 400:480 \\
+            --out para_cli_w0 --backend cuda12x --gpu 0 --merge-epoch
+
+See Also:
+    ``docs/gb-para-search.md`` (the design, the walls, the CLI runbook).
 """
 
 from __future__ import annotations
@@ -135,6 +178,11 @@ UNION_PER_FIND = 800
 # knobs
 # ---------------------------------------------------------------------------
 def _env(name, default, cast):
+    """Env ``name`` cast by ``cast``; unset or empty -> ``default``.
+
+    For ``cast=bool`` the values ``0`` / ``false`` / ``False`` / ``no`` /
+    ``off`` are False and anything else True.
+    """
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -153,7 +201,44 @@ class ParaSearchConfig:
     ``min_steps`` and at most ``max_steps``), the detection gate
     (``snr_min``, ``det_frac``), the stage-2 length, the cluster split radius
     in frequency bins, the warm rungs pooled with the cold one for the split,
-    the stage-1 scorer and the band-group size.
+    the stage-1 scorer and the band-group size. Validated (and normalized) at
+    construction by :meth:`validate`.
+
+    Attributes:
+        every_pe (int): PE iterations between two searches. Default 100.
+        ntemps (int): Stage-1 rungs per sub-band. Default 8.
+        nwalkers (int): Walkers per rung (even, >= 4). Default 16.
+        snr_min (float): Detection floor of both gates. Default 5.0.
+        det_frac (float): Gate B: ``det >= det_frac x opt``. Default 0.7.
+        converge_tol (float): Stage-1 per-band convergence: the cold-rung
+            running max gains at most this over ``converge_window`` steps.
+            Default 0.5.
+        converge_window (int): Default 50.
+        min_steps (int): Default 100.
+        max_steps (int): Default 600.
+        stage2_steps (int): Full-likelihood steps per find (>= 2). Default
+            100.
+        split_bins (float): Cluster split / merge radius in ``1/Tobs`` bins.
+            Default 4.0.
+        cluster_rungs (int): Rungs pooled for the split (clipped to
+            ``[1, ntemps]``). Default 2.
+        scorer (str): ``auto`` / ``sighet`` / ``chunked``. Default ``auto``.
+        group_bands (int): Sub-bands per sampler run (0 = by the sig-het
+            reference block). Default 0.
+        init (str): ``comb`` (seed from an F-stat comb) or ``prior``. Default
+            ``comb``.
+        init_nsky_min (int): Default 8.
+        init_nsky_max (int): Default 64.
+        stage2_ntemps (int): Stage-2 rungs (``<= 0`` = ``ntemps``). Default 4.
+        max_finds (int): Stage-1 finds kept for stage 2 per walker (``<= 0``
+            = no cap). Default 512.
+        seed (int or None): Search seed (``None`` = fresh). Not an env knob.
+
+    Example:
+        >>> from lisatools.globalfit.warmstart.para_search import ParaSearchConfig
+        >>> cfg = ParaSearchConfig(nwalkers=8, snr_min=7.0)
+        >>> cfg.stage2_ntemps, cfg.cluster_rungs
+        (4, 2)
     """
 
     every_pe: int = 100
@@ -204,6 +289,13 @@ class ParaSearchConfig:
         self.validate()
 
     def validate(self):
+        """Check the knobs; normalize ``scorer``, ``init``, ``cluster_rungs``, ``stage2_ntemps``.
+
+        Raises:
+            ValueError: On an odd or < 4 ``nwalkers``, ``ntemps < 1``, a bad
+                step / window / split / ``det_frac`` / ``init_nsky_*`` value,
+                or an unknown ``scorer`` / ``init``.
+        """
         if int(self.nwalkers) < 4 or int(self.nwalkers) % 2:
             raise ValueError(
                 f"GB_PARA_SEARCH_NWALKERS={self.nwalkers}: needs an even "
@@ -262,11 +354,17 @@ class ParaSearchConfig:
         return cls(**kw)
 
     def as_dict(self) -> dict:
+        """Every field as a plain dict (the CLI report's knob line)."""
         return {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
 
 
 def para_search_stage_ok(stage_kind, stage_name=None) -> bool:
-    """PE stages only in v1 (search stages: the move proposes nothing)."""
+    """PE stages only in v1 (search stages: the move proposes nothing).
+
+    Returns:
+        bool: True for ``stage_kind == "pe"`` unless the stage is
+        ``replica_pe``.
+    """
     return str(stage_kind or "") == "pe" and str(stage_name or "") != "replica_pe"
 
 
@@ -277,6 +375,15 @@ def compose_para_search(recipe, *, anchor="rj_prior_pe") -> list:
     lists are composed by the driver, which knows nothing of this move).
     Idempotent; returns the stage names it was added to (a warning when
     none carries the anchor).
+
+    Args:
+        recipe: The stock ``Recipe`` (``stages``, ``add_move``,
+            ``move_names``).
+        anchor (str, optional): The move it goes after. Default
+            ``"rj_prior_pe"``.
+
+    Returns:
+        list of str: The stages it was added to in this call.
     """
     added = []
     for st in list(getattr(recipe, "stages", [])):
@@ -313,6 +420,14 @@ def seeded_global_rng(seed, xp=np):
     without this a search would both be unreproducible and shift every later
     draw of the run that uses them. ``seed=None`` draws a fresh seed (still
     restored afterwards).
+
+    Args:
+        seed (int or None): The seed (taken mod 2**32).
+        xp (module, optional): ``numpy`` (default) or ``cupy``; cupy's global
+            state is seeded and restored too.
+
+    Yields:
+        int: The seed used.
     """
     if seed is None:
         seed = int(np.random.SeedSequence().generate_state(1)[0])
@@ -332,6 +447,7 @@ def seeded_global_rng(seed, xp=np):
 
 
 def _host(a):
+    """cupy-or-numpy -> numpy."""
     return a.get() if hasattr(a, "get") else np.asarray(a)
 
 
@@ -346,6 +462,14 @@ class BandBoxPrior:
     ``[f_lo, f_hi] x [third_lo, third_hi]`` and adds the flat log density of
     the box. ``groups_running`` is the sampler's array of running group
     INDICES (``None`` = all).
+
+    Args:
+        f_lo_mhz, f_hi_mhz (array-like): ``(n_groups,)`` f0 box [mHz].
+        third_lo, third_hi (array-like): ``(n_groups,)`` third-column box.
+        xp (module, optional): ``numpy`` (default) or ``cupy``.
+
+    Raises:
+        ValueError: When a box has ``hi <= lo``.
     """
 
     def __init__(self, f_lo_mhz, f_hi_mhz, third_lo, third_hi, xp=np):
@@ -360,6 +484,7 @@ class BandBoxPrior:
 
     @property
     def xp(self):
+        """``cupy`` or ``numpy`` (from the stored name)."""
         if self.xp_name == "cupy":
             import cupy as cp
 
@@ -367,11 +492,13 @@ class BandBoxPrior:
         return np
 
     def _sel(self, groups_running):
+        """The group indices to use (all when ``None``)."""
         if groups_running is None:
             return self.xp.arange(len(self.f_lo))
         return groups_running
 
     def adjust_logp(self, logp, groups_running):
+        """Add each group's flat box log density to ``logp`` ``(groups, nt, nw)``, in place."""
         g = self._sel(groups_running)
         lp = (-self.xp.log(self.f_hi[g] - self.f_lo[g])
               - self.xp.log(self.t_hi[g] - self.t_lo[g]))
@@ -379,6 +506,7 @@ class BandBoxPrior:
         return logp
 
     def transform_to_prior_basis(self, coords, groups_running):
+        """Map the f0 / third columns of ``coords`` ``(groups, nt, nw, 9)`` to the unit cube."""
         g = self._sel(groups_running)
         lo, hi = self.f_lo[g][:, None, None], self.f_hi[g][:, None, None]
         coords[:, :, :, F0_COL] = (coords[:, :, :, F0_COL] - lo) / (hi - lo)
@@ -386,6 +514,7 @@ class BandBoxPrior:
         coords[:, :, :, THIRD_COL] = (coords[:, :, :, THIRD_COL] - lo) / (hi - lo)
 
     def transform_from_prior_basis(self, coords, groups_running):
+        """Map unit-cube f0 / third columns back onto each group's box, in place."""
         g = self._sel(groups_running)
         lo, hi = self.f_lo[g][:, None, None], self.f_hi[g][:, None, None]
         coords[:, :, :, F0_COL] = coords[:, :, :, F0_COL] * (hi - lo) + lo
@@ -394,8 +523,20 @@ class BandBoxPrior:
 
 
 def default_search_priors_in(*, dist_lims, ratio_max, use_cupy=False):
-    """The search prior for a standalone search: uniform boxes, f0 / Mc as
-    unit-cube placeholders (mapped per group by :class:`BandBoxPrior`)."""
+    """The search prior for a standalone search (the CLI): uniform boxes, f0 / Mc unit-cube.
+
+    f0 and Mc are unit-cube placeholders (mapped per group by
+    :class:`BandBoxPrior`); the other columns are uniform over their full
+    ranges.
+
+    Args:
+        dist_lims (tuple): ``(lo, hi)`` distance [kpc].
+        ratio_max (float): ``fdot_astro_ratio`` half-width.
+        use_cupy (bool, optional): Default ``False``.
+
+    Returns:
+        dict: ``priors_in`` keyed by the 9 sampling column names.
+    """
     from eryn.prior import UniformDistribution
 
     def u(a, b):
@@ -418,7 +559,14 @@ def band_restricted_priors_in(priors_in_global: dict, use_cupy=False) -> dict:
     ``("f0", "Mc")`` prior (or the single ``f0`` / ``fdot`` / ``Mc`` keys) is
     replaced IN PLACE by two unit-cube singles; every other prior -- the
     ``fdot_astro_ratio`` box, a joint galaxy (dist, sky) prior -- is carried
-    through unchanged.
+    through unchanged. Used by ``GBParaSearchRJMove`` on the run's GB prior.
+
+    Args:
+        priors_in_global (dict): The run's GB ``priors_in`` (deep-copied).
+        use_cupy (bool, optional): Default ``False``.
+
+    Returns:
+        dict: The search ``priors_in`` (insertion order kept).
     """
     from copy import deepcopy
 
@@ -438,9 +586,21 @@ def band_restricted_priors_in(priors_in_global: dict, use_cupy=False) -> dict:
 
 def build_search_prior(priors_in: dict, *, input_basis=SAMPLING_COLUMNS,
                        use_cupy=False):
-    """``ProbDistContainer`` over the 9 sampling columns, keys reordered by
-    NAME onto ``input_basis`` (a joint ``("dist", "alpha", "sin_delta")``
-    grabbed consecutive columns by insertion order)."""
+    """``ProbDistContainer`` over the 9 sampling columns, keys reordered by NAME (``input_basis``).
+
+    The reorder matters because a joint ``("dist", "alpha", "sin_delta")``
+    prior grabbed consecutive columns by insertion order.
+
+    Args:
+        priors_in (dict): :func:`band_restricted_priors_in` or
+            :func:`default_search_priors_in` output.
+        input_basis (list of str, optional): Column order. Default
+            :data:`SAMPLING_COLUMNS`.
+        use_cupy (bool, optional): Default ``False``.
+
+    Returns:
+        eryn.prior.ProbDistContainer: The prior (``return_gpu=True``).
+    """
     from eryn.prior import ProbDistContainer
 
     cont = ProbDistContainer(priors_in, return_gpu=True, use_cupy=use_cupy)
@@ -466,6 +626,26 @@ class ResidualScorer:
     Rows are PHYSICAL ``(A, f0 [Hz], fdot, fddot, phi0, iota, psi, alpha,
     delta)``. The full likelihood's comps carry ``d_d = 0``, so
     ``d_h_out`` / ``h_h_out`` are ``<r|h>`` / ``<h|h>`` of the residual.
+
+    Args:
+        chunked (GBWDMComputations): The chunked comp.
+        holder: The WDM holder (``linear_data_arr`` / ``linear_psd_arr``).
+        row: Residual row. Default ``0``.
+        noise_row (int, optional): Noise row. Default ``None`` = ``row``.
+        sighet (GBSignalHetComputations, optional): Enables the shared-
+            reference F-stat when built with ``v4_knots > 0``.
+        tobs: Observation time [s].
+        mode: ``auto`` (default) / ``sighet`` / ``chunked``.
+        batch: Full-likelihood batch. Default ``None`` = the ``FSTAT_BATCH``
+            knob.
+
+    Attributes:
+        mode (str): The resolved scorer (``sighet`` or ``chunked``).
+        n_fstat (int): Exact F-stat rows scored.
+        n_full (int): Full-likelihood rows scored.
+
+    Raises:
+        ValueError: ``mode="sighet"`` without a usable sig-het comp.
     """
 
     def __init__(self, chunked, holder, *, row: int = 0, noise_row=None,
@@ -497,14 +677,20 @@ class ResidualScorer:
 
     @property
     def xp(self):
+        """The chunked comp's array module."""
         return self.chunked.xp
 
     def _di(self, n, row):
+        """``(n,)`` int32 index array filled with ``row``."""
         return self.xp.full(int(n), int(row), dtype=self.xp.int32)
 
     # -- F-statistic ------------------------------------------------------
     def margin_hz(self) -> float:
-        """Reference spacing of the sig-het scorer (Hz); 0 for chunked."""
+        """Reference spacing of the sig-het scorer (Hz); 0 for chunked.
+
+        ``FSTAT_SIGHET_REF_SPACING_HZ`` overrides the spacing derived from
+        ``v4_knots`` and Tobs.
+        """
         if self.mode != "sighet":
             return 0.0
         from lisatools.sampling.fstat_gridfit import sighet_fstat_ref_margin_hz
@@ -516,6 +702,7 @@ class ResidualScorer:
             int(self.sighet._g.get("v4_knots", 0)), self.tobs)
 
     def ref_block(self) -> int:
+        """References per resident sig-het block (``FSTAT_SIGHET_REF_BLOCK``, default 512)."""
         return max(1, int(os.environ.get("FSTAT_SIGHET_REF_BLOCK", "512")))
 
     def fstat_call(self, f0_lims_hz):
@@ -525,6 +712,7 @@ class ResidualScorer:
         return self.fstat_exact
 
     def _sighet_call(self, f0_lims_hz):
+        """The shared-reference sig-het F-stat call for ``f0_lims_hz`` (references stashed)."""
         from lisatools.sampling.fstat_gridfit import build_sighet_call_fstat
 
         return build_sighet_call_fstat(
@@ -642,12 +830,14 @@ class _Tracker:
         self.running = np.ones(self.ng, dtype=bool)
 
     def seed(self, state):
+        """Initialize the running max and the best sample from the start state."""
         ll = _host(state.log_like)[:, 0]
         self.runmax = ll.max(axis=-1)
         self.hist[0] = self.runmax
         self._note_best(state, np.arange(self.ng))
 
     def _note_best(self, state, run):
+        """Keep each running group's best cold-rung sample and lnL."""
         if run.size == 0:
             return
         ll = _host(state.log_like[:, 0])[run]                 # (r, nw)
@@ -700,6 +890,7 @@ class _Tracker:
         return x, ll
 
     def pool_cold(self, g):
+        """``(n, ndim)`` cold-rung kept samples of group ``g``."""
         n = int(min(self.n_written[g], self.keep))
         slots = np.arange(self.keep) if n >= self.keep else np.arange(n)
         return self.ring[slots, g, 0].reshape(-1, self.ring.shape[-1])
@@ -709,9 +900,12 @@ class _Tracker:
 # the detection gates
 # ---------------------------------------------------------------------------
 def passes_gate_a(F_best, cfg) -> bool:
-    """Stage 1: the cluster's best extrinsic-maximised lnL ``F`` reaches the
-    optimal SNR floor, ``sqrt(2 F) >= snr_min`` (F = SNR^2 / 2 at the F-stat
-    maximum of a noise-free source)."""
+    """Stage 1 gate: the cluster's best extrinsic-maximised lnL ``F`` reaches the SNR floor.
+
+    The test is ``sqrt(2 F) >= snr_min`` (F = SNR^2 / 2 at the F-stat
+    maximum of a noise-free source); ``cfg`` is a :class:`ParaSearchConfig`.
+    Returns a bool.
+    """
     return float(F_best) >= 0.5 * float(cfg.snr_min) ** 2
 
 
@@ -721,7 +915,9 @@ def passes_gate_b(opt, det, cfg) -> bool:
     with it (``det >= det_frac x opt``). At an exact amplitude maximum
     ``det == opt``, so the second clause catches a best sample whose template
     the residual does not actually support (an edge-pinned or mis-scored
-    row), not a weak source."""
+    row), not a weak source. ``cfg`` is a :class:`ParaSearchConfig`; returns
+    a bool.
+    """
     return (float(opt) >= float(cfg.snr_min)
             and float(det) >= float(cfg.det_frac) * float(opt))
 
@@ -765,6 +961,17 @@ def band_groups(band_edges_hz, bands, *, spacing_hz=0.0, ref_block=512,
     layout) inside ONE resident block of ``ref_block``; with no spacing
     (chunked scorer) every band in one group. A gap in ``bands`` always
     starts a new group.
+
+    Args:
+        band_edges_hz (array-like): ``(n_bands + 1,)`` sub-band edges [Hz].
+        bands (iterable of int): Band indices to group (sorted here).
+        spacing_hz (float, optional): Sig-het reference spacing [Hz]
+            (:meth:`ResidualScorer.margin_hz`). Default ``0.0``.
+        ref_block (int, optional): References per block. Default ``512``.
+        group_bands (int, optional): Fixed group size cap. Default ``0``.
+
+    Returns:
+        list of np.ndarray: int64 band-index arrays, one per group.
     """
     edges = np.asarray(band_edges_hz, dtype=float)
     bands = np.asarray(sorted(int(b) for b in bands), dtype=np.int64)
@@ -808,9 +1015,24 @@ class ParaSearchBuilder:
         ratio_max: half-width of the ``fdot_astro_ratio`` prior.
         cfg: :class:`ParaSearchConfig`.
         gpu: CUDA device index for the sampler (``None`` = CPU).
+        periodic (dict, optional): Eryn ``periodic`` map; default
+            ``{"gb": GB_PERIODIC}`` (phi0, psi, alpha).
         f0_lims_hz: the global f0 prior range (stage-2 windows are clipped
             to it); default the outer band edges.
         tag: log prefix (``"rank r walker w"``).
+
+    Raises:
+        ValueError: When ``transform_fn``'s ``input_basis`` is not the
+            9-column sampling basis.
+
+    Example:
+        .. code-block:: python
+
+            builder = ParaSearchBuilder(
+                scorer, band_edges_hz=edges, transform_fn=transform,
+                prior=prior, mc_lims=(0.001, 1.0), ratio_max=1.0,
+                cfg=ParaSearchConfig.from_env(), gpu=0, tag="walker 0")
+            finds = builder.run(bands=np.arange(400, 480), walker=0)
     """
 
     def __init__(self, scorer, *, band_edges_hz, transform_fn, prior, mc_lims,
@@ -838,6 +1060,7 @@ class ParaSearchBuilder:
 
     @property
     def xp(self):
+        """The scorer's array module."""
         return self.scorer.xp
 
     def default_bands(self):
@@ -847,6 +1070,12 @@ class ParaSearchBuilder:
 
     # ---- the sampler -------------------------------------------------------
     def _run_sampler(self, *, lnl, box, gibbs, start, tracker, max_steps):
+        """Run Eryn's ``ParaEnsembleSampler`` from ``start`` until ``tracker`` stops it.
+
+        ``start`` is ``(ngroups, nt, nw, 9)``; tempering to ``Tmax = inf``;
+        raises ``RuntimeError`` when a start point is outside the prior.
+        Returns the sampler.
+        """
         from eryn.paraensemble import ParaEnsembleSampler
         from eryn.state import ParaState
 
@@ -876,6 +1105,11 @@ class ParaSearchBuilder:
 
     # ---- stage 1 -----------------------------------------------------------
     def _stage1_group(self, bands):
+        """Stage 1 on one band group: F-stat PT-MCMC, Gibbs on f0 / Mc / sky, ratio held at 0.
+
+        Returns the group's :class:`_Tracker` (with ``comb`` and
+        ``n_evals`` attached); the scorer's references are released.
+        """
         cfg, xp = self.cfg, self.xp
         ng = len(bands)
         f_lo = self.edges[bands] * 1e3
@@ -1097,6 +1331,7 @@ class ParaSearchBuilder:
         return np.asarray(_host(lp))
 
     def _stage2_boxes(self, finds):
+        """``(BandBoxPrior, f_lo, f_hi)``: a ``+-split_bins/Tobs`` f0 box [mHz] per find."""
         radius = float(self.cfg.split_bins) * self.df_hz * 1e3
         f_c = np.array([f["centre"][F0_COL] for f in finds])
         f_lo = np.maximum(f_c - radius, self.f0_lims_mhz[0])
@@ -1151,6 +1386,7 @@ class ParaSearchBuilder:
         return tracker, finds
 
     def _rescore(self, rows):
+        """``(opt, det, phys)``: ``sqrt(<h|h>)``, ``<r|h>/sqrt(<h|h>)`` and the physical rows."""
         xp = self.xp
         phys = self.transform_fn.both_transforms(xp.asarray(rows), xp=xp)
         d_h, h_h = self.scorer.full(phys)
@@ -1163,7 +1399,23 @@ class ParaSearchBuilder:
     def run(self, bands=None, walker=None, seed=None) -> dict:
         """Search ``bands`` (default: the interior ones) of this residual row.
 
-        Returns the walker's finds (host numpy; see :func:`empty_finds`).
+        Stage 1 per band group, gate A, the ``max_finds`` cap (loudest
+        kept), stage 2, gate B, then the within-walker de-duplication; all
+        inside :func:`seeded_global_rng`.
+
+        Args:
+            bands (array-like, optional): Band indices. Default ``None`` =
+                :meth:`default_bands`.
+            walker (int, optional): The walker label of the record.
+            seed (int, optional): Default ``cfg.seed`` (``None`` = fresh).
+
+        Returns:
+            dict: The walker's finds (host numpy; see :func:`empty_finds`):
+            per-band ``steps`` / ``converged`` / ``band_finds`` /
+            ``band_peaks``, per-find scalars (``f0_hz`` [Hz], ``fdot``,
+            ``F1``, ``lnl2``, ``opt_snr``, ``det_snr``, medians, ``edge``),
+            ``best`` ``(n_finds, 9)`` and the stage-2 cold ``samples``
+            (sampling basis) with ``offsets``, counters, walls and the seed.
         """
         cfg = self.cfg
         bands = self.default_bands() if bands is None else np.asarray(bands, dtype=np.int64)
@@ -1256,6 +1508,7 @@ class ParaSearchBuilder:
         return out
 
     def _log_summary(self, out):
+        """One ``[GB_PARA_SEARCH]`` summary line of a walker's search."""
         st = out["steps"]
         nb = len(st)
         two = int((out["band_finds"] >= 2).sum())
@@ -1285,7 +1538,19 @@ _FIND_SCALARS = ("band", "f0_hz", "fdot", "F1", "lnl2", "opt_snr", "det_snr",
 
 
 def empty_finds(walker=None) -> dict:
-    """The per-walker finds record (host numpy, picklable, small)."""
+    """The per-walker finds record (host numpy, picklable, small), empty.
+
+    Args:
+        walker (int, optional): The walker label (``None`` -> -1).
+
+    Returns:
+        dict: The record :meth:`ParaSearchBuilder.run` fills: ``walker``,
+        per-band arrays, the counters (``n_finds``, ``n_gate_a``,
+        ``n_gate_b_fail``, ``n_dedup``, ``n_capped``, ``n_prior_dropped``,
+        ``n_fstat_evals``, ``n_full_evals``), ``seed``, ``walls``, the
+        per-find scalar arrays, ``best`` ``(0, 9)``, ``offsets`` ``[0]`` and
+        ``samples`` ``(0, 9)``.
+    """
     return dict(
         walker=(-1 if walker is None else int(walker)),
         bands=np.zeros(0, dtype=np.int64), steps=np.zeros(0, dtype=np.int64),
@@ -1302,6 +1567,7 @@ def empty_finds(walker=None) -> dict:
 
 
 def _pack_finds(out, finds):
+    """Write find dicts into the record ``out`` (scalars, ``best``, ``samples`` + ``offsets``)."""
     out["n_finds"] = len(finds)
     for k in _FIND_SCALARS:
         dt = (np.int64 if k == "band" else bool if k == "edge" else float)
@@ -1315,6 +1581,7 @@ def _pack_finds(out, finds):
 
 
 def _unpack_finds(rec) -> list:
+    """Inverse of :func:`_pack_finds`: a record -> one dict per find (with its ``walker``)."""
     out = []
     off = np.asarray(rec["offsets"])
     for i in range(int(rec["n_finds"])):
@@ -1361,6 +1628,20 @@ def merge_finds(walker_finds, *, tobs, radius_bins, seed=0):
     residuals, which is what proposing to each walker what the others found
     needs (the per-source GMM is a min-BIC mixture, so a bimodal union is
     represented, not averaged). Returns a list of dicts sorted by f0.
+
+    Args:
+        walker_finds (list of dict): Every walker's :meth:`ParaSearchBuilder.run`
+            record.
+        tobs (float): Observation time [s].
+        radius_bins (float): The merge radius in ``1/Tobs`` bins (the
+            config's ``split_bins``).
+        seed (int, optional): Subsampling seed. Default ``0``.
+
+    Returns:
+        list of dict: One per source: ``samples`` (the union, sampling
+        basis), ``walkers``, ``n_finds``, ``n_pinned_dropped``, ``f0_hz``,
+        ``fdot``, ``band``, ``opt_snr``, ``det_snr`` (of its loudest find)
+        and ``f0_span_hz``.
     """
     allf = []
     for rec in walker_finds:
@@ -1418,6 +1699,7 @@ def merge_finds(walker_finds, *, tobs, radius_bins, seed=0):
 
 
 def _write_json_atomic(path, payload):
+    """JSON to ``path`` via ``<path>.tmp`` + fsync + ``os.replace``."""
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(payload, fh, indent=1, sort_keys=True, default=_json_default)
@@ -1427,6 +1709,7 @@ def _write_json_atomic(path, payload):
 
 
 def _json_default(o):
+    """``json`` fallback: numpy scalars / arrays to Python, anything else to ``str``."""
     if isinstance(o, (np.integer,)):
         return int(o)
     if isinstance(o, (np.floating,)):
@@ -1439,6 +1722,7 @@ def _json_default(o):
 
 
 def _quantiles(v):
+    """``{min, p10, p50, p90, max, n}`` of ``v`` (``{}`` when empty)."""
     v = np.asarray(v, dtype=float)
     if v.size == 0:
         return {}
@@ -1460,6 +1744,29 @@ def write_epoch(out_dir, sources, walker_finds, *, tobs, transform_fn=None,
     dict (``None`` when there are no sources: no npz, the manifest still
     records the build and says ``n_sources = 0``, and the epoch is NOT
     complete, so no move adopts it).
+
+    The sources' samples are mapped to the observable basis at ``tobs`` and
+    fitted with :func:`.fit_from_store.fit_cluster_gmms` (``GMM_SAMPLES`` /
+    ``GMM_MAX_COMP`` / ``GMM_MIN_MEMBERS``); each cluster's
+    ``f0_window_edges`` is its finds' f0 span +- 2 / Tobs [Hz]. Extra
+    per-source columns: ``src_f0_hz``, ``src_opt_snr``, ``src_det_snr``,
+    ``src_band``, ``src_n_walkers``.
+
+    Args:
+        out_dir (str): The epoch directory (created).
+        sources (list of dict): :func:`merge_finds` output.
+        walker_finds (list of dict): Every walker's record (``finds.npz``
+            and the manifest's per-walker statistics).
+        tobs (float): Observation time [s].
+        transform_fn (optional): The run's GB transform container, checked
+            against the fitter's columns. Default ``None``.
+        manifest_extra (dict, optional): Merged into the manifest first
+            (``epoch``, ``stage``, ...).
+        gmm_gpu (int, optional): CUDA device for the GMM fit; ``None`` = CPU.
+        seed (int, optional): GMM seed. Default ``7``.
+
+    Returns:
+        dict or None: The manifest, or ``None`` with no sources.
     """
     from lisatools.sampling.fstat_proposal import pack_gmm_components
 
@@ -1546,6 +1853,7 @@ def write_epoch(out_dir, sources, walker_finds, *, tobs, transform_fn=None,
 
 
 def _write_finds_npz(path, walker_finds):
+    """Every walker's record into one npz, keys ``w<walker>_<field>`` plus ``walkers``."""
     out = {}
     for r in walker_finds:
         w = int(r["walker"])
@@ -1591,6 +1899,20 @@ class ParaSearchHolder:
     move proposes nothing (the head returns before any command). Seeds are
     ``warm_seed(build_seed, tag ^ (epoch + 1))``, per rank and epoch, the
     warm-start self refit's rule. Pickle / deepcopy safe (numpy containers).
+
+    Args:
+        epoch_root (str): :func:`para_search_epoch_root` of the store.
+        load_kwargs (dict): :meth:`.proposal.WarmStartComponents.from_npz`
+            options (``new_tobs``, ``use_cupy``, ``floor_box``, ...).
+        build_seed (int, optional): The run's per-rank build seed.
+        tag (int, optional): Seed domain tag. Default ``0``.
+        name (str, optional): Move name for logs. Default
+            ``"rj_para_search_pe"``.
+
+    Attributes:
+        container (WarmStartComponents or None): The adopted epoch's mixture.
+        epoch (int or None): The adopted epoch.
+        tallies (dict): Cumulative propose / birth / death counts.
     """
 
     is_para_search_holder = True
@@ -1613,6 +1935,7 @@ class ParaSearchHolder:
     # -- container surface ------------------------------------------------
     @property
     def active(self):
+        """The adopted container; raises ``RuntimeError`` when none is adopted."""
         if self.container is None:
             raise RuntimeError(
                 f"{self.name}: no para-search epoch is adopted; the move must "
@@ -1621,25 +1944,31 @@ class ParaSearchHolder:
 
     @property
     def n_components(self) -> int:
+        """The adopted container's component count (0 with none)."""
         return 0 if self.container is None else int(self.container.n_components)
 
     @property
     def use_cupy(self) -> bool:
+        """``load_kwargs["use_cupy"]``."""
         return bool(self.load_kwargs.get("use_cupy", False))
 
     def rvs(self, size=1):
+        """Birth draws from the adopted container."""
         return self.active.rvs(size=size)
 
     def logpdf(self, x):
+        """Log density of the adopted container."""
         return self.active.logpdf(x)
 
     # -- adoption ---------------------------------------------------------
     def epoch_seed(self, k: int):
+        """The container seed of epoch ``k``: ``warm_seed(build_seed, tag ^ (k + 1))``."""
         from .self_refit import warm_seed
 
         return warm_seed(self.build_seed, self.tag ^ (int(k) + 1))
 
     def _adopt(self, k, manifest, rank) -> bool:
+        """Load epoch ``k``'s npz; False (and one warning per epoch) on failure."""
         from .proposal import WarmStartComponents
         from .self_refit import read_manifest
 
@@ -1686,10 +2015,15 @@ class ParaSearchHolder:
             self._adopt(k, man, rank)
 
     def directive(self) -> dict:
+        """HEAD: ``{"epoch": the adopted epoch or None}`` for the compute ranks."""
         return {"epoch": self.epoch}
 
     def apply_directive(self, directive, rank=None) -> None:
-        """COMPUTE RANK: hold exactly the head's epoch (``None`` empties)."""
+        """COMPUTE RANK: hold exactly the head's epoch (``None`` empties).
+
+        Raises:
+            RuntimeError: When the head's epoch cannot be loaded here.
+        """
         k = (directive or {}).get("epoch")
         if k is None:
             self.container, self.epoch = None, None
@@ -1703,6 +2037,7 @@ class ParaSearchHolder:
                 "a propose must draw and price from the head's container.")
 
     def note_census(self, sp, *, move_name=None, rank=None) -> None:
+        """Fold one propose's RJ census into the tallies and log the cumulative line."""
         t = self.tallies
         t["proposes"] += 1
         for kk in ("births", "viable", "birth_acc", "viable_cold",
@@ -1727,6 +2062,13 @@ class ParaSearchClock:
     tick (``gf_iteration`` is the stage combine's per-process counter: it
     restarts at 0 in every job, so only its DIFFERENCES are used; the first
     tick of a process adds 0).
+
+    Args:
+        root (str): The epoch root (the journal is ``<root>/clock.json``;
+            an unreadable journal starts at 0).
+
+    Attributes:
+        value (int): PE iterations counted so far.
     """
 
     def __init__(self, root):
@@ -1741,6 +2083,7 @@ class ParaSearchClock:
             self.value = 0
 
     def tick(self, gf_iteration) -> int:
+        """Advance by the iterations since the last tick (``None`` adds 1); journal; return it."""
         if gf_iteration is None:
             self.value += 1
         else:
@@ -1768,6 +2111,18 @@ def empirical_inverse_covariance(res, *, time_blocks=1, layer_smooth=1):
     unresolved signal the walker's model still holds -- the same thing the
     run's noise + galactic-foreground fit describes. A loud unfound source
     inflates its own layers' estimate slightly (its SNRs read low).
+
+    Args:
+        res (array-like): ``(3, Nf, Nt)`` XYZ WDM residual (active box).
+        time_blocks (int, optional): Equal time blocks per layer. Default
+            ``1``.
+        layer_smooth (int, optional): Neighbouring layers averaged on each
+            side. Default ``1``.
+
+    Returns:
+        np.ndarray: ``(3, 3, Nf, Nt)`` inverse covariance (a ``1e-9``
+        relative diagonal load before inversion), constant within each time
+        block.
     """
     res = np.asarray(res, dtype=float)
     nch, nf, nt = res.shape
@@ -1804,7 +2159,18 @@ class _OneRowHolder:
 
 
 def _cli_world(args):
-    """Build (scorer, band_edges, transform, prior, mc_lims, ratio_max, tobs)."""
+    """The CLI's world: ``(scorer, band_edges, transform, prior, mc_lims, ratio_max, tobs, store)``.
+
+    Reads the store's WDM ``domain_settings``, ``noise_model_identity``
+    (``data_t0`` = the WDM t0 unless ``--t0``), ``sub_backend/gb/band_edges``
+    and the walker's residual from the residual snapshot; the noise is
+    :func:`empirical_inverse_covariance` of that residual. The orbits are
+    :class:`~lisatools.detector.ESAOrbits` of ``--orbit-file``, else the
+    packaged default ESA file -- not the run's L1 orbits (see the frame note
+    of :class:`~lisatools.detector.Orbits`). Exits (``SystemExit``) on a
+    non-WDM store, a walker missing from the snapshot or a residual of the
+    wrong shape.
+    """
     import h5py
 
     from lisatools.globalfit.hdfbackend import GFHDFBackend
@@ -1887,8 +2253,13 @@ def _cli_world(args):
 
 
 def _held_report(store, walker, finds, tobs, radius_bins):
-    """How many finds the walker's own last cold row already holds (should be
-    ~0: the residual has its leaves subtracted)."""
+    """How many finds the walker's own last cold row already holds (should be ~0).
+
+    ~0 because the residual has the walker's leaves subtracted. A find is
+    "held" when a leaf of the store's last row lies within
+    ``radius_bins / tobs`` of its f0. Returns ``None`` when the store cannot
+    be read.
+    """
     try:
         import h5py
 
@@ -1908,6 +2279,7 @@ def _held_report(store, walker, finds, tobs, radius_bins):
 
 
 def _report_text(finds, *, walker, store, held, cfg, edges):
+    """The CLI's ``report_w<walker>.txt``: knobs, per-band table, per-find table."""
     lines = [f"GB parallel residual search: walker {walker} of {store}",
              f"knobs: {json.dumps(cfg.as_dict(), sort_keys=True)}",
              f"bands searched {len(finds['bands'])}, converged "
@@ -1938,6 +2310,29 @@ def _report_text(finds, *, walker, store, held, cfg, edges):
 
 
 def main(argv=None):
+    """The offline CLI: search one walker of a store snapshot's residual.
+
+    Writes ``<out>/report_w<walker>.txt`` (also printed) and
+    ``<out>/finds_w<walker>.npz``; with ``--merge-epoch`` also a one-walker
+    ``<out>/epoch/parasearch.npz`` + ``DONE.json`` (:func:`write_epoch`).
+    The search knobs are the ``GB_PARA_SEARCH_*`` env
+    (:meth:`ParaSearchConfig.from_env`; ``--scorer`` and ``--seed``
+    override); the comp sizing (``--nt-sub``, ``--n-pad``, ``--n-sparse``,
+    ``--n-cp-sig``, ``--n-cp-orbit``, ``--sighet-v4-knots``,
+    ``--sighet-v3-nodes``), ``--t-ref`` and the prior boxes (``--mc-min`` /
+    ``--mc-max`` / ``--dist-min`` / ``--dist-max`` / ``--ratio-max``)
+    default to the env-resolved stock all-sources GB settings. Other
+    options: ``--store``, ``--walker``, ``--bands a:b``, ``--out``,
+    ``--residual``, ``--backend`` (default ``cpu``), ``--gpu``, ``--t0``,
+    ``--orbit-file``, ``--orbit-dt``, ``--tdi-gen`` (default 2),
+    ``--noise-time-blocks``, ``--noise-layer-smooth``.
+
+    Args:
+        argv (list of str, optional): Arguments; ``None`` = ``sys.argv[1:]``.
+
+    Returns:
+        dict: The walker's finds record (:meth:`ParaSearchBuilder.run`).
+    """
     ap = argparse.ArgumentParser(
         description="GB parallel residual search on a store snapshot's residual "
                     "(docs/gb-para-search.md, section 8).")
@@ -1976,6 +2371,7 @@ def main(argv=None):
         gbs = None
 
     def _g(name, default):
+        """The stock GB setting ``name``, else ``default``."""
         return getattr(gbs, name, default) if gbs is not None else default
 
     for name, default, attr in (("nt_sub", 256, "nt_sub"), ("n_pad", 32, "n_pad"),

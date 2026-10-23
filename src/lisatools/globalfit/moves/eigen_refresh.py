@@ -1,19 +1,26 @@
 # -*- coding: utf-8 -*-
-"""Per-leaf eigen proposal tables for the single-source PE moves.
+"""Per-leaf eigen proposal tables for the single-source and noise PE moves.
 
 Builds the ``(axes, sigmas)`` tables that :class:`eryn.moves.EigenAxisMove`
-consumes, from an information matrix in the SAMPLING basis. Two builders,
-one shared post-processing pipeline:
+consumes, from an information matrix in the SAMPLING basis (or, for the
+MBH proposal frame, in the frame's coordinates). Every route ends in the
+same post-processing pipeline (:func:`_tables_from_info_batch`):
 
-* :func:`eigen_table_from_ll` — likelihood second differences via
-  :func:`lisatools.info_matrix_ll.information_matrix_from_ll`. The right
-  route when the likelihood is cheap and batched (SOBBH chunked scoring).
-* :func:`eigen_table_from_waveform` — the Gram form
-  ``<d_i h | d_j h>`` via the general waveform machinery
+* the Gram route (``{BRANCH}_EIGEN_INFO=gram``, the 9mo / 12mo launcher
+  value for MBH / EMRI / SOBBH): the add/remove move builds the matrix
+  itself from its own batched templates
+  (:meth:`~lisatools.globalfit.moves.addremovemove.ResidualAddOneRemoveOneMove._gram_info`)
+  and hands it to :func:`_table_from_info`;
+* :func:`eigen_table_from_ll` / :func:`eigen_tables_from_ll_batch` --
+  likelihood second differences via
+  :func:`lisatools.info_matrix_ll.information_matrix_from_ll` (the code
+  default ``"ll"`` route, the Gram route's failure fallback, the move's
+  ``per_walker`` scope, and the PSD / galfor tables' fallback route);
+* :func:`eigen_table_from_waveform` -- the Gram form ``<d_i h | d_j h>``
+  through the general waveform machinery
   :func:`lisatools.diagnostic.info_matrix` (positive semi-definite by
   construction, ``parameter_transforms`` keeps the derivatives in the
-  sampling basis). The right route when one likelihood row is expensive
-  but waveform builds are not (MBH, EMRI).
+  sampling basis). No production path calls it.
 
 Pipeline (the GB lesson, ``gb_prior_box_scales``: a relative eigen floor is
 not scale invariant): whiten the matrix by the prior box widths, run the
@@ -27,10 +34,17 @@ degrades to the identity-axes / 1%-of-prior-width fallback with a logged
 warning. A refresh must never crash the sampler.
 
 The step-scale adaptation (``{BRANCH}_EIGEN_AXIS_ADAPT``, user ruling
-2026-10-14) lives here too: :func:`cold_unit_deviations` ->
-:func:`empirical_axis_widths` -> :func:`adapt_axis_sigmas` widen each axis
+2026-10-14; on in both launchers) lives here too: :func:`cold_unit_deviations`
+-> :func:`empirical_axis_widths` -> :func:`adapt_axis_sigmas` widen each axis
 of a built table to the chain's own robust width along it (the axes are
-kept); the add/remove move owns the ring buffer that feeds them.
+kept); the add/remove move owns the ring buffer that feeds them. The prior
+box readers (:func:`prior_box_widths`, :func:`prior_box_bounds`,
+:func:`nudge_inside`) and :func:`temper_sigmas` are shared with
+:class:`~lisatools.globalfit.moves.psdmove.PSDMove`. Callers:
+:mod:`~lisatools.globalfit.moves.addremovemove`,
+:mod:`~lisatools.globalfit.moves.psdmove`; the module logger
+(``[eigen_refresh]`` lines) is shared with
+:mod:`~lisatools.globalfit.moves.eigen_table_persist`.
 """
 
 import logging
@@ -112,9 +126,28 @@ def temper_sigmas(sigmas_cold, betas):
     almost everything and nothing travels.
 
     ``beta <= 0`` (a fully flattened rung) has no finite width; those rungs
-    keep the cold sigma rather than producing ``inf``, and the axis cap in
-    :func:`_tables_from_info_batch` already bounds every sigma by the prior
-    box, so a widened table can never step outside the prior.
+    keep the cold sigma rather than producing ``inf``. The axis cap of
+    :func:`_tables_from_info_batch` bounds the COLD sigma only: the widened
+    sigma is not re-capped here. The add/remove move caps its tempered rows
+    itself (``ResidualAddOneRemoveOneMove._eigen_tempered_rows``);
+    :class:`~lisatools.globalfit.moves.psdmove.PSDMove` uses the widened
+    sigma as returned. Either way a draw outside the prior box is rejected
+    by the prior.
+
+    Args:
+        sigmas_cold (array_like): Cold-chain sigmas; the leading axis
+            broadcasts against ``betas``.
+        betas (array_like): Inverse temperatures, one per rung.
+
+    Returns:
+        np.ndarray: ``sigmas_cold / sqrt(beta)`` (``beta <= 0``: the cold
+        sigma), float, with the rung axis first.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.globalfit.moves.eigen_refresh import temper_sigmas
+        >>> temper_sigmas(np.ones((3, 1)), np.array([1.0, 0.25, 0.0])).tolist()
+        [[1.0], [2.0], [1.0]]
     """
     sig = np.asarray(sigmas_cold, dtype=float)
     b = np.asarray(betas, dtype=float).reshape((-1,) + (1,) * (sig.ndim - 1))
@@ -153,6 +186,16 @@ def prior_box_widths(prob_dist_container, ndim):
     Columns the container does not cover at all (fixed / per-leaf-filled
     parameters) keep width 1.0 quietly, as before. A reader failure keeps
     the columns read up to that point (unit widths elsewhere) and warns.
+
+    Args:
+        prob_dist_container (eryn.prior.ProbDistContainer): The branch prior
+            (or a duck-typed container with ``priors`` / ``priors_in``).
+        ndim (int): Number of sampling columns.
+
+    Returns:
+        np.ndarray: ``(ndim,)`` positive widths
+        (:func:`eryn.moves.eigenaxis.prior_box_scales` of the read box;
+        1.0 where unknown).
     """
     lo_r, hi_r, covered, unread, exc = _read_prior_box(prob_dist_container, ndim)
     if exc is not None:
@@ -182,6 +225,13 @@ def prior_box_bounds(prob_dist_container, ndim):
 
     Quiet by design: the refresh reads :func:`prior_box_widths` off the same
     container first, and that reports unread columns and reader failures.
+
+    Args:
+        prob_dist_container (eryn.prior.ProbDistContainer): The branch prior.
+        ndim (int): Number of sampling columns.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``(lo, hi)``, each ``(ndim,)``.
     """
     lo_r, hi_r, covered, _, _ = _read_prior_box(prob_dist_container, ndim)
     lo = np.full(ndim, -np.inf)
@@ -212,6 +262,22 @@ def nudge_inside(x0, steps, lo, hi):
     the box, the cos -> arccos transform gave a NaN template, the Gram build
     failed every refresh and the likelihood fallback scored a "no signal"
     corner -- finite, so its table was silently wrong.
+
+    Args:
+        x0 (array_like): Expansion point(s), ``(ndim,)`` or ``(n, ndim)``.
+        steps (array_like): Stencil half-widths, broadcast against ``x0``.
+        lo (array_like): Lower bounds (:func:`prior_box_bounds`).
+        hi (array_like): Upper bounds.
+
+    Returns:
+        np.ndarray: The nudged point(s), float, the shape of ``x0``.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.globalfit.moves.eigen_refresh import nudge_inside
+        >>> nudge_inside(np.array([0.9, 0.0]), np.array([0.25, 0.25]),
+        ...              np.array([-1.0, -1.0]), np.array([1.0, 1.0])).tolist()
+        [0.75, 0.0]
     """
     x = np.array(x0, dtype=float)
     s = np.broadcast_to(np.asarray(steps, dtype=float), x.shape)
@@ -285,6 +351,7 @@ _UNREAD_WARNED = set()
 
 
 def _warn_unread(ndim, cols):
+    """Warn once per ``(ndim, cols)`` that prior columns ``cols`` have no finite box."""
     key = (int(ndim), tuple(cols))
     if key in _UNREAD_WARNED:
         return
@@ -345,7 +412,16 @@ def axis_caps(axes, widths, sigma_max_frac=1.0):
     ``(..., ndim)``. One function for the table build
     (:func:`_tables_from_info_batch`) and the step-scale adaptation
     (:func:`adapt_axis_sigmas`), so an adapted axis is capped exactly as the
-    information-matrix table caps it.
+    information-matrix table caps it; the add/remove move also caps its
+    tempered and acceptance-tuned steps with it.
+
+    Args:
+        axes (array_like): ``(..., ndim, ndim)`` unit axes (columns).
+        widths (array_like): ``(ndim,)`` prior-box widths.
+        sigma_max_frac (float): Multiplier of the bound. Default 1.0.
+
+    Returns:
+        np.ndarray: ``(..., ndim)`` caps.
     """
     axes = np.asarray(axes, dtype=float)
     lead = axes.shape[:-2]
@@ -383,6 +459,20 @@ def wrap_periodic(dev, periodic_inds=(), periods=()):
     :class:`eryn.utils.PeriodicContainer`). A copy is returned; non-periodic
     columns pass through unchanged. A phase on ``[0, 2 pi)`` maps to
     ``[-pi, pi)``.
+
+    Args:
+        dev (array_like): Deviations ``(..., ndim)``.
+        periodic_inds (array_like): Periodic column indices. Default none.
+        periods (array_like): Their periods, same length.
+
+    Returns:
+        np.ndarray: The wrapped copy (float).
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.globalfit.moves.eigen_refresh import wrap_periodic
+        >>> wrap_periodic(np.array([[3.0, 3.0], [-3.0, 0.5]]), [0], [4.0]).tolist()
+        [[-1.0, 3.0], [1.0, 0.5]]
     """
     out = np.array(dev, dtype=float, copy=True)
     inds = np.asarray(periodic_inds, dtype=int).ravel()
@@ -425,6 +515,16 @@ def cold_unit_deviations(rung_samples, periodic_inds=(), periods=()):
       ``beta`` is ``exp(beta lnL)``, whose Gaussian width is ``1 /
       sqrt(beta)`` times the cold one. Rungs with ``beta <= 0`` (no finite
       width) and non-finite rows are dropped.
+
+    Args:
+        rung_samples (list): ``[(X_k, beta_k), ...]`` as above (the
+            move's ``_eigen_adapt_rung_samples``).
+        periodic_inds (array_like): Periodic column indices. Default none.
+        periods (array_like): Their periods.
+
+    Returns:
+        list[np.ndarray] or None: One ``(m_k, ndim)`` deviation array per
+        usable rung, or ``None``.
     """
     devs = []
     for X, b in rung_samples:
@@ -473,6 +573,14 @@ def empirical_axis_widths(axes, deviations):
     carries transient outliers (a hot rung freshly re-anchored or rotated,
     a temperature swap from far away). A singular axis matrix falls back to
     the pseudo-inverse.
+
+    Args:
+        axes (array_like): ``(..., ndim, ndim)`` table axes (columns).
+        deviations (list or np.ndarray): Per-rung ``(m_k, ndim)`` arrays,
+            or one ``(m, ndim)`` array.
+
+    Returns:
+        np.ndarray: ``(..., ndim)`` robust widths along the axes.
     """
     axes = np.asarray(axes, dtype=float)
     groups = deviations if isinstance(deviations, (list, tuple)) else [deviations]
@@ -501,6 +609,14 @@ def carried_axis_widths(axes, axes_old, sigmas_old):
     lands before the buffer holds ``{BRANCH}_EIGEN_ADAPT_MIN_VISITS`` visits
     maps that scale onto the new axes instead of dropping it. Returns
     ``None`` when the shapes do not line up.
+
+    Args:
+        axes (array_like): ``(..., ndim, ndim)`` the new table's axes.
+        axes_old (array_like): The adopted table's axes, same shape.
+        sigmas_old (array_like): The adopted (adapted) sigmas ``(..., ndim)``.
+
+    Returns:
+        np.ndarray or None: ``(..., ndim)`` widths, or ``None``.
     """
     axes = np.asarray(axes, dtype=float)
     a_old = np.asarray(axes_old, dtype=float)
@@ -529,6 +645,18 @@ def adapt_axis_sigmas(axes, sigmas_fisher, widths_emp, prior_widths,
     sigma_empirical), cap)``; a custom table above the cap keeps its own
     sigma. Non-finite empirical widths count as no information (the Fisher
     sigma). The axes are not touched.
+
+    Args:
+        axes (array_like): ``(..., ndim, ndim)`` table axes.
+        sigmas_fisher (array_like): ``(..., ndim)`` information-matrix
+            sigmas (the floor).
+        widths_emp (array_like): ``(..., ndim)`` empirical widths
+            (:func:`empirical_axis_widths` or :func:`carried_axis_widths`).
+        prior_widths (array_like): ``(ndim,)`` box widths of the cap.
+        sigma_max_frac (float): Cap multiplier. Default 1.0.
+
+    Returns:
+        np.ndarray: ``(..., ndim)`` adapted sigmas.
     """
     sf = np.asarray(sigmas_fisher, dtype=float)
     se = np.asarray(widths_emp, dtype=float)
@@ -556,6 +684,25 @@ def eigen_table_from_ll(call_ll, x0, widths, *, eps_rel=1e-4,
     one step of a bound would still put a corner outside the prior, so
     ``bounds=(lo, hi)`` (:func:`prior_box_bounds`) first moves ``x0`` that
     step inside (:func:`nudge_inside`). ``None`` uses ``x0`` as given.
+
+    Used by the add/remove move's ``walker_max`` ll route (the code default,
+    and the production Gram route's failure fallback); any failure returns
+    the identity fallback table with a warning.
+
+    Args:
+        call_ll (callable): ``call_ll(params_2d) -> ll_1d`` as above.
+        x0 (array_like): ``(ndim,)`` expansion point.
+        widths (array_like): ``(ndim,)`` prior-box widths (step unit,
+            whitening and cap).
+        eps_rel (float): Step as a fraction of each width. Default 1e-4.
+        sigma_max_frac (float): Cap multiplier. Default 1.0.
+        xp (module): Array module handed to the information-matrix builder.
+            Default numpy.
+        bounds (tuple, optional): ``(lo, hi)`` box to nudge ``x0`` into.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``axes (ndim, ndim)`` (column ``k`` =
+        axis ``k``) and ``sigmas (ndim,)``.
     """
     widths = np.asarray(widths, dtype=float)
     try:
@@ -591,6 +738,24 @@ def eigen_tables_from_ll_batch(call_ll, x0s, widths, *, eps_rel=1e-4,
 
     Returns ``axes (n, ndim, ndim)``, ``sigmas (n, ndim)``; any failure
     degrades to identity tables for every point with a logged warning.
+
+    Used by the add/remove move's ``per_walker`` scope and by
+    :class:`~lisatools.globalfit.moves.psdmove.PSDMove` (its ll route, the
+    fallback of the production ``fisher`` route).
+
+    Args:
+        call_ll (callable): ``call_ll(params_2d) -> ll_1d`` in the sampling
+            basis; rows arrive as whole ``n``-point blocks.
+        x0s (array_like): ``(n, ndim)`` expansion points.
+        widths (array_like): ``(ndim,)`` prior-box widths.
+        eps_rel (float): Step as a fraction of each width. Default 1e-4.
+        sigma_max_frac (float): Cap multiplier. Default 1.0.
+        xp (module): Array module for the builder. Default numpy.
+        bounds (tuple, optional): ``(lo, hi)`` box to nudge each row into.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``axes (n, ndim, ndim)`` and
+        ``sigmas (n, ndim)``.
     """
     widths = np.asarray(widths, dtype=float)
     x0s = np.atleast_2d(np.asarray(x0s, dtype=float))
@@ -612,6 +777,7 @@ def eigen_tables_from_ll_batch(call_ll, x0s, widths, *, eps_rel=1e-4,
         return _identity_tables(widths, x0s.shape[0])
 
 
+# TODO check: keep/remove/document -- not reached by the 9mo/12mo runs; only caller is tests/test_mbh_proposal_frame.py (reference for the frame Gram route)
 def transform_information(info, J):
     """The information matrix in the coordinates ``y = F(x)``: ``J^-T F J^-1``.
 
@@ -639,12 +805,33 @@ def transform_information(info, J):
 
 def table_covariance(axes, sigmas):
     """The Gaussian covariance an ``(axes, sigmas)`` table encodes,
-    ``sum_k sigma_k^2 a_k a_k^T`` (batched over leading axes)."""
+    ``sum_k sigma_k^2 a_k a_k^T`` (batched over leading axes).
+
+    Used by the add/remove move's proposal frame (``MBH_PROPOSAL_FRAME=lisa``
+    in both launchers): the once-per-refresh ``[MBH_EIGEN] ... proposals in
+    the LISA frame`` log line and the push-forward of a custom builder's
+    table.
+
+    Args:
+        axes (array_like): ``(..., ndim, ndim)`` axes (column ``k`` = axis
+            ``k``).
+        sigmas (array_like): ``(..., ndim)`` sigmas.
+
+    Returns:
+        np.ndarray: ``(..., ndim, ndim)`` covariance.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.globalfit.moves.eigen_refresh import table_covariance
+        >>> table_covariance(np.eye(2), np.array([2.0, 3.0])).tolist()
+        [[4.0, 0.0], [0.0, 9.0]]
+    """
     a = np.asarray(axes, dtype=float)
     s = np.asarray(sigmas, dtype=float)
     return np.einsum("...ik,...k,...jk->...ij", a, s ** 2, a)
 
 
+# TODO check: keep/remove/document -- not reached by the 9mo/12mo runs (their Gram route is ResidualAddOneRemoveOneMove._gram_info); only caller is tests/test_eigen_refresh.py
 def eigen_table_from_waveform(waveform_model, params, widths, *,
                               eps_rel=1e-4, sigma_max_frac=1.0,
                               deriv_inds=None, parameter_transforms=None,

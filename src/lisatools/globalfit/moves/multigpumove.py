@@ -1,8 +1,12 @@
-"""
-multigpumove.py
-=============
+"""Legacy base class for moves that evaluate likelihoods on multiple devices.
 
-Base move to perform likelihood evaluations on multiple devices. 
+Holds :class:`MultiGPUMoveBase`, a small holder of a
+:class:`~lisatools.domaincomputation.DomainComputationGroupArray` (DCGA) and its
+async / threaded flags. Nothing subclasses or imports it any more: the 2026-07
+multi-GPU pass moved the DCGA plumbing into the moves themselves (the ``dcga``
+argument of ``PSDMove`` and ``ResidualAddOneRemoveOneMove``). Not on the
+9mo / 12mo production path; kept only because ``docs/source/user/globalfitmoves.rst``
+documents the module.
 """
 from __future__ import annotations
 
@@ -15,7 +19,10 @@ from ...domaincomputation import DomainComputationGroupArray
 logger = getLogger(__name__)
 
 
+# TODO check: keep/remove/document -- no subclasses or importers in src/scripts/tests/LATW; only the rst automodule; superseded by the dcga keyword of PSDMove / ResidualAddOneRemoveOneMove
 class MultiGPUMoveBase:
+    """Holder of a DCGA plus its ``run_async`` / ``run_threaded`` flags (legacy, unused)."""
+
     def __init__(self, dcga: DomainComputationGroupArray, run_async: bool = False, run_threaded: bool = False):
         self._dcga = dcga
         self._run_async = run_async

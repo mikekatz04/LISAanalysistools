@@ -6,6 +6,18 @@ annual-modulated galactic-foreground machinery. Fully parameterized — the
 annual-modulation callables are picklable classes rather than functions
 reading module globals — so stock variants and settings files bind their
 own configuration explicitly.
+
+Production 9mo / 12mo path (``all_sources``, ``data_mode="mojito"``):
+:class:`L1ProcessingStepWithSyntheticNoise` loads the mojito L1 streams
+verbatim from ``SOURCE_TYPES=COMBINED,GB,VGB,MBHB,EMRI,SOBHB`` (the COMBINED
+stream already holds instrument noise and the foreground) and
+:func:`sobbh_catalogue_to_waveform_basis` converts the SOBHB catalogue rows
+for the SOBBH branch. Everything else here serves ``data_mode="synthetic"``
+(:class:`SyntheticDataProcessor`, :class:`SyntheticGBProcessingStep`,
+:class:`SyntheticCombinedProcessingStep`, the ``make_*_injections`` row
+makers), the noise variants (:class:`SyntheticNoiseProcessingStep`), the
+``blank`` canvas (:class:`ZeroDataProcessingStep`) and bring-your-own data
+(:class:`UserDataProcessor`).
 """
 
 from __future__ import annotations
@@ -67,6 +79,13 @@ def gb_fd_shared_bytes(n_sparse: int, nchannels: int) -> int:
 
     The kernel reserves the max of a direct-path region and a spline arena;
     the synthetic generator uses ``n_cp_sig = 0``, i.e. the direct path.
+
+    Args:
+        n_sparse: Heterodyne FFT length ``N_sparse``.
+        nchannels: TDI channels (3 for XYZ).
+
+    Returns:
+        int: Required dynamic shared memory per block (bytes).
     """
     common = 20 * 8 + n_sparse * 8 + nchannels * n_sparse * 16
     direct = 2 * nchannels * n_sparse * 8 + n_sparse * 8 + 21 * n_sparse
@@ -78,6 +97,14 @@ def gb_fd_shared_limit(force_backend: Optional[str]) -> Optional[int]:
 
     ``None`` on the CPU backend: that path holds the same working set on the
     heap, so nothing caps ``N_sparse`` there but memory.
+
+    Args:
+        force_backend: Backend name; a ``"cpu..."`` name returns ``None``.
+
+    Returns:
+        int | None: The current device's ``MaxSharedMemoryPerBlockOptin``
+        (else ``MaxSharedMemoryPerBlock``) in bytes, or ``None`` on CPU or
+        when cupy / a device is unavailable.
     """
     if force_backend is not None and str(force_backend).startswith("cpu"):
         return None
@@ -169,8 +196,13 @@ INJECTION_PARAMS_FULL_BASIS = np.array(
 SAMPLE_FILL_INDICES = [5, 12]
 
 
+# TODO check: keep/remove/document -- only caller is a legacy global_fit_input/ settings file
 def emri_full_to_sampling(params_full):
-    """Convert a 14-param waveform-basis vector to the 12-param sampling basis."""
+    """Convert a 14-param waveform-basis vector to the 12-param sampling basis.
+
+    The ``xI0`` / ``Phi_theta0`` fills are taken from the row itself
+    (:data:`SAMPLE_FILL_INDICES`).
+    """
     p = np.asarray(params_full, dtype=float)
     transform = make_emri_transform_container(p[SAMPLE_FILL_INDICES])
     return transform.both_inverse_transforms(p)
@@ -204,6 +236,7 @@ SOBBH_INJECTION_PARAMS_FULL_BASIS = np.array(
 )
 
 
+# TODO check: keep/remove/document -- only caller is a legacy global_fit_input/ settings file
 def sobbh_full_to_sampling(params_full):
     """Convert an 11-param SOBBH waveform-basis vector to the 11-param sampling basis."""
     transform = make_sobbh_transform_container()
@@ -226,6 +259,7 @@ def sobbh_full_to_sampling(params_full):
 # to a list of single-branch processors and adds their TD outputs.
 
 
+# TODO check: keep/remove/document -- superseded by SyntheticDataProcessor; legacy re-export only
 class SyntheticEMRIProcessingStep(BaseProcessingStep):
     """Generate the EMRI injection in-process via the shared ResponseWrapper.
 
@@ -285,6 +319,7 @@ class SyntheticEMRIProcessingStep(BaseProcessingStep):
         self.tdi_chan = tdi_chan
 
 
+# TODO check: keep/remove/document -- superseded by SyntheticDataProcessor; legacy re-export only
 class SyntheticSOBBHProcessingStep(BaseProcessingStep):
     """Generate the SOBBH injection in-process via the shared ResponseWrapper.
 
@@ -386,6 +421,19 @@ class SyntheticGBProcessingStep(BaseProcessingStep):
             ``GB_SYNTH_N_SPARSE`` (heterodyne FFT length, default 2048 —
             see the convergence table in the source).
         force_backend: ``"cpu"`` / ``"cuda12x"`` etc.
+        orbits (Orbits, optional): Orbits for the generator. Default ``None``
+            -> analytic :class:`~lisatools.detector.EqualArmlengthOrbits`,
+            matching the ecliptic ``lam`` / ``beta`` injection basis of this
+            synthetic path (a test-data convenience; the production runs
+            analyse mojito data on L1 orbits).
+        verbose: Forwarded to :class:`BaseProcessingStep`.
+        do_plots: Forwarded to :class:`BaseProcessingStep`.
+
+    Raises:
+        AssertionError: ``injection_params`` not ``(num_sources, 9)``.
+        ValueError: ``nchannels`` larger than ``tdi_chan`` provides, or an
+            explicit ``GB_SYNTH_N_SPARSE`` exceeding the device's shared
+            memory.
     """
 
     def __init__(
@@ -543,6 +591,21 @@ class SyntheticCombinedProcessingStep(BaseProcessingStep):
     Each entry in ``processor_specs`` is a ``(class, init_kwargs)`` pair;
     each child generates its own TD signal at the same ``(Tobs, dt, t_start)``
     grid, and the combined output is the sum of all child TDs.
+
+    Args:
+        Tobs: Observation span (s); ``N = round(Tobs / dt)`` samples.
+        dt: Sample spacing (s).
+        t_start: Start time (s).
+        processor_specs: ``[(ProcessorClass, init_kwargs), ...]``; ``Tobs``,
+            ``dt``, ``t_start`` and ``nchannels`` are filled into each
+            child's kwargs unless given (children run with
+            ``verbose=False, do_plots=False``).
+        nchannels: Channels of the summed stream. Default 3.
+        verbose: Forwarded to :class:`BaseProcessingStep`.
+        do_plots: Forwarded to :class:`BaseProcessingStep`.
+
+    Raises:
+        ValueError: Empty ``processor_specs``.
     """
 
     def __init__(
@@ -600,6 +663,7 @@ MBH_PHENTAX_BASE_PARAMS = np.array(
 )
 
 
+# TODO check: keep/remove/document -- no caller anywhere
 def mbh_phentax_injection_full_basis(t_plunge: float) -> np.ndarray:
     """The stock MBH phentax injection row with ``t_plunge`` appended."""
     return np.concatenate([MBH_PHENTAX_BASE_PARAMS, [float(t_plunge)]])
@@ -611,6 +675,23 @@ def sobbh_catalogue_to_waveform_basis(row) -> np.ndarray:
     ICRS run frame: sky + polarization are read raw (RA in the lam slot,
     Dec in the beta slot, psi ICRS); the orbits must be loaded with
     ``frame='icrs'`` to match. ``phi0`` is the catalogue ``TrueAnomaly``.
+
+    Called per catalogue source by
+    :func:`~lisatools.globalfit.stock.erebor.source_runtime.prepare_sobbh_branch`
+    (production) and by the missing-brick fill of
+    :class:`L1ProcessingStepWithSyntheticNoise`.
+
+    Args:
+        row: One mojito SOBHB catalogue entry (mapping with the
+            ``PrimaryMassSSBFrame``, ``SecondaryMassSSBFrame``,
+            ``PrimarySpinCompZ``, ``SecondarySpinCompZ``,
+            ``LuminosityDistance`` [Mpc], ``InclinationAngle``,
+            ``GW22FrequencySSBFrame`` [Hz], ``RightAscension``, ``Declination``,
+            ``PolarisationAngle``, ``TrueAnomaly`` columns).
+
+    Returns:
+        np.ndarray: ``(11,)`` row ``(m1, m2, s1, s2, dist [Gpc], inc,
+        f_low [Hz], RA mod 2 pi, Dec, psi mod pi, phi0)``.
     """
     return np.array(
         [
@@ -635,7 +716,15 @@ def sobbh_catalogue_to_waveform_basis(row) -> np.ndarray:
 
 
 class AnnualAmplitudeEnvelope:
-    """Picklable per-sample amplitude envelope ``1 + A*cos(2*pi*t/yr + phi0)``."""
+    """Picklable per-sample amplitude envelope ``1 + A*cos(2*pi*t/yr + phi0)``.
+
+    ``yr`` is ``YRSID_SI``; calling an instance on a time array (s; numpy or
+    cupy) returns the envelope with the same shape and array module.
+
+    Args:
+        amp: Modulation depth ``A``. Default 0.10.
+        phase0: Phase offset (rad). Default 0.0.
+    """
 
     def __init__(self, amp: float = 0.10, phase0: float = 0.0):
         self.amp = amp
@@ -655,7 +744,14 @@ class AnnualCovarianceModulation:
     off-diag = -1/2) with an overall annual amplitude envelope applied
     uniformly across elements. The envelope is the square of the TD
     amplitude envelope because the modulation acts on the covariance
-    (power), not the realization amplitude.
+    (power), not the realization amplitude. Used by ``full_year_combined``;
+    the production runs use a tabulated
+    :class:`~lisatools.sensitivity.GalForTimeModulation` instead.
+
+    Args:
+        amp: Amplitude-envelope depth (see :class:`AnnualAmplitudeEnvelope`).
+            Default 0.10.
+        phase0: Phase offset (rad). Default 0.0.
     """
 
     def __init__(self, amp: float = 0.10, phase0: float = 0.0):
@@ -673,6 +769,7 @@ class AnnualCovarianceModulation:
         return base[:, :, None] * env[None, None, :]
 
 
+# TODO check: keep/remove/document -- deprecated duplicate of the sensitivity.py class; no caller
 class AnnualModulatedGalacticForeground(GalacticForeground):
     """:class:`GalacticForeground` with an annual modulation pre-bound.
 
@@ -765,6 +862,27 @@ def generate_modulated_foreground_td(
     Cholesky, draw complex Gaussian, IRFFT to TD, then multiply each
     channel by ``sqrt(envelope(t))`` so the realization is non-stationary
     in the same way the model covariance is.
+
+    Used only with ``add_galactic_foreground=True`` on
+    :class:`L1ProcessingStepWithSyntheticNoise` / :class:`SyntheticDataProcessor`
+    (off in every stock default and in production, where the COMBINED stream
+    already carries the foreground).
+
+    Args:
+        N: Number of TD samples.
+        dt: Sample spacing (s).
+        Tobs: Observation span (s), the placeholder foreground parameter when
+            ``foreground_params`` is ``None``.
+        foreground_params: Parameters of
+            :class:`~lisatools.stochastic.FittedHyperbolicTangentGalacticForeground`;
+            ``None`` -> its tabulated defaults at ``Tobs``.
+        tdi_generation: TDI generation (1 or 2).
+        seed: RNG seed of the draw.
+        annual_amp: Envelope depth. Default 0.10.
+        annual_phase0: Envelope phase (rad). Default 0.0.
+
+    Returns:
+        np.ndarray: ``(3, N)`` float64 TD realization.
     """
     Nf_rfft = N // 2 + 1
     df = 1.0 / (N * dt)
@@ -839,6 +957,18 @@ def make_emri_injections(
     source (fixed seed). ``mode="prior"``: intrinsics drawn from an interior
     region of the wide priors (M 5e5-2e6, mu 5-30, a 0-0.9, p0 9-13,
     e0 0.1-0.5 — guaranteed-valid FEW trajectories); extrinsics isotropic.
+
+    Args:
+        n: Number of rows.
+        base (np.ndarray, optional): ``(14,)`` baseline row; ``None`` ->
+            :data:`INJECTION_PARAMS_FULL_BASIS`.
+        mode: ``"stock"`` or ``"prior"`` (``general.synthetic_injections``).
+        seed: Seed of the ``"prior"`` draws (``None`` -> 1234); the
+            ``"stock"`` scatter always uses its fixed seed.
+
+    Returns:
+        np.ndarray: ``(n, 14)`` FEW waveform-basis rows (``M, mu, a, p0, e0,
+        xI0, dist [Gpc], qS, phiS, qK, phiK, Phi_phi0, Phi_theta0, Phi_r0``).
     """
     base = (INJECTION_PARAMS_FULL_BASIS if base is None else np.asarray(base)).copy()
     if n == 0:
@@ -887,8 +1017,19 @@ def make_sobbh_injections(
 
     ``mode="stock"``: the stock baseline with fixed-seed extrinsic scatter.
     ``mode="prior"``: masses/spins/``f_low`` from an interior region of the
-    wide priors (m1 25-55, m2 15-m1, |s| <= 0.9, f_low 6-18 mHz — in-band,
+    wide priors (m1 25-55, m2 15-m1, ``|s| <= 0.9``, f_low 6-18 mHz — in-band,
     laptop-fast); extrinsics isotropic.
+
+    Args:
+        n: Number of rows.
+        base (np.ndarray, optional): ``(11,)`` baseline row; ``None`` ->
+            :data:`SOBBH_INJECTION_PARAMS_FULL_BASIS`.
+        mode: ``"stock"`` or ``"prior"``.
+        seed: Seed of the ``"prior"`` draws (``None`` -> 1234).
+
+    Returns:
+        np.ndarray: ``(n, 11)`` waveform-basis rows (``m1, m2, s1, s2,
+        dist [Gpc], inc, f_low [Hz], lam, beta, psi, phi0``).
     """
     base = (
         SOBBH_INJECTION_PARAMS_FULL_BASIS if base is None else np.asarray(base)
@@ -942,8 +1083,21 @@ def make_mbh_injections(
     the shared phentax baseline; sky / phase / distance / merger time vary
     per source (fixed seed) with merger times spread across the interior of
     the observation. ``mode="prior"``: total mass log-uniform 8e5-4e6,
-    Q log-uniform 1-8, |s| <= 0.9, dist 10-50 Gpc, isotropic sky/orientation,
+    Q log-uniform 1-8, ``|s| <= 0.9``, dist 10-50 Gpc, isotropic sky/orientation,
     ``t_plunge`` uniform over the interior (0.25-0.85) of the observation.
+    ``Q = m1 / m2 >= 1`` throughout (the stock MBH basis).
+
+    Args:
+        n: Number of rows.
+        tobs: Observation span (s) the merger times are spread over.
+        base (np.ndarray, optional): Waveform-basis baseline (``m1, m2, s1z,
+            s2z, ...``); ``None`` -> :data:`MBH_PHENTAX_BASE_PARAMS`. Only
+            its masses and spins are used (``"stock"`` mode).
+        mode: ``"stock"`` or ``"prior"``.
+        seed: Seed of the ``"prior"`` draws (``None`` -> 1234).
+
+    Returns:
+        np.ndarray: ``(n, 11)`` MBH sampling-basis rows.
     """
     base = (MBH_PHENTAX_BASE_PARAMS if base is None else np.asarray(base)).copy()
     if n == 0:
@@ -999,6 +1153,22 @@ def make_gb_injections(
     fixed-seed ``f0`` jitter beyond the table length keeps rows distinct).
     ``mode="prior"``: amplitude log-uniform 3e-23-3e-22, ``f0`` uniform in
     ``band``, ``fdot`` log-uniform 1e-17-1e-14, isotropic orientation/sky.
+
+    Args:
+        n: Number of rows.
+        mode: ``"stock"`` or ``"prior"``.
+        seed: Seed of the ``"prior"`` draws (``None`` -> 1234).
+        band: ``(f_lo, f_hi)`` (Hz) of the ``"prior"`` ``f0`` draw. Default
+            ``(1e-3, 1e-2)``.
+
+    Returns:
+        np.ndarray: ``(n, 9)`` GBGPU-basis rows (``f0`` Hz, ``fdot`` Hz/s,
+        angles rad; ``lam`` / ``beta`` ecliptic for the synthetic orbits).
+
+    Example:
+        >>> from lisatools.globalfit.stock.erebor.injections import make_gb_injections
+        >>> make_gb_injections(3, mode="prior", seed=7).shape
+        (3, 9)
     """
     if n == 0:
         return np.zeros((0, 9), dtype=float)
@@ -1062,6 +1232,39 @@ def build_synthetic_source_streams(
     missing-brick fill passes the run's REAL loader orbits so synthesized
     streams null against the branch templates exactly (the caller builds
     ``mbh_wave_gen`` with the same orbits itself).
+
+    The SOBBH stream uses ``get_sobbh_tdionfly_gen`` from
+    :mod:`lisatools.sources.sobbh.response` with this module's
+    :class:`~lisatools.globalfit.stock.erebor.wrappers.SOBBHTDIonFlyWaveWrap`;
+    EMRI uses :func:`~lisatools.sources.emri.get_emri_response_wrapper`; MBH
+    rows are pushed through ``mbh_transform`` then
+    ``mbh_wave_gen.compute_tdi_channels``. Every stream is placed on the
+    ``(target_N, dt, t_start)`` grid on the host.
+
+    Args:
+        Tobs: Observation span (s).
+        dt: Sample spacing (s).
+        t_start: Start time (s).
+        target_N: Samples of the output grid.
+        nchannels: Output channels.
+        force_backend: Generator backend name.
+        emri_injections: ``(n_emri, 14)`` FEW waveform-basis rows.
+        sobbh_injections: ``(n_sobbh, 11)`` SOBBH waveform-basis rows.
+        mbh_injections: ``(n_mbh, 11)`` MBH SAMPLING-basis rows.
+        tdi_chan: Output channels. Default ``"XYZ"``.
+        tdi_gen_str: TDI generation string. Default ``"2nd generation"``.
+        sobbh_reference_time: See above.
+        mbh_wave_gen: ``PhenomTHMTDIWaveform`` (required for MBH rows).
+        mbh_transform: The stock MBH container (required for MBH rows).
+        orbits: See above.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray, np.ndarray]: ``(emri_td, sobbh_td,
+        mbh_td)``, each ``(nchannels, target_N)`` float64 (zeros for an empty
+        class).
+
+    Raises:
+        ValueError: MBH rows without ``mbh_wave_gen`` / ``mbh_transform``.
     """
     tdi_config = TDIConfig(tdi_gen_str, force_backend=force_backend)
     zero = np.zeros((nchannels, target_N), dtype=np.float64)
@@ -1148,17 +1351,73 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
 
     Loads MBHB / EMRI / SOBHB source TD signals from a mojito L1 folder
     (no GB / VGB unless requested), then optionally adds:
-      1. Instrument noise — either the **real mojito NOISE brick**
-         (``add_instrument_noise="mojito"``: the loader sums the
-         ``INSTRUMENT/L1`` TD noise stream, which shares the sources' exact
-         time grid) or a synthetic FD-correlated draw from the
-         ``(noise_soms_d, noise_sa_a)`` covariance
-         (``add_instrument_noise=True`` / ``"synthetic"``).
-      2. A galactic-foreground TD realization with the annual amplitude
-         envelope applied per-sample.
+
+    1. Instrument noise — either the **real mojito NOISE brick**
+       (``add_instrument_noise="mojito"``: the loader sums the
+       ``INSTRUMENT/L1`` TD noise stream, which shares the sources' exact
+       time grid) or a synthetic FD-correlated draw from the
+       ``(noise_soms_d, noise_sa_a)`` covariance
+       (``add_instrument_noise=True`` / ``"synthetic"``).
+    2. A galactic-foreground TD realization with the annual amplitude
+       envelope applied per-sample.
 
     The mojito catalog populated by the base loader on ``self.catalogue``
     is preserved for downstream factories.
+
+    Production (``all_sources`` ``set_default_processor``, mojito data):
+    ``source_types=["COMBINED", "GB", "VGB", "MBHB", "EMRI", "SOBHB"]``
+    verbatim, ``add_instrument_noise`` resolved to ``"mojito"`` (satisfied by
+    the COMBINED stream), no synthetic foreground, ``synthesize_missing``
+    from ``SYNTHESIZE_MISSING_BRICKS`` (unset -> ``False``).
+
+    Args:
+        L1_folder: Mojito brick-cache root (``general.mojito_data_path``).
+        source_ids: ``{class: [ids]}`` for ``"GB"``, ``"VGB"``, ``"MBHB"``,
+            ``"EMRI"``, ``"SOBHB"`` (the driver's ``MBHB_IDS`` / ``EMRI_IDS``
+            / ``SOBHB_IDS``).
+        orbits_class: Orbits class; ``None`` ->
+            :class:`~lisatools.detector.L1Orbits`.
+        orbits_kwargs: Orbits kwargs (``force_backend``, ``frame="icrs"``).
+        verbose: Loader verbosity.
+        do_plots: Loader diagnostic plots.
+        Tobs: Keep this many seconds of data from ``window_start_offset``
+            (``None`` keeps the whole file).
+        window_start_offset: Offset (s) of the kept window from the file
+            start. Default 0.0.
+        add_instrument_noise: ``False``, ``True`` / ``"synthetic"`` (FD-correlated
+            draw from ``noise_soms_d`` / ``noise_sa_a``) or ``"mojito"`` (the
+            NOISE brick, prepended as a ``"NOISE"`` stream when
+            ``source_types`` is derived).
+        noise_soms_d: Synthetic noise ``Soms_d`` (sqrt units). Default 15e-12.
+        noise_sa_a: Synthetic noise ``Sa_a`` (sqrt units). Default 3e-15.
+        noise_seed: Synthetic noise seed. Default 12345.
+        noise_model_name: Analytic noise model of the synthetic draw.
+        add_galactic_foreground: Add a synthetic annually modulated foreground
+            (:func:`generate_modulated_foreground_td`). Default ``False``.
+        foreground_params: Foreground parameters (``None`` -> tabulated).
+        foreground_seed: Foreground seed. Default 67890.
+        annual_amp: Foreground envelope depth. Default 0.10.
+        annual_phase0: Foreground envelope phase (rad). Default 0.0.
+        tdi_generation: TDI generation of the synthetic noise / foreground.
+        synthesize_missing: Allow missing MBHB / EMRI / SOBHB bricks and
+            synthesize those sources from their catalogue rows (HYBRID fill).
+        tdi_chan: Channels of the synthesized streams. Default ``"XYZ"``.
+        tdi_gen_str: TDI generation string of the synthesized streams.
+        synth_force_backend: Backend of the synthesized streams.
+        mbh_phenom_kwargs: Extra :func:`~.wrappers.get_mbh_phenom_wave_gen`
+            kwargs for synthesized MBH streams (so they match the branch
+            template).
+        source_types: Explicit stream list, used verbatim (upper-cased);
+            ``None`` derives it from the non-empty ``source_ids`` classes.
+
+    Raises:
+        ValueError: Unknown ``add_instrument_noise``; ``COMBINED`` together
+            with synthetic noise or ``add_galactic_foreground``; a missing
+            GB / VGB brick under ``synthesize_missing``.
+
+    Attributes:
+        synthesized_sources: ``[(class, id), ...]`` filled by the HYBRID
+            missing-brick fill (empty otherwise).
     """
 
     def __init__(
@@ -1319,7 +1578,19 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
 
         Provenance is logged loudly per source; brick-backed sources carry
         mojito's waveform conventions, synthesized ones are exact against
-        our own generators by construction.
+        our own generators by construction. Only runs when the base loader
+        recorded missing bricks (``synthesize_missing=True``).
+
+        Args:
+            missing: ``[(class, source_id), ...]`` with classes in
+                ``"MBHB"`` / ``"EMRI"`` / ``"SOBHB"``.
+            tdi_chan: Output channels.
+            tdi_gen_str: TDI generation string.
+            force_backend: Generator backend.
+            mbh_phenom_kwargs: Extra MBH generator kwargs.
+
+        Returns:
+            np.ndarray: ``(nchannels, N)`` sum of the synthesized streams.
         """
         # recipe hosts MOJITO_REFERENCE_TIME + the MBH converter; imported
         # lazily (recipe imports pieces of this module at top level)
@@ -1404,7 +1675,44 @@ class SyntheticDataProcessor(BaseProcessingStep):
     and sums the same instrument-noise + modulated-foreground TD streams
     as :class:`L1ProcessingStepWithSyntheticNoise`. Exposes a
     ``catalogue`` dict in the same shape so downstream factories can
-    read leaf counts uniformly.
+    read leaf counts uniformly. The ``data_mode="synthetic"`` processor of
+    ``all_sources`` / ``full_year_combined``.
+
+    Args:
+        Tobs: Observation span (s); ``N = round(Tobs / dt)``.
+        dt: Sample spacing (s).
+        t_start: Start time (s).
+        emri_injection_params_full_basis: ``(n_emri, 14)`` FEW rows (may be
+            empty).
+        sobbh_injection_params_full_basis: ``(n_sobbh, 11)`` waveform rows.
+        mbh_injection_params_sampling_basis: ``(n_mbh, 11)`` MBH
+            SAMPLING-basis rows.
+        source_ids: ``{class: [ids]}`` for the catalogue keys; ``None`` ->
+            ``range(n)`` per class.
+        nchannels: Output channels. Default 3.
+        force_backend: Generator backend. Default ``"cpu"``.
+        verbose: Forwarded to :class:`BaseProcessingStep`.
+        do_plots: Forwarded to :class:`BaseProcessingStep`.
+        tdi_chan: Channels. Default ``"XYZ"``.
+        tdi_gen_str: TDI generation string. Default ``"2nd generation"``.
+        sobbh_reference_time: Epoch of the SOBBH ``f_low`` (``None`` ->
+            ``t_start``).
+        mbh_phenom_kwargs: Extra MBH generator kwargs.
+        add_instrument_noise: ``False`` or ``True`` / ``"synthetic"``
+            (``"mojito"`` raises).
+        noise_soms_d: Synthetic noise ``Soms_d``. Default 15e-12.
+        noise_sa_a: Synthetic noise ``Sa_a``. Default 3e-15.
+        noise_seed: Noise seed. Default 12345.
+        noise_model_name: Analytic noise model name.
+        add_galactic_foreground: Add the synthetic modulated foreground.
+        foreground_params: Foreground parameters (``None`` -> tabulated).
+        foreground_seed: Foreground seed. Default 67890.
+        annual_amp: Envelope depth. Default 0.10.
+        annual_phase0: Envelope phase (rad). Default 0.0.
+        tdi_generation: TDI generation of noise / foreground. Default 2.
+
+    Raises:
+        ValueError: ``add_instrument_noise="mojito"``.
     """
 
     def __init__(
@@ -1561,6 +1869,8 @@ class SyntheticNoiseProcessingStep(BaseProcessingStep):
         seed: RNG seed for the noise draw (reproducible data).
         t_start: Start time of the stream (seconds).
         nchannels: Number of TDI channels (3 for XYZ).
+        verbose: Forwarded to :class:`BaseProcessingStep`.
+        do_plots: Forwarded to :class:`BaseProcessingStep`.
     """
 
     def __init__(
@@ -1613,7 +1923,27 @@ class SyntheticNoiseProcessingStep(BaseProcessingStep):
         )
 
     def pour(self, settings, window=None, return_orbits=False):
-        """Draw the composite-noise realization on the active WDM grid."""
+        """Draw the composite-noise realization on the active WDM grid.
+
+        Builds the injected composite covariance on ``settings`` (a
+        :class:`~lisatools.sensitivity.CompositeSensitivityBackend` at
+        ``psd_injection`` / ``galfor_injection`` / ``sgwb_injection``), adds a
+        ``1e-12``-relative diagonal jitter, and draws one batched-Cholesky
+        Gaussian realization per pixel on ``settings.xp`` (numpy RNG on CPU is
+        the reproducible reference; cupy draws on device).
+
+        Args:
+            settings (WDMSettings): The run's analysis domain.
+            window: Unused (kept for the ``pour`` interface).
+            return_orbits (bool): Also return ``self.orbits`` (``None``).
+
+        Returns:
+            WDMSignal | tuple: The noise ``WDMSignal`` (``(nch, Nf_active,
+            Nt_active)``), or ``(signal, None)`` with ``return_orbits``.
+
+        Raises:
+            NotImplementedError: For a non-WDM domain.
+        """
         if not isinstance(settings, WDMSettings):
             raise NotImplementedError(
                 "SyntheticNoiseProcessingStep pours into WDM domains only; got "
@@ -1685,6 +2015,8 @@ class UserDataProcessor(BaseProcessingStep):
             orbits.
         catalogue: Optional injection-truth metadata dict (mojito-shaped),
             recorded alongside the run.
+        verbose: Forwarded to :class:`BaseProcessingStep`.
+        do_plots: Forwarded to :class:`BaseProcessingStep`.
     """
 
     def __init__(
@@ -1722,6 +2054,8 @@ class ZeroDataProcessingStep(BaseProcessingStep):
         dt: Sample spacing (seconds).
         t_start: Start time of the stream (seconds).
         nchannels: Number of TDI channels (3 for XYZ).
+        verbose: Forwarded to :class:`BaseProcessingStep`.
+        do_plots: Forwarded to :class:`BaseProcessingStep`.
     """
 
     def __init__(

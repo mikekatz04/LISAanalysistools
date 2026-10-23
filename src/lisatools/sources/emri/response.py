@@ -1,10 +1,17 @@
-"""Stock EMRI response-wrapper builders + domain-projection adapters.
+"""Stock EMRI response-wrapper builders + domain-projection adapters (the legacy EMRI path).
 
 Carved out of the global-fit settings files (2026-07-01): the per-source
 ``get_emri_response_wrapper`` / ``EMRIWaveWrap`` / ``_EMRISpecialFrameWrap``
 lived (duplicated) in ``emri_only`` and ``global_fit`` settings. The canonical
 version here supports both the simple CPU smoke path (``special_frame=False``)
 and the validated SPECIAL-frame mojito path (``special_frame=True``).
+
+Status in the 9mo / 12mo runs (``EMRI_LIKELIHOOD=direct``): standby. The stock getter
+``globalfit.stock.erebor.source_runtime.get_emri_wave_wrap`` builds this wrap lazily per device;
+it supplies the FEW generator the direct-to-WDM template reuses
+(:mod:`lisatools.sources.emri.wdm_direct`), and it scores only the direct move's cross-check
+(``EMRI_CHECK_LL``, off in production) and its fallback, plus synthetic injections. The
+``EMRI_*_KWARGS`` constants are the FEW construction defaults.
 """
 
 from __future__ import annotations
@@ -60,7 +67,11 @@ class _EMRISpecialFrameWrap:
     FILE spin + ICRS orbits) that reproduces the mojito EMRI to mm ~ 4e-5 and
     removes the 1.49x amplitude (which came from ecliptic-converting the spin).
     The per-call deprecation warning the conversion emits is suppressed -- this
-    is the intended EMRI path for now.
+    is the intended EMRI path for now. Every other attribute is forwarded to the wrapped
+    generator, except ``supports_batch`` (see ``_NO_FORWARD``).
+
+    Args:
+        wave_gen (ResponseWrapper): The EMRI response wrapper to call.
     """
 
     def __init__(self, wave_gen):
@@ -112,6 +123,14 @@ def get_emri_response_wrapper(
 
     Cached so the injection and template paths share one generator (building two
     on CPU exhausts RAM). ``role`` is intentionally excluded from the cache key.
+    The key is ``(Tobs, dt, t_start, tdi_chan, order, force_backend, id(orbits),
+    t0_shift_to_data, special_frame)``: ``tdi_config``, ``t_buffer`` and the FEW kwargs are
+    not part of it, so a second call that differs only in those returns the first wrapper.
+
+    The FEW model is ``FastKerrEccentricEquatorialFlux`` (``frame="detector"``,
+    ``return_list=False``); the response uses ``index_lambda=8`` (``phiS``), ``index_beta=7``
+    (``qS``, so ``is_ecliptic_latitude=False``), ``flip_hx=True`` and
+    ``remove_garbage="zero"``.
 
     ``t_start`` is the epoch the intrinsic FEW phases (``Phi_phi0`` etc.) are
     referenced to — for mojito data this is the **catalogue reference time**, NOT
@@ -122,11 +141,32 @@ def get_emri_response_wrapper(
     samples off the front.
 
     Args:
+        Tobs: Observation time in seconds (converted to years for the response).
+        dt: Sampling cadence in seconds.
+        t_start: Phase-reference epoch [s] (the response ``t0``), see above.
+        tdi_config: :class:`~lisatools.response.tdiconfig.TDIConfig` (the response ``tdi``).
+        tdi_chan: TDI channels. Default ``"XYZ"``.
+        role: ``"template"`` or ``"injection"``; informational only (not used, not in the key).
+        order: Lagrange interpolation order of the response. Default ``40``.
+        t_buffer: Response garbage buffer [s]. Default ``3e4``.
+        orbits: :class:`~lisatools.detector.Orbits`; ``None`` builds
+            :class:`~lisatools.detector.EqualArmlengthOrbits` on ``force_backend`` (production
+            passes the run's ``frame="icrs"`` unequal-arm orbits).
+        force_backend: Backend name for FEW and the response. Default ``"cpu"``.
+        t0_shift_to_data: Sub-sample alignment [s] onto the data grid. Default ``0.0``.
         special_frame: When ``True`` (default, validated mojito path) the
             returned generator is wrapped in :class:`_EMRISpecialFrameWrap` which
             forces ``convert_to_ra_dec=True`` (ecliptic->ICRS). When ``False``
             (CPU smoke path) the raw :class:`ResponseWrapper` is returned; the
             caller supplies ``convert_to_ra_dec`` per call.
+        inspiral_kwargs: FEW ``inspiral_kwargs``; ``None`` uses :data:`EMRI_INSPIRAL_KWARGS`.
+        sum_kwargs: FEW ``sum_kwargs``; ``None`` uses :data:`EMRI_SUM_KWARGS`.
+        mode_selector_kwargs: FEW ``mode_selector_kwargs``; ``None`` uses
+            :data:`EMRI_MODE_SELECTOR_KWARGS` (inert on the run path, see the comment on it).
+
+    Returns:
+        ResponseWrapper | _EMRISpecialFrameWrap: The cached generator, called on the
+        14-parameter FEW basis and returning the per-channel TDI time series.
     """
     inspiral_kwargs = inspiral_kwargs if inspiral_kwargs is not None else EMRI_INSPIRAL_KWARGS
     sum_kwargs = sum_kwargs if sum_kwargs is not None else EMRI_SUM_KWARGS
@@ -204,7 +244,20 @@ class EMRIWaveWrap:
 
     Output is a :class:`~lisatools.domains.DomainBase` subclass (FDSignal /
     WDMSignal / ...) so ACA dispatch and the EMRI move's ``get_waveform_here``
-    land on the right kernels.
+    land on the right kernels. In the 9mo / 12mo runs this is the standby production wrap
+    (cross-check / fallback of the direct-to-WDM template; see the module docstring).
+
+    Args:
+        wave_gen: Generator from :func:`get_emri_response_wrapper`.
+        td_settings: :class:`~lisatools.domains.TDSettings` of the data grid; the output is
+            zero-padded or cut to its ``N``.
+        target_domain (DomainSettingsBase): Analysis-domain settings to transform onto.
+        td_window (xp.ndarray, optional): Time-domain window for the transform.
+        runtime_kwargs: Per-call kwargs for ``wave_gen`` (e.g. the mode-selection
+            threshold); call kwargs override them.
+        nchannels: Leading TDI channels to keep (``None``: all).
+        offset_int: Samples sliced off the front of the response output, the integer part of
+            ``(data_t0 - t_start) / dt``. Default ``0``.
     """
 
     def __init__(
@@ -230,6 +283,18 @@ class EMRIWaveWrap:
         self.offset_int = int(offset_int)
 
     def __call__(self, *params, **kwargs):
+        """Generate one template on the run domain.
+
+        Args:
+            *params: The 14-parameter FEW waveform basis.
+            **kwargs: Per-call kwargs for ``wave_gen`` (merged over ``runtime_kwargs``).
+
+        Returns:
+            DomainBase: The template on ``target_domain``.
+
+        Raises:
+            WaveformDomainError: When FEW refuses the parameters.
+        """
         call_kwargs = dict(self.runtime_kwargs)
         call_kwargs.update(kwargs)
         # Prior boxes leak outside the FEW interpolation grid; convert FEW's

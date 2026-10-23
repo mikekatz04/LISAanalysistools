@@ -1,6 +1,44 @@
-"""LISA PSD / sensitivity matrices, TDI noise channels, and PSD utilities.
+"""LISA noise models: TDI channel PSDs, sensitivity (covariance) matrices, and noise backends.
 
-The sensitivity code is heavily based on an original code by
+The module has four layers, from single curves to the global-fit noise model:
+
+- **Single-channel PSD classes** (:class:`Sensitivity` subclasses, used as classes through
+  their ``get_Sn`` classmethod): :class:`LISASens` (sky/polarization-averaged strain),
+  :class:`CornishLISASens`, :class:`FlatPSDFunction`, the analytic equal-arm TDI 1.5
+  (``X1TDISens``, ``XY1TDISens``, ``A1TDISens``, ...) and TDI 2.0 (``X2TDISens``,
+  ``XY2TDISens``, ``A2TDISens``, ...) channel elements, and the unequal-arm TDI 2.0 XYZ
+  elements (``UnequalArmXX2TDISens`` ... ``UnequalArmYZ2TDISens``) that take the six link
+  light travel times. :func:`get_sensitivity` evaluates any of them on a domain
+  (:class:`~lisatools.domains.FDSettings`, :class:`~lisatools.domains.WDMSettings`, or a raw
+  frequency array) and folds the PSD into the WDM basis when needed.
+- **Sensitivity matrices**: :class:`SensitivityMatrixBase` holds a covariance of shape
+  ``(nch, nch, *basis_shape_active)`` (or ``(nch, *basis_shape_active)`` for uncorrelated
+  channels) with its lazily computed inverse ``invC`` and determinant ``detC``, which
+  :func:`~lisatools.diagnostic.inner_product` and
+  :func:`~lisatools.diagnostic.noise_likelihood_term` consume. :class:`SensitivityMatrix` and
+  the stock builders (:class:`XYZ2SensitivityMatrix`, :class:`XYZ1SensitivityMatrix`,
+  :class:`AET1SensitivityMatrix`, :class:`LISASensSensitivityMatrix`, ...) fill it from the
+  PSD classes.
+- **Composite noise model** (the production global-fit path): a
+  :class:`CompositeSensitivityMatrix` sums :class:`NoiseComponent` objects:
+  :class:`UnequalArmInstrumentNoise` (or the equal-arm :class:`InstrumentNoise`), with the
+  arm delays from a :class:`LinkDelayTable`; :class:`GalacticForeground` (the
+  :class:`~lisatools.stochastic.HyperbolicTangentGalacticForeground` spectrum, optionally
+  time-modulated by a :class:`GalForTimeModulation` table); :class:`SGWB`; and the tabulated
+  :class:`MojitoNoiseEstimates`. :class:`CompositeSensitivityBackend` builds one such matrix
+  per walker from the sampled noise parameters (``psd`` and ``galfor`` branches). In the
+  9-month and 12-month runs it is configured with ``UNEQUAL_ARM=1`` and
+  ``WDM_PSD_METHOD=layer_calibrated`` on the WDM domain.
+- **Native backend**: :class:`XYZSensitivityBackend`, a 3x3 XYZ matrix computed by the
+  C++/CUDA ``SensitivityMatrixWrap`` kernel (an alternative ``sensitivity_backend``; the
+  production runs use :class:`CompositeSensitivityBackend`).
+
+Helpers: :func:`generate_correlated_instrument_noise_td` and :func:`generate_foreground_td`
+draw time-domain noise realizations; :func:`estimate_noise_params_from_file` fits scalar
+``(Soms_d, Sa_a)`` levels to a mojito NOISE brick; :func:`tdi_generation_from_channel` maps a
+channel label to its TDI generation.
+
+The analytic sensitivity code is heavily based on an original code by
 Stas Babak and Antoine Petiteau for the LDC team.
 """
 
@@ -150,10 +188,26 @@ def _mat3x3_det_inv(C: np.ndarray, xp) -> tuple:
 NUM_SPLINE_THREADS = 256
 
 class Sensitivity(ABC):
-    """Base Class for PSD information.
+    """Base class for a single PSD / CSD element of the LISA noise model.
 
-    The initialization function is only needed if using a file input.
+    Subclasses are used as classes, never instantiated: :meth:`get_Sn` evaluates the
+    instrument term (the model's noise levels from
+    :meth:`~lisatools.detector.LISAModel.lisanoises`, mapped through the channel's
+    :meth:`transform`) plus an optional stochastic term (:meth:`get_stochastic_contribution`
+    mapped through :meth:`stochastic_transform`). :func:`get_sensitivity` and
+    :class:`SensitivityMatrix` accept any subclass, or the name of a stock one
+    (:func:`get_stock_sensitivity_options`).
 
+    Attributes:
+        channel (str): Channel label (``"X"``, ``"XY"``, ``"A"``, ...); also the key read
+            from a model's ``Sn_spl`` dict.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.sensitivity import X2TDISens
+        >>> Sn = X2TDISens.get_Sn(np.array([1e-3, 1e-2]), model="sangria")
+        >>> Sn.shape
+        (2,)
     """
 
     channel: str = None
@@ -170,7 +224,11 @@ class Sensitivity(ABC):
 
     @staticmethod
     def get_xp(array: np.ndarray) -> object:
-        """Numpy or Cupy (or float)"""
+        """Return the array module of ``array`` (``numpy`` for a Python ``float``).
+
+        Raises:
+            ValueError: ``array`` is neither an array nor a ``float``.
+        """
         try:
             return get_array_module(array)
         except ValueError:
@@ -186,14 +244,20 @@ class Sensitivity(ABC):
     ) -> float | np.ndarray:
         """Transform from the base sensitivity functions to the TDI PSDs.
 
+        The base class raises :class:`NotImplementedError`; each TDI channel class overrides
+        this with its transfer functions, which multiply the individual noise levels and sum
+        them into the channel PSDs.
+
         Args:
-            f: Frequency array.
-            noise_levels: Current noise levels at frequency ``f``.
-            **kwargs: For interoperability.
+            f: Frequency in Hz (scalar or array; numpy or cupy).
+            noise_levels: Noise levels at ``f`` from
+                :meth:`~lisatools.detector.LISAModel.lisanoises`, in
+                ``"relative_frequency"`` units (the stock transforms assert this).
+            **kwargs: Ignored; accepted so :meth:`get_Sn` can forward its keywords.
 
         Returns:
-            Transformed TDI PSD values.
-
+            float | np.ndarray: Instrument-noise PSD (or CSD) of the channel, in fractional
+            frequency units (1/Hz), same shape as ``f``.
         """
         raise NotImplementedError
 
@@ -205,35 +269,48 @@ class Sensitivity(ABC):
         include_instrument: bool = True,
         **kwargs: dict,
     ) -> float | np.ndarray:
-        """Calculate the PSD
+        """Evaluate the channel PSD (instrument term plus optional stochastic term).
+
+        The instrument term is ``spl[channel](f)`` when the model carries an ``Sn_spl``
+        dict, otherwise ``cls.transform(f, model.lisanoises(f), **kwargs)``. The stochastic
+        term is added only when one of ``stochastic_params`` / ``stochastic_kwargs`` /
+        ``stochastic_function`` is given in ``kwargs``; it is
+        ``cls.stochastic_transform(f, cls.get_stochastic_contribution(f, ...))``.
 
         Args:
-            f: Frequency array.
-            model: Noise model. Object of type :class:`lisa_models.LISAModel`.
-                It can also be a string corresponding to one of the stock models.
-                The model object must include attributes for ``Soms_d`` (shot noise)
-                and ``Sa_a`` (acceleration noise) or a spline as attribute ``Sn_spl``.
-                In the case of a spline, this must be a dictionary with
-                channel names as keys and callable PSD splines. For example,
-                if using ``scipy.interpolate.CubicSpline``, an input option
-                can be:
+            f: Frequency in Hz (scalar or array; numpy or cupy, the output follows it).
+            model: Noise model: a :class:`~lisatools.detector.LISAModel` or the name of a
+                stock one (``"sangria"``, ``"scirdv1"``, ...). Default
+                ``lisa_models.sangria``. It carries ``Soms_d`` (OMS) and ``Sa_a``
+                (acceleration) levels, or a spline dict as attribute ``Sn_spl``, mapping
+                channel names to callable PSDs, e.g.:
 
-                ```
-                noise_model.Sn_spl = {
-                    "A": CubicSpline(f, Sn_A)),
-                    "E": CubicSpline(f, Sn_E)),
-                    "T": CubicSpline(f, Sn_T))
-                }
-                ```
-            include_instrument: If ``True`` (default), include the instrument
-                noise term. If ``False``, return only the (transformed) stochastic
-                contribution — ``model`` is then unused. Used to build
-                stochastic-only covariance components (galactic foreground, SGWB).
-            **kwargs: For interoperability.
+                .. code-block:: python
+
+                    noise_model.Sn_spl = {
+                        "A": CubicSpline(f, Sn_A),
+                        "E": CubicSpline(f, Sn_E),
+                        "T": CubicSpline(f, Sn_T),
+                    }
+
+            include_instrument: If ``True`` (default), include the instrument noise term.
+                If ``False``, return only the (transformed) stochastic contribution, or
+                zeros shaped like ``f`` when no stochastic term is requested; ``model`` is
+                then unused. Used to build stochastic-only covariance components
+                (galactic foreground, SGWB).
+            **kwargs: Forwarded to :meth:`transform` and :meth:`stochastic_transform`. The
+                stochastic keys ``stochastic_params``, ``stochastic_kwargs`` and
+                ``stochastic_function`` are read from here (see
+                :meth:`get_stochastic_contribution`). When a stochastic term is requested,
+                no other keys may be present (they would reach
+                :meth:`get_stochastic_contribution`, which does not accept them).
 
         Returns:
-            PSD values.
+            float | np.ndarray: PSD (auto elements) or CSD (cross elements) in fractional
+            frequency units (1/Hz), same shape as ``f``.
 
+        Raises:
+            ValueError: The model's ``Sn_spl`` has no entry for this channel.
         """
         if include_instrument:
             # spline or stock computation
@@ -282,7 +359,11 @@ class Sensitivity(ABC):
         stochastic_function: Optional[StochasticContribution | str] = None,
         **kwargs: dict,
     ) -> bool:
-        """Whether :meth:`get_stochastic_contribution` would produce a non-zero term."""
+        """Whether :meth:`get_stochastic_contribution` would produce a non-zero term.
+
+        True when ``stochastic_params`` or ``stochastic_kwargs`` is non-empty or
+        ``stochastic_function`` is set; other keywords are ignored.
+        """
         return bool(
             (stochastic_params is not None and tuple(stochastic_params) != tuple())
             or (stochastic_kwargs is not None and stochastic_kwargs != {})
@@ -297,26 +378,32 @@ class Sensitivity(ABC):
         stochastic_kwargs: Optional[dict] = {},
         stochastic_function: Optional[StochasticContribution | str] = None,
     ) -> float | np.ndarray:
-        """Calculate contribution from stochastic signal.
+        """Evaluate the stochastic-signal PSD at ``f``, before the TDI response.
 
-        This function directs and wraps the calculation of and returns
-        the stochastic signal. The ``stochastic_function`` calculates the
-        sensitivity contribution. The ``transform_factor`` can transform that
-        output to the correct TDI contribution.
-
-        This function has GPU capabilities if a Cupy frequency array is entered.
+        Returns zeros unless at least one of the three stochastic arguments is given. The
+        result is the strain PSD of the stochastic model;
+        :meth:`stochastic_transform` maps it to the channel. A cupy ``f`` keeps the
+        computation on the GPU.
 
         Args:
-            f: Frequency array. If a Cupy array is provided, the GPU is used.
-            stochastic_params: Parameters (arguments) to feed to ``stochastic_function``.
-            stochastic_kwargs: Keyword arguments to feeed to ``stochastic_function``.
-            stochastic_function: Stochastic class or string name of stochastic class. Takes ``stochastic_args`` and ``stochastic_kwargs``.
-                If ``None``, it uses :class:`FittedHyperbolicTangentGalacticForeground`.
+            f: Frequency array in Hz (numpy or cupy).
+            stochastic_params: Positional parameters of ``stochastic_function``. Default
+                ``()``.
+            stochastic_kwargs: Keyword arguments of ``stochastic_function``. Default ``{}``.
+            stochastic_function: :class:`~lisatools.stochastic.StochasticContribution`
+                subclass or stock name (resolved with
+                :func:`~lisatools.stochastic.check_stochastic`). If ``None`` while
+                parameters are given, it defaults to
+                :class:`~lisatools.stochastic.FittedHyperbolicTangentGalacticForeground`,
+                which requires exactly one parameter (``Tobs``).
 
         Returns:
-            Contribution from stochastic signal.
+            float | np.ndarray: One-sided strain PSD of the stochastic signal (1/Hz), same
+            shape as ``f`` (zeros when no stochastic term is requested).
 
-
+        Raises:
+            AssertionError: The default fitted foreground is used with a number of
+                parameters other than one.
         """
         xp = cls.get_xp(f)
         if isinstance(f, float):
@@ -350,35 +437,42 @@ class Sensitivity(ABC):
     ) -> float | np.ndarray:
         """Transform from the base stochastic functions to the TDI PSDs.
 
-        **Note**: If not implemented, the transform will return the input.
+        The base class returns ``Sh`` unchanged; each TDI channel class overrides this with
+        the sky- and polarization-averaged response of an isotropic stochastic signal,
+        giving the stochastic part of the channel PSDs.
 
         Args:
-            f: Frequency array.
-            Sh: Power spectral density in stochastic term.
-            **kwargs: For interoperability.
+            f: Frequency in Hz (scalar or array; numpy or cupy).
+            Sh: One-sided strain PSD of the stochastic signal at ``f``, before the response
+                (from :meth:`get_stochastic_contribution`).
+            **kwargs: Ignored; accepted so :meth:`get_Sn` can forward its keywords.
 
         Returns:
-            Transformed TDI PSD values.
-
+            float | np.ndarray: Stochastic contribution to the channel PSD (or CSD), same
+            shape as ``f``.
         """
         return Sh
 
 
 class X1TDISens(Sensitivity):
-    """Sensitivity for the TDI 1.5 X channel."""
+    """TDI 1.5 auto-PSD of a Michelson channel, equal-arm analytic model.
+
+    ``channel = "X"``; :class:`Y1TDISens` and :class:`Z1TDISens` reuse it (same transfer
+    functions, this docstring) with ``channel = "Y"`` / ``"Z"``. All arms have the nominal
+    length ``L_SI``. Used through :meth:`~Sensitivity.get_Sn` or :func:`get_sensitivity`.
+    """
 
     channel: str = "X"
 
     @staticmethod
     def Cxx(f: float | np.ndarray) -> float | np.ndarray:
-        """Common TDI 1.5 X auto-spectrum transfer factor.
+        """Common TDI 1.5 auto-spectrum transfer factor ``16 sin^2(x)``, ``x = 2 pi f L / c``.
 
         Args:
-            f: Frequencyies to evaluate.
+            f: Frequency in Hz (scalar or array).
 
         Returns:
-            Cxx: Transform factor.
-
+            float | np.ndarray: The factor, same shape as ``f``.
         """
         xp = Sensitivity.get_xp(f)
         x = 2 * np.pi * f * L_SI / C_SI
@@ -390,6 +484,20 @@ class X1TDISens(Sensitivity):
         noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
+        """Map the noise levels to the TDI 1.5 auto-PSD (equal arms).
+
+        With ``x = 2 pi f L / c`` and ``Cxx = 16 sin^2(x)``: the ISI and RFI OMS and RFI
+        backlink levels enter with ``Cxx``; the TMI OMS, test-mass, and TMI backlink levels
+        with ``2 Cxx (1 + cos^2 x)``.
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            noise_levels: Noise levels at ``f`` in ``"relative_frequency"`` units.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: PSD (1/Hz), same shape as ``f``.
+        """
         __doc__ = (
             "Transform from the base sensitivity functions to the XYZ TDI PSDs.\n\n"
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
@@ -429,6 +537,16 @@ class X1TDISens(Sensitivity):
     def stochastic_transform(
         f: float | np.ndarray, Sh: float | np.ndarray, **kwargs: dict
     ) -> float | np.ndarray:
+        """Stochastic part of the TDI 1.5 auto-PSD: ``Sh * 4 x^2 sin^2(x)``, ``x = 2 pi f L / c``.
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            Sh: Strain PSD of the stochastic signal at ``f``.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: Stochastic PSD contribution, same shape as ``f``.
+        """
         __doc__ = (
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
@@ -452,20 +570,23 @@ class Z1TDISens(X1TDISens):
 
 
 class XY1TDISens(Sensitivity):
-    """Sensitivity for the TDI 1.5 XY cross-spectrum channel."""
+    """TDI 1.5 cross-spectral density between two Michelson channels, equal-arm analytic model.
+
+    ``channel = "XY"``; :class:`ZX1TDISens` and :class:`YZ1TDISens` reuse it (identical
+    real CSD for equal arms, this docstring) with ``channel = "ZX"`` / ``"YZ"``.
+    """
 
     channel: str = "XY"
 
     @staticmethod
     def Cxy(f: float | np.ndarray) -> float | np.ndarray:
-        """Common TDI transform factor for CSD.
+        """Common TDI 1.5 CSD transfer factor ``-4 sin(2x) sin(x)``, ``x = 2 pi f L / c``.
 
         Args:
-            f: Frequencyies to evaluate.
+            f: Frequency in Hz (scalar or array).
 
         Returns:
-            Cxy: Transform factor.
-
+            float | np.ndarray: The factor, same shape as ``f``.
         """
         xp = Sensitivity.get_xp(f)
         x = 2 * np.pi * f * L_SI / C_SI
@@ -477,6 +598,19 @@ class XY1TDISens(Sensitivity):
         noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
+        """Map the noise levels to the TDI 1.5 CSD (equal arms).
+
+        With ``Cxy`` from :meth:`Cxy`: the ISI and RFI OMS and RFI backlink levels enter
+        with ``Cxy``; the TMI OMS, test-mass, and TMI backlink levels with ``4 Cxy``.
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            noise_levels: Noise levels at ``f`` in ``"relative_frequency"`` units.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: Real CSD (1/Hz), same shape as ``f``.
+        """
         __doc__ = (
             "Transform from the base sensitivity functions to the XYZ TDI PSDs.\n\n"
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
@@ -513,6 +647,16 @@ class XY1TDISens(Sensitivity):
     def stochastic_transform(
         f: float | np.ndarray, Sh: float | np.ndarray, **kwargs: dict
     ) -> float | np.ndarray:
+        """Stochastic part of the TDI 1.5 CSD: ``-1/2`` of the auto term, ``-2 x^2 sin^2(x) Sh``.
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            Sh: Strain PSD of the stochastic signal at ``f``.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: Stochastic CSD contribution, same shape as ``f``.
+        """
         __doc__ = (
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
@@ -538,22 +682,34 @@ class YZ1TDISens(XY1TDISens):
 
 
 class X2TDISens(Sensitivity):
-    """Sensitivity for the TDI 2.0 X channel."""
+    """TDI 2.0 auto-PSD of a Michelson channel, equal-arm analytic model.
+
+    ``channel = "X"``; :class:`Y2TDISens` and :class:`Z2TDISens` reuse it (same transfer
+    functions, this docstring) with ``channel = "Y"`` / ``"Z"``. All arms have the nominal
+    length ``L_SI``; :class:`UnequalArmXX2TDISens` and its siblings are the unequal-arm
+    counterparts used by the production noise model. Its :meth:`stochastic_transform` is
+    the response :class:`GalacticForeground` and :class:`SGWB` apply to their spectra.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.sensitivity import get_sensitivity, X2TDISens
+        >>> get_sensitivity(np.array([1e-3, 1e-2]), sens_fn=X2TDISens).shape
+        (2,)
+    """
 
     channel: str = "X"
 
     @staticmethod
     def Cxx(f: float | np.ndarray) -> float | np.ndarray:
-        """Common TDI transform factor.
+        """Common TDI 2.0 auto-spectrum transfer factor ``16 sin^2(x) sin^2(2x)``.
 
-        `arXiv:2211.02539 <https://arxiv.org/pdf/2211.02539>`_.
+        ``x = 2 pi f L / c``; see `arXiv:2211.02539 <https://arxiv.org/pdf/2211.02539>`_.
 
         Args:
-            f: Frequencyies to evaluate.
+            f: Frequency in Hz (scalar or array).
 
         Returns:
-            Cxx: Transform factor.
-
+            float | np.ndarray: The factor, same shape as ``f``.
         """
         xp = Sensitivity.get_xp(f)
         x = 2 * np.pi * f * L_SI / C_SI
@@ -567,6 +723,20 @@ class X2TDISens(Sensitivity):
         noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
+        """Map the noise levels to the TDI 2.0 auto-PSD (equal arms).
+
+        With ``x = 2 pi f L / c`` and ``Cxx`` from :meth:`Cxx`: the ISI and RFI OMS and
+        RFI backlink levels enter with ``4 Cxx``; the TMI OMS and TMI backlink levels with
+        ``Cxx (3 + cos 2x)``; the test-mass level with ``4 Cxx (3 + cos 2x)``.
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            noise_levels: Noise levels at ``f`` in ``"relative_frequency"`` units.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: PSD (1/Hz), same shape as ``f``.
+        """
         __doc__ = (
             "Transform from the base sensitivity functions to the XYZ TDI PSDs.\n\n"
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
@@ -606,6 +776,20 @@ class X2TDISens(Sensitivity):
     def stochastic_transform(
         f: float | np.ndarray, Sh: float | np.ndarray, **kwargs: dict
     ) -> float | np.ndarray:
+        """Stochastic part of the TDI 2.0 auto-PSD: ``Sh * 4 x^2 sin^2(x) sin^2(2x)``.
+
+        ``x = 2 pi f L / c``. This is the response the production
+        :class:`GalacticForeground` component applies to the foreground spectrum (see the
+        comment in the body for its validation).
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            Sh: Strain PSD of the stochastic signal at ``f``.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: Stochastic PSD contribution, same shape as ``f``.
+        """
         __doc__ = (
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
@@ -644,36 +828,37 @@ class Z2TDISens(X2TDISens):
 
 
 class XY2TDISens(Sensitivity):
-    """
-    Cross-spectral density (CSD) between X and Y channels for TDI2.
+    """TDI 2.0 cross-spectral density between two Michelson channels, equal-arm analytic model.
 
-    From Table II of Nam et al. (2023) for uncorrelated noises:
-    - Common factor: C_XY(ω) = -16 sin(ωL) sin³(2ωL)
-    - Acceleration contribution: 4 * C_XY * S_pm
-    - Optical path contribution (ISI/RFI): C_XY * S_op
+    ``channel = "XY"``; :class:`YZ2TDISens` and :class:`ZX2TDISens` reuse it (this
+    docstring included) with ``channel = "YZ"`` / ``"ZX"``. From Table II of Nam et al.
+    (2023) for uncorrelated noises, with ``x = 2 pi f L / c``:
 
-    Total CSD: C_XY * (4*S_pm + S_op)
+    - common factor ``C_XY = -16 sin(x) sin^3(2x)``;
+    - test-mass (acceleration) contribution ``4 C_XY S_pm``;
+    - optical-path (OMS / backlink) contribution ``C_XY S_op``;
 
-    Notes:
-        - By circular symmetry, YZ and ZX CSDs have identical transfer functions
-        - For equal armlengths, the CSD is real-valued
-        - This implements the uncorrelated noise case
+    so the total CSD is ``C_XY (4 S_pm + S_op)``.
+
+    Note:
+        By circular symmetry the YZ and ZX CSDs have identical transfer functions, and for
+        equal armlengths the CSD is real. The unequal-arm counterparts
+        (:class:`UnequalArmXY2TDISens`, ...) are complex.
     """
 
     channel: str = "XY"
 
     @staticmethod
     def Cxy(f: float | np.ndarray) -> float | np.ndarray:
-        """Common TDI transform factor for CSD.
+        """Common TDI 2.0 CSD transfer factor ``-16 sin(x) sin^3(2x)``, ``x = 2 pi f L / c``.
 
-        `arXiv:2211.02539 <https://arxiv.org/pdf/2211.02539>`_.
+        See `arXiv:2211.02539 <https://arxiv.org/pdf/2211.02539>`_.
 
         Args:
-            f: Frequencyies to evaluate.
+            f: Frequency in Hz (scalar or array).
 
         Returns:
-            Cxy: Transform factor.
-
+            float | np.ndarray: The factor, same shape as ``f``.
         """
         xp = Sensitivity.get_xp(f)
         x = 2 * np.pi * f * L_SI / C_SI
@@ -686,21 +871,19 @@ class XY2TDISens(Sensitivity):
         noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
-        """
-        Transform from base sensitivity functions (S_pm, S_op) to TDI2 XY CSD.
+        """Map the noise levels to the TDI 2.0 CSD (equal arms).
+
+        ``CSD = C_XY (4 S_pm + S_op)`` with ``x = 2 pi f L / c`` and
+        ``C_XY = -16 sin(x) sin^3(2x)``: the test-mass level enters with ``4 C_XY``, every
+        OMS and backlink level with ``C_XY``.
 
         Args:
-            f: Frequency array [Hz].
-            noise_levels: Current noise levels at frequency ``f``.
-            **kwargs: For interoperability.
+            f: Frequency in Hz (scalar or array).
+            noise_levels: Noise levels at ``f`` in ``"relative_frequency"`` units.
+            **kwargs: Ignored.
 
         Returns:
-            Cross-spectral density between X and Y channels.
-
-        Mathematical form:
-            x = 2π(L/c)f  [dimensionless frequency]
-            C_XY = -16 sin(x) sin³(2x)
-            CSD_XY = C_XY * (4*S_pm + S_op)
+            float | np.ndarray: Real CSD (1/Hz), same shape as ``f``.
         """
         assert noise_levels.units == "relative_frequency"
         Cxy = XY2TDISens.Cxy(f)
@@ -733,19 +916,19 @@ class XY2TDISens(Sensitivity):
     def stochastic_transform(
         f: float | np.ndarray, Sh: float | np.ndarray, **kwargs: dict
     ) -> float | np.ndarray:
-        """
-        Transform stochastic background to TDI2 XY CSD.
+        """Stochastic part of the TDI 2.0 CSD: ``-1/2`` of the auto term.
 
-        Note: For now, using same transform as TDI1 (placeholder).
-        TODO: Verify correct stochastic transform for TDI2 CSDs.
+        ``-0.5 * 4 x^2 sin^2(x) sin^2(2x) * Sh`` with ``x = 2 pi f L / c``, i.e. the
+        isotropic-background relation ``C_XY = -C_XX / 2`` applied to
+        :meth:`X2TDISens.stochastic_transform`.
 
         Args:
-            f: Frequency array [Hz].
-            Sh: Stochastic signal PSD.
-            **kwargs: For interoperability.
+            f: Frequency in Hz (scalar or array).
+            Sh: Strain PSD of the stochastic signal at ``f``.
+            **kwargs: Ignored.
 
         Returns:
-            Stochastic contribution to CSD.
+            float | np.ndarray: Stochastic CSD contribution, same shape as ``f``.
         """
         xp = Sensitivity.get_xp(f)
         x = 2.0 * np.pi * lisaLT * f
@@ -795,7 +978,12 @@ class ZX2TDISens(XY2TDISens):
 
 
 class A1TDISens(X1TDISens, Sensitivity):
-    """Sensitivity for the TDI 1.5 A channel (orthogonal A/E/T basis)."""
+    """TDI 1.5 A-channel PSD (orthogonal A/E/T basis), equal-arm analytic model.
+
+    ``channel = "A"``; :class:`E1TDISens` reuses it (this docstring included) with
+    ``channel = "E"``. Only the two-level :class:`~lisatools.detector.LISAModel` is
+    supported (ISI OMS and test-mass levels).
+    """
 
     channel: str = "A"
 
@@ -805,6 +993,24 @@ class A1TDISens(X1TDISens, Sensitivity):
         noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
+        """Map the noise levels to the TDI 1.5 A/E PSD (equal arms).
+
+        With ``x = 2 pi f L / c`` and ``Cxx = 16 sin^2(x)``: the ISI (and RFI) OMS level
+        enters with ``Cxx (2 + cos x) / 2`` and the test-mass level with
+        ``Cxx (3 + 2 cos x + cos 2x)``.
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            noise_levels: Noise levels at ``f`` in ``"relative_frequency"`` units.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: PSD (1/Hz), same shape as ``f``.
+
+        Raises:
+            NotImplementedError: Any RFI/TMI OMS or backlink level is non-zero (an
+                :class:`~lisatools.detector.ExtendedLISAModel`).
+        """
         __doc__ = (
             "Transform from the base sensitivity functions to the A,E TDI PSDs.\n\n"
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
@@ -865,6 +1071,19 @@ class A1TDISens(X1TDISens, Sensitivity):
     def stochastic_transform(
         f: float | np.ndarray, Sh: float | np.ndarray, **kwargs: dict
     ) -> float | np.ndarray:
+        """Stochastic part of the TDI 1.5 A/E PSD: ``1.5 * 4 x^2 sin^2(x) * Sh``.
+
+        The isotropic-background relation ``C_AA = C_XX - C_XY = 3/2 C_XX`` applied to
+        :meth:`X1TDISens.stochastic_transform`.
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            Sh: Strain PSD of the stochastic signal at ``f``.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: Stochastic PSD contribution, same shape as ``f``.
+        """
         __doc__ = (
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
@@ -882,7 +1101,11 @@ class E1TDISens(A1TDISens):
 
 
 class T1TDISens(Sensitivity):
-    """Sensitivity for the TDI 1.5 T channel (null channel of A/E/T basis)."""
+    """TDI 1.5 T-channel PSD (null channel of the A/E/T basis), equal-arm analytic model.
+
+    Only the two-level :class:`~lisatools.detector.LISAModel` is supported (ISI OMS and
+    test-mass levels).
+    """
 
     channel: str = "T"
 
@@ -892,6 +1115,23 @@ class T1TDISens(Sensitivity):
         noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
+        """Map the noise levels to the TDI 1.5 T PSD (equal arms).
+
+        With ``x = 2 pi f L / c`` and ``Cxx = 16 sin^2(x)``: the ISI (and RFI) OMS level
+        enters with ``Cxx (1 - cos x)`` and the test-mass level with ``8 Cxx sin^4(x/2)``.
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            noise_levels: Noise levels at ``f`` in ``"relative_frequency"`` units.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: PSD (1/Hz), same shape as ``f``.
+
+        Raises:
+            NotImplementedError: Any RFI/TMI OMS or backlink level is non-zero (an
+                :class:`~lisatools.detector.ExtendedLISAModel`).
+        """
         __doc__ = (
             "Transform from the base sensitivity functions to the T TDI PSDs.\n\n"
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
@@ -951,6 +1191,16 @@ class T1TDISens(Sensitivity):
     def stochastic_transform(
         f: float | np.ndarray, Sh: float | np.ndarray, **kwargs: dict
     ) -> float | np.ndarray:
+        """Stochastic part of the TDI 1.5 T PSD: zero (an isotropic background cancels in T).
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            Sh: Strain PSD of the stochastic signal at ``f``.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: Zeros, same shape as ``f``.
+        """
         __doc__ = (
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
@@ -961,7 +1211,11 @@ class T1TDISens(Sensitivity):
         return 0.0 * (Sh * t)
 
 class A2TDISens(X2TDISens, Sensitivity):
-    """Sensitivity for the TDI 2.0 A channel."""
+    """TDI 2.0 A-channel PSD (orthogonal A/E/T basis), equal-arm analytic model.
+
+    ``channel = "A"``; :class:`E2TDISens` reuses it (this docstring included) with
+    ``channel = "E"``. The global-fit monitor uses the pair for its A/E reference curves.
+    """
 
     channel: str = "A"
 
@@ -971,6 +1225,21 @@ class A2TDISens(X2TDISens, Sensitivity):
         noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
+        """Map the noise levels to the TDI 2.0 A/E PSD (equal arms).
+
+        With ``x = 2 pi f L / c``, ``Cxx`` from :meth:`X2TDISens.Cxx` and
+        ``g = 3 + 2 cos x + cos 2x``: the ISI and RFI OMS levels enter with
+        ``2 Cxx (2 + cos x)``, the RFI backlink level with ``4 Cxx cos x``, the TMI OMS and
+        TMI backlink levels with ``Cxx g``, and the test-mass level with ``4 Cxx g``.
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            noise_levels: Noise levels at ``f`` in ``"relative_frequency"`` units.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: PSD (1/Hz), same shape as ``f``.
+        """
         __doc__ = (
             "Transform from the base sensitivity functions to the XYZ TDI PSDs.\n\n"
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
@@ -1011,6 +1280,20 @@ class A2TDISens(X2TDISens, Sensitivity):
     def stochastic_transform(
         f: float | np.ndarray, Sh: float | np.ndarray, **kwargs: dict
     ) -> float | np.ndarray:
+        """Stochastic part of the TDI 2.0 A/E PSD: ``Sh * 4 x^2 sin^2(x) sin^2(2x)``.
+
+        The same kernel as :meth:`X2TDISens.stochastic_transform`; unlike
+        :meth:`A1TDISens.stochastic_transform` no ``3/2`` isotropic A-channel factor is
+        applied (see the body comment on the A-channel check).
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            Sh: Strain PSD of the stochastic signal at ``f``.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: Stochastic PSD contribution, same shape as ``f``.
+        """
         __doc__ = (
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
@@ -1043,7 +1326,7 @@ class E2TDISens(A2TDISens):
 
 
 class T2TDISens(X2TDISens, Sensitivity):
-    """Sensitivity for the TDI 2.0 T (null) channel."""
+    """TDI 2.0 T-channel PSD (null channel of the A/E/T basis), equal-arm analytic model."""
 
     channel: str = "T"
 
@@ -1053,6 +1336,21 @@ class T2TDISens(X2TDISens, Sensitivity):
         noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
+        """Map the noise levels to the TDI 2.0 T PSD (equal arms).
+
+        With ``x = 2 pi f L / c`` and ``Cxx`` from :meth:`X2TDISens.Cxx`: the ISI and RFI
+        OMS and RFI backlink levels enter with ``4 Cxx (1 - cos x)``, the TMI OMS and TMI
+        backlink levels with ``8 Cxx sin^4(x/2)``, and the test-mass level with
+        ``32 Cxx sin^4(x/2)``.
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            noise_levels: Noise levels at ``f`` in ``"relative_frequency"`` units.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: PSD (1/Hz), same shape as ``f``.
+        """
         __doc__ = (
             "Transform from the base sensitivity functions to the XYZ TDI PSDs.\n\n"
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
@@ -1092,6 +1390,19 @@ class T2TDISens(X2TDISens, Sensitivity):
     def stochastic_transform(
         f: float | np.ndarray, Sh: float | np.ndarray, **kwargs: dict
     ) -> float | np.ndarray:
+        """Stochastic part of the TDI 2.0 T PSD: ``Sh * 4 x^2 sin^2(x) sin^2(2x)``.
+
+        The same kernel as :meth:`X2TDISens.stochastic_transform` (it is not zeroed, unlike
+        :meth:`T1TDISens.stochastic_transform`).
+
+        Args:
+            f: Frequency in Hz (scalar or array).
+            Sh: Strain PSD of the stochastic signal at ``f``.
+            **kwargs: Ignored.
+
+        Returns:
+            float | np.ndarray: Stochastic PSD contribution, same shape as ``f``.
+        """
         __doc__ = (
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
@@ -1118,7 +1429,20 @@ class T2TDISens(X2TDISens, Sensitivity):
 
 
 class LISASens(Sensitivity):
-    """Base sensitivity curve for LISA (sky-/polarisation-averaged strain)."""
+    """Sky- and polarization-averaged LISA strain sensitivity curve (no TDI channel).
+
+    The classic analytic curve ``(sqrt(5) * 2/sqrt(3) * T(f) * sqrt(4 Sa_d + Sop) / L)^2``
+    with the approximate transfer ``T(f) = sqrt(1 + (f / (0.41 f*))^2)``, ``f* = c / (2 L)``
+    (averaging factors dropped with ``average=False``), plus an optional stochastic term
+    added without a response. :class:`LISASensSensitivityMatrix` stacks it per channel.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.sensitivity import get_sensitivity, LISASens
+        >>> f = np.logspace(-4, -1, 5)
+        >>> get_sensitivity(f, sens_fn=LISASens, return_type="char_strain").shape
+        (5,)
+    """
 
     @classmethod
     def get_Sn(
@@ -1129,22 +1453,28 @@ class LISASens(Sensitivity):
         include_instrument: bool = True,
         **kwargs: dict,
     ) -> float | np.ndarray:
-        """Compute the base LISA sensitivity function.
+        """Compute the sky-averaged LISA strain sensitivity at ``f``.
 
         Args:
-            f: Frequency array.
-            model: Noise model. Object of type :class:`lisa_models.LISAModel`. It can also be a string corresponding to one of the stock models.
-            average: Whether to apply averaging factors to sensitivity curve.
-                Antenna response: ``av_resp = np.sqrt(5) if average else 1.0``
-                Projection effect: ``Proj = 2.0 / np.sqrt(3) if average else 1.0``
-            include_instrument: If ``True`` (default), include the instrument
-                noise term. If ``False``, return only the stochastic contribution
-                (``model`` is then unused).
-            **kwargs: Keyword arguments to pass to :func:`get_stochastic_contribution`. # TODO: fix
+            f: Frequency in Hz (scalar or array; numpy or cupy).
+            model: Noise model: a :class:`~lisatools.detector.LISAModel` or the name of a
+                stock one. Default ``lisa_models.sangria``.
+            average: Whether to apply the averaging factors. Antenna response:
+                ``av_resp = np.sqrt(5) if average else 1.0``; projection effect:
+                ``Proj = 2.0 / np.sqrt(3) if average else 1.0``. Default ``True``.
+            include_instrument: If ``True`` (default), include the instrument noise term.
+                If ``False``, return only the stochastic contribution (``model`` is then
+                unused).
+            **kwargs: Forwarded to :meth:`~Sensitivity.get_stochastic_contribution`
+                (``stochastic_params``, ``stochastic_kwargs``, ``stochastic_function``
+                only); its result is added as is, with no response applied.
 
         Returns:
-            Sensitivity array.
+            float | np.ndarray: Strain PSD (1/Hz), same shape as ``f``.
 
+        Raises:
+            NotImplementedError: ``model`` is not a :class:`~lisatools.detector.LISAModel`
+                (e.g. an ``ExtendedLISAModel``).
         """
         xp = Sensitivity.get_xp(f)
         if include_instrument:
@@ -1183,27 +1513,26 @@ class LISASens(Sensitivity):
 
 
 class CornishLISASens(LISASens):
-    """PSD from https://arxiv.org/pdf/1803.01944.pdf
+    """Analytic LISA PSD of Robson, Cornish & Liu (2019), including the confusion foreground.
 
-    Power Spectral Density for the LISA detector assuming it has been active for a year.
-    I found an analytic version in one of Niel Cornish's paper which he submitted to the arXiv in
-    2018. I evaluate the PSD at the frequency bins found in the signal FFT.
-
-    PSD obtained from: https://arxiv.org/pdf/1803.01944.pdf
-
+    From `arXiv:1803.01944 <https://arxiv.org/pdf/1803.01944.pdf>`_. Sky-averaged strain
+    PSD with fixed OMS (``1.5e-11`` m/sqrt(Hz)) and acceleration (``3e-15`` m s^-2/sqrt(Hz))
+    levels plus the one-year Galactic confusion-noise fit of that paper; the ``model``
+    keyword of the base class is not used.
     """
 
     @staticmethod
     def get_Sn(f: float | np.ndarray, average: bool = True, **kwargs: dict) -> float | np.ndarray:
-        """Cornish (2018) LISA PSD evaluated at ``f`` (Hz).
+        """Evaluate the Robson, Cornish & Liu PSD at ``f``.
 
         Args:
-            f: Frequency array in Hz.
-            average: If ``True``, include the sky-averaging factor ``20/3``.
-            **kwargs: Ignored; kept for interface compatibility.
+            f: Frequency in Hz (scalar or array; numpy or cupy).
+            average: If ``True`` (default), include the sky-averaging factor ``20/3``.
+            **kwargs: Ignored; kept for interface compatibility (``model`` included).
 
         Returns:
-            PSD values.
+            float | np.ndarray: Strain PSD (1/Hz), instrument plus one-year confusion noise,
+            same shape as ``f``.
         """
         # TODO: documentation here
         xp = Sensitivity.get_xp(f)
@@ -1245,20 +1574,27 @@ class CornishLISASens(LISASens):
 
 
 class FlatPSDFunction(LISASens):
-    """White Noise PSD function."""
+    """Flat (white-noise) PSD: the value passed as ``val`` at every frequency.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.sensitivity import FlatPSDFunction
+        >>> FlatPSDFunction.get_Sn(np.array([1e-3, 2e-3]), 1e-40)
+        array([1.e-40, 1.e-40])
+    """
 
     @classmethod
     def get_Sn(cls, f: float | np.ndarray, val: float, **kwargs: dict) -> float | np.ndarray:
         """Return ``val`` broadcast to the shape of ``f`` (a flat / white PSD).
 
         Args:
-            f: Frequency array (or scalar).
+            f: Frequency array (or Python ``float``).
             val: The constant PSD value.
             **kwargs: Ignored; kept for interface compatibility.
 
         Returns:
-            Either an array of shape ``f.shape`` filled with ``val``, or a
-            Python ``float`` if ``f`` was a scalar.
+            np.ndarray | float: An array of shape ``f.shape`` filled with ``val``, or a
+            Python ``float`` if ``f`` was a ``float``.
         """
         # TODO: documentation here
         xp = cls.get_xp(f)
@@ -1269,11 +1605,30 @@ class FlatPSDFunction(LISASens):
 
 
 class SensitivityMatrixBase:
-    """Base Container to hold sensitivity information.
+    """Noise covariance on a domain basis, with its lazily computed inverse and determinant.
+
+    :attr:`sens_mat` has shape ``channel_shape + basis_shape_active``: ``(nch, nch, ...)``
+    for a full cross-spectral matrix, or ``(nch, ...)`` for uncorrelated channels.
+    :attr:`invC` and :attr:`detC` are computed on first read after any change
+    (construction, ``__setitem__``, ``+`` / ``-``), so a chain ``A + B + C`` pays one
+    inversion. Non-finite inverse entries are zeroed and non-finite determinants set to
+    ``1`` (zero weight, no log-det term), which handles the analytic PSD's ``f = 0``
+    divergence. This is the object :func:`~lisatools.diagnostic.inner_product` and
+    :func:`~lisatools.diagnostic.noise_likelihood_term` consume; the subclasses
+    (:class:`SensitivityMatrix`, :class:`CompositeSensitivityMatrix`,
+    :class:`XYZSensitivityBackend`) fill :attr:`sens_mat`.
 
     Args:
-        basis_settings: Frequency array in FD. Time array in TD. Wavelet basis in WDM. Etc.
-        skip_inv_det: Whether to skip the determinant check when updating sensitivities. This is relevant for slicing operations.
+        settings: Domain settings the covariance is evaluated on (FD bins, WDM layers x
+            time columns, ...).
+        skip_inv_det: If ``True``, never compute :attr:`invC` / :attr:`detC` automatically
+            (they must be assigned, as :meth:`get_slice` does). Default ``False``.
+
+    Attributes:
+        data_shape (tuple): ``basis_settings.basis_shape_active`` at construction.
+        channel_shape (tuple): Leading (channel) axes of :attr:`sens_mat`.
+        can_redo (bool): Whether the matrix was built from PSD classes (so the
+            ``update_*`` methods can re-evaluate it) rather than from arrays.
     """
 
     def __init__(
@@ -1311,22 +1666,27 @@ class SensitivityMatrixBase:
             )
 
     def update_basis_settings(self, basis_settings: domains.DomainSettingsBase) -> None:
-        """Update class with new frequency array.
+        """Re-evaluate the matrix on new domain settings.
 
         Args:
-            basis_settings: Domain information.
+            basis_settings: New domain settings.
 
+        Raises:
+            ValueError: The matrix was built from arrays, not PSD classes.
         """
         self.check_update()
         self.basis_settings = basis_settings
         self.sens_mat = self.sens_mat_input
 
     def update_model(self, model: lisa_models.LISAModel | list | np.ndarray) -> None:
-        """Update class with new sensitivity model.
+        """Re-evaluate the matrix with a new noise model in every element's keywords.
 
         Args:
-            model: Noise model. Object of type :class:`lisa_models.LISAModel`. It can also be a string corresponding to one of the stock models.
+            model: Noise model: a :class:`~lisatools.detector.LISAModel` or the name of a
+                stock one.
 
+        Raises:
+            ValueError: The matrix was built from arrays, not PSD classes.
         """
         self.check_update()
         for tmp_kwargs in self.sens_kwargs.flatten():
@@ -1334,14 +1694,20 @@ class SensitivityMatrixBase:
         self.sens_mat = self.sens_mat_input
 
     def update_stochastic(self, **kwargs: dict) -> None:
-        """Update class with new stochastic function.
+        """Merge new stochastic keywords into every element's keywords and re-evaluate.
 
         Args:
-            **kwargs: Keyword arguments update for :func:`lisatools.sensitivity.Sensitivity.get_stochastic_contribution`.
-                This operation will combine the new and old kwarg dictionaries, updating any
-                old information with any added corresponding new information. **Note**: any old information
-                that is not updated will remain in place.
+            **kwargs: Keywords for :meth:`Sensitivity.get_stochastic_contribution`
+                (``stochastic_params``, ``stochastic_kwargs``, ``stochastic_function``).
+                They are merged over the existing per-element keywords; keys not given keep
+                their old values.
 
+        Raises:
+            ValueError: The matrix was built from arrays, not PSD classes.
+
+        Warning:
+            The merge loop unpacks each element's keyword dict as ``(i, tmp_kwargs)``
+            instead of enumerating, so this method fails for any matrix as written.
         """
         self.check_update()
         tmptmp = self.sens_kwargs.flatten()
@@ -1352,7 +1718,16 @@ class SensitivityMatrixBase:
 
     @property
     def sens_mat(self) -> np.ndarray:
-        """Get sensitivity matrix."""
+        """Covariance array, shape ``channel_shape + basis_shape_active``.
+
+        Assignment accepts either a ready array (numpy or cupy, non-object dtype, trailing
+        shape ``basis_shape_active``) or a nested list (or object array) describing the
+        matrix layout whose leaves are all of one kind: 1D arrays, :class:`Sensitivity`
+        classes, or stock names. PSD-class leaves are evaluated with
+        :func:`get_sensitivity` using the instance's ``sens_args`` and per-element
+        ``sens_kwargs``. Every assignment marks :attr:`invC` / :attr:`detC` for
+        recomputation.
+        """
         return self._sens_mat
 
     @sens_mat.setter
@@ -1365,7 +1740,7 @@ class SensitivityMatrixBase:
             | Sensitivity
         ),
     ) -> None:
-        """Set sensitivity matrix."""
+        """Set the covariance from an array or a nested list layout (see the getter)."""
         
         if (isinstance(sens_mat, np.ndarray) or isinstance(
             sens_mat, cp.ndarray)
@@ -1499,15 +1874,18 @@ class SensitivityMatrixBase:
 
     # use the getitem to get a slice of the sensitivity matrix, then use that to get the corresponding slice of the determinant and inverse
     def get_slice(self, index: tuple | slice) -> SensitivityMatrixBase:
-        """
-        Get a time and frequency slice of the sensitivity matrix, and corresponding slices of the determinant and inverse.
+        """Slice the basis axes of the matrix together with its determinant and inverse.
+
+        The new :attr:`invC` / :attr:`detC` are slices of this matrix's (computed first if
+        needed), not recomputed.
 
         Args:
-            index (tuple | slice): Slice, or tuple of slices, to apply to the sensitivity matrix.
-                                   The slice(s) should select part of the time and frequency dimensions of the sensitivity matrix, which are the last dimensions of the array.
+            index: Slice, or tuple of slices, over the basis axes (the trailing axes of
+                :attr:`sens_mat`; e.g. ``(freq_slice, time_slice)`` for WDM). It is also
+                passed to ``basis_settings.get_slice``.
 
         Returns:
-            A new SensitivityMatrixBase object with the sliced sensitivity matrix, and corresponding sliced determinant and inverse.
+            SensitivityMatrixBase: New matrix on the sliced settings.
         """
         new_settings = self.basis_settings.get_slice(index)
         new_mat = SensitivityMatrixBase(new_settings, skip_inv_det=True)
@@ -1553,7 +1931,13 @@ class SensitivityMatrixBase:
     #         # switch them after they were effectively switched above
     #         self.invC = invC.transpose(transpose_shape)
     def _setup_det_and_inv(self) -> None:
-        """Determinant and inverse of TDI matrix. (Patched version)"""
+        """Compute ``_detC`` / ``_invC`` from :attr:`sens_mat` and sanitize non-finite entries.
+
+        One channel axis: ``detC = prod(sens_mat, axis=0)``, ``invC = 1 / sens_mat``.
+        ``(3, 3)``: the adjugate closed form :func:`_mat3x3_det_inv`. Other square shapes:
+        batched ``xp.linalg.inv`` per basis pixel (``1e-100`` for singular pixels). Then
+        non-finite ``invC`` entries are set to ``0`` and non-finite ``detC`` to ``1``.
+        """
         
         # Check if a custom array module is used (like cupy), fallback to numpy
         try:
@@ -1740,7 +2124,11 @@ class SensitivityMatrixBase:
         return self.sens_mat.ndim
 
     def flatten(self) -> np.ndarray:
-        """Flatten sens mat array."""
+        """Return :attr:`sens_mat` reshaped to ``(-1, shape[-1])``.
+
+        For a 1D basis (FD) that is one row per matrix element; for a 2D basis (WDM) one row
+        per element and frequency layer.
+        """
         return self.sens_mat.reshape(-1, self.sens_mat.shape[-1])
 
     @property
@@ -1756,21 +2144,31 @@ class SensitivityMatrixBase:
         char_strain: Optional[bool] = False,
         **kwargs: dict,
     ) -> Tuple[plt.Figure, plt.Axes]:
-        """Produce a log-log plot of the sensitivity.
+        """Plot every matrix element against frequency on log-log axes (FD only).
 
         Args:
-            ax: Matplotlib Axes objects to add plots. Either a list of Axes objects or a single Axes object.
-            fig: Matplotlib figure object.
-            inds: Integer index to select out which data to add to a single access.
-                A list can be provided if ax is a list. They must be the same length.
-            char_strain: If ``True``, plot in characteristic strain representation. **Note**: assumes the sensitivity
-                is input as power spectral density.
-            **kwargs: Keyword arguments to be passed to ``loglog`` function in matplotlib.
+            ax: A list / array of Axes (length ``prod(shape[:-1])``, one per element), or
+                a single Axes together with ``inds``. Default ``None`` creates a figure with
+                the matrix layout (``nrows x ncols`` panels).
+            fig: Must be ``None``; passing a figure without ``ax`` raises
+                :class:`NotImplementedError`.
+            inds: Index into :attr:`sens_mat` of the element to draw on a single Axes.
+            char_strain: If ``True``, plot ``sqrt(f * S)`` (assumes :attr:`sens_mat` holds
+                PSDs). Default ``False``.
+            **kwargs: Forwarded to ``Axes.loglog``.
 
         Returns:
-            Matplotlib figure and axes objects in a 2-tuple.
+            tuple[plt.Figure | None, list[plt.Axes]]: The figure (``None`` when ``ax`` was
+            passed) and the axes drawn on.
 
+        Raises:
+            NotImplementedError: The basis is not FD, or ``fig`` is given without ``ax``.
+            TypeError: ``ax`` is a single Axes (see the note).
 
+        Note:
+            The single-Axes branch tests ``isinstance(ax, plt.axes)``; ``plt.axes`` is a
+            function, not a class, so passing a single Axes raises :class:`TypeError`
+            before its ``inds`` check (a :class:`ValueError` as written) is reached.
         """
         if (ax is None and fig is None) or (
             ax is not None and (isinstance(ax, list) or isinstance(ax, np.ndarray))
@@ -1821,17 +2219,38 @@ class SensitivityMatrixBase:
 
 
 class SensitivityMatrix(SensitivityMatrixBase):
-    """Container to hold sensitivity information.
+    """Sensitivity matrix assembled from PSD classes, stock names, or arrays.
+
+    Each leaf of the nested ``sens_mat`` layout is evaluated with :func:`get_sensitivity`
+    on ``settings`` (so FD and WDM both work), and :attr:`invC` / :attr:`detC` follow
+    lazily. A 1D list gives uncorrelated channels (``channel_shape = (nch,)``); a 2D list a
+    full cross-spectral matrix.
 
     Args:
         settings: Domain settings (a :class:`~lisatools.domains.DomainSettingsBase`,
             e.g. :class:`~lisatools.domains.FDSettings`) describing the basis the
             sensitivity is evaluated on (its ``f_arr`` in FD, etc.).
-        sens_mat: Input sensitivity list. The shape of the nested lists should represent the shape of the
-            desired matrix. Each entry in the list must be an array, :class:`Sensitivity`-derived object,
-            or a string corresponding to the :class:`Sensitivity` object.
-        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
+        sens_mat: Input sensitivity layout. The shape of the nested lists sets the shape of
+            the matrix. The leaves must all be of one kind: 1D arrays (used as given),
+            :class:`Sensitivity` subclasses, or stock names
+            (:func:`get_stock_sensitivity_options`).
+        *sens_args: Positional arguments forwarded to every element's ``get_Sn`` (through
+            :func:`get_sensitivity`).
+        sens_kwargs_mat: Optional per-element keyword dicts with the same nested layout as
+            ``sens_mat`` (overrides ``**sens_kwargs``).
+        **sens_kwargs: Keywords forwarded to every element's evaluation: those of
+            :func:`get_sensitivity` (``fill_nans``, ``wdm_psd_method``, ...) and of
+            :meth:`Sensitivity.get_Sn` (``model``, ``stochastic_params``, ...).
 
+    Example:
+        >>> from lisatools.domains import FDSettings
+        >>> from lisatools.sensitivity import SensitivityMatrix
+        >>> fd = FDSettings(N=1001, df=1e-5, min_freq=1e-4, force_backend="cpu")
+        >>> sens = SensitivityMatrix(fd, ["X2TDISens", "Y2TDISens", "Z2TDISens"], model="sangria")
+        >>> sens.channel_shape
+        (3,)
+        >>> sens.invC.shape == sens.shape
+        True
     """
 
     def __init__(
@@ -1858,15 +2277,16 @@ class SensitivityMatrix(SensitivityMatrixBase):
 
 
 class XYZ1SensitivityMatrix(SensitivityMatrix):
-    """Default sensitivity matrix for XYZ (TDI 1)
+    """Stock 3x3 XYZ covariance for TDI 1.5, equal-arm analytic model.
 
-    This is 3x3 symmetric matrix.
+    Diagonal :class:`X1TDISens` / :class:`Y1TDISens` / :class:`Z1TDISens`, off-diagonal
+    :class:`XY1TDISens` / :class:`YZ1TDISens` / :class:`ZX1TDISens`; real symmetric.
 
     Args:
         settings: Domain settings (e.g. :class:`~lisatools.domains.FDSettings`)
             whose ``f_arr`` sets the frequency grid.
-        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
-
+        **sens_kwargs: Keywords forwarded to every element (see :class:`SensitivityMatrix`),
+            e.g. ``model="sangria"`` or ``stochastic_params=...``.
     """
 
     def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
@@ -1879,41 +2299,38 @@ class XYZ1SensitivityMatrix(SensitivityMatrix):
 
 
 class XYZ2SensitivityMatrix(SensitivityMatrix):
-    """
-    Default sensitivity matrix for XYZ channels using TDI2 transfer functions.
+    """Stock 3x3 XYZ covariance for TDI 2.0, equal-arm analytic model.
 
-    This creates a 3×3 Hermitian covariance matrix accounting for correlations
-    between the X, Y, and Z TDI channels due to shared noise sources (S_pm and S_op).
-
-    Matrix structure:
-        Σ(f) = [ Σ_XX   Σ_XY   Σ_XZ ]
-               [ Σ_YX   Σ_YY   Σ_YZ ]  at each frequency
-               [ Σ_ZX   Σ_ZY   Σ_ZZ ]
+    The covariance accounts for the correlations between the X, Y, and Z channels from
+    the shared noise sources (``S_pm`` and ``S_op``): diagonal :class:`X2TDISens` /
+    :class:`Y2TDISens` / :class:`Z2TDISens`, off-diagonal :class:`XY2TDISens` /
+    :class:`YZ2TDISens` / :class:`ZX2TDISens` (real symmetric for equal arms). This is the
+    standard covariance for single-source analyses and the tutorials; the global fit
+    instead uses the unequal-arm :class:`UnequalArmInstrumentNoise` through
+    :class:`CompositeSensitivityBackend`.
 
     Args:
         settings: Domain settings (e.g. :class:`~lisatools.domains.FDSettings`)
             whose ``f_arr`` sets the frequency grid [Hz].
-        **sens_kwargs: Keyword arguments to pass to Sensitivity.get_Sn()
-            (e.g., model=lisa_models.sangria).
+        **sens_kwargs: Keywords forwarded to every element (see :class:`SensitivityMatrix`),
+            e.g. ``model="sangria"``, ``stochastic_params=...``,
+            ``stochastic_function=...``.
 
-    Notes:
-        - Inherits matrix inversion and determinant computation from SensitivityMatrix
-        - The invC attribute provides Σ⁻¹(f) for likelihood computations
-        - The detC attribute provides det[Σ(f)] for normalization
+    Note:
+        :attr:`invC` gives the per-pixel inverse covariance used by the likelihood and
+        :attr:`detC` its determinant.
+
+    Example:
+        >>> from lisatools.domains import FDSettings
+        >>> from lisatools.sensitivity import XYZ2SensitivityMatrix
+        >>> fd = FDSettings(N=8001, df=1.25e-5, min_freq=1e-4, max_freq=1e-1, force_backend="cpu")
+        >>> sens = XYZ2SensitivityMatrix(fd, model="sangria")
+        >>> sens.shape[:2], sens.invC.shape[:2]
+        ((3, 3), (3, 3))
     """
 
     def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
-        """
-        Initialize TDI2 sensitivity matrix.
-
-        Args:
-            settings: Domain settings containing frequency array and other parameters.
-            **sens_kwargs: Keyword arguments for Sensitivity.get_Sn()
-                Common kwargs:
-                    - model: LISA noise model (e.g., sangria, sangria)
-                    - stochastic_params: Parameters for galactic foreground
-                    - stochastic_function: Custom stochastic function
-        """
+        """Build the 3x3 layout and evaluate it (arguments documented on the class)."""
         # Define 3×3 matrix structure
         # Diagonal: X2, Y2, Z2 PSDs
         # Off-diagonal: XY2, YZ2, ZX2 CSDs
@@ -1927,15 +2344,15 @@ class XYZ2SensitivityMatrix(SensitivityMatrix):
 
 
 class AET1SensitivityMatrix(SensitivityMatrix):
-    """Default sensitivity matrix for AET (TDI 1)
+    """Stock A/E/T PSDs for TDI 1.5 (equal-arm analytic model), uncorrelated channels.
 
-    This is just an array because no cross-terms.
+    A 1D layout ``[A1TDISens, E1TDISens, T1TDISens]`` (``channel_shape = (3,)``): the
+    A/E/T basis has no cross-terms for equal arms.
 
     Args:
         settings: Domain settings (e.g. :class:`~lisatools.domains.FDSettings`)
             whose ``f_arr`` sets the frequency grid.
-        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
-
+        **sens_kwargs: Keywords forwarded to every element (see :class:`SensitivityMatrix`).
     """
 
     def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
@@ -1944,14 +2361,15 @@ class AET1SensitivityMatrix(SensitivityMatrix):
 
 
 class AET2SensitivityMatrix(SensitivityMatrix):
-    """Default sensitivity matrix for AET (TDI 2)
+    """A/E/T PSDs for TDI 2.0 (equal-arm analytic model), uncorrelated channels.
 
-    This is just an array because no cross-terms.
+    A 1D layout ``[A2TDISens, E2TDISens, T2TDISens]`` (``channel_shape = (3,)``): the
+    A/E/T basis has no cross-terms for equal arms.
 
     Args:
-        f: Frequency array.
-        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
-
+        settings: Domain settings (e.g. :class:`~lisatools.domains.FDSettings`)
+            whose ``f_arr`` sets the frequency grid.
+        **sens_kwargs: Keywords forwarded to every element (see :class:`SensitivityMatrix`).
     """
 
     def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
@@ -1960,12 +2378,14 @@ class AET2SensitivityMatrix(SensitivityMatrix):
 
 
 class AE1SensitivityMatrix(SensitivityMatrix):
-    """Default sensitivity matrix for AE (no T) (TDI 1)
+    """Stock A/E PSDs (no T) for TDI 1.5 (equal-arm analytic model), uncorrelated channels.
+
+    A 1D layout ``[A1TDISens, E1TDISens]`` (``channel_shape = (2,)``).
 
     Args:
-        f: Frequency array.
-        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
-
+        settings: Domain settings (e.g. :class:`~lisatools.domains.FDSettings`)
+            whose ``f_arr`` sets the frequency grid.
+        **sens_kwargs: Keywords forwarded to every element (see :class:`SensitivityMatrix`).
     """
 
     def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
@@ -1974,12 +2394,14 @@ class AE1SensitivityMatrix(SensitivityMatrix):
 
 
 class AE2SensitivityMatrix(SensitivityMatrix):
-    """Default sensitivity matrix for AE (no T) (TDI 1)
+    """A/E PSDs (no T) for TDI 2.0 (equal-arm analytic model), uncorrelated channels.
+
+    A 1D layout ``[A2TDISens, E2TDISens]`` (``channel_shape = (2,)``).
 
     Args:
-        f: Frequency array.
-        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
-
+        settings: Domain settings (e.g. :class:`~lisatools.domains.FDSettings`)
+            whose ``f_arr`` sets the frequency grid.
+        **sens_kwargs: Keywords forwarded to every element (see :class:`SensitivityMatrix`).
     """
 
     def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
@@ -1988,14 +2410,20 @@ class AE2SensitivityMatrix(SensitivityMatrix):
 
 
 class LISASensSensitivityMatrix(SensitivityMatrix):
-    """Default sensitivity matrix adding :class:`LISASens` for the specified number of channels.
+    """The sky-averaged :class:`LISASens` curve repeated for ``nchannels`` uncorrelated channels.
 
     Args:
         settings: Domain settings (e.g. :class:`~lisatools.domains.FDSettings`)
             whose ``f_arr`` sets the frequency grid.
-        nchannels: Number of channels.
-        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
+        nchannels: Number of channels (``channel_shape = (nchannels,)``).
+        **sens_kwargs: Keywords forwarded to every element (see :class:`SensitivityMatrix`).
 
+    Example:
+        >>> from lisatools.domains import FDSettings
+        >>> from lisatools.sensitivity import LISASensSensitivityMatrix
+        >>> fd = FDSettings(N=1001, df=1e-5, min_freq=1e-4, force_backend="cpu")
+        >>> LISASensSensitivityMatrix(fd, 1).channel_shape
+        (1,)
     """
 
     def __init__(
@@ -2004,6 +2432,7 @@ class LISASensSensitivityMatrix(SensitivityMatrix):
         sens_mat = [LISASens for _ in range(nchannels)]
         super().__init__(settings, sens_mat, **sens_kwargs)
 
+# TODO check: keep/remove/document -- no callers in src/, tests/ or scripts/
 def randc(shape):
     """Return complex Gaussian noise with the given ``shape`` (real + imaginary unit-variance)."""
     return np.random.randn(*shape) + 1j*np.random.randn(*shape)
@@ -2036,7 +2465,21 @@ def _wdm_stationary_psd_column(
     kwargs,
     wdm_psd_method,
 ):
-    """Evaluate one stationary WDM PSD column under the selected policy."""
+    """Evaluate one stationary WDM PSD column under the selected ``wdm_psd_method``.
+
+    ``"layer_constant"``: ``0.5 * get_Sn(f_layer_centres)``; ``"layer_calibrated"``: a
+    :data:`STOCHASTIC_WDM_QUADRATURE_NODES`-node window-weighted quadrature per layer
+    (``wdm_layer_quadrature_data``); ``"fold"``: the exact sparse fold of the DFT-grid PSD
+    (``fold_sparse_psd``). A :class:`~lisatools.domains.CoarseWDMSettings` evaluates on its
+    fine settings. ``args`` / ``kwargs`` go to ``sensitivity.get_Sn``.
+
+    Returns:
+        xp.ndarray: The column, length ``Nf_active`` on the last axis (numpy or cupy,
+        following the settings backend).
+
+    Raises:
+        ValueError: Unknown ``wdm_psd_method``.
+    """
     fold_settings = (
         basis_settings.fine_settings
         if isinstance(basis_settings, domains.CoarseWDMSettings)
@@ -2121,23 +2564,43 @@ def get_sensitivity(
     stationary: bool = True,
     **kwargs,
 ) -> float | np.ndarray:
-    """Generic sensitivity generator
+    """Evaluate a sensitivity curve on a domain.
 
-    Same interface to many sensitivity curves.
+    Same interface to every PSD class in this module (and any class with a ``get_Sn``
+    method). In FD the curve is ``sens_fn.get_Sn(basis_settings.f_arr, ...)``; in WDM the
+    Fourier-domain PSD is mapped to the wavelet basis according to ``wdm_psd_method`` and
+    returned as a ``(Nf_active, Nt_active)`` array. Every :class:`SensitivityMatrix` element
+    and the generic paths of the composite components (:class:`InstrumentNoise`,
+    :class:`GalacticForeground`, :class:`SGWB`) go through it; the unequal-arm instrument
+    (:class:`UnequalArmInstrumentNoise`) and the CPU WDM foreground fast paths compute the
+    same values directly.
 
     Args:
         basis_settings: Domain settings (a
             :class:`~lisatools.domains.DomainSettingsBase`, e.g.
-            :class:`~lisatools.domains.FDSettings`) whose ``f_arr`` sets the
+            :class:`~lisatools.domains.FDSettings` or
+            :class:`~lisatools.domains.WDMSettings`) whose ``f_arr`` sets the
             evaluation grid. A raw frequency scalar/array is also accepted for
             backward compatibility (the sensitivity is then evaluated directly
             on those frequencies).
         *args: Any additional arguments for the sensitivity function ``get_Sn`` method.
-        sens_fn: String or class that represents the name of the desired PSD function.
+        sens_fn: Stock name (:func:`get_stock_sensitivity_options`) or class with a
+            ``get_Sn`` method. Default :class:`LISASens`.
         return_type: Describes the desired output. Choices are ``"ASD"``,
-            ``"PSD"``, or ``"char_strain"`` (characteristic strain). Default is ``"PSD"``.
-        fill_nans: Value to fill nans in sensitivity (at 0 frequency).
-            If ``None``, thens nans will be left in the array.
+            ``"PSD"``, or ``"char_strain"`` (characteristic strain ``sqrt(f * PSD)``).
+            Default is ``"PSD"``.
+        fill_nans: Value to fill nans in sensitivity (at 0 frequency); must be a
+            ``float`` for domain-settings input. Default ``np.nan`` (NaNs stay). If
+            ``None``, NaNs are left in the array as well. For a raw frequency input the
+            fill uses ``np.nan_to_num``, which also replaces infinities with the largest
+            finite floats.
+        args_list: WDM only: one positional-argument tuple per wavelet time column
+            (length ``Nt``, or ``Ncoarse`` on a coarse grid), used column by column when
+            ``stationary=False``; with ``stationary=True`` only its first entry is used.
+            Default ``None`` repeats ``args``.
+        kwargs_list: WDM only: one keyword dict per wavelet time column, same length as
+            ``args_list`` and used the same way. Default ``None`` repeats ``kwargs``; when
+            given, the top-level ``kwargs`` are NOT merged into its entries.
         wdm_psd_method: How to build the WDM (wavelet) noise PSD (ignored for
             non-WDM domains). ``"fold"`` (default) folds the full-resolution
             Fourier-domain PSD into the wavelet basis (matches the forward WDM
@@ -2158,11 +2621,32 @@ def get_sensitivity(
             (default) returns instrument + stochastic; ``False`` returns only the
             stochastic contribution (``model`` then unused) — folded through the
             same domain dispatch, so it works in FD, WDM, etc.
-        **kwargs: Keyword arguments to pass to sensitivity function ``get_Sn`` method.
+        **kwargs: Keyword arguments to pass to sensitivity function ``get_Sn`` method
+            (``model``, ``include_instrument``, ``stochastic_params``, ``ltts``, ...).
 
-    Return:
-        Sensitivity values.
+    Returns:
+        np.ndarray: The requested quantity (numpy or cupy, following the domain): shape of
+        ``f_arr`` in FD or for a raw frequency input, ``(Nf_active, Nt_active)`` in WDM
+        (``(Nf_active, Ncoarse)`` on a :class:`~lisatools.domains.CoarseWDMSettings`).
 
+    Raises:
+        ValueError: ``sens_fn`` is neither a stock name nor a class with ``get_Sn``, an
+            unknown ``return_type`` or ``wdm_psd_method``, malformed ``args_list`` /
+            ``kwargs_list``, or an unsupported domain type.
+        NotImplementedError: ``basis_settings`` is a
+            :class:`~lisatools.domains.TDSettings` or
+            :class:`~lisatools.domains.STFTSettings`.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.domains import FDSettings
+        >>> from lisatools.sensitivity import get_sensitivity, LISASens, X1TDISens
+        >>> f = np.logspace(-4, -1, 3000)
+        >>> hc_lisa = get_sensitivity(f, sens_fn=LISASens, return_type="char_strain")
+        >>> fd = FDSettings(N=8001, df=1.25e-5, min_freq=1e-4, max_freq=1e-1, force_backend="cpu")
+        >>> hc_X = get_sensitivity(fd, sens_fn=X1TDISens, return_type="char_strain")
+        >>> hc_X.shape == fd.f_arr.shape
+        True
     """
 
     if isinstance(sens_fn, str):
@@ -2361,11 +2845,14 @@ __stock_sens_options__ = [
 
 
 def get_stock_sensitivity_options() -> List[Sensitivity]:
-    """Get stock options for sensitivity curves.
+    """Names of the stock sensitivity curves accepted as ``sens_fn`` strings.
+
+    The TDI 1.5 XYZ and A/E/T elements, the TDI 2.0 XYZ elements, :class:`LISASens`,
+    :class:`CornishLISASens`, and :class:`FlatPSDFunction`. The TDI 2.0 A/E/T classes and
+    the unequal-arm elements are not in the list; pass those as classes.
 
     Returns:
-        List of stock sensitivity options.
-
+        list[str]: The class names (the module list itself, not a copy).
     """
     return __stock_sens_options__
 
@@ -2379,24 +2866,26 @@ __stock_sensitivity_mat_options__ = [
 
 
 def get_stock_sensitivity_matrix_options() -> List[SensitivityMatrix]:
-    """Get stock options for sensitivity matrix.
+    """Names of the stock sensitivity-matrix classes.
 
     Returns:
-        List of stock sensitivity matrix options.
-
+        list[str]: The module list itself: ``XYZ1SensitivityMatrix``,
+        ``XYZ2SensitivityMatrix``, ``AET1SensitivityMatrix``, ``AE1SensitivityMatrix``.
     """
     return __stock_sensitivity_mat_options__
 
 
 def get_stock_sensitivity_from_str(sensitivity: str) -> Sensitivity:
-    """Return a LISA sensitivity from a ``str`` input.
+    """Return the stock sensitivity class with the given name.
 
     Args:
-        sensitivity: Sensitivity indicated with a ``str``.
+        sensitivity: One of :func:`get_stock_sensitivity_options`.
 
     Returns:
-        Sensitivity associated to that ``str``.
+        type[Sensitivity]: The class (not an instance).
 
+    Raises:
+        ValueError: The name is not a stock option.
     """
     if sensitivity not in __stock_sens_options__:
         raise ValueError(
@@ -2406,14 +2895,24 @@ def get_stock_sensitivity_from_str(sensitivity: str) -> Sensitivity:
 
 
 def check_sensitivity(sensitivity: Any) -> Sensitivity:
-    """Check input sensitivity.
+    """Resolve and validate a sensitivity given as a class or a stock name.
 
     Args:
-        sensitivity: Sensitivity to check.
+        sensitivity: A :class:`Sensitivity` subclass, or a name from
+            :func:`get_stock_sensitivity_options`.
 
     Returns:
-        Sensitivity checked. Adjusted from ``str`` if ``str`` input.
+        type[Sensitivity]: The class.
 
+    Raises:
+        ValueError: An unknown name, or a class that is not a :class:`Sensitivity`
+            subclass.
+        TypeError: ``sensitivity`` is neither a string nor a class (from ``issubclass``).
+
+    Example:
+        >>> from lisatools.sensitivity import check_sensitivity, X2TDISens
+        >>> check_sensitivity("X2TDISens") is X2TDISens
+        True
     """
     if isinstance(sensitivity, str):
         sensitivity = get_stock_sensitivity_from_str(sensitivity)
@@ -2446,9 +2945,13 @@ class SensitivityBackendBase(LISAToolsParallelModule):
 
     Args:
         settings: Domain settings the matrix is evaluated on (FD, WDM, ...).
-        tdi_generation: 1 (TDI 1.5) or 2 (TDI 2.0).
+        tdi_generation: 1 (TDI 1.5) or 2 (TDI 2.0). Default ``2``.
         force_backend: Backend selector (``"cpu"`` / a CUDA name / ``"jax"``);
             see :class:`~lisatools.utils.parallelbase.LISAToolsParallelModule`.
+
+    Attributes:
+        basis_settings (DomainSettingsBase): The domain settings.
+        tdi_generation (int): The TDI generation.
     """
 
     def __init__(
@@ -2502,9 +3005,15 @@ class SensitivityBackendBase(LISAToolsParallelModule):
                 entirely in the backend's ``extra_components`` (e.g. a
                 :class:`MojitoNoiseEstimates` table) — no parametric
                 instrument component is built then.
-            galfor_params: Optional galactic-foreground parameters.
-            sgwb_params: Optional SGWB spectral-template parameters.
-            transform_fn: Optional PSD :class:`TransformContainer`.
+            galfor_params: Optional galactic-foreground parameters, physical basis (not
+                transformed here). The layout is the subclass's: the foreground model's
+                own order for :class:`CompositeSensitivityBackend`
+                (``(amp, fk, alpha, f_1, f_2)`` for the default hyperbolic-tangent model),
+                ``[Amp, alpha, f_1, kn, f_2]`` for :class:`XYZSensitivityBackend`.
+            sgwb_params: Optional SGWB spectral-template parameters (ignored by
+                :class:`XYZSensitivityBackend`).
+            transform_fn: Optional PSD :class:`~eryn.utils.TransformContainer`, applied
+                to ``psd_params`` only (``both_transforms``).
             basis_settings: Optional domain settings to evaluate the matrix
                 on instead of the backend's own :attr:`basis_settings`. Must
                 compare value-equal to them (``DomainSettingsBase.__eq__``);
@@ -2512,6 +3021,11 @@ class SensitivityBackendBase(LISAToolsParallelModule):
                 per-walker build allocates and reads on the walker's owning
                 device (see ``PSDMove``). ``None`` (default) keeps the
                 historical behavior exactly.
+
+        Returns:
+            SensitivityMatrixBase: The per-walker matrix (a
+            :class:`CompositeSensitivityMatrix` or a configured
+            :class:`XYZSensitivityBackend` copy, depending on the subclass).
         """
         if psd_params is None:
             return self._build_matrix(
@@ -2552,18 +3066,24 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
     optional spline interpolation and galactic-foreground contributions.
     Currently supports TDI generations 1 and 2, but only XYZ channels.
 
+    It is an alternative ``sensitivity_backend``; the production global fit uses
+    :class:`CompositeSensitivityBackend`. When the backend build lacks
+    ``SensitivityMatrixWrap``, ``pycpp_sensitivity_matrix`` is ``None`` and every kernel
+    call raises :class:`RuntimeError`.
+
     Args:
         orbits: Configured :class:`~lisatools.detector.L1Orbits` instance providing
             light travel times and spacecraft positions.
         settings: Domain settings (frequency or time-frequency) the matrix is
             evaluated on.
-        tdi_generation: 1 for TDI 1.5 or 2 for TDI 2.0.
+        tdi_generation: 1 for TDI 1.5 or 2 for TDI 2.0. Default ``2``.
         use_splines: If ``True``, use Akima spline interpolation for the noise
-            knots passed in :meth:`set_sensitivity_matrix`.
+            knots passed in :meth:`set_sensitivity_matrix`. Default ``False``.
         spline_order: Order of the Akima interpolant (passed through to
-            :class:`cudakima.AkimaInterpolant1D`).
+            :class:`cudakima.AkimaInterpolant1D`). Default ``"cubic"``.
         force_backend: Backend selector (``"cpu"`` or a CUDA name); see
-            :class:`LISAToolsParallelModule`.
+            :class:`LISAToolsParallelModule`. Default ``"cpu"``. Must match the backend
+            of ``orbits``.
         mask_percentage: Fractional bandwidth around transfer-function dips that
             is masked out (defaults to ``0.05``).
         galactic_grid_kwargs: Optional dictionary of keyword arguments to set up
@@ -2630,6 +3150,7 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
 
     @property
     def kwargs(self):
+        """dict: Constructor keywords that rebuild an equivalent backend."""
         return {
             "orbits": self.orbits,
             "settings": self.basis_settings,
@@ -2674,9 +3195,12 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
         Link ordering follows ``orbits.LINKS``: [12, 23, 31, 13, 32, 21].
         Averages are taken between opposite-direction pairs (12↔21, 23↔32, 31↔13).
 
+        Side effect: sets :attr:`time_indices` (and the FD-averaging flag).
+
         Returns:
-            avg_ltts: Mean light-travel times per arm. Shape ``(n_epochs, 6)``.
-            delta_ltts: Signed difference (forward − backward) per arm. Shape ``(n_epochs, 6)``.
+            tuple[xp.ndarray, xp.ndarray]: ``(avg_ltts, delta_ltts)``, the mean light-travel
+            times per link pair and the signed difference (forward - backward), each of
+            shape ``(n_epochs, 6)`` in seconds.
 
         Note:
             ``n_epochs`` (the first axis of the returned arrays — it becomes the C++
@@ -2911,17 +3435,19 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
         return dips_indices
 
     def _sanitize_galactic_grid_kwargs(self, kwargs: dict) -> None:
-        """
-        Check that the galactic grid kwargs are valid and contain the necessary parameters.
-        
+        """Check that the galactic-grid keywords are present and of the right type.
+
         Args:
-            kwargs: Dictionary of galactic grid parameters to check. Expected keys include:
-                - R_d: Disk radial scale length [kpc]
-                - z_d: Disk vertical scale height [kpc]
-                - t0: Reference time at which to compute the initial LISA orbital phase and rotation angle.
-                - N_lambda: Number of ecliptic longitude points for quadrature (optional, default 90)
-                - N_beta: Number of ecliptic latitude points for quadrature (optional, default 60)
-                - galactic_grid: Optional pre-computed galactic grid object (e.g., from another instance) to reuse
+            kwargs: Galactic-grid parameters. Required numbers: ``R_d`` (disk radial scale
+                length, kpc), ``z_d`` (disk vertical scale height, kpc), ``t0`` (reference
+                time of the initial LISA orbital phase and rotation angle, s). Optional
+                integers: ``N_lambda`` (ecliptic-longitude quadrature points, default 90),
+                ``N_beta`` (ecliptic-latitude points, default 60). Optional
+                ``galactic_grid``: a precomputed grid object to reuse (any type).
+
+        Raises:
+            ValueError: A required key is missing or not a number, or an optional count is
+                not an ``int``.
         """
         required_keys = ["R_d", "z_d", "t0"]
         for key in required_keys:
@@ -2948,21 +3474,22 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
             N_beta: Optional[int] = 60,
             galactic_grid: Optional[Any] = None
         ) -> None:
-        """
-        Compute the fixed galactic sky geometry if not provided, and attach it to the sensitivity backend.
+        """Build (or reuse) the galactic sky geometry and attach it to the C++ kernel.
 
-        Called once during setup.  After this call, sensitivity_backend.pycpp_sensitivity_matrix
-        has gal_R_avg wired in and will include the galactic foreground in every likelihood
-        evaluation automatically, scaled by the per-walker spectral parameters passed via
-        Amp_all, alpha_all, f_1_all, f_knee_all, f_2_all.
+        Called once during setup. Afterwards ``pycpp_sensitivity_matrix`` has the grid's
+        ``gal_R_avg`` wired in and includes the galactic foreground in every covariance /
+        likelihood evaluation, scaled by the per-walker spectral parameters (``Amp``,
+        ``alpha``, ``f_1``, ``kn``, ``f_2``). On a domain without ``t_arr`` the sky average
+        is evaluated at ``t0`` only.
 
         Args:
-            R_d: Disk radial scale length [kpc]
-            z_d: Disk vertical scale height [kpc]
-            t0: Reference time at which to compute the initial LISA orbital phase and rotation angle.
-            N_lambda: Number of ecliptic longitude points for quadrature (default 90)
-            N_beta: Number of ecliptic latitude points for quadrature (default 60)
-            galactic_grid: Optional pre-computed galactic grid object (e.g., from another instance) to reuse
+            R_d: Disk radial scale length [kpc].
+            z_d: Disk vertical scale height [kpc].
+            t0: Reference time (s) for the initial LISA orbital phase and rotation angle.
+            N_lambda: Number of ecliptic-longitude points for the quadrature. Default 90.
+            N_beta: Number of ecliptic-latitude points for the quadrature. Default 60.
+            galactic_grid: Optional precomputed grid object (e.g. from another instance) to
+                reuse instead of building one.
         """
         if galactic_grid is not None:
             self._galactic_grid = galactic_grid
@@ -3034,11 +3561,11 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
         beta0: float,
         t0: float
     ) -> None:
-        """
-        Build the GalacticGridWrap, compute fixed sky weights and R_avg, and
-        attach to the C++ sensitivity matrix.  Call once before inference.
+        """Build the ``GalacticGridWrap`` and compute its fixed sky weights and ``R_avg``.
 
-        The grid is stored on self and propagated to any copies made via __call__.
+        Stores the grid on ``self._galactic_grid`` (shared by reference with the per-walker
+        copies made through ``__call__``); :meth:`_setup_galactic_grid` attaches it to the
+        kernel.
 
         Args:
             times:        Segment centre times (N_times,)
@@ -3104,7 +3631,15 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
         knots_position_all: NDArrayLike = None,
         knots_amplitude_all: NDArrayLike = None,
     ):
-        """Compute the 6 sensitivity matrix terms using the c++ backend."""
+        """Compute the 6 unique matrix elements with the C++ ``get_noise_covariance_wrap``.
+
+        Arguments as in :meth:`compute_sensitivity_matrix`. Returns flat arrays of length
+        ``basis_settings.total_terms`` in the order ``(c00, c11, c22, c01, c02, c12)``
+        (diagonals ``float64``, cross terms ``complex128``).
+
+        Raises:
+            RuntimeError: The native kernel is unavailable in this build.
+        """
 
         xp = self.xp
         total_terms = self.basis_settings.total_terms
@@ -3244,9 +3779,9 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
                 (zeros of the transfer function) before returning. Default ``False``.
 
         Returns:
-            Hermitian covariance matrix ``Σ(f)``. Shape ``(3, 3, n_times, n_freqs)``
-            (or ``(3, 3, n_freqs)`` for FD analyses with a single time point),
-            dtype ``complex128``.
+            xp.ndarray: Hermitian covariance matrix ``Σ(f)``, shaped
+            ``(3, 3, *basis_shape_active)`` (``(3, 3, n_freqs)`` for FD), dtype
+            ``complex128``.
         """
         c00, c11, c22, c01, c02, c12 = self._compute_matrix_elements(
             freqs,
@@ -3283,12 +3818,13 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
 
         Computes the 3×3 XYZ covariance matrix at ``self.f_arr`` via the C++ kernel,
         applies Gaussian smoothing around the TDI transfer-function notches, and
-        stores the result in ``self.sens_mat``.  The inverse and log-determinant
-        (``self.invC``, ``self.detC``) are recomputed immediately via
-        :meth:`_setup_det_and_inv`.
+        stores the result in ``self.sens_mat``. The inverse and determinant
+        (``self.invC``, ``self.detC``) are recomputed by :meth:`_setup_det_and_inv` on
+        their next read (the ``sens_mat`` setter marks them stale).
 
-        This is the method called by :meth:`__call__` to update a per-walker copy of
-        the backend with new PSD/foreground parameters at each MCMC step.
+        This is the method :meth:`_build_matrix` (reached through ``__call__``) uses to
+        update a per-walker copy of the backend with new PSD/foreground parameters at each
+        MCMC step.
 
         Args:
             Soms_d_in: Displacement (OMS) noise amplitude ``S_oms`` [m/√Hz]. Default 15 pm/√Hz.
@@ -3322,7 +3858,11 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
         self.sens_mat = self.smooth_sensitivity_matrix(sens_mat, sigma=self.smoothing_sigma)
 
     def _setup_det_and_inv(self):
-        """use the c++ backend to compute the log-determinant and inverse of the sensitivity matrix."""
+        """Compute ``invC`` / ``detC`` with the C++ kernel and sanitize non-finite pixels.
+
+        Non-finite inverse entries are set to ``0``; non-finite or non-positive
+        determinants to ``1``.
+        """
         c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(self.sens_mat, flatten=True)
         invC, detC = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
 
@@ -3356,7 +3896,14 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
         c02: NDArrayLike,
         c12: NDArrayLike,
     ) -> tuple:
-        """Wrapper to call c++ backend for inverse log-determinant computation."""
+        """Invert the 3x3 matrix per pixel with the C++ ``get_inverse_det_wrap``.
+
+        Takes the six flat unique elements and returns ``(inverse_matrix, det)`` with
+        shapes ``(3, 3, *basis_shape_active)`` and ``basis_shape_active``.
+
+        Raises:
+            RuntimeError: The native kernel is unavailable in this build.
+        """
 
         xp = self.xp
         total_terms = self.basis_settings.total_terms
@@ -3381,15 +3928,15 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
         return inverse_matrix, det.reshape(self.basis_settings.basis_shape_active)
 
     def compute_inverse_det(self, matrix_in: NDArrayLike) -> tuple:
-        """
-        Invert the 3x3 sensitivity matrix and compute its log-determinant with the c++ backend.
+        """Invert a 3x3 sensitivity matrix and compute its determinant with the C++ kernel.
 
         Args:
-            matrix_in: Input sensitivity matrix. Shape (3, 3, ...)
+            matrix_in: Input matrix, shape ``(3, 3, *basis_shape_active)`` (the trailing
+                size must equal ``basis_settings.total_terms``).
 
         Returns:
-            inverse_matrix: Inverted sensitivity matrix. Shape (3, 3, ...)
-            det: Determinant of the sensitivity matrix. Shape (...)
+            tuple[xp.ndarray, xp.ndarray]: ``(inverse_matrix, det)`` with shapes
+            ``(3, 3, *basis_shape_active)`` and ``basis_shape_active``.
         """
         c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(matrix_in, flatten=True)
         inverse_matrix, det = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
@@ -3409,9 +3956,9 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
             freqs: Frequency array [Hz]. Shape ``(n_freqs,)``.
 
         Returns:
-            12-tuple of arrays, each of shape ``(n_times, n_freqs)``:
+            tuple[xp.ndarray, ...]: 12 arrays, each of shape ``(n_times, n_freqs)``:
             ``(oms_xx, oms_xy, oms_xz, oms_yy, oms_yz, oms_zz,
-               tm_xx,  tm_xy,  tm_xz,  tm_yy,  tm_yz,  tm_zz)``.
+            tm_xx, tm_xy, tm_xz, tm_yy, tm_yz, tm_zz)``.
             Diagonal elements (``*_xx``, ``*_yy``, ``*_zz``) are real-valued;
             off-diagonal elements are complex.
         """
@@ -3486,8 +4033,11 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
         knots_amplitude_all: NDArrayLike = None,
         run_async: bool = False,
     ) -> NDArrayLike:
-        """
-        Compute log-likelihood using the c++ backend.
+        """Compute per-PSD noise log-likelihoods of the data with the C++ ``psd_likelihood`` kernel.
+
+        The kernel receives each PSD's noise and foreground levels (and spline weights when
+        ``use_splines``), the data rows with their PSD indices, the basis frequencies and
+        ``differential_component``, and ``dips_mask`` (the transfer-function dip bins).
 
         Args:
             data_in_all: Input data array. Shape (num_psds, num_freqs * num_times)
@@ -3504,7 +4054,10 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
             run_async: Whether to run the CUDA computation asynchronously. Default is False.
 
         Returns:
-            log_like_out: Computed log-likelihoods for each PSD. Shape (num_psds,)
+            xp.ndarray: Log-likelihood for each PSD, shape ``(num_psds,)``.
+
+        Raises:
+            RuntimeError: The native kernel is unavailable in this build.
         """
 
         xp = self.xp
@@ -3591,7 +4144,7 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
                 Default 5.
 
         Returns:
-            Smoothed sensitivity matrix, same shape and dtype as ``matrix_in``.
+            xp.ndarray: Smoothed sensitivity matrix, same shape and dtype as ``matrix_in``.
         """
         filter_func = np_gaussian_filter1d if self.xp == np else cp_gaussian_filter1d
 
@@ -3632,10 +4185,9 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
                 ``(2 * n_knots_oms + 2 * n_knots_tm,)`` for a single walker.
 
         Returns:
-            spline_knots_position: Log10-frequency positions of knots.
-                Shape ``(2, n_walkers, n_knots)`` — axis 0 indexes [OMS, TM].
-            spline_knots_amplitude: Knot amplitudes (multiplicative noise residuals).
-                Shape ``(2, n_walkers, n_knots)`` — axis 0 indexes [OMS, TM].
+            tuple[xp.ndarray, xp.ndarray]: The log10-frequency knot positions and the knot
+            amplitudes (multiplicative noise residuals), each of shape
+            ``(2, n_walkers, n_knots)`` with axis 0 indexing [OMS, TM].
         """
         
         spline_params = self.xp.atleast_2d(spline_params)
@@ -3673,7 +4225,7 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
 
         Args:
             name: Identifier label attached to the returned copy (``new_sens_mat.name``).
-            psd_params: Noise parameters for this walker.
+            params: Noise parameters for this walker (physical basis).
 
                 - Without splines: ``[Soms_d, Sa_a]`` — shape ``(2,)``.
                 - With splines: ``[Soms_d, Sa_a, amp₀, pos₀, amp₁, pos₁, ...]``
@@ -3683,19 +4235,21 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
             galfor_params: Galactic foreground parameters ``[Amp, alpha, f_1, kn, f_2]``
                 in physical (not log) units.  If ``None``, the foreground contribution
                 is zeroed out.
+            sgwb_params: Ignored.
+            basis_settings: Ignored.
 
         Returns:
-            A new :class:`XYZSensitivityBackend` instance with the sensitivity matrix,
-            its inverse, and log-determinant set to reflect the supplied parameters.
+            XYZSensitivityBackend: A shallow copy with :attr:`sens_mat` set from the
+            supplied parameters (its inverse and determinant follow on first read).
 
-        Notes:
+        Note:
             The copy is a **shallow** :func:`copy.copy`, not a re-construction.  All
             walker-independent state — orbits, spline interpolant, the C++ kernel
             (``pycpp_sensitivity_matrix``), the galactic grid, ``f_arr``, ``dips_mask``,
             window normalisation, basis settings — is shared by reference with the
             parent.  Only the per-walker arrays differ, and they are *rebound* (not
             mutated in place): :meth:`set_sensitivity_matrix` assigns a fresh
-            ``sens_mat`` whose setter recomputes ``invC``/``detC`` into new arrays, so
+            ``sens_mat``, and ``invC``/``detC`` are later recomputed into new arrays, so
             the parent's arrays are never touched.  This avoids re-allocating the C++
             kernel / interpolant and recomputing the (walker-independent) light-travel
             times and transfer-function dip mask on every MCMC step.
@@ -3792,7 +4346,8 @@ def modulation_from_elements(
         nchannels: Number of channels (3 for XYZ).
 
     Returns:
-        A callable ``t_arr -> (nch, nch, Ntime)`` filling the symmetric matrix.
+        Callable: ``t_arr -> (nch, nch, Ntime)`` filling the symmetric matrix; usable as
+        the ``modulation`` of :class:`GalacticForeground` or :class:`SGWB`.
     """
 
     def _mod(t_arr):
@@ -3840,16 +4395,36 @@ class GalForTimeModulation:
     interpolated onto the requested time grid.
 
     Prefer this over the analytic annual model (:func:`annual_modulation_matrix`
-    / :class:`AnnualCovarianceModulation`) when a measured/tabulated modulation
-    is available. The file and each domain-shaped interpolation are loaded
-    lazily and cached at runtime; derived caches are omitted from pickles so the
-    object still moves cleanly across MPI ranks.
+    / :class:`~lisatools.globalfit.stock.erebor.injections.AnnualCovarianceModulation`)
+    when a measured/tabulated modulation is available. The file and each domain-shaped
+    interpolation are loaded lazily and cached at runtime; derived caches are omitted from
+    pickles so the object still moves cleanly across MPI ranks. The production global fit
+    loads the packaged :data:`GALFOR_MODULATION_TABLE` (``GALFOR_MODULATION_PATH``, with
+    ``GALFOR_MODULATION_T0=data``).
 
     Args:
-        path: Path to the whitespace-delimited modulation table. A bare file name that
-            does not exist in the working directory resolves to the packaged copy in
+        path: Path to the whitespace-delimited modulation table, ``(Ntime, 7)`` (its
+            transpose is accepted too). A bare file name that does not exist in the
+            working directory resolves to the packaged copy in
             ``lisatools/galfor_modulation/`` (:func:`packaged_galfor_modulation_path`)
             when one exists.
+        t0: Absolute epoch (s) subtracted from the table's time column, so a table
+            written on an absolute mission clock lines up with the 0-based domain
+            ``t_arr``. Pass the data's first sample time for such tables. Default ``0.0``
+            (table already relative to the data start).
+
+    Raises:
+        ValueError: On first use, if the table is not 2D with 7 columns (or rows), is
+            ``7 x 7`` (ambiguous), or its time column is not strictly increasing; on a
+            call, if the requested times fall outside the table's coverage.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.sensitivity import CompositeSensitivityBackend, GalForTimeModulation
+
+            mod = GalForTimeModulation("modulation_unequal.dat", t0=data_t0)  # packaged
+            backend = CompositeSensitivityBackend(wdm_settings, galfor_modulation=mod)
     """
 
     def __init__(self, path: str, t0: float = 0.0):
@@ -3949,6 +4524,10 @@ class GalForTimeModulation:
         return values
 
     def __call__(self, t_arr):
+        """Interpolate the ``(3, 3)`` modulation onto ``t_arr`` (s, domain clock).
+
+        Returns a ``(3, 3, len(t_arr))`` numpy array (linear interpolation in time).
+        """
         glass = self._table()
         t_tab = glass[:, 0] - self.t0
         mod = np.array(
@@ -3976,12 +4555,18 @@ class NoiseComponent:
     Subclasses return the full ``(nch, nch, *basis_shape_active)`` contribution
     for the given domain settings. Use :class:`SeparableComponent` for the common
     factorised case (a base covariance times a per-element modulation).
+    :class:`CompositeSensitivityMatrix` sums the contributions of its components.
+
+    Attributes:
+        name (str): Component label.
+        nchannels (int): Number of channels, ``3`` (XYZ).
     """
 
     name: str = "component"
     nchannels: int = 3
 
     def covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+        """Contribution on ``settings``: ``(nch, nch, *basis_shape_active)``, backend ``xp``."""
         raise NotImplementedError
 
 
@@ -4006,6 +4591,13 @@ class SeparableComponent(NoiseComponent):
         return None
 
     def covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+        """``base_covariance * time_modulation``, broadcast per the modulation's shape.
+
+        Raises:
+            ValueError: A time-varying modulation on a domain without a time axis, a
+                modulation time length that differs from the basis time axis, or a
+                modulation that is neither 2D nor 3D.
+        """
         base = self.base_covariance(settings)  # (nch, nch, *basis)
         mod = self.time_modulation(settings)
         if mod is None:
@@ -4043,11 +4635,17 @@ class SeparableComponent(NoiseComponent):
 
 
 class InstrumentNoise(SeparableComponent):
-    """Stationary TDI instrument-noise covariance (no time modulation).
+    """Stationary XYZ TDI instrument-noise covariance, equal-arm analytic model.
+
+    The six elements come from the equal-arm XYZ classes of the chosen generation
+    (:class:`X2TDISens` ... :class:`YZ2TDISens` for TDI 2.0) through
+    :func:`get_sensitivity`. :class:`UnequalArmInstrumentNoise` is the drop-in
+    unequal-arm subclass that the production global fit uses.
 
     Args:
-        tdi_generation: 1 (TDI 1.5) or 2 (TDI 2.0).
-        model: LISA noise model (name or :class:`~lisatools.detector.LISAModel`).
+        tdi_generation: 1 (TDI 1.5) or 2 (TDI 2.0). Default ``2``.
+        model: LISA noise model (name or :class:`~lisatools.detector.LISAModel`). Default
+            ``"sangria"``.
         fill_nans: Passed to :func:`get_sensitivity` (default ``np.nan``, matching
             the stock matrices, leaves the ``f=0`` bin non-finite).
         basis_cache: Optional caller-owned dict enabling the two-basis fast
@@ -4056,6 +4654,12 @@ class InstrumentNoise(SeparableComponent):
             dict that outlives the component -- typically owned by the object
             that rebuilds the matrix per MCMC proposal, e.g.
             :class:`CompositeSensitivityBackend` -- to reuse the bases.
+        wdm_psd_method: WDM PSD policy forwarded to :func:`get_sensitivity`
+            (``"fold"``, ``"layer_constant"``, or ``"layer_calibrated"``). Default
+            ``"fold"``.
+
+    Raises:
+        ValueError: ``tdi_generation`` is not 1 or 2, or ``wdm_psd_method`` is unknown.
     """
 
     name = "instrument"
@@ -4103,6 +4707,7 @@ class InstrumentNoise(SeparableComponent):
         )
 
     def _direct_base_covariance(self, settings, model) -> np.ndarray:
+        """Evaluate the six elements with :func:`get_sensitivity` and fill the symmetric matrix."""
         xp = settings.xp
         nch = self.nchannels
         elems = [
@@ -4254,13 +4859,21 @@ class _UnequalArmSensMixin:
         Args:
             f: Frequency array (Hz).
             model: :class:`~lisatools.detector.LISAModel` carrying the squared
-                levels ``Soms_d`` / ``Sa_a``. Spline (``Sn_spl``) models are not
+                levels ``Soms_d`` / ``Sa_a`` (or a stock name). Default
+                ``lisa_models.sangria``. Spline (``Sn_spl``) models are not
                 supported on this path.
             include_instrument: ``False`` drops the instrument term, leaving only
                 any stochastic contribution (same contract as the base class).
             ltts: Length-6 light travel times (s) in :data:`UNEQUAL_ARM_LINKS`
                 order. Required when ``include_instrument`` is ``True``.
             **kwargs: Stochastic-contribution arguments, forwarded unchanged.
+
+        Returns:
+            np.ndarray: The element in fractional-frequency units (1/Hz), shape of ``f``;
+            real for the auto elements, complex for the cross elements.
+
+        Raises:
+            ValueError: ``ltts`` is missing, or the model is a spline (``Sn_spl``) model.
         """
         xp = cls.get_xp(f)
         if include_instrument:
@@ -4305,7 +4918,14 @@ class _UnequalArmSensMixin:
 
 
 class UnequalArmXX2TDISens(_UnequalArmSensMixin, X2TDISens):
-    """Unequal-arm TDI-2 ``C_XX``."""
+    """Unequal-arm TDI-2 ``C_XX``.
+
+    One of the six per-element XYZ classes (``_UNEQUAL_ARM_ELEMENT_SENS``), usable with
+    :func:`get_sensitivity`; ``get_Sn`` needs ``ltts=`` (see :class:`_UnequalArmSensMixin`).
+    :class:`UnequalArmInstrumentNoise` lists them as its element classes but builds its
+    covariance from the fused ``unequal_arm_tdi2_unit_covariances``. The stochastic response
+    is the equal-arm parent's.
+    """
 
     element = "XX"
     _expr = staticmethod(_ua_expr.noise_cov_XX)
@@ -4455,10 +5075,15 @@ class LinkDelayTable:
     def slice_averages(self, settings: domains.DomainSettingsBase) -> np.ndarray:
         """``(Nt, 6)`` delays, each the mean over one domain time slice.
 
-        Slices are centred on the domain's ``t_arr`` and one column-spacing
-        wide. Columns the table does not cover (a table coarser than the grid,
-        or a grid running past the tabulated span) fall back to linear
-        interpolation at the column centre, so the result is always finite.
+        Slices are centred on the full grid's column centres (``k * layer_dt`` for every
+        WDM column, cropped or not; otherwise the domain's ``t_arr``) and one
+        column-spacing wide, shifted by ``data_t0`` onto the table's clock. Columns the
+        table does not cover (a table coarser than the grid, or a grid running past the
+        tabulated span) fall back to linear interpolation at the column centre, so the
+        result is always finite. Cached per settings object.
+
+        Raises:
+            ValueError: ``settings`` has no time axis (``t_arr``).
         """
         t_arr = getattr(settings, "t_arr", None)
         if t_arr is None:
@@ -4525,6 +5150,18 @@ class LinkDelayTable:
             data_t0: Absolute time of domain time zero. ``None`` (default) uses
                 the file's own ``t0``, which is right whenever the analysed data
                 is this file's own span.
+
+        Returns:
+            LinkDelayTable: Table over the strided samples.
+
+        Example:
+            .. code-block:: python
+
+                from lisatools.detector import sangria
+                from lisatools.sensitivity import LinkDelayTable, UnequalArmInstrumentNoise
+
+                table = LinkDelayTable.from_l1_file("mojito_L1.h5", stride=200)
+                instrument = UnequalArmInstrumentNoise(ltts=table, model=sangria)
         """
         import h5py
 
@@ -4576,8 +5213,11 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
             setup; it happens once and is cached, so the per-proposal MCMC cost
             is the same as the stationary case either way.
         tdi_generation: Must be 2; the generated closed forms are TDI-2 only.
-        model: Noise model supplying the squared levels (name or
-            :class:`~lisatools.detector.LISAModel`).
+        model: Noise model supplying the squared levels, a
+            :class:`~lisatools.detector.LISAModel` (read as ``model.Soms_d`` /
+            ``model.Sa_a``). A stock name is not resolved on this path, so the string
+            default ``"sangria"`` raises :class:`AttributeError` at the first covariance
+            build; pass a model object (e.g. ``lisatools.detector.sangria``).
         fill_nans: Forwarded to :func:`get_sensitivity` for the ``f=0`` bin.
         basis_cache: Caller-owned dict enabling the two-basis fast path, exactly
             as on :class:`InstrumentNoise`.
@@ -4607,6 +5247,31 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
             amplitude, so ``1e-4`` keeps the induced bias well under the
             posterior width of even a two-year fit (5.6e-4). The two-year
             production grid measures 7.8e-7 here. Ignored by the other methods.
+
+    Raises:
+        ValueError: ``tdi_generation != 2``, ``ltts`` has the wrong shape, or
+            ``wdm_psd_method`` is unknown.
+
+    Note:
+        This is the instrument component of the 9-month and 12-month global-fit runs
+        (``UNEQUAL_ARM=1``): :class:`CompositeSensitivityBackend` rebuilds it per walker
+        with ``instrument_component_kwargs=dict(ltts=<LinkDelayTable>)`` and
+        ``wdm_psd_method="layer_calibrated"`` (``WDM_PSD_METHOD``), sharing the backend's
+        basis cache.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.detector import sangria
+            from lisatools.sensitivity import (
+                CompositeSensitivityMatrix, LinkDelayTable, UnequalArmInstrumentNoise,
+            )
+
+            table = LinkDelayTable.from_l1_file("mojito_L1.h5", stride=200)
+            inst = UnequalArmInstrumentNoise(
+                ltts=table, model=sangria, wdm_psd_method="layer_calibrated", basis_cache={}
+            )
+            sens = CompositeSensitivityMatrix(wdm_settings, [inst])
     """
 
     name = "instrument_unequal_arm"
@@ -4671,8 +5336,11 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
                 stationary case. ``"per_epoch"`` returns ``(len(t), 6)``.
 
         Returns:
-            ``(6,)`` or ``(n_epochs, 6)`` light travel times in
+            np.ndarray: ``(6,)`` or ``(n_epochs, 6)`` light travel times (s) in
             :data:`UNEQUAL_ARM_LINKS` order.
+
+        Raises:
+            ValueError: Unknown ``mode``.
 
         Note:
             Returns a plain numpy array on purpose. The orbits object holds a
@@ -4722,8 +5390,12 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
                 mean in the 12th digit while reading a fraction of the data.
 
         Returns:
-            ``(6,)`` or ``(len(t), 6)`` light travel times in
+            np.ndarray: ``(6,)`` or ``(len(t), 6)`` light travel times (s) in
             :data:`UNEQUAL_ARM_LINKS` order.
+
+        Raises:
+            ValueError: Unknown ``mode``, ``"per_epoch"`` without ``t``, or epochs outside
+                the file's span.
         """
         import h5py
 
@@ -5167,6 +5839,7 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
         return digest.hexdigest()[:24]
 
     def _coarse_progress_message(self, message: str) -> None:
+        """Log ``message`` at INFO, and also print it when ``coarse_progress`` is set."""
         logger.info(message)
         if self.coarse_progress:
             print(f"[unequal-arm] {message}", flush=True)
@@ -5344,7 +6017,25 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
         *,
         extra_diagonal=None,
     ):
-        """Channelwise WS dof from the selected fine/center unit diagonals."""
+        """Channelwise Welch-Satterthwaite effective dof of each coarse WDM cell.
+
+        Per coarse cell and channel, ``(sum d)^2 / sum d^2`` over the cell's fine
+        diagonal variances ``d`` (instrument diagonals for the current levels, plus
+        ``extra_diagonal``), capped at the cell size.
+
+        Args:
+            settings: The coarse WDM grid.
+            extra_diagonal: Optional additional fine diagonal variances, shape
+                ``(3, Nf_active, Nt_active)`` (e.g. the foreground), added before the ratio.
+
+        Returns:
+            tuple[xp.ndarray, xp.ndarray]: ``(qeff, channels)``: the channel-mean dof,
+            shape ``(Nf_active, Ncoarse)`` (``0`` where any channel is invalid), and the
+            per-channel dof, shape ``(3, Nf_active, Ncoarse)``.
+
+        Raises:
+            ValueError: ``extra_diagonal`` has the wrong shape.
+        """
         _, diagonals = self._coarse_basis_data(settings)
         diagonal = (
             float(self.model.Soms_d) * diagonals[0]
@@ -5442,18 +6133,37 @@ class GalacticForeground(SeparableComponent):
     term is included here. The per-element structure (including the off-diagonal
     sign) and the slow time variation live entirely in the modulation.
 
+    The magnitude is the foreground spectrum times the analytic X-channel stochastic
+    response of the chosen generation (:meth:`X2TDISens.stochastic_transform` for TDI
+    2.0), mapped into the domain basis with ``wdm_psd_method``. For the default
+    five-parameter model on a CPU WDM grid, the ``"fold"`` and ``"layer_calibrated"``
+    paths use cached fixed-grid factors (``_fast_hyperbolic_wdm_*``), algebraically equal
+    to the generic :func:`get_sensitivity` path. This is the ``galfor`` component of the
+    production global fit, built per walker by :class:`CompositeSensitivityBackend`.
+
     Args:
         foreground_params: Parameters for ``stochastic_fn`` (for the default
-            :class:`HyperbolicTangentGalacticForeground` these are
-            ``(amp, fk, alpha, s1, s2)``).
+            :class:`~lisatools.stochastic.HyperbolicTangentGalacticForeground` these are
+            ``(amp, fk, alpha, f_1, f_2)``).
         modulation: One of: ``None`` (the isotropic/stationary limit — diagonals
             ``1``, off-diagonals ``-1/2`` — which reproduces the stationary
             foreground); a ``(nch, nch)`` constant matrix; a ``(nch, nch, Ntime)``
-            array; or a callable ``t_arr -> (nch, nch, Ntime)`` (build one from
-            six per-element functions with :func:`modulation_from_elements`).
+            array; a callable ``t_arr -> (nch, nch, Ntime)`` (build one from
+            six per-element functions with :func:`modulation_from_elements`); or an
+            object with an ``evaluate(settings)`` method such as
+            :class:`GalForTimeModulation` (used directly, with its own caching).
         tdi_generation: 1 or 2 (used to pick the X-channel sensitivity used to
-            extract the foreground magnitude).
-        stochastic_fn: Stochastic foreground model (class or name).
+            extract the foreground magnitude). Default ``2``.
+        stochastic_fn: Stochastic foreground model (class or name). Default
+            :class:`~lisatools.stochastic.HyperbolicTangentGalacticForeground`.
+        spectral_cache: Optional dict for the fixed-grid spectral factors, shared across
+            the per-proposal components (the composite backend passes its own). ``None``
+            uses a private dict. Dropped on pickling.
+        wdm_psd_method: WDM PSD policy (``"fold"``, ``"layer_constant"``,
+            ``"layer_calibrated"``). Default ``"fold"``.
+
+    Raises:
+        ValueError: ``tdi_generation`` is not 1 or 2, or ``wdm_psd_method`` is unknown.
     """
 
     name = "galactic_foreground"
@@ -5793,6 +6503,10 @@ class GalacticForeground(SeparableComponent):
         )
 
     def base_covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+        """Foreground magnitude placed on all nine elements: ``(nch, nch, *basis_shape_active)``.
+
+        NaNs (the ``f = 0`` indeterminacy) are filled with ``0``.
+        """
         xp = settings.xp
         nch = self.nchannels
         Xsens = _XYZ_ELEMENT_SENS[self.tdi_generation][0]
@@ -5821,6 +6535,15 @@ class GalacticForeground(SeparableComponent):
         return C
 
     def time_modulation(self, settings: domains.DomainSettingsBase):
+        """Per-element modulation on ``settings``.
+
+        ``None`` gives the constant isotropic pattern (diagonal ``1``, off-diagonal
+        ``-1/2``); an object with ``evaluate`` is evaluated through it; anything else goes
+        through ``settings.evaluate_time_modulation``.
+
+        Raises:
+            ValueError: A callable modulation on a domain without a time axis.
+        """
         xp = settings.xp
         nch = self.nchannels
 
@@ -5849,8 +6572,9 @@ class GalacticForeground(SeparableComponent):
 class SGWB(SeparableComponent):
     """Stochastic gravitational-wave background component (stationary by default).
 
-    The SGWB spectral template ``Sgw(f)`` is folded through the equal-arm TDI
-    response (``R_XX = 4 x^2 sin^2 x``, off-diagonals ``-1/2 R_XX``) and summed
+    The SGWB spectral template ``Sgw(f)`` is folded through the analytic equal-arm X
+    response of the chosen generation (``R_XX = 4 x^2 sin^2(x) sin^2(2x)`` for TDI 2.0,
+    ``4 x^2 sin^2 x`` for TDI 1.5; off-diagonals ``-1/2 R_XX``) and summed
     into the covariance. Like the galactic foreground, the *magnitude* — the
     auto-channel (XX) response in the domain basis — is extracted
     domain-agnostically as the X-channel *stochastic-only* sensitivity
@@ -5876,7 +6600,21 @@ class SGWB(SeparableComponent):
             ``(nch, nch)`` constant matrix; a ``(nch, nch, Ntime)`` array; or a
             callable ``t_arr -> (nch, nch, Ntime)``.
         tdi_generation: 1 or 2 (used to pick the X-channel sensitivity used to
-            extract the SGWB magnitude).
+            extract the SGWB magnitude). Default ``2``.
+        wdm_psd_method: WDM PSD policy forwarded to :func:`get_sensitivity`. Default
+            ``"fold"``.
+
+    Raises:
+        ValueError: ``tdi_generation`` is not 1 or 2, or ``wdm_psd_method`` is unknown.
+
+    Example:
+        >>> from lisatools.domains import FDSettings
+        >>> from lisatools.sensitivity import CompositeSensitivityMatrix, InstrumentNoise, SGWB
+        >>> fd = FDSettings(N=1001, df=1e-5, min_freq=1e-4, force_backend="cpu")
+        >>> sgwb = SGWB((-12.0, 2.0 / 3.0), "PowerLawSGWB")
+        >>> sens = CompositeSensitivityMatrix(fd, [InstrumentNoise(), sgwb])
+        >>> sens.shape[:2]
+        (3, 3)
     """
 
     name = "sgwb"
@@ -5903,6 +6641,10 @@ class SGWB(SeparableComponent):
         self.wdm_psd_method = wdm_psd_method
 
     def base_covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+        """SGWB magnitude placed on all nine elements: ``(nch, nch, *basis_shape_active)``.
+
+        NaNs (``f <= 0``) are filled with ``0``.
+        """
         xp = settings.xp
         nch = self.nchannels
         Xsens = _XYZ_ELEMENT_SENS[self.tdi_generation][0]
@@ -5924,6 +6666,14 @@ class SGWB(SeparableComponent):
         return C
 
     def time_modulation(self, settings: domains.DomainSettingsBase):
+        """Per-element modulation on ``settings``.
+
+        ``None`` gives the constant isotropic pattern (diagonal ``1``, off-diagonal
+        ``-1/2``); anything else goes through ``settings.evaluate_time_modulation``.
+
+        Raises:
+            ValueError: A callable modulation on a domain without a time axis.
+        """
         xp = settings.xp
         nch = self.nchannels
 
@@ -5993,9 +6743,10 @@ class MojitoNoiseEstimates(NoiseComponent):
     * FD basis: the interpolated (time-averaged) one-sided PSD, matching
       :func:`get_sensitivity`'s FD convention;
     * WDM basis: the interpolated full-resolution PSD is folded into the
-      wavelet basis through the same validated
-      ``FDSignal.wdmtransform(is_psd=True)`` path :class:`InstrumentNoise`
-      uses, so the two components are drop-in comparable. With
+      wavelet basis through ``FDSignal.wdmtransform(is_psd=True)``, the exact fold
+      that :class:`InstrumentNoise` applies with ``wdm_psd_method="fold"``
+      (``WDMSettings.fold_sparse_psd`` is algebraically identical to it), so the two
+      components are drop-in comparable. With
       ``time_dependent=True`` (default) the slow daily variation is applied
       as a per-layer ratio on top of the time-averaged fold. Domain times
       are interpreted as seconds since the brick's TDI data start (plus
@@ -6082,6 +6833,12 @@ class MojitoNoiseEstimates(NoiseComponent):
         return vals
 
     def covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+        """Tabulated covariance on ``settings``: ``(nch, nch, *basis_shape_active)``.
+
+        Raises:
+            ValueError: The table is not ``nch x nch``.
+            NotImplementedError: ``settings`` is neither FD nor WDM.
+        """
         est_t, est_f, cov = self._load()
         xp = settings.xp
         nch = self.nchannels
@@ -6256,12 +7013,12 @@ class MojitoNoiseEstimates(NoiseComponent):
         real brick lands the levels **low** -- measured 2026-09-23 on
         mojito-light, whose injection is exactly ``(1.5e-11, 3e-15)``:
 
-        ============================  ============  ============
-        arm model                     Soms_d        Sa_a
-        ============================  ============  ============
-        equal-arm                     1.496182e-11  2.982412e-15
-        unequal-arm (brick ``/ltts``) 1.500004e-11  3.000107e-15
-        ============================  ============  ============
+        ==============================  ============  ============
+        arm model                       Soms_d        Sa_a
+        ==============================  ============  ============
+        equal-arm                       1.496182e-11  2.982412e-15
+        unequal-arm (brick ``/ltts``)   1.500004e-11  3.000107e-15
+        ==============================  ============  ============
 
         i.e. 0.26% / 0.59% low in amplitude, 0.5% / 1.2% in power. That matters
         because this pair is what every noise-only accuracy statement is scored
@@ -6281,8 +7038,13 @@ class MojitoNoiseEstimates(NoiseComponent):
                 run's ``general.psd_injection``.
 
         Returns:
-            ``(Soms_d, Sa_a)`` in linear (square-root) units, the convention
-            of :class:`CompositeSensitivityBackend` / the psd-branch priors.
+            tuple[float, float]: ``(Soms_d, Sa_a)`` in linear (square-root) units, the
+            convention of :class:`CompositeSensitivityBackend` / the psd-branch priors.
+
+        Raises:
+            ValueError: ``which != "xyz"``, an invalid ``tdi_generation``, a ``band``
+                outside the tabulated grid, malformed ``ltts``, or a fit returning
+                negative squared levels.
         """
         if self.which != "xyz":
             raise ValueError("fit_scalar_params requires which='xyz'.")
@@ -6347,6 +7109,27 @@ def estimate_noise_params_from_file(
     uses the brick's own ``/ltts`` (unequal arms) whenever they are there --
     see that method for why the arm model is worth 0.26% / 0.59%, and
     :meth:`MojitoNoiseEstimates._resolve_fit_ltts` for ``honor_resume_pin``.
+    The stock noise setup (:mod:`lisatools.globalfit.stock.erebor.noise`) uses it for
+    the reference levels of a mojito run.
+
+    Args:
+        path: Path to the mojito NOISE L1 ``.h5`` file.
+        band: Frequency range (Hz) of the tabulated grid to fit over. Default
+            ``(1e-4, 2.5e-2)``.
+        tdi_generation: 1 or 2. Default ``2``.
+        ltts: Optional ``(6,)`` link delays overriding the brick's ``/ltts``.
+        honor_resume_pin: Whether ``MOJITO_PSD_REFERENCE_FIT_UNEQUAL_ARM`` is honoured.
+            Default ``True``.
+
+    Returns:
+        tuple[float, float]: ``(Soms_d, Sa_a)`` in linear (square-root) units.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.sensitivity import estimate_noise_params_from_file
+
+            Soms_d, Sa_a = estimate_noise_params_from_file("mojito_NOISE_L1.h5")
     """
     return MojitoNoiseEstimates(path).fit_scalar_params(
         band=band, tdi_generation=tdi_generation, ltts=ltts,
@@ -6357,11 +7140,18 @@ def estimate_noise_params_from_file(
 class CompositeSensitivityMatrix(SensitivityMatrixBase):
     """Sensitivity matrix built as a sum of :class:`NoiseComponent` objects.
 
+    Each component's ``covariance(settings)`` is cached; :meth:`rebuild` /
+    :meth:`update_component` recompute only the requested components before re-summing,
+    and :attr:`invC` / :attr:`detC` follow lazily on first read.
+
     Args:
         settings: Domain settings the matrix is evaluated on (FD, WDM, …).
         components: :class:`NoiseComponent` list to sum. All must produce the same
             ``(nch, nch, *basis_shape_active)`` shape.
         skip_inv_det: Skip determinant/inverse computation (e.g. for slicing).
+
+    Raises:
+        ValueError: ``components`` is empty.
     """
 
     def __init__(
@@ -6428,7 +7218,10 @@ class CompositeSensitivityMatrix(SensitivityMatrixBase):
             seed: Seed or :class:`numpy.random.Generator` for the draw.
 
         Returns:
-            ``(nchannels, N)`` ``float64`` array of correlated TD noise.
+            np.ndarray: ``(nchannels, N)`` ``float64`` array of correlated TD noise.
+
+        Raises:
+            ValueError: The basis is not FD, or its length is not ``N // 2 + 1``.
         """
         if not isinstance(self.basis_settings, domains.FDSettings):
             raise ValueError(
@@ -6522,16 +7315,17 @@ def generate_correlated_instrument_noise_td(
 ) -> np.ndarray:
     """Sample a ``(nchannels, N)`` TD instrument-noise realization.
 
-    Builds an :class:`InstrumentNoise` covariance for a
+    Builds an (equal-arm) :class:`InstrumentNoise` covariance for a
     ``LISAModel(Soms_d**2, Sa_a**2, orbits, model_name)`` on an rFFT
-    :class:`~lisatools.domains.FDSettings` grid and delegates to
+    :class:`~lisatools.domains.FDSettings` grid (CPU, ``fill_nans=0.0``) and delegates to
     :meth:`CompositeSensitivityMatrix.draw_correlated_td_noise`.
 
     Args:
         N: Number of TD samples.
         dt: Sample spacing in seconds.
-        Soms_d / Sa_a: Linear instrument-noise levels (the covariance uses the
-            squared values internally, matching the stock model convention).
+        Soms_d: Linear OMS noise level (the covariance uses the squared value, matching
+            the stock model convention).
+        Sa_a: Linear acceleration noise level (squared internally, as ``Soms_d``).
         tdi_generation: 1 (TDI 1.5) or 2 (TDI 2.0).
         seed: RNG seed / generator.
         model_name: Name recorded on the :class:`LISAModel` (does not affect the
@@ -6540,7 +7334,14 @@ def generate_correlated_instrument_noise_td(
             ``LISAModel.lisanoises`` only reads the noise levels).
 
     Returns:
-        ``(nchannels, N)`` ``float64`` array of correlated TD noise.
+        np.ndarray: ``(nchannels, N)`` ``float64`` array of correlated TD noise.
+
+    Example:
+        >>> from lisatools.sensitivity import generate_correlated_instrument_noise_td
+        >>> n = generate_correlated_instrument_noise_td(
+        ...     4096, 5.0, Soms_d=15e-12, Sa_a=3e-15, tdi_generation=2, seed=1)
+        >>> n.shape
+        (3, 4096)
     """
     Nf_rfft = N // 2 + 1
     df = 1.0 / (N * dt)
@@ -6586,6 +7387,7 @@ def annual_modulation_matrix(
     return base[:, :, None] * env[None, None, :]
 
 
+# TODO check: keep/remove/document -- deprecated, no callers; injections.py has its own copy
 class AnnualModulatedGalacticForeground(GalacticForeground):
     """:class:`GalacticForeground` with an annual amplitude modulation pre-bound.
 
@@ -6663,7 +7465,7 @@ def generate_foreground_td(
         envelope: Optional callable ``t_arr -> (N,)`` amplitude-domain multiplier.
 
     Returns:
-        ``(nchannels, N)`` ``float64`` array of correlated TD foreground.
+        np.ndarray: ``(nchannels, N)`` ``float64`` array of correlated TD foreground.
     """
     if stochastic_fn is None:
         stochastic_fn = FittedHyperbolicTangentGalacticForeground
@@ -6698,8 +7500,21 @@ _TDI_CHAN_TO_GENERATION = {
 def tdi_generation_from_channel(tdi_chan: str) -> int:
     """Map a TDI channel label to its TDI generation (1 or 2).
 
-    ``"XYZ"/"AET"/"XYZ2"/"AET2" -> 2``, ``"XYZ1"/"AET1" -> 1``. Raises
-    :class:`ValueError` on an unrecognised label.
+    ``"XYZ"/"AET"/"XYZ2"/"AET2" -> 2``, ``"XYZ1"/"AET1" -> 1``.
+
+    Args:
+        tdi_chan: Channel label.
+
+    Returns:
+        int: The TDI generation.
+
+    Raises:
+        ValueError: An unrecognised label.
+
+    Example:
+        >>> from lisatools.sensitivity import tdi_generation_from_channel
+        >>> tdi_generation_from_channel("XYZ")
+        2
     """
     try:
         return _TDI_CHAN_TO_GENERATION[tdi_chan]
@@ -6711,22 +7526,31 @@ def tdi_generation_from_channel(tdi_chan: str) -> int:
 
 
 class CompositeSensitivityBackend(SensitivityBackendBase):
-    """Callable wrapper that produces :class:`CompositeSensitivityMatrix` instances
-    parameterised by per-walker PSD (and optional galactic-foreground / SGWB)
-    coordinates.
+    """Per-walker noise-model factory: noise parameters -> :class:`CompositeSensitivityMatrix`.
 
-    Shares :class:`SensitivityBackendBase` (hence the backend dispatch + the
-    ``__call__`` contract) with :class:`XYZSensitivityBackend`, so either can be
-    slotted into ``GeneralSetup.sensitivity_backend`` interchangeably. Each call
+    The matrices are parameterised by per-walker PSD (and optional galactic-foreground /
+    SGWB) coordinates. Shares :class:`SensitivityBackendBase` (hence the backend dispatch
+    and the ``__call__`` contract) with :class:`XYZSensitivityBackend`, so either can be
+    slotted into ``GeneralSetup.sensitivity_backend`` (the two expect different
+    ``galfor_params`` layouts, see :meth:`SensitivityBackendBase.__call__`). Each call
     (via the base ``__call__`` -> :meth:`_build_matrix`) returns a fresh
-    :class:`CompositeSensitivityMatrix` that sums an :class:`InstrumentNoise`
-    component (rebuilt with the walker's Soms_d / Sa_a) and optionally a
-    :class:`GalacticForeground` component (when ``galfor_params`` is supplied),
-    plus any extra stationary components passed at construction.
+    :class:`CompositeSensitivityMatrix` that sums an instrument component
+    (``instrument_component_cls``, rebuilt with the walker's Soms_d / Sa_a) and optionally
+    a :class:`GalacticForeground` component (when ``galfor_params`` is supplied) and an
+    :class:`SGWB` component (when ``sgwb_params`` is supplied), plus any extra components
+    passed at construction.
+
+    This is the default ``sensitivity_backend_class`` of the global fit
+    (:class:`~lisatools.globalfit.engine.GeneralSetup`). The 9-month and 12-month runs
+    configure it with ``instrument_component_cls=UnequalArmInstrumentNoise`` and a
+    :class:`LinkDelayTable` (``UNEQUAL_ARM=1``), ``wdm_psd_method="layer_calibrated"``
+    (``WDM_PSD_METHOD``), and a :class:`GalForTimeModulation` foreground modulation
+    (``GALFOR_MODULATION_PATH``); :class:`~lisatools.globalfit.moves.psdmove.PSDMove` calls
+    it once per walker and proposal.
 
     Args:
         settings: Domain settings the matrix is evaluated on (FD, WDM, ...).
-        tdi_generation: 1 (TDI 1.5) or 2 (TDI 2.0).
+        tdi_generation: 1 (TDI 1.5) or 2 (TDI 2.0). Default ``2``.
         model_name: Name to record on the constructed :class:`LISAModel`.
         instrument_fill_nans: ``fill_nans`` value forwarded to
             :class:`InstrumentNoise`. Defaults to ``0.0`` so the WDM fold of
@@ -6744,7 +7568,15 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
             the domain's active time grid.
         sgwb_stochastic_fn: SGWB spectral-template class or stock name used for
             the optional :class:`SGWB` component (only used when the caller
-            supplies ``sgwb_params``).
+            supplies ``sgwb_params``). Default ``"PowerLawSGWB"``.
+        wdm_psd_method: Backend-wide WDM PSD policy given to every component
+            (``"fold"``, ``"layer_constant"``, ``"layer_calibrated"``). Default
+            ``"fold"``; a ``wdm_psd_method`` inside ``instrument_component_kwargs`` is
+            promoted to it when this is left at ``"fold"``.
+        instrument_component_cls: Instrument :class:`NoiseComponent` class rebuilt per
+            walker. Default ``None`` -> :class:`InstrumentNoise`.
+        instrument_model_cls: Model class for the levels. Default ``None`` ->
+            :class:`~lisatools.detector.LISAModel`.
         instrument_component_kwargs: Extra constructor arguments for
             ``instrument_component_cls``, merged into the per-walker rebuild.
             Use for instrument models needing more than the noise levels — e.g.
@@ -6754,6 +7586,31 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         extra_components: Additional :class:`NoiseComponent` instances added
             to every constructed matrix — e.g. a stationary SGWB. These are
             held by reference so they're built once and reused.
+        force_backend: Backend selector, see :class:`SensitivityBackendBase`.
+        cache_instrument_basis: Keep a backend-owned cache of the two unit-level
+            instrument covariances (the linear fast path of
+            :meth:`InstrumentNoise.base_covariance`). Default ``True``.
+
+    Raises:
+        ValueError: Conflicting or unknown ``wdm_psd_method``.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.sensitivity import (
+                CompositeSensitivityBackend, LinkDelayTable, UnequalArmInstrumentNoise,
+            )
+
+            backend = CompositeSensitivityBackend(
+                wdm_settings,
+                instrument_component_cls=UnequalArmInstrumentNoise,
+                instrument_component_kwargs=dict(
+                    ltts=LinkDelayTable.from_l1_file("mojito_L1.h5", stride=200)
+                ),
+                wdm_psd_method="layer_calibrated",
+            )
+            sens = backend("walker_0", [15e-12, 3e-15],
+                           galfor_params=[1e-44, 2.5e-3, 1.2, 1.3e-3, 3e-4])
     """
 
     def __init__(
@@ -6903,7 +7760,21 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         return components
 
     def component_covariance(self, branch: str, params, *, name: str = "cached"):
-        """Build exactly one additive branch covariance in physical units."""
+        """Build exactly one additive branch covariance in physical units.
+
+        Args:
+            branch: ``"psd"``, ``"galfor"``, or ``"sgwb"``.
+            params: That branch's physical parameters.
+            name: Label recorded on the model. Default ``"cached"``.
+
+        Returns:
+            xp.ndarray: The component covariance ``(nch, nch, *basis_shape_active)``, for
+            reuse as a frozen term in :meth:`covariance_from_params`.
+
+        Raises:
+            ValueError: Unknown ``branch``.
+            RuntimeError: The branch did not build exactly one component.
+        """
         if branch == "psd":
             args = dict(params=params)
         elif branch == "galfor":
@@ -6969,6 +7840,20 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         returned by :meth:`component_covariance`.  Addition stays in the same
         canonical order as :class:`CompositeSensitivityMatrix`, preserving the
         floating-point result exactly.
+
+        Args:
+            name: Label recorded on the instrument model.
+            params: ``[Soms_d, Sa_a]`` (linear, physical) or ``None``.
+            galfor_params: Optional foreground parameters (physical).
+            sgwb_params: Optional SGWB parameters.
+            fixed_covariances: Optional ``{"psd" | "galfor" | "sgwb" | "extra:<i>": array}``
+                of frozen terms used instead of rebuilding those components.
+
+        Returns:
+            xp.ndarray: Summed covariance ``(nch, nch, *basis_shape_active)``.
+
+        Raises:
+            ValueError: Nothing to build.
         """
         fixed_covariances = fixed_covariances or {}
         built = {
@@ -7005,7 +7890,12 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         sgwb_params=None,
         fixed_covariances=None,
     ) -> SensitivityMatrixBase:
-        """Matrix wrapper for :meth:`covariance_from_params`."""
+        """Matrix wrapper for :meth:`covariance_from_params` (same arguments).
+
+        Returns:
+            SensitivityMatrixBase: A plain matrix on the backend's settings holding the
+            summed covariance.
+        """
         matrix = SensitivityMatrixBase(self.basis_settings)
         matrix.sens_mat = self.covariance_from_params(
             name,
@@ -7037,9 +7927,15 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
                 ``galfor_modulation``).
             sgwb_params: Optional SGWB spectral-template parameters. When given,
                 an :class:`SGWB` component is added.
+            basis_settings: Optional value-equal (per-device) replica of the backend's
+                settings to build on. Default ``None`` uses :attr:`basis_settings`.
 
         Returns:
-            A freshly built :class:`CompositeSensitivityMatrix`.
+            CompositeSensitivityMatrix: A freshly built matrix.
+
+        Raises:
+            ValueError: No component to build (no ``params``, no galfor/sgwb parameters,
+                and no ``extra_components``).
         """
         components = [
             component

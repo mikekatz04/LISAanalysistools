@@ -7,11 +7,55 @@ a direct call (no communicator, no pickling, no copies). Setup phase:
 :meth:`WalkerFanout.allgather_walker_vector` is a symmetric collective every
 compute rank calls at the same program point.
 
+Who runs what: ``GlobalFit`` builds a :class:`WalkerFanout` on every compute
+rank (the head drives :meth:`WalkerFanout.run`; the others use it only for
+the setup-phase collectives) and a :class:`ComputeService` on every compute
+rank other than the head, all on the fan-out communicator (head + compute
+ranks only,
+:meth:`~lisatools.globalfit.communication.ranks.WalkerBlockLayout.make_fanout_comm`;
+the saver is not a member). The non-head compute ranks sit in
+:meth:`ComputeService.serve` for the whole sampling phase. Moves reach the
+fan-out through :class:`~lisatools.globalfit.moves.walkerfanout.WalkerFanoutMixin`
+(rank side: ``move.gf_serve``).
+
 Command / reply schemas (host numpy, pickled by mpi4py ``send``/``recv``)::
 
     cmd   = {"seq", "op", "move", "clock", "payload", "shared"}
     reply = {"seq", "rank", "ok", "result", "wall_s",
              "error": None | {"type", "msg", "traceback"}}
+
+Command fields:
+
+- ``seq`` (int): the head's fan-out counter, incremented once per
+  multi-rank :meth:`WalkerFanout.run`. Every reply must echo it; a
+  mismatch raises on the head.
+- ``op`` (str): the operation. Builtins answered by :class:`ComputeService`
+  itself: :data:`STOP_OP` (leave the loop, no reply), :data:`PING_OP`
+  (layout digest), and the ones ``GlobalFit.prepare_compute`` installs:
+  :data:`LIKELIHOOD_OP`, :data:`RESIDUAL_HASH_OP` and
+  ``residual_snapshot.RESIDUAL_SNAPSHOT_OP``. Any other op is routed to
+  ``move.gf_serve(op, payload, clock, model)`` of the move named below.
+- ``move`` (str or None): the move name; together with ``clock["stage"]``
+  it is the service registry key.
+- ``clock`` (dict): a copy of :attr:`WalkerFanout.clock` with keys
+  ``iteration``, ``stage``, ``stage_kind``, ``move``, ``call_index`` (per
+  ``(move, op)`` call count), ``seq`` and ``seed_base`` (the run's seed
+  base, so rank-side bodies can derive reproducible streams).
+- ``payload``: the per-rank part, ``per_rank_payload(rank, w0, w1)``.
+- ``shared``: the same object for every rank (``None`` by default).
+
+Reply fields: ``seq`` (echo), ``rank`` (the replying rank, run-communicator
+numbering), ``ok`` (bool), ``result`` (the body's return value, ``None`` on
+failure), ``wall_s`` (seconds spent in :meth:`ComputeService.handle`) and
+``error`` (``None``, or ``{"type", "msg", "traceback"}`` of the remote
+exception; the head raises :class:`RemoteWorkerError` with it).
+
+Transport: the head sends one command to every worker's fan-out rank
+(``isend``), waits for the sends, runs its own block, then receives one
+reply from each worker in compute-rank order (``recv``). Workers receive
+from the head's fan-out rank and send the reply back. Each multi-rank ``run`` logs one
+``[FANOUT] op=... move=... head_s=... max_rank_s=... wait_s=...`` INFO line
+on this module's logger (the head's ``globalfit_run.log``).
 """
 
 from __future__ import annotations
@@ -43,7 +87,25 @@ RESIDUAL_HASH_OP = "residual_hash"
 
 
 class RemoteWorkerError(RuntimeError):
-    """A computation rank's command failed; carries the remote traceback text."""
+    """A computation rank's command failed; carries the remote traceback text.
+
+    Raised on the head by :meth:`WalkerFanout.run` for the first failing
+    reply (every failing reply's traceback is logged first).
+
+    Args:
+        rank (int): The failing rank.
+        op (str): The operation that failed.
+        move (str or None): The move name of the command.
+        error (dict or None): The reply's ``error`` dict
+            (``{"type", "msg", "traceback"}``).
+
+    Attributes:
+        rank (int): The failing rank.
+        op (str): The operation.
+        move (str or None): The move name.
+        error (dict): A copy of the reply's ``error`` dict.
+        remote_traceback (str): The remote traceback text (``""`` if absent).
+    """
 
     def __init__(self, rank, op, move, error):
         self.rank = int(rank)
@@ -66,6 +128,14 @@ def concat_blocks(results, layout):
     every block but its own. Both of the pre-2026-09-23 branches are special
     cases of this -- at ``R == 1`` the leads ARE the compute ranks, and at
     ``n_blocks == 1`` the only lead is the head.
+
+    Args:
+        results (dict): ``{rank: 1-D array-like}`` from a fan-out merge.
+        layout (WalkerBlockLayout): The run layout (its ``block_leads``).
+
+    Returns:
+        np.ndarray: The leads' results concatenated in block order, shape
+        ``(nwalkers,)`` for one value per walker.
     """
     leads = getattr(layout, "block_leads", None)
     if leads is None:  # pragma: no cover - stub layouts in older tests
@@ -75,10 +145,12 @@ def concat_blocks(results, layout):
 
 
 def _reply(seq, rank, ok, result, wall_s, error=None):
+    """Build one reply dict (schema in the module docstring)."""
     return {"seq": seq, "rank": rank, "ok": ok, "result": result, "wall_s": wall_s, "error": error}
 
 
 def _sha1_16(data: bytes) -> str:
+    """First 16 hex digits of the sha1 of ``data``."""
     return hashlib.sha1(data).hexdigest()[:16]
 
 
@@ -94,6 +166,16 @@ def residual_hash(acs) -> str:
     noise covariance) when present, so a PSD-only drift between replicas is
     caught too, not just a residual drift; falls back to the likelihood
     vector when neither buffer is available.
+
+    Used in replica mode (``R > 1``: one-walker replica mode, or
+    ``GF_GPU_ROUTING=1`` with more compute ranks than walker blocks): by the
+    GB replica sync and by the :data:`RESIDUAL_HASH_OP` builtin.
+
+    Args:
+        acs: The rank's ``AnalysisContainerArray``.
+
+    Returns:
+        str: 16 hex digits.
     """
     arrs = (
         list(getattr(acs, "linear_data_arr", []) or [])
@@ -112,6 +194,15 @@ def replicas_agree(residual_hashes, layout=None) -> bool:
     whole-world comparison would read ``False`` on every line. Without a
     layout (or at one block) every rank holds the same walker and the
     whole map must agree -- the original one-walker replica rule.
+
+    Args:
+        residual_hashes (dict or None): ``{rank: hash}`` from
+            :meth:`WalkerFanout.gather_residual_hashes`.
+        layout (WalkerBlockLayout, optional): Enables the per-block
+            comparison.
+
+    Returns:
+        bool: ``True`` when every block's hashes agree (or no hashes).
     """
     hashes = {int(r): h for r, h in (residual_hashes or {}).items()}
     if not hashes:
@@ -145,6 +236,21 @@ def fanout_digest_line(iteration, state, residual_hashes=None, layout=None) -> s
     run's ``WalkerBlockLayout``) makes ``replicas_agree`` a PER-BLOCK
     comparison (:func:`replicas_agree`); without it the whole map is
     compared, which is right at one walker block.
+
+    ``GF_FANOUT_DIGEST`` is off by default and the 9mo/12mo launchers leave
+    it unset; it is listed in ``docs/global-fit-launch.md``.
+
+    Args:
+        iteration (int): The iteration whose moves just ran.
+        state: The merged head state (``log_like``, ``branches_coords``,
+            ``branches_inds``).
+        residual_hashes (dict, optional): ``{rank: hash}``; adds the
+            ``residual=`` and ``replicas_agree=`` fields.
+        layout (WalkerBlockLayout, optional): Forwarded to
+            :func:`replicas_agree`.
+
+    Returns:
+        str: The log line.
     """
     log_like_hash = _sha1_16(_array_bytes(state.log_like))
     coords = state.branches_coords
@@ -163,7 +269,47 @@ def fanout_digest_line(iteration, state, residual_hashes=None, layout=None) -> s
 
 
 class WalkerFanout:
-    """Head-side fan-out (usable on every compute rank for the collectives)."""
+    """Head-side fan-out (usable on every compute rank for the collectives).
+
+    Built by ``GlobalFit`` on every compute rank (multi-rank, or a single
+    rank with the test-only ``GB_PROPOSE_ORCHESTRATE=1``) with the fan-out
+    communicator and the two sub-communicators built beside it. :meth:`run` is head-only; the
+    other compute ranks answer it from :class:`ComputeService`.
+    :meth:`allgather_walker_vector` is a collective that every compute rank
+    calls.
+
+    Args:
+        comm: The fan-out communicator
+            (:meth:`~lisatools.globalfit.communication.ranks.WalkerBlockLayout.make_fanout_comm`),
+            never the world or run communicator; its size must equal
+            ``layout.n_compute`` unless the layout is single. ``None`` is a
+            test-only placeholder.
+        layout (WalkerBlockLayout): The run layout.
+        rank (int): This process's rank in the run communicator.
+        model (optional): The eryn model handed to each local body.
+        logger (logging.Logger, optional): Receives remote failure
+            tracebacks.
+        group_comm (optional): The block's replica communicator
+            (:meth:`~lisatools.globalfit.communication.ranks.WalkerBlockLayout.make_group_comm`).
+        reps_comm (optional): One-lead-per-block communicator
+            (:meth:`~lisatools.globalfit.communication.ranks.WalkerBlockLayout.make_reps_comm`).
+
+    Raises:
+        ValueError: When ``comm`` is not the fan-out communicator (size
+            mismatch).
+
+    Attributes:
+        head (int): The head rank.
+        is_head (bool): Whether this process is the head.
+        single (bool): ``layout.is_single()``; :meth:`run` is then a direct
+            call.
+        seq (int): The fan-out counter (see the module docstring).
+        last_wait_s (float): Seconds the last :meth:`run` waited on its
+            sends.
+        clock (dict): The clock shipped with every command: ``iteration``,
+            ``stage``, ``stage_kind``, ``move``, ``call_index``, ``seq``,
+            ``seed_base`` (set by ``GlobalFit`` after the state broadcast).
+    """
 
     def __init__(self, comm, layout, rank, *, model=None, logger=None,
                  group_comm=None, reps_comm=None):
@@ -182,11 +328,16 @@ class WalkerFanout:
         #: O(n_compute) instead of O(R) AND would put blocks with nothing to
         #: say to each other into unit lockstep.
         #:
-        #: PASSED IN, never built here. ``WalkerFanout`` is constructed on
-        #: the head while workers construct ``ComputeService`` instead, so
-        #: this is NOT a symmetric call site and a ``Split`` taken here
-        #: deadlocks the head. ``run.py`` builds both beside
-        #: ``make_fanout_comm``, which every compute rank does reach.
+        #: PASSED IN, never built here. ``run.py`` builds both beside
+        #: ``make_fanout_comm`` in ``GlobalFit.__init__``, which every rank
+        #: reaches exactly once. ``WalkerFanout`` itself is built on every
+        #: compute rank by ``GlobalFit._make_fanout`` (from ``prepare_main``
+        #: on the head, from ``prepare_compute`` on the workers, which also
+        #: build their ``ComputeService``). A ``Split`` taken here would turn
+        #: every construction into a collective over the fan-out comm, which
+        #: holds only while both setup paths call ``_make_fanout`` at the
+        #: same point (today right after the state broadcast); tests also
+        #: build it on one side only, with a ``None`` comm.
         self.group_comm = group_comm
         #: one representative per block (replica 0); a null comm off-lead.
         self.reps_comm = reps_comm
@@ -217,10 +368,12 @@ class WalkerFanout:
 
     # -- clock -----------------------------------------------------------
     def enter_stage(self, name, kind):
+        """Set ``clock["stage"]`` / ``clock["stage_kind"]`` (recipe step start)."""
         self.clock["stage"] = name
         self.clock["stage_kind"] = kind
 
     def note_iteration(self, iteration):
+        """Set ``clock["iteration"]`` (called by the recipe every iteration)."""
         self.clock["iteration"] = int(iteration)
 
     # -- commands --------------------------------------------------------
@@ -232,6 +385,13 @@ class WalkerFanout:
         Any head-side "all walkers" read of the residual during sampling must go
         through here -- the head's ACA holds only its block. With one compute
         rank this is a direct call.
+
+        Args:
+            acs: The head's ``AnalysisContainerArray`` (its block's rows).
+
+        Returns:
+            np.ndarray: Real log-likelihood per walker, shape ``(nwalkers,)``,
+            in walker order (:func:`concat_blocks`).
         """
         return self.run(
             LIKELIHOOD_OP,
@@ -251,6 +411,15 @@ class WalkerFanout:
         each worker) so drift between replicas shows up as disagreeing
         hashes -- unlike :meth:`gather_likelihood` / :func:`concat_blocks`,
         this is per-rank, never merged down to the head's single block.
+
+        Called only by the recipe's ``[FANOUT_DIGEST]`` hook
+        (``GF_FANOUT_DIGEST=1``) when the layout is in replica mode.
+
+        Args:
+            acs: The head's ``AnalysisContainerArray``.
+
+        Returns:
+            dict[int, str]: ``{rank: residual_hash}`` for every compute rank.
         """
         return self.run(
             RESIDUAL_HASH_OP,
@@ -261,6 +430,38 @@ class WalkerFanout:
         )
 
     def run(self, op, *, move=None, per_rank_payload, local_body, merge, shared=None):
+        """Run one command on every compute rank's walker block and merge (head-only).
+
+        Sends ``{"seq", "op", "move", "clock", "payload", "shared"}`` to each
+        worker (payload from ``per_rank_payload``), waits for the sends,
+        runs ``local_body`` on the head's own block, receives every reply,
+        checks the sequence numbers and failures, logs the ``[FANOUT]``
+        line, and returns ``merge({rank: result})``. With a single layout it
+        calls ``merge({head: local_body(...)})`` directly. If the head's own
+        body raises, the replies of the workers already sent a command are
+        drained before re-raising, so the channel stays clean.
+
+        Args:
+            op (str): The operation (a builtin or a ``gf_serve`` op).
+            move (str, optional): The move name (registry key). Default
+                ``None`` for builtins.
+            per_rank_payload (Callable[[int, int, int], object]):
+                ``fn(rank, w0, w1)`` returning that rank's payload; also
+                called for the head.
+            local_body (Callable[[object, object], object]):
+                ``fn(payload, model)`` run on the head.
+            merge (Callable[[dict], object]): Combines ``{rank: result}``
+                (head included).
+            shared (optional): One object sent unchanged to every worker.
+
+        Returns:
+            object: The value returned by ``merge``.
+
+        Raises:
+            RuntimeError: When called off the head, or on a reply sequence
+                mismatch.
+            RemoteWorkerError: When any worker reports a failure.
+        """
         if not self.is_head:
             raise RuntimeError("WalkerFanout.run is head-only; compute ranks serve commands")
         key = (move, op)
@@ -355,7 +556,17 @@ class WalkerFanout:
         return merge({r: rep["result"] for r, rep in replies.items()})
 
     def ping(self):
-        """Every compute rank's layout digest, keyed by world rank; raises on mismatch."""
+        """Every compute rank's layout digest, keyed by rank; raises on mismatch.
+
+        Sent once by the head after setup, before sampling.
+
+        Returns:
+            dict[int, str]: ``{rank: WalkerBlockLayout.digest()}``.
+
+        Raises:
+            RuntimeError: When the digests differ (ranks resolved different
+                layouts).
+        """
         digests = self.run(
             PING_OP,
             per_rank_payload=lambda r, w0, w1: None,
@@ -367,6 +578,11 @@ class WalkerFanout:
         return digests
 
     def stop(self):
+        """Send :data:`STOP_OP` to every worker once (head-only; no reply expected).
+
+        Releases the compute ranks from :meth:`ComputeService.serve`. A no-op
+        when single, off the head, or already stopped.
+        """
         if self.single or not self.is_head or self._stopped:
             return
         self._stopped = True
@@ -398,6 +614,14 @@ class WalkerFanout:
         byte-for-byte the pre-2026-09-23 concatenation. At ``n_blocks == 1``
         exactly one part survives, the head's, which is what replica mode
         has always returned.
+
+        Args:
+            local_1d (array-like): This rank's per-walker values over its
+                block, shape ``(block,)``.
+
+        Returns:
+            np.ndarray: The values of all walkers in walker order, shape
+            ``(nwalkers,)``; ``local_1d`` itself when single.
         """
         local = np.asarray(local_1d)
         if self.single:
@@ -414,7 +638,28 @@ class WalkerFanout:
 
 
 class ComputeService:
-    """Compute-rank command loop: ``recv`` is the clock, ``{"op": "stop"}`` exits."""
+    """Compute-rank command loop: ``recv`` is the clock, ``{"op": "stop"}`` exits.
+
+    Built by ``GlobalFit.prepare_compute`` on every compute rank other than
+    the head. :meth:`serve` blocks on the head's commands until
+    :data:`STOP_OP`; each command is answered by :meth:`handle` with one
+    reply (schemas in the module docstring).
+
+    Args:
+        comm: The fan-out communicator.
+        layout (WalkerBlockLayout): The run layout.
+        rank (int): This process's rank in the run communicator.
+        registry (dict): Moves by ``(stage_name, move_name)`` with bare
+            ``move_name`` keys as fallback (``run._serve_registry``).
+        model (optional): The eryn model handed to every body.
+        builtins (dict, optional): Extra ``{op: fn(payload, clock, model)}``
+            answered before the registry; :data:`PING_OP` is always
+            installed (layout digest). ``GlobalFit`` adds
+            :data:`LIKELIHOOD_OP`, :data:`RESIDUAL_HASH_OP` and
+            ``RESIDUAL_SNAPSHOT_OP``.
+        logger (logging.Logger, optional): Receives the traceback of a
+            failing command.
+    """
 
     def __init__(self, comm, layout, rank, *, registry, model=None, builtins=None, logger=None):
         self.comm = comm
@@ -428,6 +673,20 @@ class ComputeService:
         self._head_local = layout.fanout_rank(layout.head_rank)
 
     def handle(self, cmd):
+        """Execute one command and build its reply; never raises.
+
+        A builtin op is called as ``fn(payload, clock, model)``. Any other op
+        looks up the move by ``(clock["stage"], move)`` (then by the bare
+        name), sets ``move.gf_stage_kind`` from the clock, and calls
+        ``move.gf_serve(op, payload, clock, model)``. An exception becomes an
+        ``ok=False`` reply carrying its type, message and traceback.
+
+        Args:
+            cmd (dict): The command (see the module docstring).
+
+        Returns:
+            dict: The reply.
+        """
         t0 = time.perf_counter()
         seq = op = move_name = None
         try:
@@ -464,6 +723,16 @@ class ComputeService:
             return _reply(seq, self.rank, False, None, time.perf_counter() - t0, error)
 
     def serve(self):
+        """Serve head commands until :data:`STOP_OP`.
+
+        Receives from the head's fan-out rank, answers each command with
+        :meth:`handle`, and sends the reply back. If the reply cannot be
+        sent (e.g. it does not pickle), a ``SendError`` failure reply is
+        sent instead so the head does not hang.
+
+        Returns:
+            int: Number of commands served (STOP excluded).
+        """
         served = 0
         while True:
             cmd = self.comm.recv(source=self._head_local)

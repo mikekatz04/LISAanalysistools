@@ -24,6 +24,25 @@ being stamped down by the preset. See :meth:`StockGlobalFit.apply_lite` /
 This module is also the single home of the preset tables — they are
 attached to the FULL variant classes here (rather than edited into each
 variant module) so the ``lite=True`` kwarg works on those classes too.
+
+Every preset shares :data:`_COMMON_LITE` (3 iterations, 4 walkers, every
+per-branch ladder at 2 rungs, CPU); then ``all_sources`` uses a fixed
+``720 x 180`` grid, a 1-10 mHz GB band and 2 GB repeats; ``gb_no_fg`` a
+14-day span and 2 GB repeats; ``full_year_combined`` a 30-day span; ``vgb``
+a 14-day span; ``noise_only`` / ``noise_sgwb`` a ``768 x 256`` grid. The lite
+twins are laptop smokes for the LATW tutorials, not production
+configurations.
+
+Example:
+    .. code-block:: python
+
+        from lisatools.globalfit.stock import erebor
+
+        fit = erebor.gb_no_fg_lite(data_mode="synthetic")
+        fit.general.num_iterations = 10         # scale any knob back up
+        fit.build()
+        for model, state in fit.sample(store=False):
+            pass
 """
 
 from __future__ import annotations
@@ -209,7 +228,12 @@ _attach(VGBGlobalFit, VGB_LITE, VGB_LITE_ENV)
 
 
 class AllSourcesLiteGlobalFit(AllSourcesGlobalFit):
-    """``all_sources`` with the lite preset applied at construction."""
+    """``all_sources`` with the lite preset applied at construction.
+
+    Registered as ``all_sources_lite``; same as ``all_sources(lite=True)``
+    (preset :data:`ALL_SOURCES_LITE`). The preset table's note records a
+    ~4 GB peak for the (then six-branch) lite fit.
+    """
 
     option_name = "all_sources_lite"
     description = (
@@ -225,7 +249,10 @@ class AllSourcesLiteGlobalFit(AllSourcesGlobalFit):
 
 
 class GBNoForegroundLiteGlobalFit(GBNoForegroundGlobalFit):
-    """``gb_no_fg`` with the lite preset applied at construction."""
+    """``gb_no_fg`` with the lite preset applied at construction.
+
+    Registered as ``gb_no_fg_lite``; preset :data:`GB_NO_FG_LITE`.
+    """
 
     option_name = "gb_no_fg_lite"
     description = (
@@ -239,7 +266,11 @@ class GBNoForegroundLiteGlobalFit(GBNoForegroundGlobalFit):
 
 
 class FullYearCombinedLiteGlobalFit(FullYearCombinedGlobalFit):
-    """``full_year_combined`` with the lite preset applied at construction."""
+    """``full_year_combined`` with the lite preset applied at construction.
+
+    Registered as ``full_year_combined_lite``; preset
+    :data:`FULL_YEAR_COMBINED_LITE`.
+    """
 
     option_name = "full_year_combined_lite"
     description = (
@@ -253,7 +284,10 @@ class FullYearCombinedLiteGlobalFit(FullYearCombinedGlobalFit):
 
 
 class NoiseOnlyLiteGlobalFit(NoiseOnlyGlobalFit):
-    """``noise_only`` with the lite preset applied at construction."""
+    """``noise_only`` with the lite preset applied at construction.
+
+    Registered as ``noise_only_lite``; preset :data:`NOISE_ONLY_LITE`.
+    """
 
     option_name = "noise_only_lite"
     description = (
@@ -267,7 +301,10 @@ class NoiseOnlyLiteGlobalFit(NoiseOnlyGlobalFit):
 
 
 class NoiseSGWBLiteGlobalFit(NoiseSGWBGlobalFit):
-    """``noise_sgwb`` with the lite preset applied at construction."""
+    """``noise_sgwb`` with the lite preset applied at construction.
+
+    Registered as ``noise_sgwb_lite``; preset :data:`NOISE_SGWB_LITE`.
+    """
 
     option_name = "noise_sgwb_lite"
     description = (
@@ -281,7 +318,10 @@ class NoiseSGWBLiteGlobalFit(NoiseSGWBGlobalFit):
 
 
 class VGBLiteGlobalFit(VGBGlobalFit):
-    """``vgb`` with the lite preset applied at construction."""
+    """``vgb`` with the lite preset applied at construction.
+
+    Registered as ``vgb_lite``; preset :data:`VGB_LITE`.
+    """
 
     option_name = "vgb_lite"
     description = (

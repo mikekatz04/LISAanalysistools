@@ -71,8 +71,23 @@ def spawn_executor_without_main(n_workers, warm_fn, warm_args=(), timeout=POOL_S
     ``n_workers`` warm-up tasks ``warm_fn(*warm_args)`` are submitted at once with the
     main script hidden (:func:`_main_hidden_from_spawn`), so every worker exists before
     the context is left -- ``ProcessPoolExecutor`` never spawns again unless one dies
-    (which breaks the pool). Raises (after shutting the executor down) when the warm-up
-    fails or exceeds ``timeout`` seconds."""
+    (which breaks the pool).
+
+    Args:
+        n_workers (int): Number of worker processes.
+        warm_fn (callable): Picklable warm-up task run once per worker.
+        warm_args (tuple, optional): Arguments of ``warm_fn``. Default ``()``.
+        timeout (float, optional): Seconds each warm-up result may take. Default
+            :data:`POOL_START_TIMEOUT` (300).
+
+    Returns:
+        concurrent.futures.ProcessPoolExecutor: The started executor.
+
+    Raises:
+        Exception: Whatever the warm-up raised (including ``TimeoutError``), or
+            ``RuntimeError`` if fewer than ``n_workers`` processes exist after the warm-up;
+            the executor is shut down and its processes killed first.
+    """
     n_workers = int(n_workers)
     ex = ProcessPoolExecutor(max_workers=n_workers, mp_context=multiprocessing.get_context("spawn"))
     try:
@@ -94,6 +109,7 @@ def spawn_executor_without_main(n_workers, warm_fn, warm_args=(), timeout=POOL_S
 
 
 def _kill_executor(ex):
+    """Shut ``ex`` down without waiting (pending futures cancelled) and kill its processes."""
     procs = list(getattr(ex, "_processes", {}).values())
     ex.shutdown(wait=False, cancel_futures=True)
     for p in procs:
@@ -104,14 +120,42 @@ def _kill_executor(ex):
 class EMRIDirectWDMSignalGen:
     """Rows -> direct-to-WDM EMRI templates on the run's active box.
 
+    The ``EMRI_LIKELIHOOD=direct`` template generator of the 9mo / 12mo runs: built per device
+    by ``globalfit.stock.erebor.source_runtime.get_emri_direct_gen``; the EMRI move
+    (:class:`~lisatools.globalfit.moves.emridirectmove.EMRIDirectLikeMove`) scores batches
+    with :meth:`templates`, and the engine's EMRI ``signal_gen`` builds residual templates
+    through :meth:`__call__`. On construction it sets ``direct.f_band`` to the run's active
+    frequency layers (when unset), so the direct template builds only those layers.
+
     Args:
-        direct: :class:`~lisatools.sources.emri.wdm_direct.EMRIDirectWDM` built on the
-            run's FULL wavelet grid (``WDMSettings(Nf, Nt, dt)``, no active box).
-        domain_settings: the run's :class:`~lisatools.domains.WDMSettings` (active box).
-        nchannels: channels kept (the production wrap's ``nchannels``).
-        runtime_kwargs: per-call FEW kwargs every template gets (the production wrap's
-            ``runtime_kwargs``: the mode-selection threshold); call kwargs win.
-        traj_workers: trajectory pool size; 0 (default) integrates serially.
+        direct (EMRIDirectWDM): :class:`~lisatools.sources.emri.wdm_direct.EMRIDirectWDM`
+            built on the run's FULL wavelet grid (``WDMSettings(Nf, Nt, dt)``, no active box).
+        domain_settings (WDMSettings): the run's :class:`~lisatools.domains.WDMSettings`
+            (active box).
+        nchannels (int, optional): channels kept (the production wrap's ``nchannels``);
+            ``None`` keeps all.
+        runtime_kwargs (dict, optional): per-call FEW kwargs every template gets (the
+            production wrap's ``runtime_kwargs``: the mode-selection threshold); call kwargs
+            win.
+        traj_workers (int, optional): trajectory pool size (``EMRI_TRAJ_WORKERS``); 0
+            (default) integrates serially.
+
+    Attributes:
+        last_stats (dict): ``direct.last_stats`` of the last :meth:`templates` call.
+        pool_totals (dict): Pool counters (``batches``, ``rows``, ``computed``, ``errors``).
+
+    Raises:
+        ValueError: If ``direct``'s grid is not the run's ``(Nf, Nt, dt)``, or the run's
+            active time box reaches the ``pixel_edge`` layers the direct template leaves
+            zero at each grid end.
+
+    Example:
+        .. code-block:: python
+
+            gen = EMRIDirectWDMSignalGen(direct, run_wdm_settings, nchannels=3,
+                                         runtime_kwargs={"mode_selection_threshold": 1e-5})
+            arr, ok = gen.templates(rows)    # (n, nch, Nf_active, Nt_active), (n,) bool
+            sig = gen(*rows[0])              # WDMSignal on the run domain
     """
 
     def __init__(self, direct, domain_settings, *, nchannels=None, runtime_kwargs=None,
@@ -153,10 +197,24 @@ class EMRIDirectWDMSignalGen:
     # ------------------------------------------------------------------
 
     def templates(self, rows, **kwargs):
-        """``(arr, ok)`` for waveform-basis ``rows`` (n, ndim).
+        """Templates of many waveform-basis rows on the run's active box.
 
-        ``arr``: ``(n, nch, Nf_active, Nt_active)`` on the backend's array module; a row
-        with ``ok[i] = False`` (FEW domain refusal) is all-zero there."""
+        Runs the optional trajectory pre-computation, then ONE
+        :meth:`~lisatools.sources.emri.wdm_direct.EMRIDirectWDM.batch` call over all rows
+        (``skip_domain_errors=True``), and crops to the active frequency layers and time box.
+
+        Args:
+            rows (np.ndarray): ``(n, 14)`` FEW waveform-basis rows (one row is accepted).
+            **kwargs: Per-call FEW kwargs, merged over ``runtime_kwargs``.
+
+        Returns:
+            tuple: ``(arr, ok)``. ``arr`` is ``(n, nch, Nf_active, Nt_active)`` float64 on the
+            backend's array module; a row with ``ok[i] = False`` (FEW domain refusal) is
+            all-zero there. ``ok`` is a host ``(n,)`` bool array.
+
+        Raises:
+            ValueError: If the direct template's band does not hold the active layers.
+        """
         kw = dict(self.runtime_kwargs)
         kw.update(kwargs)
         rows = [np.asarray(r, dtype=np.float64) for r in np.atleast_2d(np.asarray(rows, dtype=np.float64))]
@@ -183,7 +241,18 @@ class EMRIDirectWDMSignalGen:
         return arr, ok
 
     def __call__(self, *params, **kwargs):
-        """ONE template as a :class:`~lisatools.domains.WDMSignal` on the run domain."""
+        """ONE template as a :class:`~lisatools.domains.WDMSignal` on the run domain.
+
+        Args:
+            *params: The 14 FEW waveform-basis parameters.
+            **kwargs: Per-call FEW kwargs (see :meth:`templates`).
+
+        Returns:
+            WDMSignal: ``(nch, Nf_active, Nt_active)`` on ``domain_settings``.
+
+        Raises:
+            WaveformDomainError: When FEW refuses the parameters.
+        """
         from ...domains import WDMSignal
 
         arr, ok = self.templates(np.asarray(params, dtype=np.float64)[None, :], **kwargs)
@@ -196,6 +265,8 @@ class EMRIDirectWDMSignalGen:
     # ------------------------------------------------------------------
 
     def _precompute_trajectories(self, rows, kw):
+        """Integrate the rows' inspirals on the pool into the trajectory cache (no-op without a
+        pool or for fewer rows than workers); any pool failure disables the pool (logged)."""
         # a chunk smaller than the pool (an in-model step: ntemps x walkers-per-rank rows)
         # is integrated serially: the capture + IPC round trip would cost more than the
         # one or two trajectories it parallelises; the eigen-table sweeps fill the pool
@@ -230,6 +301,7 @@ class EMRIDirectWDMSignalGen:
             self.traj_workers = 0
 
     def _start_pool(self):
+        """Start the spawn pool and install FEW's ``TrajectoryCache`` on the generator."""
         from few.trajectory.pool import (
             TrajectoryCache,
             TrajectoryPool,

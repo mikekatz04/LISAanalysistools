@@ -2,23 +2,41 @@
 
 The installed version of ``global_fit_input/gb_no_foreground_global_fit_settings.py``:
 
-* **No galactic-foreground branch** — the foreground is not fit.
+* **One branch, ``gb``** (:class:`GBNoFgGBSettings`); no galactic-foreground
+  branch — the foreground is not fit.
 * **Fixed PSD** — no ``psd`` branch; the sensitivity is a fixed
   :class:`InstrumentNoise` from ``general.fixed_psd_params`` via the
   engine's no-psd-branch path. Default levels are read off the mojito
   NOISE brick's tabulated estimates when the run uses mojito data
   (``psd_from_noise_file`` auto; stock analytic ``[15e-12, 3e-15]``
   otherwise).
-* **Frequency band restricted to f > 6 mHz** so the unresolved galactic
-  confusion is out of band — no foreground model needed anywhere.
-* Data: the mojito L1 GB galaxy (``catalogue["GB"]`` populated so leaves
-  can start at true catalogue points, SNR > 3 subset).
+* **Frequency band restricted to f > 6 mHz** (data band 6-25 mHz,
+  ``MIN_FREQ`` / ``MAX_FREQ``) so the unresolved galactic confusion is out of
+  band — no foreground model needed anywhere. The GB band itself defaults to
+  the three WDM layers around 7.5 mHz (``GB_MIN_FREQ`` / ``GB_MAX_FREQ``
+  ``7.36e-3`` / ``7.78e-3``).
+* Data (``DATA_MODE``): ``"mojito"`` (default) loads the mojito L1 GB galaxy
+  (``source_types = ("GB",)``; ``catalogue["GB"]`` populated so leaves can
+  start at true catalogue points, SNR > 3 subset, in ``GB_MODE=pe``);
+  ``"synthetic"`` injects ``general.gb_injection_params`` in-process.
+* Recipe: one PE stage ``gb_pe`` with ``rj_fstat_pe`` (the F-stat birth RJ
+  move, which carries the in-model repeat blocks internally). Any GB stock
+  move name built by :func:`~lisatools.globalfit.recipe.build_gb_moves` can
+  be added (``rj_prior_pe``, ``rj_fstat_mcmc``, ...; ``rj_refit`` only exists
+  with a refit file).
+
+Role in production: the variant class is not what the 9mo / 12mo runs use
+(they run :mod:`.all_sources`; the driver builds ``gb_no_fg`` only with
+``GB_ONLY=1``), but the module-level helpers ARE the production GB path:
+:class:`GBNoFgGBSettings` is the base of the production GB block,
+:func:`prepare_gb_branch` its branch prep and :func:`setup_gb_moves` its
+move-stack builder.
 
 Usage::
 
     from lisatools.globalfit.stock import erebor
 
-    fit = erebor.gb_no_fg(nwalkers=4, file_base_name="my_run")
+    fit = erebor.gb_no_fg(nwalkers=4, base_file_name="my_run")
     fit.gb.min_freq = 9.8e-3           # direct GB band bounds (primary
     fit.gb.max_freq = 10.4e-3          #   interface; snapped to WDM layers)
     fit.gb.center_freq = 8.0e-3        # or: center/n_layers (secondary)
@@ -89,26 +107,32 @@ _DEBUG_ENV_PRESET = {
 
 
 def _default_phi0_lims():
+    """``[0, 2 pi]`` (field factory)."""
     return [0.0, 2 * np.pi]
 
 
 def _default_iota_lims():
+    """``[1e-5, pi - 1e-5]`` (field factory)."""
     return [0.0 + _DELTA_SAFE, np.pi - _DELTA_SAFE]
 
 
 def _default_psi_lims():
+    """``[0, pi]`` (field factory)."""
     return [0.0, np.pi]
 
 
 def _default_alpha_lims():
+    """``[0, 2 pi]`` (field factory)."""
     return [0.0, 2 * np.pi]
 
 
 def _default_delta_lims():
+    """``[-pi/2 + 1e-5, pi/2 - 1e-5]`` (field factory)."""
     return [-np.pi / 2.0 + _DELTA_SAFE, np.pi / 2.0 - _DELTA_SAFE]
 
 
 def _default_gb_periodic():
+    """``{"gb": {"phi0": 2 pi, "psi": pi, "alpha": 2 pi}}`` (field factory)."""
     # Sampling-basis periodic parameters, keyed by plain names (run.py
     # translates names -> indices through the branch transform).
     return {"gb": {"phi0": 2 * np.pi, "psi": np.pi, "alpha": 2 * np.pi}}
@@ -122,6 +146,137 @@ class GBNoFgGBSettings(GBSettings):
     kernel sizes are resolved into the underlying :class:`GBSettings`
     fields / the runtime likelihood object at build time. Env-backed
     defaults mirror the legacy settings file's env vars.
+
+    Also the base of the PRODUCTION GB block
+    (:class:`~lisatools.globalfit.stock.erebor.variants.all_sources.AllSourcesGBSettings`,
+    which only widens ``min_freq`` / ``max_freq``), so the env knobs below
+    are the production GB knobs. Fields inherited unchanged from
+    :class:`~lisatools.globalfit.stock.erebor.gb.GBSettings` are documented
+    there. Resolution happens in :func:`prepare_gb_branch` (band, ``t0``,
+    ``ndim``, ``oversample``, ``nleaves_max``, ladder) and
+    :func:`setup_gb_moves` (likelihood objects, seeding). Launcher values are
+    those of ``submit_gf_9mo_v9.sh`` / ``submit_gf_12mo.sh``.
+
+    Attributes:
+        A_lims: Amplitude prior box. Default ``[7e-26, 1e-19]``.
+        m_chirp_lims: Chirp-mass box (Msol). Default ``[0.001, 1.0]``.
+        phi0_lims: Phase box (rad). Default ``[0, 2 pi]``.
+        iota_lims: Inclination box (rad). Default ``[1e-5, pi - 1e-5]``.
+        psi_lims: Polarization box (rad). Default ``[0, pi]``.
+        alpha_lims: Right-ascension box (rad, ICRS). Default ``[0, 2 pi]``.
+        delta_lims: Declination box (rad, ICRS). Default
+            ``[-pi/2 + 1e-5, pi/2 - 1e-5]``.
+        ndim: Sampling dimension. ``None`` (default) -> 8, or 9 when
+            ``use_fdot_astro`` adds the ``fdot_astro_ratio`` column (the
+            production 9-column basis).
+        nleaves_min: Minimum leaves per walker. Default ``0``.
+        nleaves_max: RJ leaf slots per walker. Env ``GB_NLEAVES_MAX``.
+            ``None`` (default) -> 2 x the catalogue sources in the sampled
+            band, capped by ``nleaves_max_cap`` (100 without a catalogue or on
+            FD); launchers ``20000``.
+        num_repeat_proposals: In-model repeats per proposal. Env
+            ``GB_NUM_REPEAT_PROPOSALS``. Default ``100``; launchers ``25``.
+        periodic: Periodic sampling parameters ``{"gb": {"phi0": 2 pi,
+            "psi": pi, "alpha": 2 pi}}``.
+        t0: GB phase / frequency reference epoch [s]. ``None`` (default) ->
+            :data:`GB_MOJITO_T_REF` in mojito mode, the synthetic start
+            otherwise.
+        extra_buffer: FD band-walk buffer (bins). Default ``5``.
+        start_freq_ind: Default ``0``.
+        oversample: ``None`` (default) -> 4 on WDM, 2 on FD.
+        min_freq: GB band floor [Hz], snapped inward to a WDM layer edge
+            (>= 3 layers required). Env ``GB_MIN_FREQ``. Default ``7.36e-3``
+            here (``AllSourcesGBSettings``: ``1e-4``; launchers ``5.5e-4``).
+        max_freq: GB band ceiling [Hz]. Env ``GB_MAX_FREQ``. Default
+            ``7.78e-3`` here (``AllSourcesGBSettings``: ``2.5e-2``; launchers
+            ``2.2e-2``).
+        center_freq: Secondary band interface: centre [Hz] of an
+            ``n_layers``-wide band; used when it or ``n_layers`` is set (the
+            unset one defaults to 7.5e-3 / 3) and then overrides
+            ``min_freq`` / ``max_freq``. Env ``GB_CENTER_FREQ``. Default
+            ``None``.
+        n_layers: WDM layers of the centred band. Env ``GB_N_LAYERS``.
+            Default ``None``.
+        highest_frequencies: Centre the band on the N-th highest-frequency
+            catalogue GB (1-based). Env ``GB_HIGHEST_FREQUENCIES``. Default
+            ``None``.
+        data_band_layers: Clip the DATA band to +-N layers around the GB
+            band (memory knob, N >= 5; ignored with a warning by
+            ``all_sources``). Env ``DATA_BAND_LAYERS``. Default ``None``.
+        fd_bandwidth: FD basis only: band width [Hz] around the centre;
+            ``None`` (default) uses the whole data band. Env
+            ``GB_FD_BANDWIDTH``.
+        mode: ``"pe"`` (default; leaves start at the catalogue truth, SNR
+            cut) or ``"search"`` (zero-leaf start, progressive leaf caps).
+            Env ``GB_MODE``; the production driver sets ``search``.
+        start: ``"truth"`` (default) or ``"prior"`` (PE leaf count, prior
+            coordinates). Env ``GB_START``.
+        snr_threshold: SNR cut of the PE-mode truth seeding. Default ``3.0``.
+        subtract_neighbors: Subtract the neighbouring-layer catalogue sources
+            from the data as known signals. Env ``GB_SUBTRACT_NEIGHBORS``.
+            Default ``False``.
+        neighbor_window_layers: Width (layers) of that window. Default ``4``.
+        subtract_out_of_band: Subtract every catalogue source outside the
+            sampled band. Env ``GB_SUBTRACT_OUT_OF_BAND``. Default ``False``.
+        nt_sub: Chunked-het chunk length. Env ``CHUNKED_NT_SUB``. Default
+            ``256``.
+        n_pad: Chunked-het padding. Env ``CHUNKED_N_PAD``. Default ``32``.
+        n_sparse: Chunked-het sparse points. Env ``CHUNKED_N_SPARSE``.
+            Default ``256``.
+        n_cp_sig: Chunked-het signal spline nodes. Env ``CHUNKED_N_CP_SIG``.
+            Default ``48``.
+        n_cp_orbit: Chunked-het orbit spline nodes. Env
+            ``CHUNKED_N_CP_ORBIT``. Default ``32``.
+        search_in_model: Search mode: insert a pure ``in_model`` move before
+            the removal move. Env ``GB_SEARCH_IN_MODEL``. Default ``False``;
+            launchers ``1``.
+        fstat_fit_in_move: Fit the F-stat birth grids inside the RJ move
+            against the live residual. Env ``GB_FSTAT_FIT_IN_MOVE``. Default
+            ``True``.
+        fstat_refit_every: Refit the F-stat grids every N global-fit
+            iterations (0 = never). Env ``GB_FSTAT_REFIT_EVERY``. Default
+            ``40``; launchers ``2``.
+        fstat_fit_dir: F-stat fit cache directory; ``""`` (default) ->
+            ``gb_fstat_fit`` beside the store. Env ``GB_FSTAT_FIT_DIR``.
+        sighet_inmodel: Score in-model proposals with the sig-het engine
+            (:func:`~lisatools.globalfit.stock.erebor.gb.build_sighet_engine`).
+            Env ``GB_SIGHET_INMODEL``. Default ``True``.
+        sighet_nt_layer: Sig-het time-layer stride. Env ``SIGHET_NT_LAYER``.
+            Default ``64``; launchers ``180`` (9mo) / ``240`` (12mo).
+        sighet_n_sparse_fd: Sig-het FD sparse count. Env
+            ``SIGHET_N_SPARSE_FD``. Default ``1024``.
+        sighet_max_r: Heterodyne-ratio clip (0 = off; diagnostic only). Env
+            ``SIGHET_MAX_R``. Default ``0.0``.
+        sighet_n_cp: Sig-het spline nodes (-1 auto, 0 direct). Env
+            ``SIGHET_N_CP``. Default ``-1``; launchers ``256``.
+        sighet_v3_nodes: V3 ratio-spline nodes (0 off, -1 adaptive). Env
+            ``SIGHET_V3_NODES``. Default ``64``.
+        sighet_v4_knots: V4 fixed knots (0 off). Env ``SIGHET_V4_KNOTS``.
+            Default ``128``.
+        sighet_tukey_alpha: Reference-build Tukey alpha (fraction of the
+            whole observation). Env ``SIGHET_TUKEY_ALPHA``. Default ``0.01``;
+            launchers ``0.01``.
+        sighet_v5: V5 scratch layout (0 off, 1 shared arena, 2 flat). Env
+            ``SIGHET_V5``. Default ``1``.
+        sighet_v4_band: V4 banded half-band (0 = PCR solve). Env
+            ``SIGHET_V4_BAND``. Default ``16``.
+        sighet_ref_build: Carrier reference source, ``"fd"`` or ``"lookup"``.
+            Env ``SIGHET_REF_BUILD``. Default ``"fd"``; launchers ``lookup``.
+        sighet_anchor_engine: Exact ln L behind the anchor offset,
+            ``"chunked"`` or ``"lookup"``. Env ``SIGHET_ANCHOR_ENGINE``.
+            Default ``"chunked"``; launchers ``lookup``.
+        likelihood: Per-row GB likelihood of the chunked delegate,
+            ``"chunked"`` or ``"lookup"``. Env ``GB_LIKELIHOOD``. Default
+            ``"chunked"`` (launchers unset).
+        lookup_table_path: Explicit GB lookup table. Env
+            ``GB_LOOKUP_TABLE_PATH``. Default ``""``.
+        lookup_table_dir: Directory of the recipe table. Env
+            ``GB_LOOKUP_TABLE_DIR``. Default ``""``.
+        lookup_n_nodes: Lookup nodes (<= 0 auto). Env ``GB_LOOKUP_N_NODES``.
+            Default ``-1``.
+        lookup_k_coarse: Env ``GB_LOOKUP_K_COARSE``. Default ``True``.
+        lookup_fill: ``likelihood="lookup"`` only: also write lookup
+            templates on fills. Env ``GB_LOOKUP_FILL``. Default ``False``.
     """
 
     # -- parameter limits (prior ranges) --
@@ -417,7 +572,30 @@ class GBNoFgGBSettings(GBSettings):
 
 @dataclasses.dataclass
 class GBNoFgGeneralSettings(EreborGeneralSettings):
-    """General block for ``gb_no_fg`` (defaults mirror the legacy file)."""
+    """General block for ``gb_no_fg`` (defaults mirror the legacy file).
+
+    Subclass of :class:`~lisatools.globalfit.stock.erebor.fit.EreborGeneralSettings`
+    (inherited fields documented there); the fields below are this
+    variant's.
+
+    Attributes:
+        min_freq: Data-band floor [Hz] (foreground-free restriction). Env
+            ``MIN_FREQ``. Default ``6e-3``.
+        max_freq: Data-band ceiling [Hz]. Env ``MAX_FREQ``. Default ``2.5e-2``.
+        file_store_dir: Output directory. Env ``FILE_STORE_DIR``. Default
+            ``"./gf_output_gb_no_fg/"``.
+        base_file_name: Store file stem. Env ``BASE_FILE_NAME``. Default
+            ``"gb_no_fg_test_2"``.
+        source_types: Mojito streams loaded. Default ``("GB",)``.
+        fixed_psd_params: Fixed ``[Soms_d, Sa_a]`` (sqrt units). ``None``
+            (default) -> fit to the mojito NOISE brick when available, else
+            ``[15e-12, 3e-15]``.
+        likelihood_source_only: Report ``-1/2 <r|r>`` without the noise
+            normalization. Default ``True`` (fixed PSD).
+        gb_injection_params: Synthetic mode: GB rows ``(N, 9)`` in the GBGPU
+            basis ``[A, f0, fdot, fddot, phi0, iota, psi, lam, beta]``.
+            ``None`` -> the stock two-source table.
+    """
 
     # foreground-free band restriction; env-backed so MIN_FREQ/MAX_FREQ
     # widen the data band (they were plain defaults before, which silently
@@ -456,7 +634,22 @@ class GBNoFgGeneralSettings(EreborGeneralSettings):
 
 
 def _band_klohi(gb, layer_df: float) -> typing.Tuple[int, int]:
-    """Resolved (k_lo, k_hi) GB-band layer bounds (pure; no mutation)."""
+    """Resolved (k_lo, k_hi) GB-band layer bounds (pure; no mutation).
+
+    Centre mode (``center_freq`` or ``n_layers`` set): ``n_layers`` layers
+    with the centre layer containing ``center_freq``. Otherwise
+    ``min_freq`` / ``max_freq`` snapped inward to layer edges.
+
+    Args:
+        gb: The GB block.
+        layer_df: WDM layer width [Hz].
+
+    Returns:
+        tuple[int, int]: Layer indices; the band is ``[k_lo, k_hi] * layer_df``.
+
+    Raises:
+        ValueError: When the snapped band spans fewer than 3 layers.
+    """
     if gb.center_freq is not None or gb.n_layers is not None:
         center = gb.center_freq if gb.center_freq is not None else 7.5e-3
         n_layers = int(gb.n_layers) if gb.n_layers is not None else 3
@@ -476,7 +669,17 @@ def _band_klohi(gb, layer_df: float) -> typing.Tuple[int, int]:
 
 
 def _resolve_nleaves_max(gb, general_setup, is_fd, layer_df) -> int:
-    """Dynamic RJ leaf budget: 2x the catalogue sources in the sampled band."""
+    """Dynamic RJ leaf budget: 2x the catalogue sources in the sampled band.
+
+    Counts catalogue GBs with ``f0`` inside the band shrunk by one layer at
+    each edge; returns ``max(2 * n, 4)`` clamped to ``gb.nleaves_max_cap``
+    (``GB_NLEAVES_MAX_CAP``, default 20000), or 100 on FD / without a
+    catalogue. Bypassed when ``nleaves_max`` is set (production
+    ``GB_NLEAVES_MAX=20000``).
+
+    Returns:
+        int: The leaf budget.
+    """
     fallback = 100
     catalogue = (getattr(general_setup, "catalogue", None) or {}).get("GB", {})
     if is_fd or not catalogue:
@@ -558,7 +761,39 @@ def prepare_gb_branch(gb, general_setup, *, data_mode, synthetic_t_start):
 
     Shared by ``gb_no_fg`` and ``all_sources`` so their GB setup is identical
     (all_sources just passes a GB band down to 0.1 mHz via the branch's
-    ``min_freq``/``max_freq``).
+    ``min_freq``/``max_freq``). The production GB branch prep.
+
+    Steps, on ``gb`` in place: ``t0`` (mojito catalogue epoch, or the
+    synthetic start); validates ``mode`` / ``start``; empty ``f0_lims`` ->
+    the data band, empty ``fdot_lims`` -> +-fdot of the heaviest chirp mass
+    at the top frequency; ``ndim`` (8, or 9 with ``use_fdot_astro``); the
+    band (WDM: :func:`_band_klohi`, which sets ``start_freq`` /
+    ``end_freq`` / ``min_freq`` / ``max_freq`` / ``n_layers`` /
+    ``center_freq``; FD: the data band or ``fd_bandwidth``); ``oversample``;
+    ``nleaves_max`` (:func:`_resolve_nleaves_max` when unset); TDI setup;
+    ``initialize_kwargs``; and, when ``betas`` is unset, the GB ladder
+    ``betas = 1 / 1.2**k`` for ``k < ntemps`` with the last rung ``1e-4``.
+
+    Args:
+        gb (GBNoFgGBSettings): The deepcopied GB block.
+        general_setup: The built general setup (domain, band, catalogue).
+        data_mode (str): ``general.data_mode``.
+        synthetic_t_start (float): Synthetic stream start [s].
+
+    Returns:
+        GBNoFgGBSettings: ``gb`` (mutated).
+
+    Raises:
+        ValueError: On a bad ``mode`` / ``start``, a band outside the data
+            band or narrower than 3 layers, or a bad
+            ``highest_frequencies``.
+
+    Note:
+        Because this fills an unset ``betas`` (the stock GB blocks leave it
+        unset), the two-slope ladder fallback in
+        :meth:`~lisatools.globalfit.stock.erebor.gb.GBSetup.init_sampling_info`
+        (``GB_LADDER_HOT_RATIO`` / ``GB_LADDER_HOT_FROM`` /
+        ``GB_LADDER_PIN_LAST``) is never reached on the stock paths.
     """
     if gb.t0 is None:
         gb.t0 = GB_MOJITO_T_REF if data_mode == "mojito" else float(synthetic_t_start)
@@ -687,7 +922,47 @@ def prepare_gb_branch(gb, general_setup, *, data_mode, synthetic_t_start):
 
 
 class GBNoForegroundGlobalFit(EreborFit):
-    """GB-only global fit without foreground fitting (fixed PSD, f > 6 mHz)."""
+    """GB-only global fit without foreground fitting (fixed PSD, f > 6 mHz).
+
+    One branch, ``gb`` (:class:`GBNoFgGBSettings`), on the 6-25 mHz data
+    band with a fixed instrument PSD (``general.fixed_psd_params``). Default
+    recipe: stage ``gb_pe`` (kind ``pe``) with ``rj_fstat_pe``. Data: the
+    mojito L1 GB galaxy (``DATA_MODE=mojito``, default) or an in-process GB
+    injection (``"synthetic"``). Used by the production driver only with
+    ``GB_ONLY=1``; registered as ``gb_no_fg`` with the laptop twin
+    ``gb_no_fg_lite``.
+
+    Knobs: every field of :class:`GBNoFgGeneralSettings` (``fit.general``)
+    and :class:`GBNoFgGBSettings` (``fit.gb``), plus the constructor knob
+    ``debug`` (env ``GB_DEBUG``): the smoke preset (3-day span, 3 walkers,
+    ``GB_NTEMPS=2``, small chunked-het sizes, 4 iterations) seeded through
+    ``os.environ.setdefault`` (explicit env values win). ``GB_DOMAIN=fd``
+    switches the run to the FD basis (the object-level
+    ``fit.general.domain_settings`` swap is the primary route).
+
+    Args:
+        debug (bool, optional): Apply the ``GB_DEBUG`` preset. Default
+            ``None`` reads ``GB_DEBUG``.
+        **knobs: Forwarded to
+            :class:`~lisatools.globalfit.stock.base.StockGlobalFit`.
+
+    Attributes:
+        debug (bool): Whether the debug preset was applied.
+        option_name: ``"gb_no_fg"``.
+        setup_classes: ``{"gb": GBSetup}``.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.stock import erebor
+
+            fit = erebor.gb_no_fg(nwalkers=4, data_mode="synthetic")
+            fit.add_move("rj_prior_pe", branch="gb", stage="gb_pe")
+            print(fit.list_moves())                # "[pe] gb_pe:" rj_fstat_pe, rj_prior_pe
+            fit.build()
+            for model, state in fit.sample(iterations=5, store=False):
+                pass
+    """
 
     option_name = "gb_no_fg"
     description = (
@@ -698,6 +973,7 @@ class GBNoForegroundGlobalFit(EreborFit):
     setup_classes = {"gb": GBSetup}
 
     def __init__(self, **knobs):
+        """Apply the ``GB_DEBUG`` env preset first (if asked), then construct."""
         # GB_DEBUG preset FIRST (before any env-backed default resolves), so
         # the debug values seed the environment exactly like the legacy file.
         debug = knobs.pop("debug", None)
@@ -733,6 +1009,7 @@ class GBNoForegroundGlobalFit(EreborFit):
         self.debug = True
 
     def apply_overrides(self, overrides: dict) -> None:
+        """Clone-time knobs: ``debug=True`` applies :meth:`apply_debug_preset`, then the rest."""
         debug = overrides.pop("debug", None)
         if debug:
             self.apply_debug_preset()
@@ -743,10 +1020,13 @@ class GBNoForegroundGlobalFit(EreborFit):
     # -- default blocks -------------------------------------------------------
 
     def default_branches(self) -> typing.Dict[str, Settings]:
+        """``{"gb": GBNoFgGBSettings()}``."""
         return {"gb": GBNoFgGBSettings()}
 
     def default_recipe(self) -> Recipe:
-        # Smoke-validated default: ONLY the prior-based RJ proposal (which
+        """One PE stage ``gb_pe`` with ``rj_fstat_pe``."""
+        # Smoke-validated default: ONLY the RJ birth proposal rj_fstat_pe
+        # (F-stat grid births under the default GB_FSTAT_FIT_IN_MOVE; it
         # carries the in-model repeat blocks internally). Add
         # Move("rj_fstat_mcmc"/"rj_refit", branch="gb") for the full PE
         # stack, or *_search names in a kind="search" stage.
@@ -764,6 +1044,17 @@ class GBNoForegroundGlobalFit(EreborFit):
     # -- general resolution -----------------------------------------------------
 
     def adjust_general(self, gs: GBNoFgGeneralSettings) -> None:
+        """Variant hook: fixed PSD levels, ``highest_frequencies`` centre, data-band clip.
+
+        Unset ``fixed_psd_params`` -> the NOISE-brick fit, else
+        ``[15e-12, 3e-15]``. With ``gb.highest_frequencies`` in mojito mode
+        the band centre is read from the catalogue file here; with
+        ``gb.data_band_layers`` the data band is clipped to that many layers
+        around the GB band.
+
+        Args:
+            gs: The build-time general block (mutated in place).
+        """
         # Fixed PSD levels: explicit list > mojito NOISE brick fit > stock.
         if gs.fixed_psd_params is None:
             file_params = self.resolve_noise_file_psd_params(gs)
@@ -811,6 +1102,14 @@ class GBNoForegroundGlobalFit(EreborFit):
             )
 
     def set_default_processor(self, gs: GBNoFgGeneralSettings) -> None:
+        """Mojito: the base L1 loader on ``source_types``; synthetic: ``SyntheticGBProcessingStep``.
+
+        Args:
+            gs: The build-time general block (mutated in place).
+
+        Raises:
+            ValueError: On another ``data_mode``.
+        """
         if gs.data_mode == "mojito":
             # Mojito L1 GB galaxy (populates catalogue["GB"] for the
             # true-point start).
@@ -852,6 +1151,7 @@ class GBNoForegroundGlobalFit(EreborFit):
         )
 
     def default_preprocess_kwargs(self) -> dict:
+        """Synthetic data: no highpass / trim; mojito: the Erebor default."""
         if self.general.data_mode == "synthetic":
             # The synthetic stream covers exactly Tobs = Nf*Nt*dt; skip the
             # engine's default highpass + edge-trim + Tobs trim so the WDM
@@ -862,6 +1162,7 @@ class GBNoForegroundGlobalFit(EreborFit):
         return super().default_preprocess_kwargs()
 
     def make_domain_settings(self, gs, Nf, Nt, wavelet_duration, edge_crop):
+        """``GB_DOMAIN=fd``: an FD factory on the data band; otherwise the Erebor WDM factory."""
         # GB_DOMAIN=fd switches the run basis to the frequency domain (same
         # band restriction); the object-level swap (fit.general.domain_settings
         # = FDSettings.make_factory(...)) is the primary interface.
@@ -872,6 +1173,7 @@ class GBNoForegroundGlobalFit(EreborFit):
     # -- branch resolution --------------------------------------------------------
 
     def prepare_branch_settings(self, name: str, general_setup: GeneralSetup) -> Settings:
+        """Erebor completion, then :func:`prepare_gb_branch` for ``gb``."""
         settings = super().prepare_branch_settings(name, general_setup)
         if name != "gb":
             return settings
@@ -1003,6 +1305,36 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
     prior seeding, neighbor subtraction — then ``build_gb_moves``. Returns the
     ``{name: move}`` dict; the caller materializes the recipe. Imported by both
     ``gb_no_fg`` and ``all_sources`` so their GB setup is identical.
+
+    The production GB move builder (via ``all_sources.setup_recipe``).
+    Steps: pin the device; in search mode seed ``GB_LEAF_CAP_START=1`` and
+    ``GB_RJ_PHASE_MAXIMIZE=1`` with ``os.environ.setdefault`` (a launcher
+    export, even an empty one, wins); on WDM build the chunked-het
+    ``GBWDMComputations`` (or ``GBLookupWDMComputations`` with
+    ``GB_LIKELIHOOD=lookup``) and wrap it in the sig-het engine when
+    ``sighet_inmodel``, logging the resolved sig-het configuration; on FD
+    attach the orbits / TDI handles; optional catalogue-source subtraction
+    (``subtract_out_of_band`` / ``subtract_neighbors``); PE-mode seeding
+    (truth with ``GB_START_FACTOR`` multiplicative scatter, default
+    ``1e-4``, or prior draws) unless already seeded by
+    :meth:`GBNoForegroundGlobalFit.attach_runtime_objects`; search-mode
+    insertion of ``rj_replace`` / ``in_model`` / ``rj_prior_removal`` after
+    the F-stat birth move when missing; PE-mode insertion of
+    ``rj_replace_pe`` (``gb.pe_rj_replace``); ``rj_para_search_pe`` with
+    ``gb.para_search``; finally
+    :func:`~lisatools.globalfit.recipe.build_gb_moves` for the requested
+    names, plus the legacy aliases ``rj_prior_search`` / ``rj_prior``.
+
+    Args:
+        engine_info: The engine settings.
+        curr: The built current info (``general_info``, ``source_info``,
+            ``source_metadata["recipe"]``).
+        acs: The rank's ``AnalysisContainerArray`` (residual).
+        priors (dict): Per-branch priors.
+        state (GFState): The starting state (GB leaves seeded in place).
+
+    Returns:
+        dict: ``{move name: built GB move}``.
     """
     general_info = curr.general_info
     gpus = general_info.gpus
@@ -1388,7 +1720,12 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
 
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
-    """Recipe setup for ``gb_no_fg`` (the run's ``setup_function``)."""
+    """Recipe setup for ``gb_no_fg`` (the run's ``setup_function``).
+
+    Builds the GB stack with :func:`setup_gb_moves` and materializes the
+    recipe (:meth:`~lisatools.globalfit.recipe.Recipe.setup`). Arguments as
+    for :func:`setup_gb_moves`.
+    """
     general_info = curr.general_info
     stock_moves = setup_gb_moves(engine_info, curr, acs, priors, state)
     ctx = MoveBuildContext(

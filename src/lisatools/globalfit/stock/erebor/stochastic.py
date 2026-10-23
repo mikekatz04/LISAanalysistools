@@ -2,10 +2,18 @@
 
 The stochastic gravitational-wave background is a *signal* branch (as opposed
 to the instrument PSD + galactic-confusion foreground, which are treated as
-noise and live in :mod:`.noise`). It is sampled jointly with the noise branches
-by the single :class:`~lisatools.globalfit.moves.psdmove.PSDMove`, and folded
-into the covariance through the :class:`~lisatools.sensitivity.SGWB` component
-of :class:`~lisatools.sensitivity.CompositeSensitivityBackend`.
+noise and live in :mod:`~lisatools.globalfit.stock.erebor.noise`). It is
+sampled jointly with the noise branches by the single
+:class:`~lisatools.globalfit.moves.psdmove.PSDMove`, and folded into the
+covariance through the :class:`~lisatools.sensitivity.SGWB` component of
+:class:`~lisatools.sensitivity.CompositeSensitivityBackend`.
+
+Since the 2026-07 noise-move split the ``sgwb`` branch runs its OWN
+``PSDMove`` (stock names ``sgwb_pe`` / ``sgwb_search``) on its own ladder
+(``SGWB_NTEMPS``), with the other noise branches frozen at their cold rows.
+Used by the ``noise_sgwb`` variants and by ``all_sources`` with
+``FIT_SGWB=1`` (legacy ``ALL_SOURCES_SGWB``); the production 9mo / 12mo runs
+leave ``FIT_SGWB`` unset, so there is no sgwb branch.
 """
 
 from __future__ import annotations
@@ -37,6 +45,38 @@ class SGWBSettings(Settings):
     :class:`~lisatools.stochastic.PowerLawSGWB` ``(log10_A, alpha)``; other
     templates (LogNormal, PhaseTransition) need matching ``ndim`` + priors and a
     matching ``sgwb_stochastic_fn`` on the sensitivity backend.
+
+    Attributes:
+        ntemps: The sgwb move's own ladder size. Env ``SGWB_NTEMPS``. Default
+            12.
+        sgwb_kwargs: Reserved template kwargs; not read by the stock path.
+        transform: Optional sampling -> template transform (``None`` = the
+            template takes the sampled values directly).
+        nleaves_max: Always 1 (one background).
+        nleaves_min: Always 1.
+        ndim: Template dimension. Default 2 (``PowerLawSGWB``).
+        num_prop_repeats: Inner proposals per PSDMove call. Env
+            ``SGWB_NUM_PROP_REPEATS``. Default 50.
+        injection: Optional ``(ndim,)`` start/truth row.
+        stochastic_fn: Spectral template name, threaded onto the sensitivity
+            backend by the variant's ``finalize_general``. Default
+            ``"PowerLawSGWB"`` (parameters ``(log10_A, alpha)``, reference
+            frequency 25 Hz).
+        inner_move_kind: PSDMove inner proposal, ``"eigen"`` or ``"stretch"``;
+            ``None`` resolves from the walker count. Env
+            ``SGWB_INNER_MOVE_KIND``.
+        eigen_refresh_every: Proposes between eigen-table refreshes. Env
+            ``SGWB_EIGEN_REFRESH``. Default 10.
+        eigen_eps_rel: Finite-difference step of the information matrix, as a
+            fraction of each prior-box width. Env ``SGWB_EIGEN_EPS_REL``.
+            Default 1e-4.
+
+    Example:
+        .. code-block:: python
+
+            fit = erebor.noise_sgwb()
+            fit.sgwb.stochastic_fn = "PowerLawSGWB"
+            fit.sgwb.ntemps = 8
     """
 
     # the sgwb move's OWN ladder size (noise-move split 2026-07)
@@ -72,6 +112,10 @@ class SGWBSettings(Settings):
 class SGWBSetup(Setup):
     """:class:`Setup` for the SGWB branch in the Erebor recipe.
 
+    Construction copies the settings, opens the ``sgwb_setup.log`` logger and
+    runs :meth:`init_setup` (prior, ladder, generic module sub-state /
+    sub-backend).
+
     Args:
         sgwb_settings: Settings dataclass with SGWB kwargs, prior, and
             tempering configuration.
@@ -95,7 +139,18 @@ class SGWBSetup(Setup):
         self.init_setup()
 
     def init_sampling_info(self):
-        """Build the SGWB prior and tempering kwargs."""
+        """Build the SGWB prior and tempering kwargs.
+
+        Fills (only when unset): ``sgwb_kwargs`` (``{}``),
+        ``initialize_kwargs``, ``priors`` (``log10_A ~ U(-22, -18)``,
+        ``alpha ~ U(-1, 2)``; this default range does not contain a loud
+        injection such as ``log10_A = -9.5``), ``betas``
+        (``make_ladder(10 * ndim, Tmax=inf, ntemps=ntemps)``) and
+        ``other_tempering_kwargs`` (``permute=False``).
+
+        Raises:
+            AssertionError: When ``other_tempering_kwargs["permute"]`` is true.
+        """
         if self.sgwb_kwargs is None:
             self.sgwb_kwargs = {}
 
@@ -144,8 +199,17 @@ class SGWBSetup(Setup):
             self.branch_backend = ModuleSubBackend
 
 
+# TODO check: keep/remove/document -- legacy helper; no caller anywhere (erebor re-export only)
 def get_sgwb_erebor_settings(general_set: GeneralSetup) -> SGWBSetup:
-    """Construct the default :class:`SGWBSetup` for an Erebor run."""
+    """Construct the default :class:`SGWBSetup` for an Erebor run.
+
+    Args:
+        general_set: Built general setup supplying ``Tobs``, ``dt`` and
+            ``file_store_dir`` (the log directory).
+
+    Returns:
+        SGWBSetup: Built from a default :class:`SGWBSettings`.
+    """
     sgwb_settings = SGWBSettings(
         Tobs=general_set.Tobs,
         dt=general_set.dt,

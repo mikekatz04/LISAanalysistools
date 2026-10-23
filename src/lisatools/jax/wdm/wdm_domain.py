@@ -1,11 +1,13 @@
-"""JAX port of ``WDMDomain`` / ``WDMDomainWrap`` (TDIonTheFly.hh:386).
+"""JAX port of ``WDMDomain`` / ``WDMDomainWrap``.
 
-Passive container for the observed-data WDM coefficients and the
-inverse-noise array. The actual inner-product accumulators
-(``add_ip_contrib`` / ``add_ip_swap_contrib``) are expressed as JAX
-``jnp.sum`` reductions inside the kernels in
-:mod:`fastlisaresponse.jax.wdm.computation_group`; this class only
-needs to expose the data layout helpers.
+Passive container (mirroring the C++ ``WDMDomainWrap`` of
+``lisatools/cutils/binding_wdm_domain.hpp``) for the observed-data WDM
+coefficients and the inverse-noise array. The actual inner-product
+accumulators (``add_ip_contrib`` / ``add_ip_swap_contrib``) are expressed as
+JAX ``jnp.sum`` reductions inside the GBGPU JAX kernels
+(``gbgpu.jax.wdm.kernels``, ``gbgpu.jax.wdm.computation_group``; formerly
+``fastlisaresponse.jax.wdm.computation_group``); this class only holds the
+data and the grid scalars.
 """
 from __future__ import annotations
 
@@ -16,10 +18,28 @@ import numpy as np
 class WDMDomainWrapJAX:
     """Mirror of the C++ ``WDMDomainWrap`` data container.
 
-    Constructor signature matches the C++ wrapper exactly:
-        (wdm_data, wdm_noise, layer_df, layer_dt,
-         Nf, Nt, num_channel, ind_min_t, ind_max_t, ind_min_f, ind_max_f,
-         num_data, num_noise)
+    Constructor signature matches the C++ wrapper exactly. The two arrays are
+    moved to JAX through the host (``np.asarray``, so pass numpy or JAX
+    arrays, not cupy); the scalars are stored as in
+    :class:`~lisatools.jax.wdm.wdm_settings.WDMSettingsWrapJAX` (including
+    ``Nf_active`` / ``Nt_active``). No layout or length check is made here.
+
+    Args:
+        wdm_data (array-like): Flattened observed-data WDM coefficients
+            (``num_data`` data streams).
+        wdm_noise (array-like): Flattened inverse-noise array (``num_noise``
+            noise realisations).
+        layer_df: WDM frequency-layer width [Hz].
+        layer_dt: WDM time-pixel width [s].
+        Nf: Number of frequency layers.
+        Nt: Number of time pixels.
+        num_channel: Number of TDI channels.
+        ind_min_t: First time pixel of the active band.
+        ind_max_t: Last time pixel of the active band (inclusive).
+        ind_min_f: First frequency layer of the active band.
+        ind_max_f: Last frequency layer of the active band (inclusive).
+        num_data: Number of data streams in ``wdm_data``.
+        num_noise: Number of noise arrays in ``wdm_noise``.
     """
 
     def __init__(self,

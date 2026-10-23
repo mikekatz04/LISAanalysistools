@@ -1,5 +1,23 @@
 """Host-side cache of GB in-model proposal factors (``GB_CHOL_CACHE``).
 
+Where it sits: every GB in-model block of
+:class:`~lisatools.globalfit.moves.gbspecialstretch.GBSpecialBase` asks
+``_proposal_cholesky`` for its sources' proposal factors. When the shared
+nearest-f0 table is not in use (``GB_INFOMAT_PER_BLOCK=1``, the per-block exact
+route) and the move's ``_chol_cache`` gate passes (``GB_CHOL_CACHE=1``, an
+info-matrix proposal, a GB branch without per-leaf fills -- not VGB), the
+factors come from :meth:`_CholCache.take` instead of a direct
+``_compute_proposal_cholesky`` call. ``_ensure_proposal_tables`` runs
+:meth:`_CholCache.due` / :meth:`_CholCache.refresh` once per proposal, and
+``_run_in_model_repeats`` calls :meth:`_CholCache.retrack` at the end of each
+block. The 9mo/12mo launchers set ``GB_CHOL_CACHE=1``,
+``GB_CHOL_CACHE_EVERY=40``, ``GB_CHOL_CACHE_TOL=5`` and
+``GB_INFOMAT_PER_BLOCK=1``.
+
+Public entry points: :func:`chol_cache_enabled`, :func:`source_uid_enabled`,
+:func:`new_source_uids` (the per-source IDs issued by the GB moves) and
+:func:`get_chol_cache`.
+
 What is cached
 --------------
 Every GB in-model block draws its jumps from a per-source factor ``B`` of the
@@ -142,8 +160,8 @@ Knobs (environment)
     path, exactly as before the IDs. Read at every sorter build
     (:func:`source_uid_enabled`), like ``GB_CHOL_CACHE``.
 
-``GB_CHOL_CACHE_TOL``, ``_BATCH`` and ``_WINDOW`` are read once, when a cache
-is created.
+``GB_CHOL_CACHE_EVERY``, ``_TOL``, ``_BATCH`` and ``_WINDOW`` are read once,
+when a cache is created (:class:`_CholCache` ``__init__``).
 
 Logging
 -------
@@ -225,23 +243,52 @@ _UID_STATE = {"pid": None, "prefix": 0, "next": 0}
 
 
 def chol_cache_enabled() -> bool:
-    """True when ``GB_CHOL_CACHE=1`` (default off)."""
+    """Return whether the proposal-factor cache is switched on.
+
+    Reads ``GB_CHOL_CACHE`` from the environment on every call (default
+    ``"0"``; only ``"1"`` turns it on). Called by
+    ``GBSpecialBase._chol_cache`` and by the per-source ID hooks of the GB
+    moves.
+
+    Returns:
+        bool: True when ``GB_CHOL_CACHE=1``.
+    """
     return os.environ.get("GB_CHOL_CACHE", "0") == "1"
 
 
 def source_uid_enabled() -> bool:
-    """True unless ``GB_CHOL_CACHE_UID=0`` (the rollback switch)."""
+    """Return whether GB sorters carry per-source IDs.
+
+    Reads ``GB_CHOL_CACHE_UID`` on every call (default ``"1"``; ``"0"`` is
+    the rollback switch to coordinate matching, see the module docstring).
+    The GB moves consult it together with :func:`chol_cache_enabled` when
+    they build a sorter.
+
+    Returns:
+        bool: True unless ``GB_CHOL_CACHE_UID=0``.
+    """
     return os.environ.get("GB_CHOL_CACHE_UID", "1") != "0"
 
 
 def new_source_uids(n: int) -> np.ndarray:
-    """``n`` fresh per-source IDs (host int64, all ``>= 0``).
+    """Issue ``n`` fresh per-source IDs.
 
     Unique for the lifetime of the process. Across the ranks of a run (each
     issues its own births) and across restarts (a mid-iteration checkpoint
     brings the previous process's IDs back) they differ by their random
     prefix: two processes collide only if they drew the same 31-bit prefix.
     The prefix is redrawn in a forked child and when the counter runs out.
+    The prefix comes from ``os.urandom``, so drawing IDs never consumes a
+    sampler random stream. Called by the GB moves at sorter build
+    (``_issue_missing_uids``), RJ births (``_rj_flip_uids``) and accepted
+    replacements (``_replace_uids``).
+
+    Args:
+        n: Number of IDs to issue (cast to ``int``).
+
+    Returns:
+        np.ndarray: ``(n,)`` host int64 array of consecutive IDs, all ``>= 0``
+        (``prefix << 32 | counter``).
     """
     n = int(n)
     st = _UID_STATE
@@ -257,8 +304,16 @@ def new_source_uids(n: int) -> np.ndarray:
 def get_chol_cache(key) -> "_CholCache":
     """Return this process's cache for ``key``, creating it on first use.
 
+    The cache lives in the module-level registry ``_CHOL_CACHES`` (one per
+    process and key), never on a move. Called by ``GBSpecialBase._chol_cache``.
+
     Args:
-        key: ``(branch name, observable eigen mode, eigen-axis flag)``.
+        key (tuple): ``(branch name, observable eigen mode, eigen-axis flag)``,
+            e.g. ``("gb", "axis", False)``.
+
+    Returns:
+        _CholCache: The cache for ``key``. A new cache reads
+        ``GB_CHOL_CACHE_EVERY`` / ``_TOL`` / ``_BATCH`` / ``_WINDOW`` once.
     """
     cache = _CHOL_CACHES.get(key)
     if cache is None:
@@ -301,8 +356,7 @@ def _regrow(old, n_filled: int, capacity: int, template, fill=None):
 
 
 class _WalkerTable:
-    """One walker's cache entries: append-only host arrays plus an ID index
-    and an f0 index.
+    """One walker's cache entries: append-only host arrays, ID and f0 indexes.
 
     Rows ``[0, n)`` are filled. They are appended with amortized doubling and
     never move, so an entry number recorded for a block stays valid until a
@@ -463,6 +517,13 @@ class _CholCache:
         separately). A refresh is due when the cache has never been refreshed
         or the ticker has entered a new ``every``-period since the last one;
         never once the cache is disabled.
+
+        Args:
+            propose_index (int): The calling move's propose counter
+                (``move.time``).
+
+        Returns:
+            bool: True when :meth:`refresh` should run before the next block.
         """
         self.tick = max(self.tick, int(propose_index))
         return (not self.disabled
@@ -473,7 +534,15 @@ class _CholCache:
 
         Computes the factors in ``batch``-sized calls through the move's
         slot-free route and replaces all tables. On error the cache is
-        disabled (see :meth:`_fail`).
+        disabled (see :meth:`_fail`). Logs one ``refreshed N sources`` INFO
+        line.
+
+        Args:
+            move (GBSpecialBase): The GB move; supplies ``xp``, ``name`` and
+                ``_compute_proposal_cholesky``.
+            model (object): The eryn model passed to the move's propose.
+            band_sorter (BandSorter): This propose's sorter; every row with
+                ``inds`` True (all walkers, all rungs) is cached.
         """
         if self.disabled:
             return
@@ -510,6 +579,20 @@ class _CholCache:
         cached ``Gamma_z`` into ``move._obs_gamma_z`` -- the two side effects
         the direct computation has. Before the first refresh, once disabled,
         or on error (which disables), the whole block is computed directly.
+
+        Args:
+            move (GBSpecialBase): The GB move.
+            model (object): The eryn model passed to the move's propose.
+            band_sorter (BandSorter): This propose's sorter.
+            ids (xp.ndarray): Sorter row ids of the block's alive sources.
+            slots (xp.ndarray or None): Buffer slot of each row of ``ids``
+                (``None`` = no slots, the slot-free route).
+            buffer_obj (SubBandBuffer or None): The bound sub-band buffer,
+                forwarded as the router's ``slot_holder``.
+
+        Returns:
+            xp.ndarray: ``(len(ids), ndim, ndim)`` proposal factors ``B`` on
+            ``move.xp``, row-aligned with ``ids``.
         """
         self._served = None
         if self.disabled or self.epoch is None:
@@ -558,6 +641,15 @@ class _CholCache:
         ``_MATCH_COLS`` in that entry's marginal widths; a hit is a distance
         ``<= tol``, and the hit entry's key is set to the row's current
         coordinates.
+
+        Args:
+            band_sorter (BandSorter): This propose's sorter (``coords``,
+                ``walker_inds`` and, when present, ``source_uid`` are read).
+            ids (xp.ndarray): Sorter row ids to look up.
+
+        Returns:
+            _Lookup: Host-side hit mask, walkers, entry numbers, factors and
+            ``Gamma_z`` for the rows of ``ids``.
         """
         coords = asnumpy(band_sorter.coords[ids])
         n_rows, ndim = coords.shape
@@ -624,7 +716,15 @@ class _CholCache:
         to the block the last :meth:`take` served: ``ids`` must be that
         block's ids in the same order, else nothing changes. ``coords`` are
         the final sampling coordinates, row-aligned with ``ids``. On error
-        the cache is disabled (see :meth:`_fail`).
+        the cache is disabled (see :meth:`_fail`). Called by
+        ``GBSpecialBase._run_in_model_repeats`` after the block's final
+        write-back.
+
+        Args:
+            ids (xp.ndarray): The block's sorter row ids, in the order
+                :meth:`take` received them.
+            coords (xp.ndarray): ``(len(ids), ndim)`` final sampling-basis
+                coordinates.
         """
         served, self._served = self._served, None
         if served is None or self.disabled:
@@ -673,8 +773,10 @@ class _CholCache:
 
     @staticmethod
     def _uids(band_sorter, ids, n_rows) -> np.ndarray:
-        """Host source ID of each row; ``-1`` where it has none, and for
-        every row of a sorter that carries no ID column."""
+        """Host source ID of each row (``-1`` where there is none).
+
+        Every row of a sorter that carries no ID column reads ``-1``.
+        """
         col = getattr(band_sorter, "source_uid", None)
         if col is None:
             return np.full(n_rows, -1, dtype=np.int64)

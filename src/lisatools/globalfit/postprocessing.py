@@ -1,11 +1,58 @@
-"""
-postprocessing.py
-=================
+"""Results out: the L3C submission writer and its chain-reading helpers.
 
 Post-processing routines for the output of a global fit run.
 
 Produces L3C-compliant HDF5 submission files and GitHub Pages-compatible
 JSON manifests for web dashboard display.
+
+Main entry points:
+
+- :class:`BackendConsumer`: reads the cold chain of a run store, thins it
+  by the integrated autocorrelation time and maps samples to the physical
+  basis with each branch's transform.
+- :class:`SubmissionWriter`: the end-of-run writer
+  (:meth:`SubmissionWriter.write_submission`): GB clustering
+  (:func:`~lisatools.globalfit.gathergalaxy.gather_gb_samples`), MBHB
+  ordering, per-source posterior files, the metadata manifests and the
+  data / residual dumps.
+- :class:`RunMetadata`, :class:`SourceMetadata`, :class:`StochasticMetadata`:
+  the L3C metadata records; :class:`RunMetadata` can rebuild the run's
+  orbits, domain and sensitivity from a written submission.
+- :class:`GlobalFitPlotter`: characteristic-strain arrays of the input
+  streams for the web dashboard.
+- :class:`DetectionCriteria` and its subclasses: per-leaf detection
+  statistics; :func:`save_residuals`.
+
+Pipeline position: :mod:`lisatools.globalfit.run` imports this module. At
+sampler setup :meth:`GlobalFitPlotter.save_input_data` runs, and at the end
+of the run ``GlobalFit._write_submission`` builds a
+:class:`SubmissionWriter` (``ess=20_000``), both only when
+``general.submission_parent_folder`` is set (no env knob; default ``None``).
+The submission is also skipped (with a warning) in any multi-rank run, so
+the 9mo/12mo production runs write nothing here.
+
+Submission layout (``P = <run_type>_<codename>_<run_id>``, from
+``global_fit_version = "<run_type>_<run_id>"`` and
+``global_fit_codename``, default ``"Erebor"``; ``T`` the submission
+timestamp)::
+
+    <submission_parent_folder>/<P>_<T>/
+        global_metadata.json                RunMetadata (L3C keys + extras)
+        input_data.h5, residuals.h5         save_residuals dumps
+        <P>_<SOURCE>_<T>.h5 / .json         per source type: metadata and the
+                                            "sources/detection" table
+        <P>_<SOURCE>_posteriordir/
+            <P>_<SOURCE>_posteriors_<n>_<first>_<T>.h5
+                                            one structured dataset per source
+                                            (label XXXXX_YYYYY)
+        <P>_noise_<T>.h5 / .json            stochastic (psd + galfor) metadata
+        <P>_NOISE_posteriordir/<P>_noise_posteriors_<T>.h5
+
+``<SOURCE>`` is the L3C type name (``GB``, ``MBHB``, ``EMRI``, ``SOBHB``,
+``NOISE``). Posterior columns are the L3C parameter names of
+:data:`PARAMETER_INFO_REGISTRY` (physical basis, SI-like units listed there;
+MBH distance in Gpc, sky angles ICRS right ascension / declination) plus
+``logprior`` and ``loglikelihood``.
 """
 
 from __future__ import annotations
@@ -50,7 +97,16 @@ logger = getLogger(__name__)
 
 @dataclasses.dataclass(frozen=True)
 class ParameterInfo:
-    """Stores the L3C plain name, LaTeX display label, and unit for one parameter."""
+    """Stores the L3C plain name, LaTeX display label, and unit for one parameter.
+
+    The values of :data:`PARAMETER_INFO_REGISTRY`; the ``l3c_name`` is the
+    posterior column name the submission files use.
+
+    Attributes:
+        l3c_name (str): L3C column name (e.g. ``"frequency"``).
+        latex_name (str): LaTeX label for plots.
+        unit (str): Unit string (e.g. ``"Hz"``, ``"solMass"``).
+    """
 
     l3c_name: str
     latex_name: str
@@ -104,6 +160,9 @@ _GALFOR_PARAM_INFO: Dict[str, ParameterInfo] = {
 
 # todo add galactic foreground
 
+#: ``{branch: {parameter: ParameterInfo}}`` for the branches the submission
+#: writer can export (``gb``, ``mbh``, ``psd``, ``galfor``). The parameter
+#: order must match the branch transform's output (physical) columns.
 PARAMETER_INFO_REGISTRY: Dict[str, Dict[str, ParameterInfo]] = {
     "gb": _GB_PARAM_INFO,
     "mbh": _MBH_PARAM_INFO,
@@ -131,6 +190,9 @@ _REMOVED_PARAMS_REGISTRY: Dict[str, List[str]] = {
     "galfor": [],
 }
 
+#: Branch name -> L3C source-type name. Branches not listed here (e.g. ``vgb``,
+#: the stock ``sobbh``; the key below is ``sobh``) are left out of the
+#: metadata and make :meth:`SubmissionWriter.create_folders` raise.
 source_types_names = dict(
     gb="GB",  # todo: separate the verification binaries into their own source type
     mbh="MBHB",
@@ -143,10 +205,15 @@ source_types_names = dict(
 # order of the mojito light mbh sources, sorted by merger time (earliest to latest), for the purpose of assigning `known_injection` labels in the metadata
 _MOJITO_LIGHT_MBH_ORDER = ["source_18", "source_5", "source_16", "source_7", "source_2", "source_12", "source_9", "source_4", "source_0", "source_15", "source_3", "source_10", "source_19", "source_13", "source_6", "source_17", "source_8", "source_1", "source_11", "source_14"] 
 
+#: Leaves written per posterior HDF5 file.
 MAX_SOURCES_PER_BATCH = 500
 
 def _apply_output_corrections(branch: str, samples_dict: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    """Apply branch-specific output corrections to a posterior mapping."""
+    """Apply branch-specific output corrections to a posterior mapping.
+
+    The corrections of ``_OUTPUT_CORRECTIONS_REGISTRY`` (the only one is
+    MBH ``luminosity_distance`` Mpc -> Gpc). Returns a new dict.
+    """
 
     corrected = dict(samples_dict)
     transform = _OUTPUT_CORRECTIONS_REGISTRY[branch]
@@ -162,7 +229,11 @@ def _apply_output_corrections(branch: str, samples_dict: dict[str, np.ndarray]) 
 
 
 def _filter_removed_params(branch: str, samples_dict: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    """Remove parameters that should not be written for the given branch."""
+    """Remove parameters that should not be written for the given branch.
+
+    The names of ``_REMOVED_PARAMS_REGISTRY`` (GB ``frequency_double_dot``).
+    Returns a new dict.
+    """
 
     removed_params = set(_REMOVED_PARAMS_REGISTRY[branch])
     filtered = {}
@@ -179,7 +250,28 @@ def _filter_removed_params(branch: str, samples_dict: dict[str, np.ndarray]) -> 
 
 
 def posteriors_to_structured_array(samples_dict: dict[str, np.ndarray]) -> np.ndarray:
-    """Convert a posterior mapping into a structured NumPy array."""
+    """Convert a posterior mapping into a structured NumPy array.
+
+    Args:
+        samples_dict: ``{column name: (n_samples,) array}``, all the same
+            length.
+
+    Returns:
+        np.ndarray: ``(n_samples,)`` structured array with one ``float64``
+        field per key, in insertion order.
+
+    Raises:
+        ValueError: ``samples_dict`` is empty.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.globalfit.postprocessing import posteriors_to_structured_array
+        >>> arr = posteriors_to_structured_array(
+        ...     {"frequency": np.ones(3), "logprior": np.zeros(3)}
+        ... )
+        >>> arr.dtype.names, arr.shape
+        (('frequency', 'logprior'), (3,))
+    """
 
     if not samples_dict:
         raise ValueError("Cannot build a structured array from an empty posterior mapping.")
@@ -196,7 +288,20 @@ def posteriors_to_structured_array(samples_dict: dict[str, np.ndarray]) -> np.nd
 
 
 def detections_to_structured_array(detections: list[dict]) -> np.ndarray:
-    """Convert detection records into a structured NumPy array for HDF5 storage."""
+    """Convert detection records into a structured NumPy array for HDF5 storage.
+
+    Args:
+        detections: One dict per source with the keys ``source_id``,
+            ``posterior_id``, ``comment``, ``known_injection`` (UTF-8 strings),
+            ``quality_flag`` (int) and ``detection_statistic`` (float).
+
+    Returns:
+        np.ndarray: ``(n_detections,)`` structured array with those six
+        fields (the ``sources/detection`` dataset of a source metadata file).
+
+    Raises:
+        KeyError: A record misses one of the keys.
+    """
 
     str_dtype = h5py.string_dtype(encoding="utf-8")
     fields = [
@@ -218,7 +323,13 @@ def detections_to_structured_array(detections: list[dict]) -> np.ndarray:
 
 
 def _save_metadata_attributes(h5obj: h5py.File | h5py.Group, metadata: MetadataBase) -> None:
-    """Save dataclass metadata fields as HDF5 attributes."""
+    """Save dataclass metadata fields as HDF5 attributes.
+
+    ``str`` / ``int`` / ``float`` fields are written as is, ``list`` / ``dict``
+    fields as JSON strings; other types are skipped with a warning. Only
+    dataclass FIELDS are written (attributes set on the instance afterwards,
+    such as ``detections``, are not).
+    """
 
     for field in dataclasses.fields(metadata):
         value = getattr(metadata, field.name)
@@ -239,7 +350,11 @@ def _save_posterior_dataset(
     source_label: str,
     samples_dict: dict[str, np.ndarray],
 ) -> None:
-    """Write one posterior dataset into an open HDF5 object."""
+    """Write one posterior dataset into an open HDF5 object.
+
+    Creates dataset ``source_label`` holding
+    :func:`posteriors_to_structured_array` of ``samples_dict``.
+    """
 
     h5obj.create_dataset(source_label, data=posteriors_to_structured_array(samples_dict))
 
@@ -252,7 +367,21 @@ def _build_leaf_samples_dict(
     log_prior: np.ndarray,
     log_likelihood: np.ndarray,
 ) -> dict[str, np.ndarray]:
-    """Build one leaf's posterior mapping and apply corrections/filtering."""
+    """Build one leaf's posterior mapping and apply corrections/filtering.
+
+    Args:
+        samples_here: ``(n_samples, n_leaves_batch, n_params)`` physical
+            samples of a batch of leaves.
+        parameter_names: L3C column names, one per parameter column.
+        leaf: Leaf index within the batch.
+        branch: Branch name (selects the corrections / removals).
+        log_prior: ``(n_samples,)`` log-prior of the samples.
+        log_likelihood: ``(n_samples,)`` log-likelihood of the samples.
+
+    Returns:
+        dict[str, np.ndarray]: ``{column: (n_samples,)}`` for the leaf, with
+        ``logprior`` and ``loglikelihood`` appended.
+    """
 
     samples_dict = {name: samples_here[..., i] for i, name in enumerate(parameter_names)}
     samples_dict["logprior"] = log_prior
@@ -273,7 +402,16 @@ def _build_stochastic_samples_dict(
     log_prior: np.ndarray,
     log_likelihood: np.ndarray,
 ) -> dict[str, np.ndarray]:
-    """Build the combined posterior mapping for stochastic branches."""
+    """Build the combined posterior mapping for stochastic branches.
+
+    ``samples`` is ``(n_samples, 1, n_params)`` (the concatenated psd /
+    galfor columns of their single leaf); the corrections and removals of
+    every branch in ``branches_here`` are applied in turn.
+
+    Returns:
+        dict[str, np.ndarray]: ``{column: (n_samples,)}`` with ``logprior``
+        and ``loglikelihood``.
+    """
 
     samples_dict = {name: samples[:, 0, i] for i, name in enumerate(parameter_names)}
     samples_dict["logprior"] = log_prior
@@ -291,7 +429,18 @@ def _build_stochastic_samples_dict(
 
 
 def get_source_types(curr: CurrentInfoGlobalFit) -> List[str]:
-    """Get the list of source types searched for in this run, inferred from curr."""
+    """Get the list of source types searched for in this run, inferred from curr.
+
+    Maps each branch of ``curr.source_info`` through
+    :data:`source_types_names` (``psd`` and ``galfor`` both give ``"NOISE"``);
+    unmapped branches (e.g. ``vgb``, ``sobbh``) are left out.
+
+    Args:
+        curr: The built global fit.
+
+    Returns:
+        list[str]: L3C source-type names, one per mapped branch.
+    """
     sources = list(curr.source_info.keys())
 
     out = []
@@ -305,7 +454,7 @@ def get_source_types(curr: CurrentInfoGlobalFit) -> List[str]:
 
 
 def _seconds_to_l3c_datetime(t: float) -> str:
-    """Convert a UTC timestamp in seconds with respect to LISA_EPOCH_TCB to the L3C format yyyy.mm.dd.hh.mm.ss."""
+    """Format ``t`` seconds after ``LISA_EPOCH_TCB`` as L3C ``yyyy.mm.dd.hh.mm.ss``."""
     from lisaconstants import LISA_EPOCH_TCB
 
     format_str = "%Y-%m-%dT%H:%M:%S.%f"
@@ -348,6 +497,43 @@ class BackendConsumer:
 
     Can be constructed from a live `curr` object or a standalone HDFBackend,
     making it usable both in-session and in offline post-processing.
+
+    Without ``curr`` the chain readers work (:meth:`get_cold_chain`,
+    :meth:`compute_auto_correlation_time`, :meth:`get_independent_samples`)
+    but everything that needs the branch transforms (:meth:`transform`,
+    :meth:`process_samples`, :attr:`transform_containers`) raises
+    ``AttributeError``. Chains are read whole (``get_chain()``) on first use
+    and cached.
+
+    Args:
+        curr (GlobalFitSetup, optional): The built global fit. Supplies the
+            branch transforms (``curr.source_info[branch].transform``).
+            Default ``None``.
+        backend (eryn HDFBackend or str, optional): An open backend (e.g. the
+            run's :class:`~lisatools.globalfit.hdfbackend.GFHDFBackend`) or a
+            store path, opened read-only with :class:`eryn.backends.HDFBackend`.
+            When ``None`` the path is taken from ``curr.main_file_path``,
+            which :class:`~lisatools.globalfit.run.GlobalFitSetup` does not
+            define (it lives on ``curr.general_info``), so pass ``backend``.
+            Default ``None``.
+
+    Raises:
+        ValueError: Neither ``curr`` nor ``backend`` is given.
+
+    Attributes:
+        backend: The chain reader.
+        ess (int): The ``ess`` requested by the last thinning
+            (:meth:`store_independent_samples`); fewer rows are kept when the
+            thinned chain is shorter.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.postprocessing import BackendConsumer
+
+            consumer = BackendConsumer(backend="/path/to/run_store.h5")
+            act = consumer.compute_auto_correlation_time()
+            chains, log_prior, log_like = consumer.get_independent_samples(ess=5000)
     """
 
     def __init__(
@@ -373,29 +559,46 @@ class BackendConsumer:
     def from_curr(self):
         """
         Extract any additional info needed from curr to configure the consumer for post-processing.
+
+        Hook called at construction when ``curr`` is given; a no-op here.
         """
 
     @property
     def curr(self) -> CurrentInfoGlobalFit:
+        """The global fit passed at construction.
+
+        Raises:
+            AttributeError: The consumer was built without ``curr``.
+        """
         if not hasattr(self, "_curr"):
             raise AttributeError("BackendConsumer was not initialized with a curr object.")
         return self._curr
 
     @property
     def branches(self) -> List[str]:
+        """Branch names of the backend."""
         return self.backend.branch_names
 
     @property
     def ndims(self) -> dict[str, int]:
+        """``{branch: ndim}`` of the backend."""
         return self.backend.ndims
 
     @property
     def nleaves_max(self) -> dict[str, int]:
+        """``{branch: nleaves_max}`` of the backend."""
         return self.backend.nleaves_max
 
     @property
     def transform_containers(self) -> dict[str, TransformContainer | None]:
-        """Return the TransformContainer for each branch, if present."""
+        """Return the TransformContainer for each branch, if present.
+
+        Deep copies of ``curr.source_info[branch].transform`` (``None`` with
+        a warning when a branch has none), built once and cached.
+
+        Raises:
+            AttributeError: The consumer was built without ``curr``.
+        """
 
         if not hasattr(self, '_transforms'):
             self._transforms = {}
@@ -410,7 +613,13 @@ class BackendConsumer:
         return self._transforms
 
     def store_cold_chains(self):
-        """Extract cold chains and inds for all branches and cache them."""
+        """Extract cold chains and inds for all branches and cache them.
+
+        Reads the whole chain once: per branch the coordinates
+        ``(nsteps, 1, nwalkers, nleaves_max, ndim)`` and ``inds``
+        ``(nsteps, 1, nwalkers, nleaves_max)`` of temperature 0, plus the
+        cold ``log_prior`` / ``log_like`` ``(nsteps, 1, nwalkers)``.
+        """
         self._cold_chains = {}
         self._cold_inds = {}
         all_chains = self.backend.get_chain()
@@ -424,21 +633,44 @@ class BackendConsumer:
 
     @property
     def configured(self) -> bool:
+        """``True`` once :meth:`store_cold_chains` has run."""
         return hasattr(self, "_cold_chains")
 
     @property
     def cold_chains(self) -> Dict[str, np.ndarray]:
+        """Cached cold chains (see :meth:`store_cold_chains`).
+
+        Raises:
+            AttributeError: Not extracted yet.
+        """
         if not self.configured:
             raise AttributeError("Cold chains have not been extracted yet.")
         return self._cold_chains
 
     @property
     def cold_inds(self) -> Dict[str, np.ndarray]:
+        """Cached cold ``inds`` (see :meth:`store_cold_chains`).
+
+        Raises:
+            AttributeError: Not extracted yet.
+        """
         if not self.configured:
             raise AttributeError("Cold chains inds have not been extracted yet.")
         return self._cold_inds
 
     def get_cold_chain(self, branch: str = None) -> Dict[str, np.ndarray] | np.ndarray:
+        """Cold chain of one branch, or of all (extracted on first use).
+
+        Args:
+            branch: Branch name; ``None`` returns the whole dict.
+
+        Returns:
+            np.ndarray | dict: ``(nsteps, 1, nwalkers, nleaves_max, ndim)``
+            per branch.
+
+        Raises:
+            ValueError: Unknown ``branch``.
+        """
         if not self.configured:
             self.store_cold_chains()
         if branch is not None:
@@ -448,6 +680,11 @@ class BackendConsumer:
         return self.cold_chains
 
     def get_cold_inds(self, branch: str) -> np.ndarray:
+        """Cold ``inds`` ``(nsteps, 1, nwalkers, nleaves_max)`` of one branch.
+
+        Raises:
+            ValueError: Unknown ``branch``.
+        """
         if not self.configured:
             self.store_cold_chains()
         if branch not in self.branches:
@@ -457,7 +694,23 @@ class BackendConsumer:
     def compute_auto_correlation_time(
         self, branch: str = None, **act_kwargs
     ) -> Dict[str, np.ndarray] | np.ndarray:
-        """Compute the integrated ACT for the specified branch or all branches."""
+        """Compute the integrated ACT for the specified branch or all branches.
+
+        Calls :func:`eryn.utils.get_integrated_act` on the cold chain(s). For
+        the all-branches call non-finite values are replaced by 1 (with a
+        warning).
+
+        Args:
+            branch: Branch name; ``None`` (default) for every branch.
+            **act_kwargs: Forwarded to :func:`~eryn.utils.get_integrated_act`.
+
+        Returns:
+            np.ndarray | dict[str, np.ndarray]: Integrated autocorrelation
+            time(s) in chain steps.
+
+        Raises:
+            ValueError: Unknown ``branch``.
+        """
         if not self.configured:
             self.store_cold_chains()
         if branch is not None:
@@ -480,9 +733,19 @@ class BackendConsumer:
         """
         Thin the cold chains by the ACT and keep the last `ess`.
 
+        The thinning step is the largest ACT over all branches (rounded, at
+        least 1). After discarding and thinning, steps and walkers are
+        flattened together, so each branch keeps the last ``ess`` rows of
+        shape ``(nleaves_max, ndim)``; the log-prior / log-likelihood are
+        thinned the same way. Fewer rows than ``ess`` only log a warning.
+
         Args:
-            discard: int or float (optional). If int, the number of initial samples to discard. Else, fraction of initial steps to discard
-            ess: int (optional). Effective sample size
+            discard: Initial steps to drop: a value below 1 is a fraction of
+                the chain length, an integer >= 1 a step count (a float >= 1
+                is not converted and fails as a slice index). Default ``0.0``.
+            ess: Number of rows to keep (the "effective sample size").
+                Default ``10000``.
+            **act_kwargs: Forwarded to :meth:`compute_auto_correlation_time`.
         """
         all_act = self.compute_auto_correlation_time(**act_kwargs)
         max_act = int(np.round(max(np.max(act) for act in all_act.values())))
@@ -521,6 +784,11 @@ class BackendConsumer:
 
     @property
     def thinned_chains(self) -> Dict[str, np.ndarray]:
+        """``{branch: (n, nleaves_max, ndim)}`` thinned samples.
+
+        Raises:
+            ValueError: :meth:`store_independent_samples` has not run.
+        """
         if not hasattr(self, "_thinned_chains"):
             raise ValueError("Thinned samples have not been computed yet")
 
@@ -528,6 +796,11 @@ class BackendConsumer:
 
     @property
     def thinned_inds(self) -> Dict[str, np.ndarray]:
+        """``{branch: (n, nleaves_max)}`` thinned ``inds``.
+
+        Raises:
+            ValueError: :meth:`store_independent_samples` has not run.
+        """
         if not hasattr(self, "_thinned_inds"):
             raise ValueError("Thinned samples have not been computed yet")
 
@@ -535,12 +808,22 @@ class BackendConsumer:
 
     @property
     def thinned_log_prior(self) -> np.ndarray:
+        """``(n,)`` log-prior of the thinned rows.
+
+        Raises:
+            ValueError: :meth:`store_independent_samples` has not run.
+        """
         if not hasattr(self, "_thinned_log_prior"):
             raise ValueError("Thinned log prior has not been computed yet")
         return self._thinned_log_prior
 
     @property
     def thinned_log_likelihood(self) -> np.ndarray:
+        """``(n,)`` log-likelihood of the thinned rows.
+
+        Raises:
+            ValueError: :meth:`store_independent_samples` has not run.
+        """
         if not hasattr(self, "_thinned_log_likelihood"):
             raise ValueError("Thinned log likelihood has not been computed yet")
         return self._thinned_log_likelihood
@@ -554,6 +837,23 @@ class BackendConsumer:
     ) -> dict | np.ndarray | Tuple[dict | np.ndarray, dict | np.ndarray]:
         """
         Get the thinned samples for the specified branch or all branches.
+
+        Runs :meth:`store_independent_samples` when nothing is cached or the
+        cached ``ess`` differs (a different ``discard`` alone does not
+        trigger a recomputation).
+
+        Args:
+            discard: See :meth:`store_independent_samples`. Default ``0.0``.
+            ess: Rows to keep. Default ``10000``.
+            branch: One branch, or ``None`` (default) for the dicts of all.
+            return_inds: Also return the thinned ``inds``. Default ``False``.
+
+        Returns:
+            tuple: ``(samples, [inds,] log_prior, log_likelihood)``;
+            ``samples`` / ``inds`` are arrays for one ``branch`` else dicts.
+
+        Raises:
+            ValueError: Unknown ``branch``.
         """
 
         if not hasattr(self, "_thinned_chains") or (hasattr(self, "ess") and self.ess != ess):
@@ -577,12 +877,23 @@ class BackendConsumer:
         """
         Apply the TransformContainer for the specified samples to the given samples.
 
+        Uses ``both_transforms`` of :attr:`transform_containers` (sampling ->
+        physical basis, with fill values); branches without a transform are
+        returned unchanged (with a warning).
+
         Args:
-            samples: dict of branch to (n_samples, nleaves_max, ndim) array, or a single (n_samples, nleaves_max, ndim) array if branch is specified.
-            branch: str (optional). If provided, apply the transform for this branch to the samples. Else, apply the appropriate transform to each branch in the dict.
+            samples: dict of branch to (n_samples, nleaves_max, ndim) array, or a single
+                (n_samples, nleaves_max, ndim) array if branch is specified.
+            branch: str (optional). If provided, apply the transform for this branch to the
+                samples. Else, apply the appropriate transform to each branch in the dict.
 
         Returns:
-            dict of branch to transformed samples, or a single array if branch is specified.
+            dict | np.ndarray: dict of branch to transformed samples, or a single array if
+            branch is specified.
+
+        Raises:
+            ValueError: Unknown ``branch``.
+            AttributeError: The consumer was built without ``curr``.
         """
 
         if branch is not None:
@@ -613,13 +924,19 @@ class BackendConsumer:
         """
         Convenience method to run the end-to-end processing pipeline, starting from the raw samples.
 
+        Cold chains -> ACT thinning (:meth:`get_independent_samples`) ->
+        physical basis (:meth:`transform`). Needs ``curr``.
+
         Args:
-            discard: int or float (optional). If int, the number of initial samples to discard. Else, fraction of initial steps to discard
-            ess: int (optional). Effective sample size
-            return_inds: bool (optional). Whether to return the corresponding inds arrays.
+            discard: See :meth:`store_independent_samples`. Default ``0.0``.
+            ess: Rows to keep. Default ``10000``.
+            return_inds: Whether to return the corresponding inds arrays.
+                Default ``False``.
 
         Returns:
-            tuple: (original_samples, transformed_samples, inds, log_prior, log_likelihood)
+            tuple: ``(original_samples, transformed_samples, inds, log_prior,
+            log_likelihood)`` with ``return_inds``, else the same without
+            ``inds``. The samples / inds are ``{branch: array}`` dicts.
         """
         if not self.configured:
             self.store_cold_chains()
@@ -644,6 +961,16 @@ def to_periodogram(x: np.ndarray, dt: float) -> Tuple[np.ndarray, np.ndarray]:
     Convert a timeseries to a periodogram (frequency, power) pair.
 
     Uses a Tukey window and proper normalization to produce a one-sided PSD estimate.
+    The window is Tukey with ``alpha=0.1``; the estimate is
+    ``2 |rfft(x w) dt|^2 / (dt sum(w^2))``.
+
+    Args:
+        x: 1-D time series.
+        dt: Sample spacing [s].
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``rfftfreq`` frequencies [Hz] and the
+        one-sided PSD estimate [``x`` units^2 / Hz].
     """
     from scipy.signal import windows
 
@@ -661,6 +988,13 @@ def to_characteristic_strain(freqs: np.ndarray, periodogram: np.ndarray) -> np.n
     Convert a periodogram to characteristic strain.
 
     Uses the relation h_c(f) = sqrt(f * S_n(f)), where S_n is the one-sided PSD estimate.
+
+    Args:
+        freqs: Frequencies [Hz].
+        periodogram: One-sided PSD at ``freqs``.
+
+    Returns:
+        np.ndarray: ``sqrt(freqs * periodogram)``.
     """
     return np.sqrt(freqs * periodogram)
 
@@ -669,14 +1003,21 @@ def log_decimate(freqs, power, f_min=None, f_max=None, decimation_factor=10):
     """
     Logarithmically decimate the periodogram by a given factor.
 
+    Keeps the points of ``[f_min, f_max]`` at ``n // decimation_factor``
+    log-spaced indices (duplicates removed, so possibly fewer).
+
     Args:
-        freqs: Array of frequencies (must be sorted)
-        power: Array of power values
-        f_min, f_max: Frequency range of interest
-        decimation_factor: Factor by which to reduce the number of points
+        freqs (np.ndarray): Array of frequencies (must be sorted)
+        power (np.ndarray): Array of power values (first axis along
+            ``freqs``)
+        f_min (float, optional): Lower edge of the range of interest; ``None``
+            (or ``0``) means ``freqs.min()``.
+        f_max (float, optional): Upper edge; ``None`` means ``freqs.max()``.
+        decimation_factor (int): Factor by which to reduce the number of
+            points. Default ``10``.
 
     Returns:
-        tuple: (decimated_freqs, decimated_power)
+        tuple[np.ndarray, np.ndarray]: (decimated_freqs, decimated_power)
     """
     # Mask frequencies in range of interest
     f_min = f_min or freqs.min()
@@ -702,7 +1043,26 @@ def log_decimate(freqs, power, f_min=None, f_max=None, decimation_factor=10):
 
 class GlobalFitPlotter:
     """
-    Produce summary plots at the end of a global fit run, including posterior predictive plots and corner plots.
+    Produce summary plots at the end of a global fit run, including posterior predictive
+    plots and corner plots.
+
+    Currently only the input-data part exists: :meth:`save_input_data`
+    writes characteristic-strain arrays of the input streams for the web
+    dashboard. Run at sampler setup by :mod:`lisatools.globalfit.run` when
+    ``general.submission_parent_folder`` is set. It needs the data
+    processor's per-stream store
+    (:attr:`~lisatools.globalfit.preprocessing.L1DataLoader.individual_timeseries`,
+    i.e. a mojito loader with ``store_individual_timeseries=True``); without
+    one nothing is written. With one, the conversion also needs the
+    ``NOISE`` brick's ``PSD_*`` entries (absent under ``COMBINED``) and
+    ``general_info.start_freq`` / ``end_freq``, which
+    :class:`~lisatools.globalfit.engine.GeneralSetup` does not define.
+
+    Args:
+        curr (GlobalFitSetup): The built global fit.
+
+    Attributes:
+        curr (GlobalFitSetup): Constructor argument.
     """
 
     def __init__(self, curr: CurrentInfoGlobalFit):
@@ -715,7 +1075,27 @@ class GlobalFitPlotter:
         self,
     ):
         """
-        Convert the raw timeseries data into characteristic strain. We keep only the X channel for plotting.
+        Convert the raw timeseries data into characteristic strain. We keep only the X channel
+        for plotting.
+
+        The combined data's periodogram (:func:`to_periodogram`) is
+        log-decimated by 100 between ``general_info.start_freq`` and
+        ``end_freq``; the NOISE covariance estimate (``PSD_MATRIX`` XX
+        element) and every other stored stream are spline-interpolated onto
+        those frequencies. DESTRUCTIVE: the ``TIMES``, ``COMBINED`` and
+        ``PSD_*`` entries are popped from the processor's store.
+
+        Returns:
+            dict[str, np.ndarray]: ``freqs`` [Hz], ``combined``,
+            ``noise_amplitude_estimate`` and one lower-cased key per other
+            stream, all characteristic strain on ``freqs``; ``{}`` when the
+            processor kept no per-stream store.
+
+        Raises:
+            AttributeError: ``general_info`` has no ``start_freq`` /
+                ``end_freq`` (the case for the engine's ``GeneralSetup``).
+            KeyError: The store lacks ``TIMES``, ``COMBINED`` or a ``PSD_*``
+                entry.
         """
         if not hasattr(self.curr.general_info.data_processor, "_individual_timeseries"):
 
@@ -788,6 +1168,16 @@ class GlobalFitPlotter:
     def save_input_data(self, converted_data: dict = None):
         """
         Dump the converted input data to a h5 file for later plotting in the web dashboard.
+
+        Writes one dataset per key to
+        ``<submission_parent_folder>/<global_fit_version>/input_data.h5``
+        (folders created, an existing file overwritten). Nothing is written
+        when the conversion is empty.
+
+        Args:
+            converted_data (dict, optional): Output of
+                :meth:`convert_input_data_for_plotting`; computed when
+                ``None`` (default).
         """
         if converted_data is None:
             converted_data = self.convert_input_data_for_plotting()
@@ -827,7 +1217,17 @@ class GlobalFitPlotter:
 
 
 def _extract_sensitivity_metadata(gi) -> tuple[dict, dict]:
-    """Extract noise model configuration from the initialised sensitivity backend."""
+    """Extract noise model configuration from the initialised sensitivity backend.
+
+    Reads ``gi.sensitivity_backend.kwargs`` (its constructor kwargs): the
+    domain settings become ``{"class", "args", "kwargs"}`` (CPU backend), and
+    the remaining kwargs, without ``orbits`` / ``settings`` /
+    ``window_values`` and with ``force_backend="cpu"``, become
+    ``{"class", "kwargs"}``.
+
+    Returns:
+        tuple[dict, dict]: ``(domain_metadata, sensitivity_metadata)``.
+    """
     backend: XYZSensitivityBackend = gi.sensitivity_backend
 
     kwargs = backend.kwargs.copy()
@@ -857,7 +1257,12 @@ def _extract_sensitivity_metadata(gi) -> tuple[dict, dict]:
 
 
 def _extract_orbit_metadata(gi) -> dict:
-    """Extract orbit configuration from the initialised orbits object."""
+    """Extract orbit configuration from the initialised orbits object.
+
+    Returns:
+        dict: ``{"class": type name, "kwargs": gi.orbits.kwargs}`` with
+        ``force_backend="cpu"``.
+    """
     orbits = gi.orbits
     kwargs = orbits.kwargs.copy()
     kwargs["force_backend"] = "cpu"
@@ -874,16 +1279,28 @@ def _extract_orbit_metadata(gi) -> dict:
 class MetadataBase:
     """
     Base class for metadata objects, providing common utilities.
+
+    Subclasses are dataclasses; :meth:`to_dict` / :meth:`to_json` export
+    their fields (attributes added to an instance after construction are
+    not exported).
     """
 
     def to_dict(self) -> dict:
-        """Convert the dataclass to a dict, excluding private fields."""
+        """Convert the dataclass to a dict, excluding private fields.
+
+        Returns:
+            dict: ``{field name: value}`` for every field not starting with
+            ``_``.
+        """
         return {
             k: getattr(self, k) for k in self.__dataclass_fields__.keys() if not k.startswith("_")
         }
 
     def to_json(self, filepath: str):
-        """Save the metadata to a JSON file at the specified path."""
+        """Save the metadata to a JSON file at the specified path.
+
+        Writes :meth:`to_dict` with ``indent=4`` (overwrites ``filepath``).
+        """
         with open(filepath, "w") as f:
             json.dump(self.to_dict(), f, indent=4)
         logger.info(f"Saved metadata to {filepath}")
@@ -896,6 +1313,48 @@ class RunMetadata(MetadataBase):
 
     User-supplied fields must be provided at construction.
     Auto-populated fields are filled by `from_curr`.
+
+    Written as ``global_metadata.json`` of a submission. All fields default
+    to empty values. :meth:`from_curr` builds it from a live run (descriptive
+    fields from ``curr.general_info`` when set there: ``global_fit_version``,
+    ``global_fit_contact``, ``submission_parent_folder``, ...);
+    :meth:`from_submission` reads a written JSON back, and
+    :meth:`get_orbits` / :meth:`get_domain_settings` /
+    :meth:`get_sensitivity_matrix` rebuild the run's objects from it.
+    ``global_fit_version`` is expected as ``"<run_type>_<run_id>"``
+    (:attr:`run_type`, :attr:`run_id`).
+
+    Attributes:
+        global_fit_version (str): ``"<run_type>_<run_id>"``.
+        global_fit_contact (str): Contact.
+        global_fit_code_link (str): Code link.
+        input_data_link (str): Path of the submission's ``input_data.h5``.
+        input_reference (str): Input data reference.
+        noise_model (str): Noise model name (default: the sensitivity
+            backend class name).
+        noise_model_code_link (str): Noise model code link.
+        domain_metadata (dict): ``{"class", "args", "kwargs"}`` of the
+            analysis domain settings.
+        orbits_metadata (dict): ``{"class", "kwargs"}`` of the orbits.
+        sensitivity_metadata (dict): ``{"class", "kwargs"}`` of the
+            sensitivity backend.
+        preprocessing_metadata (dict): The run's ``preprocess_kwargs``
+            (without ``plot_folder``).
+        submission_parent_folder (str): Parent folder of the submission.
+        submission_timestamp (str): ``%Y-%m-%dT%H%M%S`` creation time.
+        global_fit_codename (str): Default ``"Erebor"``.
+        comment (str): Free text.
+        found_source_types_list (list[str]): Detected source types (for now
+            the searched types).
+        observation_period_begin (str): Data start, ``yyyy.mm.dd.hh.mm.ss``.
+        observation_period_end (str): Data end, same format.
+        time_step (float): Sample spacing [s].
+        number_of_time_samples (int): TD samples of the data.
+        window_type (str): Analysis window name. Default ``"tukey"``.
+        window_alpha (float): Window taper. Default ``0.1``.
+        effective_observation_duration (str): ``0000.00.DD.hh.mm.ss``.
+        tdi_channels (list[str]): TDI channel names.
+        searched_source_types_list (list[str]): L3C source types of the run.
     """
 
     # user-supplied — required
@@ -939,9 +1398,22 @@ class RunMetadata(MetadataBase):
         Descriptive fields (version, contact, etc.) are read from
         ``curr.general_info`` when set there; ``**user_fields`` takes precedence.
 
+        Every field whose name is a non-``None`` attribute of
+        ``curr.general_info`` is copied (this includes ``window_type`` /
+        ``window_alpha`` of the engine). The timing fields come from
+        ``data_t0``, ``Tobs``, ``dt`` and ``data_td_settings.N``; the
+        domain / sensitivity / orbits records from the live objects. Side
+        effects: ``plot_folder`` is popped from
+        ``curr.general_info.preprocess_kwargs`` in place, and reading
+        :attr:`submission_folder` (for ``input_data_link``) creates the
+        submission folder.
+
         Args:
             curr: Live CurrentInfoGlobalFit object.
             **user_fields: Optional overrides for any RunMetadata field.
+
+        Returns:
+            RunMetadata: The populated record.
         """
         gi = curr.general_info
 
@@ -996,7 +1468,12 @@ class RunMetadata(MetadataBase):
         return instance
 
     def _to_l3c_dict(self) -> dict:
-        """Return a dict matching the l2_output_metadata template keys exactly."""
+        """Return a dict matching the l2_output_metadata template keys exactly.
+
+        :meth:`to_dict` plus ``global_fit_release_date`` (the submission
+        timestamp), ``noise_model_config_file_link`` (empty) and
+        ``list_of_detected_sources`` (comma-joined).
+        """
 
         d = self.to_dict()
 
@@ -1012,11 +1489,23 @@ class RunMetadata(MetadataBase):
         """
         Construct RunMetadata from a submission matching the l2_output_metadata template keys.
 
+        Keys that are not public fields are ignored.
+
         Args:
-            submission: Either a dict containing the metadata fields, or a path to a JSON file containing the metadata.
+            submission: Either a dict containing the metadata fields, or a path to a JSON file
+                containing the metadata (e.g. a submission's ``global_metadata.json``).
 
         Returns:
-            RunMetadata instance with fields populated from the submission.
+            RunMetadata: Instance with fields populated from the submission.
+
+        Example:
+            .. code-block:: python
+
+                from lisatools.globalfit.postprocessing import RunMetadata
+
+                meta = RunMetadata.from_submission("submission/global_metadata.json")
+                domain = meta.get_domain_settings()
+                orbits = meta.get_orbits(filename="/data/mojito_light/data/COMBINED/L1/x.h5")
         """
 
         if isinstance(submission, str):
@@ -1040,11 +1529,19 @@ class RunMetadata(MetadataBase):
         """
         Reconstruct the Orbits object from the stored metadata.
 
+        Looks up ``orbits_metadata["class"]`` in :mod:`lisatools.detector`
+        and builds it with ``filename=`` plus the stored kwargs (CPU
+        backend, the run's ``frame``).
+
         Args:
-            filename: str. Path to the the file containing the orbits information. For the Mojito datasets, any file would work.
+            filename: str. Path to the the file containing the orbits information. For the
+                Mojito datasets, any file would work.
 
         Returns:
-            Orbits object reconstructed from the stored metadata.
+            Orbits: Orbits object reconstructed from the stored metadata.
+
+        Raises:
+            ValueError: No orbits metadata.
         """
 
         if not self.orbits_metadata:
@@ -1063,7 +1560,15 @@ class RunMetadata(MetadataBase):
         return orbits
 
     def get_domain_settings(self) -> DomainSettingsBase:
-        """Reconstruct the DomainSettings object from the stored metadata."""
+        """Reconstruct the DomainSettings object from the stored metadata.
+
+        Returns:
+            DomainSettingsBase: ``lisatools.domains.<class>(*args, **kwargs)``
+            from :attr:`domain_metadata` (CPU backend).
+
+        Raises:
+            ValueError: No domain metadata.
+        """
 
         if not self.domain_metadata:
             raise ValueError("No domain settings metadata found.")
@@ -1080,7 +1585,15 @@ class RunMetadata(MetadataBase):
         return domain_class(*domain_args, **domain_kwargs)
 
     def get_data_td_settings(self) -> TDSettings:
-        """Reconstruct the data TDSettings object from the stored metadata."""
+        """Reconstruct the data TDSettings object from the stored metadata.
+
+        Uses :attr:`number_of_time_samples` and :attr:`time_step`. ``t0`` is
+        passed :attr:`observation_period_begin`, which is the formatted
+        ``yyyy.mm.dd.hh.mm.ss`` string, not seconds.
+
+        Returns:
+            TDSettings: CPU time-domain settings.
+        """
 
         logger.info(
             f"Reconstructing TDSettings object with t0: {self.observation_period_begin}, N: {self.number_of_time_samples}, dt: {self.time_step}"
@@ -1100,13 +1613,28 @@ class RunMetadata(MetadataBase):
     ) -> XYZSensitivityBackend:
         """Reconstruct the sensitivity matrix from the stored metadata.
 
+        The class comes from :mod:`lisatools.sensitivity` by name; the window
+        is rebuilt with :func:`~lisatools.utils.utility.windowfun` from
+        :attr:`window_type` / :attr:`window_alpha` on ``number_of_time_samples``
+        (FD) or the STFT segment length. Only FD and STFT domains are
+        supported.
+
         Args:
-            orbits: Optional Orbits object. If not provided, it will be reconstructed from the stored metadata using `get_orbits()`.
-            filename: Optional str. Path to the file containing the orbits information, needed if `orbits` is not provided.
-            domain_settings: Optional DomainSettings object. If not provided, it will be reconstructed from the stored metadata using `get_domain_settings()`.
+            orbits: Optional Orbits object. If not provided, it will be reconstructed from the
+                stored metadata using `get_orbits()`.
+            filename: Optional str. Path to the file containing the orbits information, needed
+                if `orbits` is not provided.
+            domain_settings: Optional DomainSettings object. If not provided, it will be
+                reconstructed from the stored metadata using `get_domain_settings()`.
 
         Returns:
-            XYZSensitivityBackend object reconstructed from the stored metadata.
+            XYZSensitivityBackend: Sensitivity backend reconstructed from the stored metadata.
+
+        Raises:
+            ValueError: Neither ``orbits`` nor ``filename``, or no sensitivity
+                metadata.
+            NotImplementedError: A domain other than FD / STFT (e.g. WDM, the
+                production domain).
         """
         if orbits is None and filename is None:
             raise ValueError(
@@ -1150,14 +1678,23 @@ class RunMetadata(MetadataBase):
         )
 
     def to_web_dict(self) -> dict:
-        """Return a richer dict for web display, extending the L3C dict with run config."""
+        """Return a richer dict for web display, extending the L3C dict with run config.
+
+        Adds the ``_web_extras`` set by :meth:`from_curr` (``Tobs_s``,
+        ``dt_s``, ``basis_domain``, ``start_freq_hz``, ``end_freq_hz``,
+        ``nwalkers``, ``ntemps``).
+        """
         d = self._to_l3c_dict()
         d.update(self._web_extras)
         return d
 
     @property
     def run_type(self) -> str:
-        """Extract the run type from the global_fit_version string."""
+        """Extract the run type from the global_fit_version string.
+
+        The part before the first ``_``; the whole string (with a warning)
+        when there is no ``_``.
+        """
         parts = self.global_fit_version.split("_", 1)
         if len(parts) == 2:
             return parts[0]
@@ -1168,7 +1705,11 @@ class RunMetadata(MetadataBase):
 
     @property
     def run_id(self) -> str:
-        """Extract the run id from the global_fit_version string."""
+        """Extract the run id from the global_fit_version string.
+
+        The part after the first ``_``; ``"v0"`` (with a warning) when there
+        is no ``_``.
+        """
         parts = self.global_fit_version.split("_", 1)
         if len(parts) == 2:
             return parts[1]
@@ -1179,7 +1720,11 @@ class RunMetadata(MetadataBase):
 
     @property
     def submission_folder(self) -> str:
-        """Return the full path to the submission folder for this run."""
+        """Return the full path to the submission folder for this run.
+
+        ``<submission_parent_folder>/<run_type>_<codename>_<run_id>_<timestamp>``;
+        the folder is CREATED (with a warning) when it does not exist.
+        """
 
         folder_name = (
             f"{self.run_type}_{self.global_fit_codename}_{self.run_id}_{self.submission_timestamp}"
@@ -1196,7 +1741,31 @@ class RunMetadata(MetadataBase):
 
 @dataclasses.dataclass
 class SourceMetadata(MetadataBase):
-    """Holds metadata for a detected source, to be included in the L3C submission manifest."""
+    """Holds metadata for a detected source, to be included in the L3C submission manifest.
+
+    One per resolvable branch, supplied by the user in
+    ``curr.source_metadata[branch]`` (no stock fit sets these; the stock
+    ``source_metadata`` only carries ``"recipe"``).
+    :meth:`SubmissionWriter.write_submission` fills ``detection_statistic``,
+    ``posterior_files`` and attaches ``parameter_info``, ``parameter_units``
+    and ``detections`` as extra attributes before writing it.
+
+    Attributes:
+        source_type (str): L3C source type.
+        frequency_ranges (list[tuple[float, float]]): Analysed bands [Hz].
+        waveform_model (str): Waveform model name.
+        waveform_model_code_link (str): Its code link.
+        waveform_model_config (dict): Its configuration.
+        detection_statistic (list[float]): Per-source statistic (filled by
+            the writer).
+        quality_flags (list[int]): Per-source flags (``0`` where missing).
+        prior_model (str): Prior description.
+        prior_model_code_link (str): Prior code link.
+        prior_model_config (dict): Prior configuration.
+        posterior_files (list[str]): Relative posterior paths (filled by the
+            writer).
+        comment (str): Free text.
+    """
 
     source_type: str
     frequency_ranges: list[tuple[float, float]]  # = dataclasses.field(default_factory=list)
@@ -1219,7 +1788,25 @@ class SourceMetadata(MetadataBase):
 
 @dataclasses.dataclass
 class StochasticMetadata(MetadataBase):
-    """Holds metadata for the overall stochastic component of the data"""
+    """Holds metadata for the overall stochastic component of the data
+
+    Built by the writer from the ``psd`` / ``galfor`` entries of
+    ``curr.source_metadata`` (objects with ``model_config``,
+    ``frequency_ranges``, ``prior_model``, ``prior_model_code_link``,
+    ``prior_model_config`` and ``comment``).
+
+    Attributes:
+        model_config (dict): ``{branch: model_config}``.
+        frequency_ranges (list[tuple[float, float]]): Bands [Hz] (taken from
+            the first stochastic branch).
+        prior_model (str): Joined prior descriptions.
+        prior_model_code_link (str): Joined prior code links.
+        prior_model_config (dict): ``{branch: prior_model_config}``.
+        posterior_files (list[str]): Left empty by the writer, which records
+            the path on a separate ``posterior_file`` attribute instead (not
+            exported by :meth:`to_json` or the HDF5 attributes).
+        comment (str): Joined comments.
+    """
 
     model_config: dict
     frequency_ranges: list[tuple[float, float]]
@@ -1240,6 +1827,56 @@ class SubmissionWriter(BackendConsumer):
 
     This class is responsible for applying the detection criteria to identify genuine sources,
     and for writing the final outputs in the required formats.
+
+    Construction already reads and thins the chains
+    (:meth:`~BackendConsumer.process_samples` with ``ess``) and builds
+    :attr:`run_metadata` (:meth:`RunMetadata.from_curr`, which creates the
+    submission folder). :meth:`write_submission` then writes the layout of
+    the module docstring. Every leaf of each resolvable branch is written
+    with its ``detection_statistic`` (the criteria's
+    ``detection_statistics``, the leaf occupancy by default); the boolean
+    ``detect`` is not applied.
+
+    Requirements of the current implementation: a single-rank ``acs`` (the
+    run calls it only single-rank); ``curr.source_metadata`` holding a
+    :class:`SourceMetadata` (or equivalent) per branch; every branch present
+    in :data:`source_types_names` and every resolvable one in
+    :data:`PARAMETER_INFO_REGISTRY` (``gb``, ``mbh``, ``psd``, ``galfor``; a
+    ``vgb``, ``sobbh`` or ``emri`` branch raises ``KeyError``); CuPy and
+    GBGPU for the GB clustering.
+
+    Args:
+        curr (GlobalFitSetup): The built global fit (required in practice:
+            the transforms and metadata come from it). Default ``None``.
+        backend (eryn HDFBackend or str, optional): Chain reader or store
+            path (see :class:`BackendConsumer`). Default ``None``.
+        ess (int): Thinned rows kept per branch. Default ``10000``; the run
+            passes ``20_000``.
+        detection_criteria (DetectionCriteria, optional): Statistic of each
+            leaf. Default ``None`` ->
+            :class:`OccupancyDetectionCriteria` (``min_occupancy=0.5``).
+
+    Attributes:
+        original_samples (dict): ``{branch: (ess, nleaves_max, ndim)}``
+            thinned sampling-basis samples.
+        samples (dict): The same in the physical basis (replaced by the
+            prepared, sorted / clustered arrays in
+            :meth:`prepare_samples_for_submission`).
+        inds (dict): ``{branch: (ess, nleaves_max)}`` active-leaf masks.
+        log_prior (np.ndarray): ``(ess,)``.
+        log_likelihood (np.ndarray): ``(ess,)``.
+        detection_criteria (DetectionCriteria): The criteria in use.
+        run_metadata (RunMetadata): The run record.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.postprocessing import SubmissionWriter
+
+            # single-rank fit with general.submission_parent_folder set and
+            # curr.source_metadata filled
+            writer = SubmissionWriter(curr=curr, backend=run_backend, ess=20_000)
+            writer.write_submission(acs)
     """
 
     def __init__(
@@ -1261,8 +1898,16 @@ class SubmissionWriter(BackendConsumer):
 
     def prepare_samples_for_submission(self, acs: AnalysisContainerArray):
         """
-        Prepare the samples for submission by clustering the GBs, and sorting the mbhbs according to the coalescence time.
-        Each source type needs a callable to handle the specific processing, and this method act as a dispatcher.
+        Prepare the samples for submission by clustering the GBs, and sorting the mbhbs
+        according to the coalescence time. Each source type needs a callable to handle the
+        specific processing, and this method acts as a dispatcher.
+
+        Replaces ``samples[branch]`` / ``inds[branch]`` for every branch of
+        :attr:`prepare_samples_registry`; other branches are left as is.
+
+        Args:
+            acs (AnalysisContainerArray): The run's containers (likelihood,
+                sensitivity and frequency grid for the GB clustering).
         """
 
         for branch in self.branches:
@@ -1274,7 +1919,16 @@ class SubmissionWriter(BackendConsumer):
                 )
 
     def _prepare_mbhb_samples(self, acs: AnalysisContainerArray, original_samples: np.ndarray, samples: np.ndarray, inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Sort the MBHB samples according to the coalescence time, and cluster them if there are multiple sources in the same block."""
+        """Sort the MBHB samples according to the coalescence time.
+
+        Intended to also cluster several sources sharing a block; only the
+        sort is implemented: leaves are reordered by their mean
+        physical-basis ``t_c`` column (index 10, the registry order).
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: The reordered ``samples`` and
+            ``inds``.
+        """
 
         coalescence_time_idx = list(PARAMETER_INFO_REGISTRY["mbh"].keys()).index("t_c")
         mean_coalescence_times = samples[:, :, coalescence_time_idx].mean(axis=0) # shape (nleaves_max,)
@@ -1287,6 +1941,25 @@ class SubmissionWriter(BackendConsumer):
     def _prepare_gb_samples(self, acs: AnalysisContainerArray, original_samples: np.ndarray, samples: np.ndarray, inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Prepare GB samples for submission running the clustering algorithm.
+
+        Groups the thinned sampling-basis samples into sources with
+        :func:`~lisatools.globalfit.gathergalaxy.gather_gb_samples` on one GPU
+        (``num_compare_samples=200``, ``samples_keep=5``, SNR cuts 7 / 5,
+        ``overlap_lim=0.7``, ``snr_diff_lim=20``), with the sensitivity of
+        the maximum-likelihood walker. Groups with more than
+        ``nwalkers * 5 / 2`` members are kept, NaN-padded to the largest,
+        transformed to the physical basis and sorted by mean ``f0``. That
+        mean includes the NaN padding, so every group shorter than the
+        largest has a NaN mean (``argsort`` puts those last, unsorted) and
+        then fails in :meth:`_get_gb_label`.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: ``(n_max_members, n_groups,
+            ndim_physical)`` samples (NaN padding) and the matching finite
+            mask as ``inds``.
+
+        Raises:
+            ImportError: CuPy is not installed.
         """
         try:
             import cupy as cp
@@ -1376,14 +2049,21 @@ class SubmissionWriter(BackendConsumer):
 
     @property
     def prepare_samples_registry(self) -> dict[str, Callable[[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]]:
-        """Registry mapping each source type to its corresponding sample preparation function."""
+        """Registry mapping each source type to its corresponding sample preparation function.
+
+        ``{"mbh": _prepare_mbhb_samples, "gb": _prepare_gb_samples}``; each is
+        called with ``(acs, original_samples, samples, inds)``.
+        """
         return {
             "mbh": self._prepare_mbhb_samples,
             "gb": self._prepare_gb_samples,
         }
 
     def _get_mbhb_label(self, leaf_samples: np.ndarray, leaf_index: int) -> str:
-        """Get a label for an MBHB source based on its coalescence time."""
+        """Get a label for an MBHB source based on its coalescence time.
+
+        ``"<leaf_index:05d>_<int(mean t_c)>"`` (``t_c`` in s).
+        """
         
         coalescence_time_idx = list(PARAMETER_INFO_REGISTRY["mbh"].keys()).index("t_c")
         mean_coalescence_time = int(leaf_samples[:, coalescence_time_idx].mean())
@@ -1394,7 +2074,15 @@ class SubmissionWriter(BackendConsumer):
         return f"{xxxxx}_{yyyyy}"
 
     def _get_gb_label(self, leaf_samples: np.ndarray, leaf_index: int) -> str:
-        """Get a label for a GB source based on its frequency."""
+        """Get a label for a GB source based on its frequency.
+
+        ``"<leaf_index:05d>_<int(mean f0 * 1e6)>"`` (``f0`` in Hz, so the
+        second part is the frequency in microhertz).
+
+        Raises:
+            ValueError: The mean is NaN (a NaN-padded group of
+                :meth:`_prepare_gb_samples`), which ``int`` cannot convert.
+        """
         
         frequency_idx = list(PARAMETER_INFO_REGISTRY["gb"].keys()).index("f0")
         mean_frequency = leaf_samples[:, frequency_idx].mean()
@@ -1408,7 +2096,14 @@ class SubmissionWriter(BackendConsumer):
     @property
     def get_source_label_registry(self) -> dict[str, Callable]:
         """Define how sources should be labelled in the output files.
-        For Mojito light, we use the XXXXX_YYYYY format, with XXXXX a 5 digit ID based on the leaf count (eg, 00000, 00001, etc) and YYYYY a descriptor of the source (eg, coalescence time for MBHBs, frequency for GBs, etc).
+
+        For Mojito light, we use the XXXXX_YYYYY format, with XXXXX a 5 digit ID based on
+        the leaf count (eg, 00000, 00001, etc) and YYYYY a descriptor of the source (eg,
+        coalescence time for MBHBs, frequency for GBs, etc).
+
+        Returns:
+            dict[str, Callable]: ``{"mbh": ..., "gb": ...}`` label functions
+            taking ``(leaf_samples, leaf_index)``.
         """
 
         return {
@@ -1418,7 +2113,13 @@ class SubmissionWriter(BackendConsumer):
 
     @property
     def known_injections(self) -> dict[str, list[str]]:
-        """Return a dict mapping each source type to a list of known injections for that source type, to be included in the metadata."""
+        """Known-injection labels per source type, written in the detection table.
+
+        ``mbh``: the mojito-light MBHB catalogue labels in merger-time order
+        (``_MOJITO_LIGHT_MBH_ORDER``), matched to the written leaves by
+        position (so only meaningful when the leaves are the catalogue
+        sources in that order); ``gb``: empty.
+        """
         # for Mojito light, we don't have any known injections, so we return an empty list for each source type
         return {
             'mbh': _MOJITO_LIGHT_MBH_ORDER, 
@@ -1428,18 +2129,37 @@ class SubmissionWriter(BackendConsumer):
 
     @property
     def submission_folder(self) -> str:
-        """Return the full path to the submission folder for this run."""
+        """Return the full path to the submission folder for this run.
+
+        :attr:`RunMetadata.submission_folder` (created if missing).
+        """
         return self.run_metadata.submission_folder
 
     @property
     def posterior_folders(self) -> dict[str, str]:
-        """Return the full paths to the posterior folders for each branch."""
+        """Posterior folder of each branch, relative to the submission folder.
+
+        The values are folder NAMES relative to :attr:`submission_folder`
+        (``<P>_<SOURCE>_posteriordir``), as stored in the metadata (the
+        posterior file paths written to the metadata are relative too).
+
+        Raises:
+            ValueError: :meth:`create_folders` has not run.
+        """
         if not hasattr(self, "_relative_folders"):
             raise ValueError("Folders have not been created yet. Call create_folders() first.")
         return self._relative_folders
 
     def create_folders(self):
-        """Create the submission folder and any necessary subfolders."""
+        """Create the submission folder and any necessary subfolders.
+
+        One ``<P>_<SOURCE>_posteriordir`` per branch (``SOURCE`` from
+        :data:`source_types_names`, so ``psd`` and ``galfor`` share the
+        ``NOISE`` folder).
+
+        Raises:
+            KeyError: A branch missing from :data:`source_types_names`.
+        """
 
         os.makedirs(self.submission_folder, exist_ok=True)
         logger.info(f"Created submission folder at {self.submission_folder}")
@@ -1458,7 +2178,11 @@ class SubmissionWriter(BackendConsumer):
             self._relative_folders[branch] = subfolder_name # we store the relative path to the posterior folder, to be included in the metadata and used in the output files
 
     def save_posteriors(self):
-        """Save the posterior samples for each detected source in the required format."""
+        """Save the posterior samples for each detected source in the required format.
+
+        The stochastic branches first (:meth:`_save_stochastic_posterior`),
+        then each resolvable branch (:meth:`_save_source_posterior`).
+        """
         from tqdm import tqdm
 
         self._save_stochastic_posterior()  
@@ -1475,7 +2199,21 @@ class SubmissionWriter(BackendConsumer):
             self._save_source_posterior(branch)
 
     def _save_source_posterior(self, branch: str):
-        """Save the posterior samples for a single detected source type, identified by `branch`."""
+        """Save the posterior samples for a single detected source type, identified by `branch`.
+
+        Leaves are written in batches of ``MAX_SOURCES_PER_BATCH`` (500) per
+        posterior file, one structured dataset per leaf named by
+        :attr:`get_source_label_registry` with the L3C columns of
+        :data:`PARAMETER_INFO_REGISTRY` (after the output corrections and
+        removals) plus ``logprior`` / ``loglikelihood``. Then the source
+        metadata file (``sources/posterior_files/<label>`` path strings, the
+        ``sources/detection`` table, the :class:`SourceMetadata` fields as
+        attributes) and its JSON twin are written.
+
+        Raises:
+            KeyError: ``branch`` missing from :data:`source_types_names`,
+                :data:`PARAMETER_INFO_REGISTRY` or ``curr.source_metadata``.
+        """
 
         source_name = source_types_names[branch]
         samples = self.samples[branch]
@@ -1579,7 +2317,21 @@ class SubmissionWriter(BackendConsumer):
 
 
     def _save_stochastic_posterior(self):
-        """Save the posterior samples for the stochastic component, if applicable."""
+        """Save the posterior samples for the stochastic component, if applicable.
+
+        The ``psd`` and ``galfor`` columns (whichever exist) are written
+        together to ``<P>_noise_posteriors_<T>.h5`` in the first branch's
+        posterior folder: group ``noise`` with attributes ``labels``,
+        ``npars``, ``nsamples`` and datasets ``posterior`` (structured),
+        ``p`` ``(nsamples, npars)``, ``logprior`` and ``loglikelihood``. A
+        :class:`StochasticMetadata` record goes to ``<P>_noise_<T>.h5`` /
+        ``.json``. A no-op without stochastic branches.
+
+        Raises:
+            NotImplementedError: A stochastic branch with more than one leaf.
+            KeyError: A stochastic branch has no ``curr.source_metadata``
+                entry.
+        """
 
         if "psd" not in self.branches and "galfor" not in self.branches:
             logger.info("No stochastic component detected in the branches. Skipping stochastic posterior saving.")
@@ -1678,7 +2430,16 @@ class SubmissionWriter(BackendConsumer):
         logger.info(f"Saved metadata for  stochastic branch(es) to {metadata_json_filepath}")
 
     def save_data_and_residuals(self, acs: AnalysisContainerArray):
-        """Save the input data and residuals to h5 files in the submission folder."""
+        """Save the input data and residuals to h5 files in the submission folder.
+
+        ``input_data.h5`` from ``curr.general_info.input_data_residual_array``
+        and ``residuals.h5`` from ``acs``, both through
+        :func:`save_residuals` (see its note: a ``DomainBase`` input writes
+        no dataset).
+
+        Args:
+            acs (AnalysisContainerArray): The run's containers.
+        """
         data_filepath = os.path.join(self.submission_folder, "input_data.h5")
         save_residuals(
             self.curr.general_info.input_data_residual_array,
@@ -1692,7 +2453,15 @@ class SubmissionWriter(BackendConsumer):
         logger.info(f"Saved residuals to {residuals_filepath}")
 
     def write_submission(self, acs: AnalysisContainerArray):
-        """Run the full submission writing pipeline."""
+        """Run the full submission writing pipeline.
+
+        :meth:`create_folders`, :meth:`prepare_samples_for_submission`,
+        :meth:`save_posteriors`, ``global_metadata.json``
+        (:attr:`run_metadata`), then :meth:`save_data_and_residuals`.
+
+        Args:
+            acs (AnalysisContainerArray): The run's containers (single-rank).
+        """
         self.create_folders()
         self.prepare_samples_for_submission(acs)
         self.save_posteriors()
@@ -1711,15 +2480,34 @@ class SubmissionWriter(BackendConsumer):
 def save_residuals(data: AnalysisContainerArray | DataResidualArray, filepath: str):
     """
     Save residuals from the analysis container array to a file.
-    
+
+    A :class:`~lisatools.datacontainer.DataResidualArray` is written as
+    dataset ``data`` (host copy of its array); an
+    :class:`~lisatools.analysiscontainer.AnalysisContainerArray` as
+    ``residual_<i>``, one per container. ``filepath`` is overwritten.
+
     Args:
         data: AnalysisContainerArray or DataResidualArray containing the residuals to save.
         filepath: Path to the file where the residuals should be saved.
+
+    Note:
+        Only ``DataResidualArray`` objects produce a dataset. The engine's
+        ``input_data_residual_array`` and each ``AnalysisContainer.data_res_arr``
+        are :class:`~lisatools.domains.DomainBase` objects today, which are
+        skipped without error, so both submission files come out empty. For
+        residual snapshots of a running fit see
+        :mod:`lisatools.globalfit.residual_snapshot`.
     """
     with h5py.File(filepath, "w") as f:
         _save_residuals_to_handle(data, f)
 
 def _save_residuals_to_handle(data, h5obj, label=None):
+    """Write ``data`` into an open HDF5 object (recursive helper of :func:`save_residuals`).
+
+    ``label`` defaults to ``"data"`` / ``"residual"``; container ``i`` of an
+    ``AnalysisContainerArray`` recurses with ``"<label>_<i>"``. Other types
+    write nothing.
+    """
     if isinstance(data, DataResidualArray):
         residual_array = data.data_res_arr.arr
         if hasattr(residual_array, "get"):
@@ -1744,6 +2532,11 @@ class DetectionCriteria(ABC):
 
     Subclasses decide which leaves in the trans-dimensional chain represent
     genuine detections, returning a boolean mask over nleaves_max.
+
+    :class:`SubmissionWriter` calls ``detection_statistics(samples, inds)``
+    (with the prepared ``(n, nleaves, ndim)`` / ``(n, nleaves)`` arrays) to
+    fill the per-source statistic, so a criteria passed to it must also
+    define that method (the base declares only :meth:`detect`).
     """
 
     @abstractmethod
@@ -1766,6 +2559,23 @@ class OccupancyDetectionCriteria(DetectionCriteria):
     `min_occupancy` fraction of the independent samples.
 
     This is the default strategy and requires no waveform calls.
+
+    Args:
+        min_occupancy (float): Occupancy threshold in ``[0, 1]`` (checked in
+            :meth:`detect`). Default ``0.5``.
+
+    Attributes:
+        min_occupancy (float): Constructor argument.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.globalfit.postprocessing import OccupancyDetectionCriteria
+        >>> inds = np.array([[True, False], [True, True], [True, False], [False, False]])
+        >>> crit = OccupancyDetectionCriteria(min_occupancy=0.5)
+        >>> crit.detection_statistics(None, inds)
+        array([0.75, 0.25])
+        >>> crit.detect(None, inds)
+        array([ True, False])
     """
 
     def __init__(self, min_occupancy: float = 0.5):
@@ -1776,7 +2586,8 @@ class OccupancyDetectionCriteria(DetectionCriteria):
         Compute the occupancy of each leaf across the independent samples.
 
         Args:
-            samples: (n_independent, nleaves_max, ndim). Not used in this strategy but included for interface consistency.
+            samples: (n_independent, nleaves_max, ndim). Not used in this strategy but
+                included for interface consistency.
             inds: (n_independent, nleaves_max) bool
 
         Returns:
@@ -1786,6 +2597,18 @@ class OccupancyDetectionCriteria(DetectionCriteria):
         return inds.mean(axis=0)
 
     def detect(self, samples: np.ndarray, inds: np.ndarray) -> np.ndarray:
+        """Leaves whose occupancy is at least :attr:`min_occupancy`.
+
+        Args:
+            samples: Unused (interface consistency).
+            inds: ``(n_independent, nleaves_max)`` bool.
+
+        Returns:
+            np.ndarray: ``(nleaves_max,)`` bool mask.
+
+        Raises:
+            ValueError: ``min_occupancy`` outside ``[0, 1]``.
+        """
 
         if not (0 <= self.min_occupancy <= 1):
             raise ValueError(f"min_occupancy must be in [0, 1], got {self.min_occupancy}")
@@ -1801,6 +2624,17 @@ class SNRDetectionCriteria(DetectionCriteria):
     `snr_fn` must be a callable that takes a (ndim,) parameter array (in sampling
     space) and returns a scalar SNR. The MAP sample is approximated as the last
     independent draw.
+
+    Only :meth:`detect` is implemented (no ``detection_statistics``), so it
+    cannot be passed to :class:`SubmissionWriter` as is.
+
+    Args:
+        snr_fn (Callable): ``(ndim,) -> float`` SNR of one leaf.
+        snr_threshold (float): Detection threshold. Default ``7.0``.
+
+    Attributes:
+        snr_fn (Callable): Constructor argument.
+        snr_threshold (float): Constructor argument.
     """
 
     def __init__(self, snr_fn: Callable, snr_threshold: float = 7.0):
@@ -1808,6 +2642,16 @@ class SNRDetectionCriteria(DetectionCriteria):
         self.snr_threshold = snr_threshold
 
     def detect(self, samples: np.ndarray, inds: np.ndarray) -> np.ndarray:
+        """Leaves whose SNR in the most-occupied walker of the last draw passes the threshold.
+
+        Args:
+            samples: ``(n_independent, nwalkers, nleaves_max, ndim)``.
+            inds: ``(n_independent, nwalkers, nleaves_max)`` bool.
+
+        Returns:
+            np.ndarray: ``(nleaves_max,)`` bool mask (inactive leaves of that
+            walker are ``False``).
+        """
         n_steps, n_walkers, n_leaves, ndim = samples.shape
         # Use the last independent step as a proxy for MAP
         map_samples = samples[-1]  # (nwalkers, nleaves_max, ndim)

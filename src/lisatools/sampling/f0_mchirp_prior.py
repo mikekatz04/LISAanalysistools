@@ -19,10 +19,16 @@ The fit lives in ``x = log10(f0 / Hz)`` vs ``Mc`` space; this class handles
   container toggles).
 
 Register under a tuple key in the GB prior container (done by
-``GBSetup.init_sampling_info`` when ``use_astrophysical_f0_mc_prior`` is on)::
+:meth:`~lisatools.globalfit.stock.erebor.gb.GBSetup.init_sampling_info` when
+``use_chirp_mass`` and ``use_astrophysical_f0_mc_prior`` are both on)::
 
     ProbDistContainer({..., ("f0", "Mc"): F0McGMMSampling.from_heatmap(
         f0_lims_mHz=(f0_lo_mHz, f0_hi_mHz), mc_lims=(mc_lo, mc_hi)), ...})
+
+Production: both knobs (``GB_USE_CHIRP_MASS``,
+``GB_USE_ASTROPHYSICAL_F0_MC_PRIOR``) default on and neither launcher sets
+them, so the 9mo / 12mo GB prior on ``(f0, Mc)`` is this class, truncated to
+the run's GB ``f0_lims`` (converted to mHz) and ``m_chirp_lims``.
 
 Everything is picklable / deepcopy-safe (plain float arrays only).
 """
@@ -66,17 +72,50 @@ HEATMAP_GMM_PARAMS = dict(
 class F0McGMMSampling:
     """Truncated-GMM joint prior over ``(f0 [mHz], Mc [Msun])``.
 
+    The truncation mass ``Z`` over the box is computed once at construction
+    by an 801 x 801 trapezoid quadrature in ``(log10(f0/Hz), Mc)`` space, and
+    :meth:`logpdf` subtracts ``log Z``, so the density integrates to 1 over
+    the box. Evaluation is on the host (numpy).
+
     Args:
-        weights, means, covs: Mixture parameters in ``(log10(f0/Hz), Mc)``
-            space (see :data:`HEATMAP_GMM_PARAMS`).
+        weights: Mixture weights, shape ``(K,)``; renormalized to sum to 1.
+        means: Component means in ``(log10(f0/Hz), Mc)`` space, shape ``(K, 2)``
+            (see :data:`HEATMAP_GMM_PARAMS`).
+        covs: Component covariances in the same space, shape ``(K, 2, 2)``.
         f0_lims_mHz: Truncation box in the sampling f0 axis (mHz). Default:
             the heatmap fit box (``10**[-4, -1]`` Hz -> ``[0.1, 100]`` mHz).
             Pass the run's band limits so the prior matches the sampled
             space exactly; the Gaussian tails keep the density finite
             anywhere inside the box, including outside the original
             heatmap support.
-        mc_lims: Truncation box in Mc (Msun). Default: the heatmap fit box.
-        seed: RNG seed for ``rvs``.
+        mc_lims: Truncation box in Mc (Msun). Default: the heatmap fit box
+            ``(0.1, 1.4)``.
+        seed: Seed of the :func:`numpy.random.default_rng` stream used by
+            :meth:`rvs`. Default ``None`` (OS entropy).
+
+    Raises:
+        ValueError: ``f0_lims_mHz`` is not ``0 < lo < hi``, ``mc_lims`` is not
+            ``lo < hi``, or the truncation mass is not finite and positive
+            (box outside the mixture support).
+
+    Attributes:
+        ndim (int): ``2``.
+        weights (np.ndarray): Normalized weights, ``(K,)``.
+        means (np.ndarray): ``(K, 2)``.
+        covs (np.ndarray): ``(K, 2, 2)``.
+        f0_lims_mHz (tuple[float, float]): The f0 box (mHz).
+        mc_lims (tuple[float, float]): The Mc box (Msun).
+        use_cupy (bool): Toggled by eryn's
+            :class:`~eryn.priors.ProbDistContainer`; selects :attr:`xp`.
+        return_gpu (bool): Toggled by the container; with ``use_cupy``,
+            :meth:`rvs` and :meth:`logpdf` return cupy arrays.
+
+    Example:
+        >>> from lisatools.sampling.f0_mchirp_prior import F0McGMMSampling
+        >>> prior = F0McGMMSampling.from_heatmap(f0_lims_mHz=(1.0, 4.0), mc_lims=(0.1, 1.4), seed=1)
+        >>> draws = prior.rvs(5)
+        >>> draws.shape, prior.logpdf(draws).shape
+        ((5, 2), (5,))
     """
 
     ndim = 2
@@ -137,8 +176,20 @@ class F0McGMMSampling:
 
     @classmethod
     def from_heatmap(cls, f0_lims_mHz=None, mc_lims=None, seed=None):
-        """The fitted combined-heatmap mixture, optionally truncated to a
-        run's ``(f0 [mHz], Mc)`` box."""
+        """Build the fitted combined-heatmap mixture, optionally truncated to a run's box.
+
+        Uses :data:`HEATMAP_GMM_PARAMS`.
+
+        Args:
+            f0_lims_mHz (tuple[float, float], optional): f0 box (mHz); default
+                the heatmap fit box ``[0.1, 100]`` mHz.
+            mc_lims (tuple[float, float], optional): Mc box (Msun); default
+                ``(0.1, 1.4)``.
+            seed (int, optional): Seed of the :meth:`rvs` stream.
+
+        Returns:
+            F0McGMMSampling: The truncated prior.
+        """
         return cls(
             HEATMAP_GMM_PARAMS["weights"],
             HEATMAP_GMM_PARAMS["means"],
@@ -151,6 +202,7 @@ class F0McGMMSampling:
     # ------------------------------------------------------------------
     @property
     def xp(self):
+        """module: ``cupy`` when :attr:`use_cupy` is set, else ``numpy``."""
         if self.use_cupy:
             import cupy
 
@@ -158,8 +210,14 @@ class F0McGMMSampling:
         return np
 
     def _log_gmm(self, pts):
-        """Un-truncated mixture log-density in ``(x=log10 f0_Hz, Mc)``,
-        numpy in / numpy out."""
+        """Return the un-truncated mixture log-density in ``(x=log10 f0_Hz, Mc)``.
+
+        Args:
+            pts (np.ndarray): ``(n, 2)`` points in ``(log10(f0/Hz), Mc)``.
+
+        Returns:
+            np.ndarray: ``(n,)`` log-densities (numpy in, numpy out).
+        """
         diff = pts[:, None, :] - self.means[None]            # (n, K, 2)
         maha = np.einsum("nki,kij,nkj->nk", diff, self._inv, diff)
         log_comp = (
@@ -171,8 +229,20 @@ class F0McGMMSampling:
         return np.log(np.exp(log_comp - m[:, None]).sum(axis=1)) + m
 
     def rvs(self, size=1):
-        """Draws in the sampling basis, shape ``size + (2,)`` =
-        ``(f0 [mHz], Mc)``; rejection-sampled into the truncation box."""
+        """Draw from the truncated prior in the sampling basis.
+
+        Draws from the mixture in ``(log10(f0/Hz), Mc)`` space, maps f0 to mHz,
+        and keeps only the draws inside the box (rejection), batching by the
+        box mass until ``size`` draws are filled.
+
+        Args:
+            size (int or tuple[int, ...], optional): Output batch shape.
+                Default ``1``.
+
+        Returns:
+            np.ndarray: Shape ``size + (2,)``, columns ``(f0 [mHz], Mc [Msun])``;
+            a cupy array when ``use_cupy`` and ``return_gpu`` are both set.
+        """
         if isinstance(size, int):
             size = (size,)
         n = int(np.prod(size))
@@ -208,9 +278,25 @@ class F0McGMMSampling:
         return out
 
     def logpdf(self, x):
-        """Normalized log prior at ``(n, 2) = (f0 [mHz], Mc)`` points;
-        ``-inf`` outside the truncation box. Accepts numpy or cupy input
-        (computed on host; returned in the input's array module)."""
+        r"""Return the normalized log prior at ``(f0 [mHz], Mc)`` points.
+
+        .. math::
+
+            \ln p(f_{0,\mathrm{mHz}}, M_c) = \ln p_\mathrm{gmm}(\log_{10} f_{0,\mathrm{Hz}}, M_c)
+            - \ln(f_{0,\mathrm{mHz}} \ln 10) - \ln Z
+
+        Computed on the host. Accepts numpy or cupy input.
+
+        Args:
+            x (np.ndarray or cupy.ndarray): ``(n, 2)`` points (a single
+                ``(2,)`` point is promoted to ``(1, 2)``).
+
+        Returns:
+            np.ndarray or cupy.ndarray: ``(n,)`` log prior, ``-inf`` outside
+            the truncation box. The result is converted with :attr:`xp` when
+            the input is cupy or when ``use_cupy`` and ``return_gpu`` are set,
+            so a cupy input comes back as numpy unless ``use_cupy`` is on.
+        """
         xp_in = None
         if type(x).__module__.startswith("cupy"):
             xp_in = self.xp

@@ -34,6 +34,25 @@ opts into a child if you would rather keep the ~2.5 GB peak and any
 matplotlib fault out of it. Both produce byte-identical output -- see
 ``_generator.py``'s ``_NOISE_PANEL_FONT`` for the one rcParam that used to
 make that untrue.
+
+The other flags: ``--scratch DIR`` (extraction root; default
+``$TMPDIR/gf_monitor_from_tar``), ``--run-dir DIR`` (skip extraction and
+discovery), ``--mojito DIR``, ``--build-truth`` (with ``--catalogue`` /
+``--l1-brick``, or anything after ``--``, passed to ``build_truth``),
+``--add-info OTHER_RUN_DIR`` (repeatable; see
+``python -m lisatools.globalfit.monitor -h``) and ``--timeout SEC``
+(child render only; default 1800). Exit status 0, 1 when the page build
+failed, 2 when no run directory was found (or on a usage error).
+
+Example:
+    .. code-block:: bash
+
+        # page beside the tarball, named after the run directory
+        python -m lisatools.globalfit.monitor.from_tar gf_prod_9mo_v9_snapshot.tar.gz
+
+        # short page, explicit output, fresh extraction
+        python -m lisatools.globalfit.monitor.from_tar gf_prod_9mo_v9_snapshot.tar.gz \\
+            short.html --short-page --fresh
 """
 
 from __future__ import annotations
@@ -48,6 +67,7 @@ import time
 
 
 def _default_scratch() -> str:
+    """``$TMPDIR/gf_monitor_from_tar`` (``/tmp`` when ``TMPDIR`` is unset)."""
     base = (os.environ.get("TMPDIR") or "/tmp").rstrip("/")
     return os.path.join(base, "gf_monitor_from_tar")
 
@@ -74,6 +94,13 @@ def find_run_dir(root: str) -> str | None:
     corrupt copies and extracts are all accepted here -- a snapshot tar
     normally ships ONLY the ``*_extract.h5``, so requiring a full store
     would find nothing.
+
+    Args:
+        root: The extraction directory.
+
+    Returns:
+        str or None: The deepest directory holding a ``*testing*.h5`` file
+        (the first in sorted walk order on a tie), or ``None``.
     """
     best = None
     for dirpath, dirnames, filenames in os.walk(root):
@@ -86,7 +113,22 @@ def find_run_dir(root: str) -> str | None:
 
 
 def extract(tar_path: str, scratch: str, fresh: bool = False) -> str:
-    """Untar into a per-tarball scratch directory. Returns that directory."""
+    """Untar into a per-tarball scratch directory. Returns that directory.
+
+    The directory is ``<scratch>/<key>`` with the key from the tarball's
+    path, size and mtime; a ``.extracted`` stamp marks a finished
+    extraction, which is reused unless ``fresh``. Extraction uses the
+    ``"data"`` filter (no absolute paths or ``..`` escapes) where Python
+    supports it.
+
+    Args:
+        tar_path: The snapshot tarball.
+        scratch: The extraction root.
+        fresh: Delete and redo an existing extraction. Default ``False``.
+
+    Returns:
+        str: The extraction directory.
+    """
     dest = os.path.join(scratch, _tar_key(tar_path))
     stamp = os.path.join(dest, ".extracted")
     if fresh and os.path.isdir(dest):
@@ -111,6 +153,16 @@ def extract(tar_path: str, scratch: str, fresh: bool = False) -> str:
 
 
 def main(argv=None) -> int:
+    """Run the CLI (see the module docstring).
+
+    Args:
+        argv (list[str], optional): Arguments without the program name.
+            Default ``None`` reads :data:`sys.argv`.
+
+    Returns:
+        int: Exit status: 0, 1 when the page build failed, 2 when no run
+        directory was found.
+    """
     # RESOLVE argv BEFORE ANYTHING READS IT. The `--` split below indexes
     # argv directly, so leaving it None crashed every real command line
     # (`TypeError: argument of type 'NoneType' is not iterable`) while

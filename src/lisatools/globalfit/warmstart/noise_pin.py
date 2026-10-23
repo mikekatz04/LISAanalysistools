@@ -18,15 +18,28 @@ a random noise level is the failure this module exists to prevent.
 WHAT IT DOES. Reads the best-logL cold walker of the last valid row of a
 previous run's store (:func:`~lisatools.globalfit.warmstart.opt_snr.best_logl_noise`
 -- the same maxlogL point, from the same folder, that the warm-start mixture
-is fitted from), converts it to the PHYSICAL/linear basis, and prints
+is fitted from), converts it to the PHYSICAL/linear basis, checks it
+against THIS code's prior support (refused with exit status 1 if outside),
+and prints to STDOUT exactly two lines::
 
     PSD_START_PARAMS=<Soms_d>,<Sa_a>
     GALFOR_START_PARAMS=<amp>,<fk>,<alpha>,<f_1>,<f_2>
 
-for a submit script to ``eval``/export. ``run.py`` converts those physical
+(each prefixed with ``export`` under ``--export``); the diagnostics (store,
+walker, row, lnL, the resolved bases and the psd-vs-injection ratios of
+:func:`psd_plausibility`) go to STDERR. ``run.py`` converts those physical
 values back into whatever basis THIS run samples in, so the two runs' log
 sampling flags are allowed to differ -- which is the whole reason the
 interchange format is physical.
+
+WHERE IT SITS. The 9mo / 12mo launchers run it in the shell BEFORE
+``mpiexec`` on ``${GF_SEED_STORE}`` (the same store the GB warm start is
+fitted from), with ``--export``, and NEVER ``eval`` its output (job 617
+died on a stray stdout line): each value is pulled out with an anchored
+pattern that admits only number characters. A hand-set
+``PSD_START_PARAMS`` / ``GALFOR_START_PARAMS`` wins per variable (the
+shipped launchers hand-set ``GALFOR_START_PARAMS`` to the offline
+foreground estimate, so only the psd pin comes from the store).
 
 BASIS DETECTION. A stored chain row is in the SOURCE run's sampling basis,
 which may be log. Detection is not a heuristic: every log-sampled column is
@@ -35,10 +48,16 @@ strictly positive under its physical prior (psd's two levels, galfor's
 can only be a log. ``--psd-basis`` / ``--galfor-basis`` force it, and the
 decision is always printed.
 
-Usage::
+Example:
+    What the launchers run (``--psd-basis`` / ``--galfor-basis`` default to
+    ``auto``):
 
-    python -m lisatools.globalfit.warmstart.noise_pin --store <prev_run.h5>
-    python -m lisatools.globalfit.warmstart.noise_pin --store <h5> --export
+    .. code-block:: bash
+
+        python -m lisatools.globalfit.warmstart.noise_pin \\
+            --store "${GF_SEED_STORE}" --export
+        python -m lisatools.globalfit.warmstart.noise_pin --store prev_run.h5 \\
+            --psd-basis log --galfor-basis log
 """
 
 from __future__ import annotations
@@ -68,6 +87,13 @@ def _windows(kind):
     -inf`` on iteration 0. A window that merely catches order-of-magnitude
     basis mistakes would pass such a point and the run would die -- or
     worse, sit there. The prior is the real constraint, so it is the test.
+
+    Args:
+        kind (str): ``"psd"`` or anything else (= galfor).
+
+    Returns:
+        tuple: ``((lo, hi), ...)`` physical bounds per column
+        (``PSD_PRIOR_RANGE`` or ``galfor_prior_ranges()``).
     """
     from ...globalfit.stock.erebor.noise import PSD_PRIOR_RANGE, galfor_prior_ranges
 
@@ -82,7 +108,13 @@ def _looks_log(vals, log_cols) -> bool:
 
 
 def _to_physical(vals, kind: str, basis: str):
-    """``(physical values, resolved basis)`` for one noise branch's row."""
+    """``(physical values, resolved basis)`` for one noise branch's row.
+
+    psd: both columns ``exp`` (``prepare_psd_branch`` samples ln); galfor:
+    the ``GALFOR_LOG_PARAMS`` columns ``10**`` (``prepare_galfor_branch``
+    samples log10; ``alpha`` stays linear). ``basis="auto"`` picks ``"log"``
+    when a strictly-positive-by-prior column is ``<= 0``.
+    """
     from ..stock.erebor.noise import GALFOR_BASIS, GALFOR_LOG_PARAMS
 
     vals = np.asarray(vals, dtype=float)
@@ -112,6 +144,7 @@ _PRIOR_TIGHTENED = "2026-08-13 (ea7790f3)"
 
 
 def _check(vals, window, name) -> None:
+    """Raise ``SystemExit`` (with the diagnosis) when a value is outside its prior window."""
     for i, (lo, hi) in enumerate(window):
         if not (lo <= float(vals[i]) <= hi):
             raise SystemExit(
@@ -139,10 +172,28 @@ def _check(vals, window, name) -> None:
 
 def noise_pin_from_store(store: str, *, psd_basis: str = "auto",
                          galfor_basis: str = "auto") -> dict:
-    """``{psd, galfor, iteration, walker, log_like, psd_basis, galfor_basis}``.
+    """The seed store's maxlogL noise point, converted to physical values and prior-checked.
 
     ``psd`` / ``galfor`` are PHYSICAL (linear) lists ready for
     ``PSD_START_PARAMS`` / ``GALFOR_START_PARAMS``.
+
+    Args:
+        store: The seed store h5 (``GF_SEED_STORE``; gf_format_version-2
+            layout).
+        psd_basis: ``"auto"`` (default), ``"linear"`` or ``"log"`` -- the
+            SOURCE store's psd chain basis.
+        galfor_basis: The same for the galfor chain.
+
+    Returns:
+        dict: ``{psd, galfor, iteration, walker, log_like, psd_basis,
+        galfor_basis}`` -- ``psd`` ``[Soms_d, Sa_a]`` and ``galfor`` ``[amp,
+        fk, alpha, f_1, f_2]`` physical; ``iteration`` the stored row read;
+        the resolved bases.
+
+    Raises:
+        SystemExit: When a converted value lies outside the prior support.
+        RuntimeError: From :func:`.opt_snr.best_logl_noise` (no valid row,
+            zero / NaN psd parameters).
     """
     from .opt_snr import best_logl_noise
 
@@ -158,6 +209,7 @@ def noise_pin_from_store(store: str, *, psd_basis: str = "auto",
 
 
 def _fmt(vals) -> str:
+    """Comma-joined ``%.10g`` values (the stdout format the launchers parse)."""
     return ",".join(f"{float(v):.10g}" for v in vals)
 
 
@@ -179,7 +231,10 @@ _PSD_PLAUSIBLE = (0.75, 1.33)
 
 
 def psd_plausibility(psd) -> list:
-    """``[(name, value, injection, ratio, ok), ...]``.
+    """Pin / injection ratio of each psd level: ``[(name, value, injection, ratio, ok), ...]``.
+
+    ``ok`` = the ratio lies in ``_PSD_PLAUSIBLE`` (0.75 .. 1.33). Reported
+    on stderr by :func:`main`; never fatal.
 
     ⚠ WHY THIS EXISTS ON TOP OF ``_check``. ``_check`` tests the PRIOR
     support, which is the right test for "will every walker be at
@@ -208,6 +263,12 @@ def psd_plausibility(psd) -> list:
 
     The branch samples ``(Soms_d, Sa_a)`` in SQRT units, which is what
     ``psd_truth_levels`` returns -- no squaring or rooting here.
+
+    Args:
+        psd (sequence of float): ``[Soms_d, Sa_a]`` physical pin.
+
+    Returns:
+        list[tuple]: One ``(name, value, injection, ratio, ok)`` per level.
     """
     from ..stock.erebor.noise import psd_truth_levels
 
@@ -222,6 +283,17 @@ def psd_plausibility(psd) -> list:
 
 
 def main(argv=None) -> int:
+    """CLI: print the two pin lines on stdout (diagnostics on stderr); see the module docstring.
+
+    The argparse description is the module docstring's first paragraph.
+
+    Args:
+        argv (list of str, optional): Arguments; ``None`` = ``sys.argv[1:]``.
+
+    Returns:
+        int: 0. An out-of-prior pin exits with status 1 (``SystemExit``
+        message) and prints no pin line.
+    """
     ap = argparse.ArgumentParser(
         prog="python -m lisatools.globalfit.warmstart.noise_pin",
         description=__doc__.split("\n\n")[0],

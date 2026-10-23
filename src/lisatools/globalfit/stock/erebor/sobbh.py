@@ -1,4 +1,17 @@
-"""SOBBH (stellar-origin BBH) branch blocks for the Erebor recipe."""
+"""SOBBH (stellar-origin BBH) branch blocks for the Erebor recipe.
+
+:class:`SOBBHSettings` is the SOBBH knob block (``fit.sobbh``) and
+:class:`SOBBHSetup` turns it into the built branch (transform, prior,
+per-leaf ladder, inner-move stack). The production ``all_sources`` variant
+uses the subclass
+:class:`~lisatools.globalfit.stock.erebor.source_runtime.SourceSOBBHSettings`
+(likelihood path, lookup table, warm start), filled by
+:func:`~lisatools.globalfit.stock.erebor.source_runtime.prepare_sobbh_branch`
+from the mojito SOBHB catalogue (``SOBHB_IDS``); the ``sobbh_pe`` move scores
+with the WDM lookup table (``SOBBH_LIKELIHOOD=lookup``, the
+``SOBBHChunkedLikeMove`` on the lookup comp) and folds residuals with the
+exact TDI-on-the-fly generator.
+"""
 
 from __future__ import annotations
 
@@ -30,7 +43,86 @@ class SOBBHSettings(Settings):
     knobs consumed by :class:`SOBBHSetup`.
 
     The sampling basis is 11 params (no ``fill_values`` by default — the
-    SOBBH waveform consumes everything sampled).
+    SOBBH waveform consumes everything sampled): ``logm1, logm2, s1, s2,
+    dist [Gpc], cosinc, f_low [Hz], phiS, cosqS, psi, phi0``; in the ICRS run
+    frame ``phiS`` is the right ascension and ``cosqS = sin(Dec)``. Fixed
+    leaf count (one leaf per catalogue source), each leaf with its own
+    ladder. Env knobs are ``SOBBH_<FIELD>``; launcher values are those of
+    ``submit_gf_9mo_v9.sh`` / ``submit_gf_12mo.sh``. Fields with the same
+    names as on :class:`~lisatools.globalfit.stock.erebor.emri.EMRISettings`
+    have the same meaning (see there for the long form). Other launcher SOBBH
+    knobs (``SOBBH_PERMUTE_EVERY``, ``SOBBH_COLD_TO_HOT_EVERY``,
+    ``SOBBH_EIGEN_INFO``, ``SOBBH_START_FACTOR``, ``SOBBH_CHECK_LL*``) are
+    read by the move / recipe; ``SOBBH_LIKELIHOOD`` / ``SOBBH_LOOKUP_*`` /
+    ``SOBBH_NUM_PROP_REPEATS`` / ``SOBBH_M_BAND_HALF_WIDTH`` are fields of
+    ``SourceSOBBHSettings``.
+
+    Attributes:
+        logm1_lims: ``[lo, hi]`` of the ``ln(m1 / Msol)`` uniform prior (used
+            only when a 2-list); default ``[ln 2, ln 100]``.
+        logm2_lims: Same for ``ln(m2 / Msol)``; default ``[ln 2, ln 100]``.
+        s1_lims: Aligned primary spin box; default ``[-0.99, 0.99]``.
+        s2_lims: Aligned secondary spin box; default ``[-0.99, 0.99]``.
+        ntemps: Per-leaf ladder rungs. Env ``SOBBH_NTEMPS``. Default 4;
+            launchers 8.
+        f_low_lims: GW-frequency box (Hz) at the reference epoch; default
+            ``[1e-3, 1e-1]``.
+        waveform_kwargs: Waveform / likelihood kwargs (``None`` -> filled at
+            branch prep).
+        injection: ``(nleaves, 11)`` sampling-basis start/truth rows (filled
+            from the catalogue at branch prep).
+        info_matrix_gen: Optional external eigen-table builder
+            ``builder(move, leaf, widths) -> (axes, sigmas)``; ``None`` keeps
+            the move's own route (``SOBBH_EIGEN_INFO``, launchers ``gram``).
+        fill_values: Unused by the stock SOBBH transform (kept for parity
+            with EMRI); default empty array.
+        betas: Explicit per-leaf ladder; ``None`` ->
+            :func:`~lisatools.globalfit.stock.erebor.common.default_source_ladder`.
+        inner_moves: Explicit eryn inner-move stack; ``None`` -> built from
+            ``inner_move_kind`` and the jump knobs.
+        inner_move_kind: ``"eigen"`` or ``"stretch"``. Env
+            ``SOBBH_INNER_MOVE_KIND``. Default ``"eigen"``.
+        eigen_refresh_every: Leaf visits between eigen-table rebuilds. Env
+            ``SOBBH_EIGEN_REFRESH``. Default 10; launchers 10.
+        eigen_table_scope: ``"per_walker"`` (one table per (temperature,
+            walker) point) or ``"walker_max"``. Env ``SOBBH_EIGEN_SCOPE``.
+            Default ``"per_walker"``; launchers ``walker_max``.
+        num_prop_repeats: Inner-move repeats per leaf visit. Plain default 10
+            here; ``SourceSOBBHSettings`` makes it env-backed
+            (``SOBBH_NUM_PROP_REPEATS``, default 2; launchers 25).
+        sobbh_search_file_key: Legacy search temp-file key; no reader.
+        ladder_reset_on_resume: Env ``SOBBH_LADDER_RESET_ON_RESUME``. Default
+            ``False``.
+        ladder_reanchor_nats: Lost-rung guard threshold (nats; 0 = off). Env
+            ``SOBBH_LADDER_REANCHOR_NATS``. Default 200.0; launchers 60.
+        ladder_tmax: Default-ladder top temperature (``None`` = uncapped). Env
+            ``SOBBH_LADDER_TMAX``; launchers 6.
+        ladder_top_snr: SNR-keyed ladders (0 = off). Env
+            ``SOBBH_LADDER_TOP_SNR``. Default 0.0.
+        ladder_tmax_min: Env ``SOBBH_LADDER_TMAX_MIN``. Default 4.0.
+        ladder_top_snr_refresh: Env ``SOBBH_LADDER_TOP_SNR_REFRESH``. Default 0.
+        ladder_top_snr_refresh_pe: Env ``SOBBH_LADDER_TOP_SNR_REFRESH_PE``.
+            Default ``False``.
+        eigen_jump_mix: Env ``SOBBH_EIGEN_JUMP_MIX``. Default 0.0; launchers 0.1.
+        eigen_jump_factor: Env ``SOBBH_EIGEN_JUMP_FACTOR``. Default 3.0;
+            launchers 3.0.
+        eigen_axis_adapt: Env ``SOBBH_EIGEN_AXIS_ADAPT``. Default ``False``;
+            launchers 1.
+        eigen_adapt_pool: Env ``SOBBH_EIGEN_ADAPT_POOL``. Default ``False``;
+            launchers 1.
+        eigen_temper_sigmas: Env ``SOBBH_EIGEN_TEMPER_SIGMAS``. Default
+            ``False``; launchers 1.
+        eigen_adapt_max_factor: Env ``SOBBH_EIGEN_ADAPT_MAX_FACTOR``. Default
+            100.0; launchers 100.
+        eigen_axis_acc_log: Env ``SOBBH_EIGEN_AXIS_ACC_LOG``. Default
+            ``False``; launchers 1.
+        eigen_axis_acc_tune: Env ``SOBBH_EIGEN_AXIS_ACC_TUNE``. Default
+            ``False``; launchers 1.
+        eigen_axis_acc_min: Env ``SOBBH_EIGEN_AXIS_ACC_MIN``. Default 0.1.
+        eigen_axis_acc_max: Env ``SOBBH_EIGEN_AXIS_ACC_MAX``. Default 0.5.
+        eigen_axis_acc_factor: Env ``SOBBH_EIGEN_AXIS_ACC_FACTOR``. Default 2.0.
+        de_jump_mix: Env ``SOBBH_DE_JUMP_MIX``. Default 0.0; launchers 0.2.
+        de_jump_mode_frac: Env ``SOBBH_DE_JUMP_MODE_FRAC``. Default 0.5.
     """
 
     logm1_lims: typing.List[float] = dataclasses.field(default_factory=list)
@@ -69,6 +161,7 @@ class SOBBHSettings(Settings):
         default_factory=env_default("SOBBH_EIGEN_SCOPE", "per_walker", str)
     )
     num_prop_repeats: Optional[int] = 10
+    # TODO check: keep/remove/document -- field has no reader anywhere (legacy search temp-file key)
     sobbh_search_file_key: Optional[str] = "_sobbh_search_tmp_file"
     # ---- per-leaf ladder + eigen-step knobs (user rulings 2026-10-13) -------
     # Same meaning as the EMRISettings fields of the same names
@@ -153,6 +246,9 @@ class SOBBHSettings(Settings):
 class SOBBHSetup(Setup):
     """:class:`Setup` for stellar-origin BBHs in the Erebor recipe.
 
+    Construction copies the settings, opens the ``sobbh_setup.log`` logger
+    (under ``log_dir``) and runs :meth:`init_setup`.
+
     Args:
         sobbh_settings: Settings dataclass with SOBBH parameter ranges,
             waveform configuration, and search helpers.
@@ -180,7 +276,17 @@ class SOBBHSetup(Setup):
         f_low, phiS, cosqS, psi, phi0``. ``M`` (==logm1.exp) and ``m2``
         are exponentiated; ``cosinc, cosqS`` are inverted to ``inc, qS``;
         ``phiS`` is mapped to the ``lambda`` argument that ResponseWrapper
-        uses, ``qS -> beta = pi/2 - qS``.
+        uses, ``qS -> beta = pi/2 - qS``. In the ICRS run frame those
+        ``lam`` / ``beta`` slots carry RA / Dec.
+
+        Fills (only when unset): ``transform``, ``periodic`` (``phiS``,
+        ``phi0`` period ``2 pi``; ``psi`` period ``pi``), ``betas``,
+        ``other_tempering_kwargs`` (``permute=False``), ``initialize_kwargs``,
+        ``inner_moves``. ``priors`` is always rebuilt by :meth:`setup_priors`
+        (an explicit value is overwritten).
+
+        Raises:
+            AssertionError: When ``other_tempering_kwargs["permute"]`` is true.
         """
         input_basis = [
             "logm1",
@@ -239,7 +345,18 @@ class SOBBHSetup(Setup):
             resolve_inner_moves(self)
 
     def setup_priors(self, input_basis):
-        """Build the SOBBH prior dictionary, overriding intrinsic ranges from settings."""
+        """Build the SOBBH prior dictionary, overriding intrinsic ranges from settings.
+
+        Default uniforms: ``logm1`` / ``logm2`` in ``[ln 2, ln 100]``, spins in
+        ``[-0.99, 0.99]``, ``dist`` 0.01-10 Gpc, ``cosinc`` / ``cosqS`` in
+        ``[-1, 1]``, ``f_low`` 1e-3-1e-1 Hz, ``phiS`` / ``phi0`` in
+        ``[0, 2 pi]``, ``psi`` in ``[0, pi]``. A 2-element ``logm1_lims`` /
+        ``logm2_lims`` / ``s1_lims`` / ``s2_lims`` / ``f_low_lims`` replaces
+        its column's box. Sets ``self.priors = {"sobbh": ProbDistContainer}``.
+
+        Args:
+            input_basis (list[str]): The 11 sampling-basis names.
+        """
         priors_sobbh = {
             input_basis[0]: uniform_dist(np.log(2.0), np.log(100.0)),     # logm1 (M_sun)
             input_basis[1]: uniform_dist(np.log(2.0), np.log(100.0)),     # logm2
@@ -268,11 +385,12 @@ class SOBBHSetup(Setup):
         self.priors = {"sobbh": ProbDistContainer(priors_sobbh)}
 
     def init_setup(self):
+        """Run sampling-info and state-backend initialization."""
         self.init_sampling_info()
         self.init_state_backend_info()
 
     def init_state_backend_info(self):
-        """Default the SOBBH state and backend to :class:`SOBBHState` / :class:`SOBBHHDFBackend`."""
+        """Default the SOBBH state / backend to :class:`SOBBHState` / :class:`SOBBHHDFBackend`."""
         if self.branch_state is None:
             self.branch_state = SOBBHState
 

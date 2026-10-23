@@ -1,4 +1,14 @@
-"""Build per-source catalogs (GB / MBH) from a finished global-fit run."""
+"""Build per-source catalogs (GB / MBH) from a finished global-fit run (legacy, unused).
+
+Written for the pre-stock ``current_info`` layout (``gb_info`` /
+``mbh_info`` reader dicts, ``get_data_psd``, ``general_info["file_information"]``)
+and the old L-frame MBH basis; nothing imports this module. The GB path
+groups samples with
+:func:`~lisatools.globalfit.gathergalaxy.gather_gb_samples_cat`; the MBH path
+calls ``LISA_to_SSB``, whose import is commented out (``NameError``). The
+maintained end-of-run output is
+:class:`~lisatools.globalfit.postprocessing.SubmissionWriter`.
+"""
 
 import os
 import time
@@ -18,6 +28,7 @@ from gbgpu.utils.utility import get_N
 from .gathergalaxy import gather_gb_samples_cat
 
 
+# TODO check: keep/remove/document -- module never imported; needs the retired current_info API
 def build_gb_catalog(current_info, gpu, **kwargs):
     """Assemble the EREBOR-style GB catalog from a finished GB chain.
 
@@ -157,6 +168,7 @@ def build_gb_catalog(current_info, gpu, **kwargs):
             print(f"Sub hdf: {i + 1} of {len(median_inds_out)}")
 
 
+# TODO check: keep/remove/document -- module never imported; LISA_to_SSB undefined (NameError)
 def build_mbh_catalog(current_info, gpu, **kwargs):
     """Assemble the EREBOR-style MBH catalog from a finished MBH chain.
 
@@ -301,6 +313,7 @@ def build_mbh_catalog(current_info, gpu, **kwargs):
 catalog_generate_funcs = {"gb": build_gb_catalog, "mbh": build_mbh_catalog}
 
 
+# TODO check: keep/remove/document -- module never imported (no caller anywhere)
 def build_catalog(current_info, gpu=None, catalogs=["gb", "mbh"], cat_kwargs={}, **kwargs):
     """Dispatch to per-source catalog builders.
 

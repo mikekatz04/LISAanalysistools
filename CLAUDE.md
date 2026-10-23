@@ -66,6 +66,8 @@ rule — **full detail: [`docs/conventions.md`](docs/conventions.md).**
 Maps: [`docs/codebase-map.md`](docs/codebase-map.md) (this repo's internal
 layout) and [`docs/architecture-map.md`](docs/architecture-map.md)
 (cross-repo dependency graph, capability→module table, backend-wheel model).
+To build and read the six packages' dev-branch Sphinx sites locally (the online
+Pages show the last release only): [`docs/browsing-docs-locally.md`](docs/browsing-docs-locally.md).
 
 **Global-fit production work (read these before touching a run or its
 code):** [`docs/global-fit-navigation.md`](docs/global-fit-navigation.md)
@@ -94,16 +96,17 @@ pip install .
 
 Build behavior is controlled by the CMake option `LISATOOLS_WITH_GPU` (`AUTO` / `ON` / `OFF` / `ONLY` / `BARE`). On `AUTO` (default), the GPU backend is built only if `nvcc` and the CUDA toolkit are found. CUDA architectures default to `70;75;80;86;90` (70 is dropped automatically for CUDA ≥ 13). Override via `-DLISATOOLS_CUDA_ARCH=...` or `-DLISATOOLS_WITH_GPU=...` passed through `pip install --config-settings=cmake.define.<OPT>=<VAL> .`.
 
-CUDA-enabled builds are published as separate plugin wheels: `lisaanalysistools-cuda11x`, `-cuda12x`, `-cuda13x`. Each ships a `lisatools_backend_cudaXXx` Python module that the main package imports lazily.
+CUDA-enabled builds are separate plugin wheels (`lisaanalysistools-cudaXXx`). Each ships a `lisatools_backend_cudaXXx` Python module that the main package imports lazily. The backend code knows `cuda11x` / `cuda12x` / `cuda13x`; `.github/workflows/publish.yml` currently builds only the x86_64 `cuda12x` plugin (its `cuda11x` entries are commented out, there is no `cuda13x` entry). The cluster's dev stack (`install.sh`, `GPU_BACKEND=cuda13x` in the launchers) builds from source.
 
 ## Testing
 
 Tests live in `tests/` and use `unittest`:
 
 ```sh
-# Run the full suite (two equivalent forms)
-python -m lisatools.tests
+# Run the full suite from the repo root (the CI form is the second line);
+# there is no `python -m lisatools.tests` (tests/ is not in the package)
 python -m unittest discover
+python -m unittest tests/test*
 
 # Run a single test file / case / method
 python -m unittest tests.test_detector
@@ -126,14 +129,14 @@ pre-commit run --all-files # run on the whole tree
 
 This is the most important architectural concept in the codebase.
 
-LISAanalysistools delegates all GPU/CPU dispatch to **`gpubackendtools`** (a separate package, also a build dependency). Backends are registered at import in `src/lisatools/__init__.py` by adding `LISAToolsCpuBackend`, `LISAToolsCuda11xBackend`, `LISAToolsCuda12xBackend`, `LISAToolsCuda13xBackend` to the global `Globals().backends_manager`.
+LISAanalysistools delegates all GPU/CPU dispatch to **`gpubackendtools`** (a separate package, also a build dependency). Backends are registered at import in `src/lisatools/__init__.py` by adding `LISAToolsCpuBackend`, `LISAToolsCuda11xBackend`, `LISAToolsCuda12xBackend`, `LISAToolsCuda13xBackend` (registry names `lisatools_cpu`, `lisatools_cuda11x`, ...) to the global `Globals().backends_manager`, plus the pure-JAX `lisatools_jax` when `import jax` succeeds.
 
-- `lisatools.get_backend("cpu" | "cuda11x" | "cuda12x" | "cuda13x" | "cuda" | "gpu")` returns a `Backend` object. The `"cuda"` and `"gpu"` names are aliases for the first available CUDA backend.
-- `lisatools.has_backend(name)` reports availability without raising.
-- A backend object exposes `xp` (either `numpy` or `cupy`) plus C-level functions/classes loaded from the corresponding native module (`lisatools_backend_<name>.pycppdetector`).
+- `lisatools.get_backend("cpu" | "cuda11x" | "cuda12x" | "cuda13x" | "cuda" | "gpu" | "jax")` returns a `Backend` object. `"cuda"` is the first loadable of cuda13x / cuda12x / cuda11x, and `"gpu"` is an alias of `"cuda"`.
+- `lisatools.has_backend(name)` returns `False` for a registered backend that cannot be loaded. It raises `ValueError` for a name that is not registered, and that includes `"cuda"` / `"gpu"`: only `get_backend` resolves those aliases. `lisatools.get_first_backend` does not work as written (see its docstring); use `get_backend("cuda")`.
+- A backend object exposes `xp` (`numpy`, `cupy`, or `jax.numpy` for `lisatools_jax`) plus C-level functions/classes loaded from the corresponding native module (`lisatools_backend_<name>.pycppdetector`).
 - Backend definitions: `src/lisatools/cutils/__init__.py`. Methods are declared in the `LISAToolsBackendMethods` dataclass — when adding a new C++/CUDA function, expose it on this dataclass and on each concrete backend's `*_module_loader`.
 
-In Python code, the `xp` pattern is used widely — modules do `try: import cupy as cp / except: import numpy as cp` and pick the right module via `get_array_module(arr)` from `lisatools.utils.utility`. Don't assume `numpy`; arrays may be `cupy.ndarray`.
+In Python code, the `xp` pattern is used widely — modules do `try: import cupy as cp / except: import numpy as cp` and pick the right module via `get_array_module(arr)` from `lisatools.utils.utility` (returns `numpy`, `cupy` or `jax.numpy`); backend-bound classes expose `self.xp` as a property derived from their backend. Don't assume `numpy`; arrays may be `cupy.ndarray`.
 
 ## Native Sources (`src/lisatools/cutils/`)
 
@@ -141,20 +144,20 @@ In Python code, the `xp` pattern is used widely — modules do `try: import cupy
 - `PSD.cu` / `PSD.hpp` — PSD-related kernels (treated the same way).
 - `LISAResponse.cu` / `LISAResponse.hh` — LISA arm-projection / TDI machinery. **Absorbed from lisa-on-gpu at Phase 3E** (2026-06-02). lisa-on-gpu's CMake references `${LISATOOLS_DIR}/cutils/LISAResponse.cu` so its tdionthefly module still consumes the same source.
 - `fd_domain.hh`, `wdm_settings.hh`, `wdm_domain.hh` — deprecated include shims forwarding to `domains.hpp` (2026-06-12 consolidation; kept so lisa-on-gpu-era include paths compile). The POD-style FD/WDM domain descriptors they declared (absorbed from lisa-on-gpu at Phase 3L.1/3L.2/3L.4) now live in `domains.hpp`; their nanobind registrations stay in `binding_fd_domain.hpp` / `binding_wdm_settings.hpp` / `binding_wdm_domain.hpp`.
-- `lat_tdi_on_the_fly.{hh,cu}` — `LISATDIonTheFly` base class + `OrbitsSplineCache` struct + 4 cache eval helpers. **Absorbed from lisa-on-gpu at Phase 3L.5** (2026-06-03). `.hh + .cu` split because of method volume (~26 methods, ~1300 lines); lisa-on-gpu's CMake copy-compiles the `.cu`. LAT's own detector_static archive also compiles the `.cu` so the virtual-class typeinfo is present in LAT's `.so` for the pybind11 registration to dlopen cleanly.
-- `lat_spline_tdi_waveform.{hh,cu}` + `binding_lat_spline_tdi.hpp` — `FDSplineTDIWaveform` + `TDSplineTDIWaveform` (LISATDIonTheFly subclasses for spline-fed intrinsic waveforms) + their `*Wrap` + the `LISATDIonTheFlyWrap` pybind11 base shared by all Wrap subclasses. **Absorbed from lisa-on-gpu at Phase 3L.6** (2026-06-03). Same `.hh + .cu` + copy-compile pattern; wrap-side `run_wave_tdi_wrap` bodies inline in the `.hpp`.
+- `lat_tdi_on_the_fly.{hh,cu}` — `LISATDIonTheFly` base class + `OrbitsSplineCache` struct + 4 cache eval helpers. **Absorbed from lisa-on-gpu at Phase 3L.5** (2026-06-03). `.hh + .cu` split because of method volume (~26 methods, ~1300 lines); lisa-on-gpu's CMake copy-compiles the `.cu`. LAT's own detector_static archive also compiles the `.cu` so the virtual-class typeinfo is present in LAT's `.so` for the nanobind registration to dlopen cleanly.
+- `lat_spline_tdi_waveform.{hh,cu}` + `binding_lat_spline_tdi.hpp` — `FDSplineTDIWaveform` + `TDSplineTDIWaveform` (LISATDIonTheFly subclasses for spline-fed intrinsic waveforms) + their `*Wrap` + the `LISATDIonTheFlyWrap` base shared by all Wrap subclasses (registered with nanobind in `binding_flr.cxx`; the header's comments still say pybind11). **Absorbed from lisa-on-gpu at Phase 3L.6** (2026-06-03). Same `.hh + .cu` + copy-compile pattern; wrap-side `run_wave_tdi_wrap` bodies inline in the `.hpp`.
 - `binding_detector.cxx` / `binding_detector.hpp` — **nanobind** module exposing the C++/CUDA functions to Python (renamed from `binding.{cxx,hpp}` at the 2026-06-11 stft_tof merge; the module is still `pycppdetector`). The module body calls `detector_part(m)` then `response_part(m)` so OrbitsWrap, LISAResponseWrap, TDIConfigWrap all register here, plus the stft_tof-reactivated `XYZSensitivityMatrixWrap` (galactic grid, FD time-averaged transfer functions, `run_async`), `GalacticGridWrap`/`GalacticGridSetup`, and the legacy `psd_likelihood`/`compute_logpdf` kernels. (CubicSplineWrap moved to GBT's `interp` module 2026-06-10 — GBT is its single registrant.)
 - `domains.{hpp,cu}` — stft_tof STFT time-frequency C++ (`STFTSettings`, `FDSettings`, `STFTDomain`, `STFTFresnel`, and `FDDomainForStft` — renamed from the incoming `FDDomain` to avoid colliding with dev's `fd_domain.hh` class; unify later). TDI flavor ints are re-based to the canonical `TDI_XYZ=1 / TDI_AET=2 / TDI_AE=3` behind `#ifndef` guards — Python must pass `backend.TDITypeDict` values, never literals. Also hosts the consolidated WDM/FD domain descriptors (2026-06-12); the STFT wraps are bound via `binding_domains.hpp` (`STFTDomainWrap`, `FDDomainForStftWrap`, `STFTFresnelWrap`).
 - `binding_flr.cxx` / `binding_flr.hpp` — `response_part()` implementation + shared wrapper classes (`ReturnPointerBase`, `TDIConfigWrap`, `LISAResponseWrap`). **Absorbed from lisa-on-gpu at Phase 3E**. The `PYBIND11_MODULE(responselisa, m)` block was stripped; LAT's pycppdetector is the sole entry point.
 - `orbits_view.hpp` — `OrbitsView` POD struct, the stable-layout cross-wheel interface downstream packages consume in place of typed `Orbits*` pointers. `binding_detector.cxx` runs `static_assert(sizeof + 15 offsetofs)` confirming layout matches `class Orbits` at every build. See plan section "POD-view side-channel".
-- `lisatools_header_abi.hpp` — `LISATOOLS_HEADER_ABI_VERSION` macro + `LISATOOLS_IS_WRAPPER_OWNER` toggle. **`binding_detector.cxx` sets the toggle to 1** (LAT is the owner); downstream binding TUs leave it at the default 0 and add `static_assert(!LISATOOLS_IS_WRAPPER_OWNER, ...)`. Compile-time enforcement of the single-registrant rule. See `tools/check_single_registrant.sh` in the umbrella workspace root for the CI-side grep complement.
+- `lisatools_header_abi.hpp` — `LISATOOLS_HEADER_ABI_VERSION` macro + `LISATOOLS_IS_WRAPPER_OWNER` toggle. **`binding_detector.cxx` sets the toggle to 1** (LAT is the owner); downstream binding TUs leave it at the default 0 and add `static_assert(!LISATOOLS_IS_WRAPPER_OWNER, ...)`. Compile-time enforcement of the single-registrant rule. See `tools/check_single_registrant.sh` in this repo (`LISAanalysistools/tools/`) for the CI-side grep complement.
 - `LISAanalysisToolsConfig.cmake` — `find_package(LISAanalysisTools CONFIG REQUIRED)` → `LISAanalysisTools::headers` interface target for downstream CMake consumers.
-- `pycppdetector.pyx` is a legacy Cython file; the active path is the nanobind module `pycppdetector` produced from `binding_detector.cxx`.
+- The legacy Cython `pycppdetector.pyx` was deleted (commit 72c38485; `pyproject.toml`'s `sdist.include` still lists it); the active path is the nanobind module `pycppdetector` produced from `binding_detector.cxx` + `binding_flr.cxx` (`nanobind_add_module` in `cutils/CMakeLists.txt`).
 
 ## Python Package Layout
 
 `src/lisatools/`:
-- `detector.py` — `Orbits` / `DefaultOrbits` Python frontends wrapping the backend `OrbitsWrap` class.
+- `detector.py` — `Orbits` Python frontends wrapping the backend `OrbitsWrap` class: `L1Orbits` (file-based unequal-arm orbits; what the stock global fits load), `ESAOrbits`, `EqualArmlengthOrbits` (`DefaultOrbits` is its subclass); plus the instrument-noise models (`LISAModel`, ...).
 - `sensitivity.py` — `SensitivityMatrix`, `get_sensitivity`, noise/PSD models.
 - `datacontainer.py` — `DataResidualArray`: container abstracting data/residual/template arrays and their connection to sensitivity matrices.
 - `analysiscontainer.py` — `AnalysisContainer`: combines a `DataResidualArray` + `SensitivityMatrix` + signal generator; central object for likelihood computations.
@@ -162,7 +165,7 @@ In Python code, the `xp` pattern is used widely — modules do `try: import cupy
 - `domains.py` — frequency / time-frequency domain settings (`DomainSettingsBase` etc.).
 - `stochastic.py` — stochastic foreground models (e.g. `FittedHyperbolicTangentGalacticForeground`).
 - **`response/`** — LISA-response Python frontends, **absorbed from `fastlisaresponse` at Phase 3B+C**:
-  - `parallelbase.py` — `FastLISAResponseParallelModule` backend-dispatch base.
+  - `parallelbase.py` — `FastLISAResponseParallelModule`, now a legacy alias of the package-wide backend-dispatch base `lisatools.utils.parallelbase.LISAToolsParallelModule`.
   - `tdiconfig.py` — `TDIConfig` configuration.
   - `directresponse.py` — was `fastlisaresponse.response.py`; `pyResponseTDI`, `ResponseWrapper`, `ecliptic_to_icrs`.
   - `tdionfly.py` — TDI-on-the-fly family.
@@ -170,16 +173,18 @@ In Python code, the `xp` pattern is used widely — modules do `try: import cupy
   - `backend.py`, `orbits.py` — LAT-native (existing).
   - `response/` — `base.py` (JaxAmpPhaseSource), `projection.py`, `tdi_config.py`, `amp_phase_extract.py`. **Absorbed at Phase 3D.**
   - `wdm/` — `wavelet_lookup.py`, `wdm_settings.py`, `wdm_domain.py`, `fast_inner.py`. **Absorbed at Phase 3D.** GB-specific (heterodyne) variants live in `gbgpu.jax.wdm`.
-- `sources/` — waveform generators per source class: `bbh/`, `emri/`, `gb/`, plus `defaultresponse.py` and `waveformbase.py`.
+- `sources/` — waveform generators per source class: `bbh/`, `emri/`, `gb/`, `sobbh/`, plus `defaultresponse.py`, `waveformbase.py`, `batching.py`.
+- WDM-likelihood engines at the package top level: `chunked_het.py`, `signal_het.py`, `wdm_het.py`, `wdm_lookup_eval.py` / `wdm_lookup_store.py` (the n_ref lookup tables of the EMRI / SOBBH scorers and the GB lookup engine), `coarsewdm.py`, `domaincomputation.py`; `docs/codebase-map.md` has the full list.
 - `sampling/` — MCMC pieces built on top of `eryn`: priors, likelihood wrappers, custom moves, stopping criteria, GMM utilities.
-- `globalfit/` — the LISA global fit pipeline: `engine.py`, `run.py`, `recipe.py`, `hdfbackend.py`, the moves in `globalfit/moves/`, and stock recipes in `globalfit/stock/` (the legacy `pipeline.py` + per-component `mbhglobal/galaxyglobal/psdglobal` movers were deleted 2026-07, parallel-resources plan P0/P4; `mbhsearch.py` remains for the dev search script). Post stft_tof merge (2026-06-12) conventions:
+- `globalfit/` — the LISA global fit pipeline: `engine.py`, `run.py`, `recipe.py`, `hdfbackend.py`, the moves in `globalfit/moves/`, and stock recipes in `globalfit/stock/` (the legacy `pipeline.py` + per-component `mbhglobal/galaxyglobal/psdglobal` movers were deleted 2026-07, parallel-resources plan P0/P4; `mbhsearch.py` is legacy and unused: its only importer, `scripts/mbh/dev_mbh_gf_search.py`, fails at import). The production runs (9mo / 12mo) build `erebor.all_sources` through `scripts/fstat_proposal/run_combined_staged.py`; start from `docs/global-fit-navigation.md`. Post stft_tof merge (2026-06-12) conventions:
   - **Engine-side template generation**: each branch registers a params-based generator on `Settings.signal_gen` (`fn(*sampling_params) -> DomainBase`, wrapping transform + waveform + domain projection); `run.py::setup_acs(state, rebuild_residuals=True)` builds/subtracts the state's templates from the residuals under the hood. Settings-file recipes build **moves only** — never write residuals directly.
   - **ICRS run frame**: catalogue sky/polarization parameters are sampled raw (`alpha`/RA, `sin_delta`, `psi` ICRS); orbits are loaded with `frame="icrs"`. The stock MBH transform (`make_mbh_transform_container`, forward + inverse) is direct-ICRS with `Q = m1/m2`.
   - **Domains are never communicated by string** — `GeneralSettings.domain_settings` takes a `DomainSettingsBase` instance or a `(times, dt, force_backend)` factory (`FDSettings/STFTSettings/WDMSettings.make_factory`); all dispatch is `isinstance` on the settings class.
 - `utils/` — `constants.py` (re-exports `lisaconstants`-derived values like `YRSID_SI`), array helpers (`get_array_module`, `AET`), exceptions.
 - `orbit_files/` — packaged orbit data files.
 - `galfor_modulation/` — packaged galactic-foreground modulation table (`modulation_unequal.dat`, the `all_sources` mojito default; `lisatools.sensitivity.packaged_galfor_modulation_path`).
-- `scripts/` — dev / validation / benchmark / diagnostics scripts (`gb_chunked_het/`, `gb_lookup/`, `sobbh/`, `mbh/`, `emri/`, `wdm/`, `validation/`, `benchmark/`, `diagnostics/`, `notes/`). Migrated from the umbrella workspace root at Phase 2.
+
+`scripts/` (repo root, not part of the package) — the production launchers and driver (`fstat_proposal/`: `run_combined_staged.py`, `submit_gf_9mo_v9.sh`, the store-surgery tools; `flagship/`: the launcher template and `submit_gf_{3,6,9,12,18,24}mo.sh`), plus dev / validation / benchmark / diagnostics scripts (`gb/`, `gb_chunked_het/`, `gb_lookup/`, `sobbh/`, `mbh/`, `emri/`, `noise/`, `wdm/`, `validation/`, `benchmark/`, `diagnostics/`, `campaign/`, `notes/`, ...). Migrated from the umbrella workspace root at Phase 2.
 
 ## Stock global fits — no new settings files (LISA Analysis Tools–wide rule)
 
@@ -192,16 +197,28 @@ from lisatools.globalfit.stock import erebor
 erebor.get_stock_options()             # [(name, description), ...]
 fit = erebor.gb_no_fg(nwalkers=4)      # or erebor.get_stock("gb_no_fg", ...)
 fit.gb.center_freq = 8e-3              # plain attribute access on the blocks
-fit.recipe.pop_move("rj_refit")        # named move stacks per recipe stage
-fit.remove_branch("galfor")            # compose whole objects in/out
-curr = fit.build()                     # heavy stage (data load), on command
+print(fit.list_moves())                # "[pe] gb_pe:", then one line per move
+fit.add_move("rj_prior_pe", branch="gb", stage="gb_pe")  # named move stacks per stage
+fit.recipe.pop_move("rj_prior_pe")     # ... and out again
+fit.build()                            # heavy stage (data load), on command; returns the fit
 fit.run()                              # build -> GlobalFit -> run_global_fit
+
+fit = erebor.all_sources(nwalkers=4)   # the production variant (every branch)
+fit.remove_branch("galfor")            # compose whole objects in/out (drops galfor_pe too)
 ```
 
+`erebor.<name>(...)` clones the module-level instance (env knobs read at
+import); `erebor.get_stock(name, ...)` constructs from the class (env read at
+that call). `gb_no_fg` has only the `gb` branch and its default recipe is the
+one stage `gb_pe` holding `rj_fstat_pe`; `all_sources` holds `full_pe` and
+`vgb_pe` (the production driver replaces that recipe with its staged one).
+
 Every variant's data pipeline swaps with one knob: `fit.general.data_mode`
-(`"mojito"` default everywhere; `"synthetic"` builds all streams in-process
-with no external data; all_sources also keeps legacy `"sangria"`). Env:
-`DATA_MODE=<mode>`. An explicit `data_processor_class` swap always wins.
+(`"mojito"` default everywhere except `blank`, which is `"synthetic"` only;
+`"synthetic"` builds all streams in-process with no external data; all_sources
+also keeps legacy `"sangria"`; a missing mojito folder falls back to
+`"synthetic"`). Env: `DATA_MODE=<mode>` (legacy alias `DATA_PROCESSOR`). An
+explicit `data_processor_class` swap always wins.
 
 Architecture (building-block pyramid, `stock/base.py` + `stock/erebor/`):
 `StockGlobalFit` **inherits `GlobalFitSetup`** (the built config/state object,
@@ -256,7 +273,10 @@ Rules:
    grow them back.
 
 `scripts/run_global.py` accepts `--stock <name>` alongside the legacy
-`-sfp <path>`.
+`-sfp <path>`. The production runs do not go through it: `mpiexec` runs
+`scripts/fstat_proposal/run_combined_staged.py`, which composes the staged
+recipe (`gb_search_seed` x3 -> `source_search` -> `gb_search_1` ->
+`gb_search_2` -> `full_pe`) on `erebor.all_sources`.
 
 ## V2 signal-heterodyne likelihood path
 
@@ -266,7 +286,9 @@ dense `TDSignal.transform` — has been developed and validated alongside the
 chunked-heterodyne (`gb_wdm_het_*`) family (~130× faster; GB mm5 ≈ 1.6e-9
 median). Source-agnostic helpers live in `signal_het.py` / `chunked_het.py`;
 the GB implementation is `gbgpu.gbsignalhetcomputations.GBSignalHetComputations`
-(currently CPU-only, wired into the global-fit GB path via `for_band_engine()`),
+(the production GB / VGB in-model likelihood: `stock/erebor/gb.build_sighet_engine`
+wraps the chunked-het `GBWDMComputations` with `for_band_engine()`, which runs on
+the delegate's backend, CPU or CUDA; only the direct constructor is CPU-only),
 and the SOBBH counterpart lives in `bbhx`. See the per-repo `docs/codebase-map.md`
 for exact current locations; a JAX mirror is a documented follow-up.
 
@@ -276,7 +298,7 @@ LAT exposes its public C++/CUDA headers via:
 - `lisatools.get_include() → str` (Python entry point used by downstream CMake via shell-out)
 - `lisatools.get_cmake_module_path() → str` returning the directory containing `LISAanalysisToolsConfig.cmake`.
 
-Downstream waveform packages (GBGPU, BBHx, FastEMRIWaveforms) consume LAT headers (`Detector.hpp`, `LISAResponse.hh`, `binding_flr.hpp`, `orbits_view.hpp`, `lisatools_header_abi.hpp`, ...) but **do not register the shared wrapper classes with pybind11** — that's LAT's sole responsibility (single-registrant rule, enforced by `LISATOOLS_IS_WRAPPER_OWNER`).
+Downstream waveform packages (GBGPU, BBHx, FastEMRIWaveforms) consume LAT headers (`Detector.hpp`, `LISAResponse.hh`, `binding_flr.hpp`, `orbits_view.hpp`, `lisatools_header_abi.hpp`, ...) but **do not register the shared wrapper classes with nanobind** — that's LAT's sole responsibility (single-registrant rule, enforced by `LISATOOLS_IS_WRAPPER_OWNER`).
 
 ## Key External Dependencies
 

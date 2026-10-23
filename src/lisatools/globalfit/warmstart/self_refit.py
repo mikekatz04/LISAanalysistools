@@ -1,6 +1,7 @@
 """GB warm-start SELF refit: the run refits its warm-start mixture from its own store.
 
-USER RULINGS (Mike, 2026-10-13):
+USER RULINGS (Mike, 2026-10-13; the stages, the cadences and the 25/75 split
+were superseded by the 2026-10-14/15/16 rulings below):
 
 * "Starting in gb search 2 (and in full pe). Let's rebuild our warm start
   proposal with the last 50 samples (x4 walkers)."
@@ -128,8 +129,45 @@ THE PIECES (all in this module, wired from four places):
    store's recipe group at every save); the moves adopt the latest complete
    epoch at their first propose.
 
+STORED ROWS. ``GB_WARM_SELF_LAST_K`` and both cadences count STORED ROWS
+(states handed to the saver), not iterations: a numbered search stage
+stores 3 rows per cycle under ``GB_SEARCH_LEGS=1`` (one per leg), so the
+default 50 rows are the last ~17 search cycles, and ``EVERY_SEARCH=1`` is a
+build at every warm entry, i.e. every cycle; ``full_pe`` stores one row
+per iteration, so 50 rows = 50 iterations and ``EVERY_PE=25`` a build at
+the first ``rj_warm_pe`` draw at least 25 iterations after the last one.
+
+KNOBS (``GBSettings.warm_self*`` fields, env-seeded, plus the watchdog's
+plain env var ``GF_MONITOR_WARN_FRAC``; code default / 9mo + 12mo
+launchers). Every one needs a parent warm start
+(``GB_WARM_START_COMPONENTS``); without it nothing is built:
+
+* ``GB_WARM_SELF`` -- master switch, False / 1.
+* ``GB_WARM_SELF_AT_ENTRY`` -- head build at the warm entry (True) or the
+  saver build after its saves (False); True / 1.
+* ``GB_WARM_SELF_EVERY_SEARCH`` -- rows between builds in ``gb_search_N``
+  (N >= 1; ``<= 0`` never), 1 / 1.
+* ``GB_WARM_SELF_EVERY_PE`` -- rows between builds in ``full_pe``, 25 / 25.
+* ``GB_WARM_SELF_LAST_K`` -- rows x every walker fitted, 50 / 50.
+* ``GB_WARM_SELF_SPLIT_SEARCH`` / ``GB_WARM_SELF_SPLIT_PE`` -- "original,
+  full, filtered" weights of ``rj_warm_search`` / ``rj_warm_pe``,
+  ``0.5,0,0.5`` / ``1,1,1`` on both.
+* ``GB_WARM_SELF_CONSENSUS`` -- :func:`consensus_filter` threshold,
+  0.95 / 0.95.
+* ``GB_WARM_SELF_ADOPT_LAG`` -- the one-draw adoption lag, True / unset.
+* ``GF_MONITOR_WARN_FRAC`` -- the saver build's watchdog warning fraction
+  (:class:`WarmSelfWatchdog`, saver build only), 0.25 / unset.
+
+The self epochs fit at the RUN's own Tobs and use every fit / referee /
+apply option at its CLI default (the referee on the CPU unless
+``GB_WARM_START_REFEREE_BACKEND`` says otherwise).
+
 Log tag: ``[GB_WARM_SELF]`` (build, adoption, the per-propose container
 choice and the per-container birth tallies, the watchdog).
+
+See Also:
+    ``docs/global-fit-navigation.md`` section 2.8 (the knob table) and
+    ``recipe._warm_self_wrap`` (where the mixer is built).
 """
 
 from __future__ import annotations
@@ -205,12 +243,19 @@ def self_epoch_root(store_path: str) -> str:
 
     The run dir is the store's directory (``general_info.main_file_path`` on
     the moves, ``gb_reader.filename`` on the saver -- the same path).
+
+    Args:
+        store_path (str): The run's store h5.
+
+    Returns:
+        str: ``<dirname(abspath(store_path))>/warmstart/self``.
     """
     return os.path.join(os.path.dirname(os.path.abspath(str(store_path))),
                         "warmstart", "self")
 
 
 def epoch_dir(root: str, k: int) -> str:
+    """``<root>/epoch_NNNN`` (zero-padded to 4 digits) of epoch ``k``."""
     return os.path.join(root, f"epoch_{int(k):04d}")
 
 
@@ -233,7 +278,13 @@ def read_manifest(root: str, k: int) -> typing.Optional[dict]:
 
     Complete = the manifest parses, names its epoch, and the npz it names
     exists. Anything less (no manifest: a build still running or one that
-    crashed; an unreadable one; a missing npz) is not an epoch.
+    crashed; an unreadable one; a missing npz) is not an epoch. Also the
+    epoch reader of :class:`~.para_search.ParaSearchHolder`.
+
+    Returns:
+        dict or None: The manifest plus ``npz_path`` (absolute path of its
+        ``npz``, default :data:`REFEREED_NPZ`) and ``npz_filtered_path``
+        (the filtered npz, or ``None`` when absent).
     """
     d = epoch_dir(root, k)
     try:
@@ -397,6 +448,20 @@ def warm_self_due(rows: int, stage, stage_start: typing.Optional[int],
     save, so a resume picks the clock up exactly where it was: it never
     rebuilds on its first save unless the cadence has really elapsed. An
     epoch built AFTER ``rows`` (a rewound store) is ignored for the clock.
+
+    Args:
+        rows: Stored rows so far.
+        stage: The active stage name.
+        stage_start: Its start row (``None`` = 0).
+        last_built_at: The latest complete epoch's ``built_at_row`` (``None``
+            = no epoch).
+        every_search: ``GB_WARM_SELF_EVERY_SEARCH``.
+        every_pe: ``GB_WARM_SELF_EVERY_PE``.
+
+    Returns:
+        tuple: ``(due (bool), cadence (int or None), clock (int))``;
+        ``cadence`` is ``None`` (and ``due`` False) in a stage that never
+        builds.
     """
     cadence = warm_self_cadence(stage, every_search, every_pe)
     start = int(stage_start or 0)
@@ -456,7 +521,19 @@ def copy_leaf_rows(g, out_path: str, last_k: int, rows: int,
     first slots and the leaf axis trimmed to the largest alive count: the
     fitter and the referee read alive rows only (``np.nonzero(inds)``), so
     slot identity carries nothing they use. One row is read at a time.
-    Returns the provenance (source rows ``a..b`` inclusive, counts).
+    Used by the saver build (:class:`WarmSelfHook`) only; the head build
+    writes the same file from its buffer (:meth:`WarmSelfBuffer.write`).
+
+    Args:
+        g: The open source run group.
+        out_path: The small store to write (via a ``.tmp`` name).
+        last_k: STORED ROWS to copy, counted back from ``rows``.
+        rows: The source's ``attrs["iteration"]``.
+        branch: The branch. Default ``"gb"``.
+
+    Returns:
+        dict: Provenance: ``rows`` (``[a, b]`` inclusive), ``n_rows``,
+        ``n_walkers``, ``n_samples``, ``n_leaf_rows``, ``max_alive``.
     """
     a, packed, lls, ntail = _read_packed_rows(g, last_k, rows, branch)
     return _write_packed_rows(out_path, packed, lls, a, ntail, branch)
@@ -556,7 +633,26 @@ class WarmSelfBuffer:
     races nothing) and :meth:`append_state` with every state it hands to the
     saver. :meth:`write` produces exactly the file :func:`copy_leaf_rows`
     makes from the store. ``stage_name`` / ``stage_start`` are the store's
-    active stage at the fill (the head builder's resume clock).
+    active stage at the fill (the head builder's resume clock). Built by
+    :func:`make_head_builder` and attached as the head backend's
+    ``warm_self_buffer``.
+
+    Args:
+        last_k (int): Rows held (``GB_WARM_SELF_LAST_K``; a deque of that
+            length, one entry per STORED ROW, every walker).
+        branch (str, optional): Default ``"gb"``.
+        ntail (int, optional): Axes between the row and walker axes in the
+            written layout (2 = ``(nsamplers, ntemps)``). Default ``2``;
+            :meth:`fill_from_store` takes the store's.
+
+    Attributes:
+        n_stored (int): Rows the store holds (at the fill) plus every row
+            appended since: the head's row clock.
+        stage_name (str or None): The store's active stage at the fill.
+        stage_start (int): Its start row.
+
+    Raises:
+        ValueError: When ``last_k < 1``.
     """
 
     def __init__(self, last_k: int, branch: str = "gb", ntail: int = 2):
@@ -590,7 +686,11 @@ class WarmSelfBuffer:
             self._rows.append((per_w, ll, a + k))
 
     def append_state(self, state) -> None:
-        """Append the COLD rung of ``state`` (the state the head saves)."""
+        """Append the COLD rung of ``state`` (the state the head saves); ``n_stored`` += 1.
+
+        Called by the head's ``GFHDFBackend.save_step`` for every state it
+        hands to the saver.
+        """
         br = state.branches[self.branch]
         coords = _to_host(br.coords)[0]
         inds = _to_host(br.inds)[0].astype(bool)
@@ -632,12 +732,33 @@ def build_self_epoch(leaf_store: str, out_dir: str, *, tobs: float,
     The SAME three calls :func:`.build.ensure_warm_start_components` makes,
     through the same in-process runner (:func:`.build._default_runner`):
     ``fit_from_store --store S --last-k K --tobs T --out F`` (plus
-    ``--gmm-gpu``: the saver's device, ``cpu`` without one -- the parent
+    ``--gmm-gpu``: the builder's device -- the head's, or the saver's under
+    ``GB_WARM_SELF_AT_ENTRY=0`` -- ``cpu`` without one; the parent
     build's ``auto`` would take device 0 of whatever the process sees),
     ``match_referee --npz F --store S`` and ``referee_apply --fit F
     --referee R --out P``; every other option at its CLI default, i.e. the
     production warm start's settings. ``tobs`` is the RUN's own Tobs.
     Returns the walls and counts; raises on any failure (the hook catches).
+    The whole pipeline runs inside ``device``'s cupy device context.
+
+    Args:
+        leaf_store: The epoch's ``leaf_rows.h5``.
+        out_dir: The epoch directory (``self_fit.npz``,
+            ``self_fit_referee.npz`` and ``self_refereed.npz`` land there).
+        tobs: The run's Tobs [s].
+        last_k: Rows in ``leaf_store`` (all of them).
+        device: CUDA device for the mixture fit; ``None`` (or no cupy) =
+            CPU.
+        runner (callable, optional): The step runner. Default
+            :func:`.build._default_runner`.
+
+    Returns:
+        dict: ``npz`` (:data:`REFEREED_NPZ`), ``n_clusters``,
+        ``n_components`` and ``walls`` (``fit`` / ``referee`` / ``apply``
+        seconds).
+
+    Raises:
+        RuntimeError: When a step fails or writes no output.
     """
     from .build import _default_runner, _require
 
@@ -726,6 +847,17 @@ def consensus_filter(refereed_npz: str, leaf_store: str, out_npz: str, *,
     :meth:`.proposal.WarmStartComponents.from_npz` loads it unchanged);
     writes nothing when no cluster survives. Returns the counts and the
     ``consensus`` mask.
+
+    Args:
+        refereed_npz: The epoch's refereed npz.
+        leaf_store: The ``leaf_rows.h5`` it was fitted from (all rows read).
+        out_npz: The filtered npz to write (:data:`FILTERED_NPZ`).
+        threshold: ``GB_WARM_SELF_CONSENSUS``. Default ``0.95``.
+
+    Returns:
+        dict: ``n_clusters``, ``n_kept``, ``n_components_kept``, the
+        ``(n_clusters,)`` bool ``consensus`` mask and ``npz`` (the written
+        file's basename, or ``None`` when nothing survived).
     """
     from . import match_referee as mr
     from .fit_from_store import load_leaf_table, to_observable
@@ -792,7 +924,14 @@ class WarmSelfWatchdog:
     ``GF_MONITOR_WARN_FRAC`` of the measured save interval; states dropped
     across the build), reported under ``[GB_WARM_SELF]``. Dropped states
     switch the BUILDER off for the rest of the run (the moves keep the
-    epochs they hold): the refit is never worth stored iterations.
+    epochs they hold): the refit is never worth stored iterations. Saver
+    build only (``GB_WARM_SELF_AT_ENTRY=0``).
+
+    Attributes:
+        disabled_reason (str or None): Set once a build cost stored states.
+        builds (int): Builds reported.
+        delayed (int): Builds that held a save up.
+        total_build_s (float): Summed build walls [s].
     """
 
     def __init__(self):
@@ -806,13 +945,22 @@ class WarmSelfWatchdog:
 
     @property
     def save_interval(self):
+        """The measured (running-averaged) save interval [s]; ``None`` before two saves."""
         return self._inner.save_interval
 
     def note_save(self) -> None:
+        """Record one save (the interval clock)."""
         self._inner.note_save()
 
     def report(self, elapsed: float, *, queued_after: bool,
                dropped_delta: int) -> None:
+        """Log a build attempt; ``dropped_delta > 0`` disables the builder for the run.
+
+        Args:
+            elapsed: The build wall [s].
+            queued_after: A save was waiting when the build finished.
+            dropped_delta: Save states dropped across the build.
+        """
         from ..monitor.hooks import _num
 
         iv = self.save_interval
@@ -866,7 +1014,30 @@ class WarmSelfHook:
 
     Called by ``save_to_backend_asynchronously_and_plot`` once per batch
     that saved a row (after the plots and the monitor notice), with the
-    saver's own backend. Never raises into the saver loop.
+    saver's own backend. Never raises into the saver loop. The 2026-10-13
+    design, kept behind ``GB_WARM_SELF_AT_ENTRY=0`` (the 9mo / 12mo
+    launchers build on the head, so :func:`make_warm_self_hook` returns
+    ``None`` there). A queued save always wins; a build reads the last
+    ``last_k`` rows through one scoped ``open("r")`` of the saver's backend
+    (:func:`copy_leaf_rows`), runs :func:`build_self_epoch` (no consensus
+    filter on this path), writes the manifest LAST and prunes.
+
+    Args:
+        epoch_root (str): :func:`self_epoch_root` of the store.
+        tobs (float): The run's Tobs [s].
+        last_k (int): Rows copied per build (``GB_WARM_SELF_LAST_K``).
+        every_search (int): ``GB_WARM_SELF_EVERY_SEARCH``.
+        every_pe (int): ``GB_WARM_SELF_EVERY_PE``.
+        device (int, optional): The saver's GPU for the mixture fit.
+        branch (str, optional): Default ``"gb"``.
+        builder (callable, optional): Default :func:`build_self_epoch`.
+        runner (callable, optional): Forwarded to the builder.
+        keep_last (int, optional): Pruning; default ``KEEP_LAST_EPOCHS`` (3).
+        keep_every (int, optional): Pruning; default ``KEEP_EVERY_EPOCH``
+            (10).
+
+    Attributes:
+        watchdog (WarmSelfWatchdog): The build watchdog.
     """
 
     def __init__(self, *, epoch_root: str, tobs: float, last_k: int,
@@ -896,10 +1067,21 @@ class WarmSelfHook:
         self._last_elapsed = 0.0
 
     def note_save(self) -> None:
+        """Record one save on the watchdog's interval clock."""
         self.watchdog.note_save()
 
     def __call__(self, gb_reader, comm, main_rank, i, *,
                  dropped_so_far: int = 0) -> None:
+        """Build an epoch if one is due after this save; never raises.
+
+        Args:
+            gb_reader: The saver's backend (``open``, ``filename``, ``name``).
+            comm: The MPI communicator (``iprobe`` for a queued save), or
+                ``None``.
+            main_rank (int): The head rank.
+            i (int): The save index (unused by the decision).
+            dropped_so_far: The saver's dropped-state count.
+        """
         try:
             self._maybe_build(gb_reader, comm, main_rank, dropped_so_far)
         except Exception as exc:                  # noqa: BLE001
@@ -936,6 +1118,7 @@ class WarmSelfHook:
         return elapsed
 
     def _maybe_build(self, gb_reader, comm, main_rank, dropped_so_far):
+        """The decision and the build of :meth:`__call__` (may raise; the caller logs)."""
         if self._drop_base is not None:
             delta = int(dropped_so_far) - self._drop_base
             self._drop_base = None
@@ -1060,7 +1243,22 @@ def make_warm_self_hook(curr, *, store_path: typing.Optional[str] = None):
     ``GB_WARM_START_COMPONENTS``): the self epochs only feed the warm moves,
     which exist only with one. Also off when ``warm_self_at_entry``
     (``GB_WARM_SELF_AT_ENTRY=1``, the default since 2026-10-15): the HEAD
-    builds then (:func:`make_head_builder`); never both.
+    builds then (:func:`make_head_builder`); never both. Called on the saver
+    rank by ``run.py``; returns ``None`` on the 9mo / 12mo runs
+    (``GB_WARM_SELF_AT_ENTRY=1``).
+
+    Args:
+        curr: The run's ``GlobalFitSetup`` (``source_info["gb"]``,
+            ``general_info``).
+        store_path: The store h5. Default ``None`` =
+            ``general_info.main_file_path``.
+
+    Returns:
+        WarmSelfHook or None: The hook (device = ``general_info.gpus[0]``,
+        Tobs = ``general_info.Tobs``), or ``None``.
+
+    Raises:
+        ValueError: When ``GB_WARM_SELF_LAST_K < 1``.
     """
     gb = (getattr(curr, "source_info", None) or {}).get("gb")
     if gb is None or not bool(getattr(gb, "warm_self", False)):
@@ -1100,7 +1298,9 @@ def register_head_builder(builder) -> None:
     _HEAD_BUILDERS[os.path.abspath(str(builder.epoch_root))] = builder
 
 
+# TODO check: keep/remove/document -- no caller outside tests (test cleanup only)
 def unregister_head_builder(epoch_root: str) -> None:
+    """Drop the head builder registered for ``epoch_root`` here (a no-op when none is)."""
     _HEAD_BUILDERS.pop(os.path.abspath(str(epoch_root)), None)
 
 
@@ -1128,12 +1328,12 @@ class WarmSelfHeadBuilder:
     last build is read from disk. Rows are the states the head handed to the
     saver (``row_count: head states``): an epoch numbered past the stored
     rows after a resume (states the saver dropped) is ignored by the clock.
-    Only the head rank builds (``begin_propose`` passes its rank). A build writes the buffer to ``leaf_rows.h5``, runs the
-    parent pipeline (:func:`build_self_epoch`), then
-    :func:`consensus_filter`, then the manifest LAST, then prunes; every
-    rank waits for it (the compute ranks are parked on the propose). It
-    never raises: a failure logs, retries after another cadence, and the
-    propose goes on with the epoch it has.
+    Only the head rank builds (``begin_propose`` passes its rank). A build
+    writes the buffer to ``leaf_rows.h5``, runs the parent pipeline
+    (:func:`build_self_epoch`), then :func:`consensus_filter`, then the
+    manifest LAST, then prunes; every rank waits for it (the compute ranks
+    are parked on the propose). It never raises: a failure logs, retries
+    after another cadence, and the propose goes on with the epoch it has.
 
     ``adopt_lag`` (``GB_WARM_SELF_ADOPT_LAG``, ruling 2026-10-16) only words
     the build line and guards the prune: the MIXER holds the new epoch back
@@ -1142,6 +1342,31 @@ class WarmSelfHeadBuilder:
     before the build), and the prune keeps at least the newest two epochs
     whole, because the ranks load that previous one after it.
     ``last_built_epoch`` is the index of the latest successful build.
+
+    Args:
+        epoch_root (str): :func:`self_epoch_root` of the store.
+        buffer (WarmSelfBuffer): The head's row buffer.
+        tobs (float): The run's Tobs [s].
+        last_k (int): ``GB_WARM_SELF_LAST_K`` (the buffer's length).
+        every_search (int): ``GB_WARM_SELF_EVERY_SEARCH``.
+        every_pe (int): ``GB_WARM_SELF_EVERY_PE``.
+        device (int, optional): The head's GPU for the mixture fit.
+        consensus (float, optional): ``GB_WARM_SELF_CONSENSUS``. Default
+            ``0.95``.
+        branch (str, optional): Default ``"gb"``.
+        builder (callable, optional): Default :func:`build_self_epoch`.
+        runner (callable, optional): Forwarded to the builder.
+        filter_fn (callable, optional): Default :func:`consensus_filter`.
+        keep_last (int, optional): Pruning; default ``KEEP_LAST_EPOCHS`` (3;
+            at least 2 under the lag).
+        keep_every (int, optional): Pruning; default ``KEEP_EVERY_EPOCH``
+            (10).
+        adopt_lag (bool, optional): ``GB_WARM_SELF_ADOPT_LAG``. Default
+            ``True``.
+
+    Attributes:
+        n_built (int): Successful builds in this process.
+        last_built_epoch (int or None): Index of the latest successful build.
     """
 
     def __init__(self, *, epoch_root: str, buffer: WarmSelfBuffer,
@@ -1172,6 +1397,7 @@ class WarmSelfHeadBuilder:
         self.last_built_epoch: typing.Optional[int] = None
 
     def _stage_clock_start(self, stage: str, rows: int) -> int:
+        """The stage's start row: the store's on a resume, else ``rows`` at first sight."""
         if stage != self._stage:
             self._stage = stage
             if stage == self.buffer.stage_name:
@@ -1192,6 +1418,7 @@ class WarmSelfHeadBuilder:
             return False
 
     def _maybe_build(self, stage) -> bool:
+        """The decision and the build of :meth:`maybe_build` (may raise; the caller logs)."""
         if not stage:
             return False
         stage = str(stage)
@@ -1322,7 +1549,21 @@ def make_head_builder(curr, backend=None, *,
     ``backend.open("r")`` NOW -- at the head's set-up, before the first save,
     so the read races no write -- attaches it as ``backend.warm_self_buffer``
     (the head's ``save_step`` appends every state it saves) and registers
-    the builder for the run's epoch root.
+    the builder for the run's epoch root. Called once by
+    ``GlobalFit.prepare_main`` on the head; armed on the 9mo / 12mo runs.
+
+    Args:
+        curr: The run's ``GlobalFitSetup`` (``source_info["gb"]`` with the
+            ``warm_self*`` fields, ``general_info``).
+        backend (GFHDFBackend, optional): The head's backend. ``None`` = no
+            fill and no attachment.
+        store_path: The store h5. Default ``None`` =
+            ``general_info.main_file_path``.
+
+    Returns:
+        WarmSelfHeadBuilder or None: The registered builder (device =
+        ``general_info.gpus[0]``, Tobs = ``general_info.Tobs``), or ``None``
+        when off.
     """
     gb = (getattr(curr, "source_info", None) or {}).get("gb")
     if gb is None or not bool(getattr(gb, "warm_self", False)):
@@ -1378,7 +1619,16 @@ def make_head_builder(curr, backend=None, *,
 # the move side: three containers, one per propose
 # ---------------------------------------------------------------------------
 def warm_seed(build_seed, tag) -> typing.Optional[int]:
-    """``recipe._warm_start_seed`` on a bare build seed (same formula, pinned by test)."""
+    """``recipe._warm_start_seed`` on a bare build seed (same formula, pinned by test).
+
+    Args:
+        build_seed (int or None): The run's (per-rank) build seed.
+        tag (int): The seed domain tag.
+
+    Returns:
+        int or None: A uint32 seed from ``SeedSequence([build_seed, tag])``;
+        ``None`` when ``build_seed`` is ``None``.
+    """
     if build_seed is None:
         return None
     return int(np.random.SeedSequence([int(build_seed), int(tag)])
@@ -1390,7 +1640,26 @@ CHOICES = ("orig", "full", "filtered")
 
 
 def parse_split(spec) -> typing.Tuple[float, float, float]:
-    """``"orig,full,filtered"`` weights -> three floats (>= 0, not all 0)."""
+    """``"orig,full,filtered"`` weights -> three floats (>= 0, not all 0).
+
+    The parser of ``GB_WARM_SELF_SPLIT_SEARCH`` / ``GB_WARM_SELF_SPLIT_PE``;
+    the weights need not sum to 1.
+
+    Args:
+        spec (str, tuple or list): Three comma-separated numbers, or a
+            3-sequence.
+
+    Returns:
+        tuple[float, float, float]: The weights.
+
+    Raises:
+        ValueError: Not three finite non-negative numbers, or all zero.
+
+    Example:
+        >>> from lisatools.globalfit.warmstart.self_refit import parse_split
+        >>> parse_split("0.5,0,0.5")
+        (0.5, 0.0, 0.5)
+    """
     parts = list(spec) if isinstance(spec, (tuple, list)) else str(spec).split(",")
     try:
         w = tuple(float(x) for x in parts)
@@ -1430,6 +1699,36 @@ class WarmSelfMixer:
     :meth:`begin_propose` is held (``held_epoch``) and that propose draws
     from the epoch adopted before the build; the next warm draw adopts it.
     ``adopt_lag=False``: the propose that triggered a build draws from it.
+
+    Built by ``recipe._warm_self_wrap`` around each warm twin's container
+    when ``GB_WARM_SELF=1`` (``rj_warm_search*`` takes the search split,
+    every other name the PE split). In a stage that never refits
+    (``gb_search_seed``, ``source_search``, ...) every propose uses the
+    original, even when a self epoch exists.
+
+    Args:
+        original (WarmStartComponents): The parent warm-start container.
+        epoch_root (str): :func:`self_epoch_root` of the store.
+        load_kwargs (dict): :meth:`.proposal.WarmStartComponents.from_npz`
+            options for the self epochs (the original's ``new_tobs``,
+            ``use_cupy``, ``floor_box``, ``floor_eps``, ``p_floor`` and, for
+            the PE twin, ``circ_images``).
+        split (str or sequence, optional): "original,full,filtered"
+            weights (:func:`parse_split`). Default ``(1, 1, 1)``.
+        build_seed (int, optional): The run's per-rank build seed (epoch and
+            choice seeds derive from it). Default ``None``.
+        tag (int, optional): The twin's seed domain tag. Default ``0``.
+        name (str, optional): The move name (log lines). Default ``"warm"``.
+        adopt_lag (bool, optional): Default ``True``.
+
+    Attributes:
+        split (tuple[float, float, float]): The parsed weights.
+        original, self_full, self_filtered: The three containers (the self
+            ones ``None`` until an epoch is adopted; ``self_filtered`` also
+            ``None`` for an epoch without a filtered npz).
+        epoch (int or None): The adopted epoch.
+        choice (str): This propose's container, one of :data:`CHOICES`.
+        tallies (dict): Per-container propose / birth / death counts.
     """
 
     is_warm_self_mixer = True
@@ -1442,7 +1741,8 @@ class WarmSelfMixer:
         #: hold an epoch built at this propose's entry for the next draw
         self.adopt_lag = bool(adopt_lag)
         #: the epoch the head built in the CURRENT begin_propose and held back
-        #: (adopted at the next draw); None on every other propose / rank
+        #: (adopted at the next draw: the adopt lag); None on every other
+        #: propose / rank
         self.held_epoch: typing.Optional[int] = None
         self.original = original
         self.self_full = None
@@ -1475,6 +1775,7 @@ class WarmSelfMixer:
 
     @property
     def active(self):
+        """This propose's container (filtered -> full -> original fallback)."""
         if self.choice == "filtered":
             if self.self_filtered is not None:
                 return self.self_filtered
@@ -1486,16 +1787,20 @@ class WarmSelfMixer:
 
     @property
     def n_components(self) -> int:
+        """The active container's component count."""
         return int(self.active.n_components)
 
     @property
     def use_cupy(self) -> bool:
+        """Whether the active container returns device arrays."""
         return bool(getattr(self.active, "use_cupy", False))
 
     def rvs(self, size=1):
+        """Birth draws from the active container (:meth:`.proposal.WarmStartComponents.rvs`)."""
         return self.active.rvs(size=size)
 
     def logpdf(self, x):
+        """Log density of the active container (:meth:`.proposal.WarmStartComponents.logpdf`)."""
         return self.active.logpdf(x)
 
     # -- adoption -------------------------------------------------------------
@@ -1586,6 +1891,14 @@ class WarmSelfMixer:
         ships THAT epoch, so every rank uses it too; the next warm draw's
         poll adopts the new one. ``adopt_lag=False`` re-polls after the
         build and draws from the new epoch at once.
+
+        Args:
+            rank (int, optional): This rank (only ``None`` / 0 builds).
+            stage (str, optional): The stage the propose runs in.
+
+        Returns:
+            dict: The directive ``{"epoch": int or None, "choice": str}``
+            shipped to the compute ranks.
         """
         self.held_epoch = None
         self.poll(rank)
@@ -1624,6 +1937,10 @@ class WarmSelfMixer:
         before a build while the fresh one already sits there), and a
         directive without an epoch (the head holds no self refit) is the
         original whatever the rank holds.
+
+        Args:
+            directive (dict or None): The head's :meth:`begin_propose` output.
+            rank (int, optional): This rank (log lines).
         """
         if not directive:
             self.choice = "orig"
@@ -1641,7 +1958,18 @@ class WarmSelfMixer:
     # -- tallies ----------------------------------------------------------------
     def note_census(self, sp: typing.Optional[dict], *, move_name=None,
                     rank=None) -> None:
-        """Fold this propose's ``[GB_ACCEPT rj-split]`` census into the chosen container's tally."""
+        """Fold this propose's ``[GB_ACCEPT rj-split]`` census into the chosen container's tally.
+
+        Logs one ``[GB_WARM_SELF <move>]`` line with the cumulative tallies
+        of all three containers.
+
+        Args:
+            sp (dict or None): The census (``births``, ``viable``,
+                ``birth_acc``, ``viable_cold``, ``birth_acc_cold``,
+                ``deaths``, ``death_acc``; missing keys count 0).
+            move_name (str, optional): Log label. Default the mixer's name.
+            rank (int, optional): Log label.
+        """
         t = self.tallies[self.choice if self.choice in self.tallies else "orig"]
         t["proposes"] += 1
         for kk in ("births", "viable", "birth_acc", "viable_cold",

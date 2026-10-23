@@ -1,14 +1,13 @@
 """Galactic-binary TDI waveform generators built on :class:`gbgpu.gbgpu.GBGPU`.
 
-Two stock classes:
+Two stand-alone classes (the global fit's GB likelihood does not use them; it runs the GBGPU
+signal-heterodyne / WDM lookup computations directly):
 
-* :class:`GBXYZTDIWaveform` — **the primary, global-fit-aligned GB waveform.**
-  It fills the same rfft-length FD template buffer, TDI convention, orbits and
-  oversample as the stock ``all_sources`` GB injection/template path
-  (``lisatools.globalfit.stock.erebor.injections.SyntheticGBProcessingStep``):
-  ``GBGPU.generate_global_template`` with ``tdi2=True``, ``XYZ`` channels,
-  :class:`~lisatools.detector.EqualArmlengthOrbits`, ``oversample=1``. This is
-  the class the tutorials teach and the one to reach for by default.
+* :class:`GBXYZTDIWaveform` — the primary stand-alone GB waveform: an rfft-length XYZ
+  TDI-2 FD template buffer from the fastGB kernel ``GBGPU.generate_global_template``
+  (``tdi2=True``, ``oversample=1``; default orbits
+  :class:`~lisatools.detector.EqualArmlengthOrbits`). This is the class the tutorials teach
+  and the one to reach for by default.
 * :class:`GBAETWaveform` — the historical thin ``GBGPU.run_wave`` wrapper
   returning per-source ``(A, E, T)`` sparse frequency arrays. Kept unchanged
   for back-compat only; prefer :class:`GBXYZTDIWaveform`.
@@ -26,31 +25,47 @@ from ..waveformbase import AETTDIWaveform
 
 
 class GBXYZTDIWaveform:
-    """Primary global-fit-aligned GB XYZ TDI-2 frequency-domain template.
+    r"""Primary stand-alone GB XYZ TDI-2 frequency-domain template.
 
-    Reproduces the stock ``all_sources`` GB convention exactly (see
-    ``lisatools.globalfit.stock.erebor.injections.SyntheticGBProcessingStep``):
-    :meth:`GBGPU.generate_global_template` fills an rfft-length FD buffer using
-    TDI 2nd generation, :class:`~lisatools.detector.EqualArmlengthOrbits`, and
-    ``oversample=1``. The returned buffer is the GBGPU LDC-convention FD template
-    (``FD = dt * rfft(td)``) — the same array ``SyntheticGBProcessingStep``
-    inverse-FFTs onto the data grid. ``XYZ`` is the default and aligned channel
-    set; ``AE`` is available but non-stock.
+    :meth:`gbgpu.gbgpu.GBGPU.generate_global_template` fills an rfft-length FD buffer with TDI
+    2nd generation and ``oversample=1``. The returned buffer is the GBGPU LDC-convention FD
+    template (``FD = dt * rfft(td)``). ``XYZ`` is the default channel set; ``AE`` is available.
+
+    Note:
+        This is the legacy fastGB kernel without ``flip_ref_phase``, so it carries
+        :math:`e^{+i\phi_0}`, while the analysis side (the on-the-fly / heterodyne templates,
+        the GB sampling transform, mojito data) is LDC / JaxGB :math:`e^{-i\phi_0}`.
+        ``SyntheticGBProcessingStep`` (the synthetic GB injection) no longer uses this kernel
+        (it switched to the chunked-heterodyne FD kernel ``gb_fd_fill_global`` in 2026-08).
+        The default :class:`~lisatools.detector.EqualArmlengthOrbits` are analytic equal-arm
+        orbits for stand-alone use; the production model is unequal-arm
+        (:class:`~lisatools.detector.L1Orbits`).
 
     Args:
-        tdi_chan: ``"XYZ"`` (3 channels, the stock/global-fit default) or
-            ``"AE"`` (2 channels).
-        use_tdi2: Use the TDI 2nd-generation kernel (``True`` — global-fit
-            default).
-        oversample: GBGPU internal oversampling factor (``1`` — global-fit
-            default; plenty for a template).
-        orbits: :class:`~lisatools.detector.Orbits` carrying the phase-reference
-            ``t0``. ``None`` builds a stock
-            :class:`~lisatools.detector.EqualArmlengthOrbits` on
-            ``force_backend`` (consistent with the ecliptic ``lam``/``beta``
-            basis).
+        tdi_chan: ``"XYZ"`` (3 channels, default) or ``"AE"`` (2 channels).
+        use_tdi2: Use the TDI 2nd-generation kernel (default ``True``).
+        oversample: GBGPU internal oversampling factor (default ``1``; plenty for a template).
+        orbits: :class:`~lisatools.detector.Orbits` carrying the phase-reference ``t0``.
+            ``None`` builds an :class:`~lisatools.detector.EqualArmlengthOrbits` on
+            ``force_backend`` (whose positions are SSB-ecliptic, matching the ecliptic
+            ``lam`` / ``beta`` basis).
         force_backend: Backend selection at construction (``"cpu"`` /
             ``"cuda12x"`` / ...); never passed as a per-call kwarg.
+
+    Raises:
+        ValueError: If ``tdi_chan`` is not ``"XYZ"`` or ``"AE"``.
+
+    Example:
+        .. code-block:: python
+
+            import numpy as np
+            from lisatools.sources.gb import GBXYZTDIWaveform
+
+            gb = GBXYZTDIWaveform(force_backend="cpu")
+            dt, N = 10.0, 256 * 2048
+            # [A, f0 (Hz), fdot (Hz/s), fddot, phi0, iota, psi, lam, beta]
+            params = np.array([2e-22, 3.0e-3, 1.0e-17, 0.0, 0.3, 0.7, 1.2, 2.0, 0.5])
+            tmpl = gb(params, N * dt, dt)   # (3, N // 2 + 1) XYZ FD template
     """
 
     def __init__(
@@ -94,18 +109,25 @@ class GBXYZTDIWaveform:
     ) -> np.ndarray:
         """Build the XYZ TDI-2 FD template buffer.
 
+        Every source is summed into one buffer (all into group 0 unless ``group_index`` says
+        otherwise).
+
         Args:
-            params: ``(num_sources, 9)`` array in the ``GBGPU`` global-template
-                basis ``[A, f0, fdot, fddot, phi0, iota, psi, lam, beta]``.
+            params: ``(num_sources, 9)`` (or ``(9,)``) array in the ``GBGPU`` global-template
+                basis ``[A, f0 (Hz), fdot (Hz/s), fddot (Hz/s^2), phi0, iota, psi, lam, beta]``
+                (angles in radians; ``lam`` / ``beta`` in the orbits' frame).
             Tobs: Observation time in seconds.
             dt: Time-domain sample step in seconds.
             group_index: Optional ``(num_sources,)`` int32 group assignment
                 (``None`` sums every source into group 0).
-            start_freq_ind: Start frequency index of the FD buffer.
+            start_freq_ind: Start frequency index of the FD buffer. Default ``0``.
 
         Returns:
-            ``(nchannels_full, Tobs//dt // 2 + 1)`` complex FD template in the
-            GBGPU LDC convention.
+            xp.ndarray: ``(nchannels_full, N // 2 + 1)`` complex128 FD template in the GBGPU
+            LDC convention, ``N = round(Tobs / dt)`` (backend array module).
+
+        Raises:
+            ValueError: If ``params`` does not have 9 columns.
         """
         xp = self.wave_gen.xp
         params = xp.atleast_2d(xp.asarray(params, dtype=xp.float64))
@@ -146,15 +168,16 @@ class GBXYZTDIWaveform:
 class GBAETWaveform(AETTDIWaveform):
     """Legacy AET waveform for Galactic Binaries (back-compat only).
 
-    Thin wrapper over :meth:`GBGPU.run_wave` returning per-source ``(A, E, T)``
-    sparse frequency-domain arrays. Retained unchanged for back-compat; the
-    stock / global-fit-aligned GB waveform is :class:`GBXYZTDIWaveform` (XYZ,
-    TDI 2nd generation) — prefer it for new code and tutorials.
+    Thin wrapper over :meth:`gbgpu.gbgpu.GBGPU.run_wave` returning the sparse
+    frequency-domain arrays of the FIRST source. Retained unchanged for back-compat; prefer
+    :class:`GBXYZTDIWaveform` (XYZ, TDI 2nd generation) for new code and tutorials.
 
     Args:
-        *args: Arguments for :class:`GBGPU`.
-        **kwargs: Keyword arguments for :class:`GBGPU`.
+        *args: Arguments for :class:`gbgpu.gbgpu.GBGPU`.
+        **kwargs: Keyword arguments for :class:`gbgpu.gbgpu.GBGPU`.
 
+    Attributes:
+        wave_gen (GBGPU): The GBGPU generator.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -163,7 +186,7 @@ class GBAETWaveform(AETTDIWaveform):
 
     @property
     def f_arr(self) -> np.ndarray:
-        """Frequency array."""
+        """Frequencies [Hz] of the last call's first source (``xp.ndarray``)."""
         return self._f_arr
 
     @f_arr.setter
@@ -177,14 +200,16 @@ class GBAETWaveform(AETTDIWaveform):
         """Generate waveform.
 
         Args:
-            *params: Parameters going into :meth:`GBGPU.run_wave`.
-            return_array: If ``True``, return ``array([A, E, T])``.
+            *params: Parameters going into :meth:`gbgpu.gbgpu.GBGPU.run_wave` (``A, f0, fdot,
+                fddot, phi0, iota, psi, lam, beta``).
+            return_array: If ``True``, return ``np.array([A, E, T])``.
                 If ``False``, return ``(A, E, T)``.
-            **kwargs: Keyword arguments going into :meth:`GBGPU.run_wave`.
+            **kwargs: Keyword arguments going into :meth:`gbgpu.gbgpu.GBGPU.run_wave`
+                (``T``, ``dt``, ``tdi2``, ...).
 
         Returns:
-            Output waveform.
-
+            np.ndarray | tuple: The first source's three channels. The third entry is read
+            from the generator's ``X`` property (the TDI X channel), not ``T``.
         """
         self.wave_gen.run_wave(
             *params,

@@ -54,6 +54,14 @@ Knob: ``GF_MONITOR_ADD_INFO`` (the ``add_info`` attribute, CLAUDE.md knob
 rule): run directories joined by ``os.pathsep`` (``:``). The CLI's repeatable
 ``--add-info RUN_DIR`` wins over it when given; ``none`` / ``0`` / ``off``
 means no added run (so ``--add-info none`` silences an exported list).
+
+In production both launchers export it, so every in-run page overlays the
+previous run: the 9mo job overlays ``gf_prod_6mo_v9_4gpu``, the 12mo job
+``gf_prod_9mo_v9_copy`` (both under ``/shared/data/global_fit_output``). The
+generator calls :func:`parse_add_info` and :func:`load_added_runs` near its
+top, :func:`compute_recoveries` in the recovery section, the ``overlay_*``
+functions on the figures listed above and :func:`caption_html` for their
+captions.
 """
 
 from __future__ import annotations
@@ -123,6 +131,7 @@ def _guard(where: str, A: dict):
 
 
 def _never_raises(default):
+    """Decorator: record and print any exception in :data:`OVERLAY_ERRORS`, return ``default``."""
     import functools
 
     def deco(fn):
@@ -143,12 +152,14 @@ def _never_raises(default):
 # the knob
 # --------------------------------------------------------------------------
 def _split(value) -> list:
+    """Split an ``os.pathsep``-joined list into non-empty stripped entries."""
     if value is None:
         return []
     return [p.strip() for p in str(value).split(os.pathsep) if p.strip()]
 
 
 def _key(path) -> str:
+    """Canonical identity of a directory (``realpath``, ``~`` expanded, no trailing ``/``)."""
     return os.path.realpath(os.path.expanduser(str(path).rstrip("/") or "/"))
 
 
@@ -163,6 +174,22 @@ def parse_add_info(cli: Optional[Sequence[str]] = None, environ=None,
     entries mean "no added run" and are dropped; the base run itself is
     dropped too (a page never overlays itself). Paths are returned absolute,
     as given otherwise; two spellings of one directory count once.
+
+    Args:
+        cli: The ``--add-info`` values, or ``None``.
+        environ (Mapping[str, str], optional): Environment to read. Default
+            ``None`` is :data:`os.environ`.
+        base_run_dir: The page's own run directory (dropped from the list).
+
+    Returns:
+        list[str]: Absolute added-run directories, in order.
+
+    Example:
+        >>> from lisatools.globalfit.monitor._add_info import parse_add_info
+        >>> parse_add_info(environ={"GF_MONITOR_ADD_INFO": "none"})
+        []
+        >>> parse_add_info(["/data/a", "/data/a/", "/data/b"], environ={})
+        ['/data/a', '/data/b']
     """
     env = os.environ if environ is None else environ
     raw = []
@@ -186,7 +213,14 @@ def parse_add_info(cli: Optional[Sequence[str]] = None, environ=None,
 
 def add_info_env_value(dirs: Iterable[str]) -> str:
     """The ``GF_MONITOR_ADD_INFO`` value for ``dirs`` (``none`` for an empty
-    list, so an explicit empty CLI choice also silences an inherited export)."""
+    list, so an explicit empty CLI choice also silences an inherited export).
+
+    Args:
+        dirs: Run directories.
+
+    Returns:
+        str: ``os.pathsep``-joined directories, or ``"none"``.
+    """
     dirs = [str(d) for d in dirs]
     return os.pathsep.join(dirs) if dirs else "none"
 
@@ -194,7 +228,14 @@ def add_info_env_value(dirs: Iterable[str]) -> str:
 def run_label(run_dir: str) -> str:
     """The short label the page gives a run: its arm tag (``9mo_v9``, ``6mo``),
     from the run directory's name through ``_identity`` -- the same mechanism
-    the page uses for its own run, read-only."""
+    the page uses for its own run, read-only.
+
+    Args:
+        run_dir: A run directory (only its basename is used).
+
+    Returns:
+        str: The arm tag.
+    """
     from ._identity import arm_tag, run_identity
 
     return arm_tag(run_identity(os.path.basename(os.path.normpath(run_dir)))[1])
@@ -203,7 +244,14 @@ def run_label(run_dir: str) -> str:
 def find_truth(run_dir: str) -> Optional[str]:
     """The run's OWN truth set: ``gb_truth_3to21.npz`` in its run dir, else the
     newest ``gb_truth_*.npz`` there. Never the CWD (that is the base run's
-    lookup, and a page renders from the base run's directory)."""
+    lookup, and a page renders from the base run's directory).
+
+    Args:
+        run_dir: The added run's directory.
+
+    Returns:
+        str or None: The truth-set path, or ``None``.
+    """
     from . import TRUTH_NAME
 
     p = os.path.join(run_dir, TRUTH_NAME)
@@ -242,7 +290,16 @@ def _find_store(run_dir: str) -> str:
 
 
 def _read_last(run_dir: str, ns: dict, notes: list, noise_rows: int = 3) -> dict:
-    """What the overlays need from one added run, and nothing else."""
+    """What the overlays need from one added run, and nothing else.
+
+    Returns a dict with ``store``, ``nit``, ``row`` (the row read), ``wb``
+    (max-lnL cold walker), ``nwalk``, ``rec9`` (that walker's live GB rows,
+    shape ``(n_alive, ndim)`` in the stored basis), ``psd`` / ``gal`` (the last
+    ``<= noise_rows`` cold-rung rows, shape ``(k, nwalkers, ndim)``),
+    ``noise_row``, ``tobs`` [s] (or ``None``), ``galfor_log``, ``gal_phys``
+    and ``t_ref`` (the GB phase epoch from its run settings). Raises on an
+    unreadable or empty store; ``notes`` collects rewind / torn-row notes.
+    """
     import h5py
 
     from ._short import run_settings_t0
@@ -341,11 +398,13 @@ def _read_last(run_dir: str, ns: dict, notes: list, noise_rows: int = 3) -> dict
 
 
 def _log(log, msg):
+    """Call ``log(msg)`` unless ``log`` is ``None``."""
     if log is not None:
         log(msg)
 
 
 def _miss(A, reason, missing, log, what="not overlaid"):
+    """Record one added run's MISSING line on the page list and in the log."""
     line = (f"added run {A['label']} ({A['dir']}) {what}: {reason}")
     if missing is not None:
         missing.append(_html.escape(line))
@@ -362,6 +421,24 @@ def load_added_runs(dirs: Sequence[str], *, base_label: str, missing: Optional[l
     ``erebor.noise``, whose import chain restyles matplotlib (eryn's
     ``plt.style.use``, font.size 10 -> 16) -- on the page that runs this before
     its first figure, that would restyle the likelihood panel.
+
+    Also clears :data:`OVERLAY_ERRORS` (a new page build). Labels are made
+    unique: a label already taken falls back to the directory name, then to
+    a numbered copy.
+
+    Args:
+        dirs: Added run directories, in order (:func:`parse_add_info`).
+        base_label: The base run's label (never reused).
+        missing (list, optional): The page's MISSING list; one HTML-escaped
+            line is appended per run that could not be read.
+        log (Callable[[str], None] or None): Progress / MISSING printer.
+            Default :func:`print`.
+
+    Returns:
+        list[dict]: One dict per requested run with ``dir``, ``label``,
+        ``style``, ``skip`` (reason or ``None``), ``rec``, ``rec_skip``,
+        ``notes`` and, when readable, the fields of the store read
+        (``row``, ``wb``, ``psd``, ``gal``, ``gal_phys``, ``tobs``, ...).
     """
     import matplotlib
 
@@ -417,7 +494,21 @@ def compute_recoveries(runs: list, *, mojito_tree=None, thresh: float = 0.8,
     """Phase 2, one run at a time: the full page's headline match for every
     readable added run (``A["rec"]``), or the reason it has none
     (``A["rec_skip"]``). The L1 orbits are built once for all of them. Returns
-    the number of runs matched. Never raises."""
+    the number of runs matched. Never raises.
+
+    Args:
+        runs: The dicts from :func:`load_added_runs` (updated in place; each
+            run's ``rec9`` leaves are dropped afterwards).
+        mojito_tree (str, optional): The mojito tree for the L1 orbits and
+            the overlap waveforms.
+        thresh: Phase-maximised overlap threshold for a match. Default
+            ``0.8``.
+        missing (list, optional): The page's MISSING list.
+        log (Callable[[str], None] or None): Printer. Default :func:`print`.
+
+    Returns:
+        int: Number of runs with a recovery overlay.
+    """
     from ._short import _l1_orbits_from, compute_overlap
 
     orbits = None
@@ -482,10 +573,12 @@ class _Skip(Exception):
 # drawing (each returns the number of runs it drew; the base is never touched)
 # --------------------------------------------------------------------------
 def _drawable_rec(runs):
+    """The runs that carry a recovery result."""
     return [A for A in runs if A.get("rec") is not None]
 
 
 def _drawable_noise(runs):
+    """The readable runs that carry noise chains."""
     return [A for A in runs if A["skip"] is None and A.get("psd") is not None]
 
 
@@ -671,6 +764,7 @@ def galfor_in_basis(gal_phys, log_sampling: bool):
 # captions
 # --------------------------------------------------------------------------
 def _e(x) -> str:
+    """HTML-escape ``str(x)``."""
     return _html.escape(str(x))
 
 

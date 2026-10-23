@@ -2,7 +2,7 @@
 
 Canonical home for the rules that apply across all LISA Analysis Tools repos. Referenced from each repo's CLAUDE.md.
 
-### Load-bearing enforcement infra (do not regress)
+## Load-bearing enforcement infra (do not regress)
 
 | Layer | Where |
 |---|---|
@@ -70,8 +70,9 @@ files:
 ```python
 from lisatools.globalfit.stock import erebor
 fit = erebor.gb_no_fg(nwalkers=4)      # or get_stock("gb_no_fg", ...); also
-fit.gb.center_freq = 8e-3              #   blank, all_sources, full_year_combined
-fit.recipe.pop_move("rj_refit")        # named move stacks per recipe stage
+fit.gb.center_freq = 8e-3              #   blank, all_sources (production), ...
+fit.add_move("rj_prior_pe", branch="gb", stage="gb_pe")  # named move stacks
+fit.recipe.pop_move("rj_prior_pe")     #   per recipe stage (gb_pe: rj_fstat_pe)
 fit.add_move(my_fn, branch="gb")       # a move IS a proposal: fn(model, state)
 fit.build(); fit.run()                 # heavy work only on command; or the
 for model, state in fit.sample(iterations=10):   # single-process generator
@@ -102,16 +103,19 @@ On-disk format `gf_format_version=2` (the cold-chain storage rework):
   branches' `d_h`/`h_h` record is gated by `{BRANCH}_RECORD_DH`: OFF by
   default on the slow container path (it costs one extra `nwalkers`
   waveform batch per leaf per iteration; the datasets stay NaN), ON by
-  default where it is cheap (the chunked SOBBH kernel) or free (GB's
-  in-kernel capture, always on).
+  default where it is cheap (the batched MBH, direct EMRI and chunked /
+  lookup SOBBH moves: one vectorized call) or free (GB's in-kernel capture,
+  always on).
 - **"The sub-state IS the schema"**: a sub-state declares its storage
   through setup methods + name lists (`storage_arrays`/`static_arrays`/
   `storage_attrs`, `make_template`/`from_stored`); the backend derives every
   dataset from the arrays the sub-state allocates. No separate schema/Spec
   layer — extending a module's storage means extending its sub-state.
 - **Per-branch ladder knobs**: `Settings.ntemps` per branch
-  (`GB_NTEMPS` 24 / `VGB_NTEMPS` 12 / `MBH|EMRI|SOBBH_NTEMPS` 4 /
-  `PSD_NTEMPS` 12; an explicit `betas` array wins). The legacy `NTEMPS` env
+  (code defaults `GB_NTEMPS` 24 / `VGB_NTEMPS` 12 / `MBH_NTEMPS` and
+  `EMRI_NTEMPS` 24 / `SOBBH_NTEMPS` 4 / `PSD_NTEMPS` and `GALFOR_NTEMPS` 12;
+  the 9mo / 12mo launchers set VGB 8, MBH 8, EMRI 12, SOBBH 8; an explicit
+  `betas` array wins). The legacy `NTEMPS` env
   var RAISES on stock variants; `erebor.blank` keeps it because simple-API
   branches temper on the engine ladder.
 - **Cold-row consistency is enforced**: every stage entry verifies the main
@@ -131,16 +135,23 @@ On-disk format `gf_format_version=2` (the cold-chain storage rework):
   stock names are `psd_pe` / `galfor_pe` / `sgwb_pe` (+ `_search`), built
   by `recipe.build_noise_moves`; per-branch repeats via
   `{PSD,GALFOR,SGWB}_NUM_PROP_REPEATS`.
-- **SOBBH proposal scoring is swappable** (`SOBBH_LIKELIHOOD`): `full` =
-  the exact per-row full-TD container path; `chunked` =
+- **SOBBH proposal scoring is swappable** (`SOBBH_LIKELIHOOD`): `lookup`
+  (the default since 2026-10-03; the WDM lookup kernel,
+  [`sobbh-wdm-lookup.md`](https://github.com/lisa-analysis-tools/lisa-analysis-tools/blob/dev/docs/sobbh-wdm-lookup.md)); `chunked` =
   `SOBBHChunkedLikeMove`, one vectorized chunked-heterodyne
   `get_ll_wdm` call per batch against the live WDM residual buffers
   (~100x per-batch on CPU; knobs `SOBBH_NT_SUB` / `SOBBH_N_SPARSE` /
-  `SOBBH_N_PAD` / `SOBBH_M_BAND_HALF_WIDTH`). The residual expose/fold
-  ALWAYS uses the exact generator; the built-in fast-vs-slow cross-check
-  (`SOBBH_CHECK_LL`, tolerance `SOBBH_CHECK_LL_TOL`) recomputes through
-  the slow path at matching convention. Chunked is WDM-domain,
-  single-shard, no-DCGA (loud errors otherwise).
+  `SOBBH_N_PAD` / `SOBBH_M_BAND_HALF_WIDTH`, inert under `lookup`, whose
+  layer band is `SOBBH_LOOKUP_NUM_M_LAYERS`); `full` = the exact per-row
+  full-TD container path (the escape hatch for FD / STFT domains and DCGA).
+  `lookup` and `chunked` both drive `SOBBHChunkedLikeMove`. Since 2026-08-28
+  the residual expose/fold of a leaf is one batched `fill_global_wdm` of the
+  fast comp per visit (`SOBBH_CHUNKED_FILL=0` restores a per-row pass
+  through the engine's installed generator, which on the stock path is the
+  same fast comp's fill, not the exact generator); the built-in fast-vs-slow cross-check
+  (`SOBBH_CHECK_LL`, tolerance `SOBBH_CHECK_LL_TOL`; the launchers set it
+  off) recomputes through the slow path at matching convention. The fast
+  paths are WDM-domain only, no DCGA (loud errors otherwise).
 
 ## No backend strings as function kwargs (LISA Analysis Tools–wide rule)
 
@@ -170,9 +181,9 @@ Eryn, plus any repo-root scripts across the LISA Analysis Tools repos).
 
 ## Host→device upload of class-wrapper objects (LISA Analysis Tools–wide rule)
 
-Pybind11 wrapper classes in this codebase (`OrbitsWrap`,
+The nanobind wrapper classes in this codebase (`OrbitsWrap`,
 `TDIConfigWrap`, `WDMSettingsWrap`, `WDMDomainWrap`, `FDDomainWrap`,
-`AnalysisContainerArrayWrap`, …) store their underlying C++ instance
+…) store their underlying C++ instance
 via plain ``new`` on the **host** heap, e.g.
 
 ```cpp
@@ -269,12 +280,10 @@ and ``BBHx/src/bbhx/cutils/binding_bbhx.hpp`` (SOBBH/MBH wraps):
 
 ```cpp
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-#include "pybind11_cuda_array_interface.hpp"
 #define GBTDIonTheFlyWrap         GBTDIonTheFlyWrapGPU
 #define SOBBHTDIonTheFlyWrap      SOBBHTDIonTheFlyWrapGPU
 #define FDSplineTDIWaveformWrap   FDSplineTDIWaveformWrapGPU
 #define TDSplineTDIWaveformWrap   TDSplineTDIWaveformWrapGPU
-#define WaveletLookupTableWrap    WaveletLookupTableWrapGPU
 #define WDMSettingsWrap           WDMSettingsWrapGPU
 #define WDMDomainWrap             WDMDomainWrapGPU
 #define FDDomainWrap              FDDomainWrapGPU
@@ -315,8 +324,9 @@ Rules:
    entries.** A missing CPU- or GPU-branch entry (e.g. an alias
    present only on the GPU side) silently produces a backend-asymmetric
    class name, which is exactly the situation the rule prevents.
-3. The pybind11 registration line ``py::class_<FooWrap>(m, "FooWrapGPU"
-   / "FooWrapCPU")`` in the ``.cxx`` binding source must be guarded by
+3. The nanobind registration line ``nb::class_<FooWrap>(m, "FooWrapGPU"
+   / "FooWrapCPU")`` in the ``.cxx`` binding source (``py::class_`` before
+   the pybind11 -> nanobind migration) must be guarded by
    the same ``#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)``
    toggle so the Python-visible name tracks the C++ alias.
 4. **Inheritance only works through the alias if both the base and
@@ -391,7 +401,9 @@ graph that transitively holds a raw Python **module** dies in both with
    hooks (``__deepcopy__``, ``__reduce_ex__``, ``__getstate__``,
    ``__setstate__``) *before* ``__init__`` has run; an unguarded
    ``return getattr(self._inner, name)`` recurses to RecursionError.
-   Pattern (see ``_GPUPriorWrapper``):
+   Pattern (see ``_GPUPriorWrapper.__getattr__`` in
+   ``globalfit/priors/gfpriors.py``, whose storage attribute is
+   ``_prior_obj``; the class itself is unused today, the guard is the model):
 
    ```python
    def __getattr__(self, name):

@@ -1,5 +1,11 @@
 """EMRI add/remove move scored by the direct-to-WDM template (``EMRI_LIKELIHOOD=direct``).
 
+The production EMRI move (stock name ``emri_pe``): the 9mo / 12mo launchers set
+``EMRI_LIKELIHOOD=direct``, and the stock default ``auto`` resolves to ``direct`` on a WDM / XYZ
+run (``stock.erebor.source_runtime.resolve_emri_direct_cfg``). Built by
+``recipe.EMRIDirectMoveBuilder`` from ``source_runtime.build_emri_move_runtime``; it runs in
+``source_search``, every cycle of ``gb_search_1`` / ``gb_search_2`` and in ``full_pe``.
+
 :class:`EMRIDirectLikeMove` keeps ALL of :class:`ResidualAddOneRemoveOneMove`'s
 choreography (per-leaf expose/fold, in-model repeats, per-leaf tempering, eigen-table
 sweeps, replica replays) and swaps ONLY the scoring, as :class:`MBHBatchedLikeMove` and
@@ -68,15 +74,62 @@ __all__ = ["EMRIDirectLikeMove"]
 class EMRIDirectLikeMove(ResidualAddOneRemoveOneMove):
     """Add/remove move for the EMRI branch scored through the direct-to-WDM template.
 
+    The ``propose(model, state)`` contract is the base class's: the
+    :class:`~lisatools.globalfit.moves.walkerfanout.WalkerFanoutMixin` ``propose`` runs
+    :meth:`ResidualAddOneRemoveOneMove.propose_local` on every compute rank's walker block;
+    per leaf it exposes the cold-chain source into the residual, calls
+    :meth:`setup_likelihood_here`, scores ``prev_logl`` and every in-model proposal through
+    ``compute_like`` -> :meth:`compute_like_local`, runs the per-leaf ladder swaps, records
+    ``<d|h>`` / ``<h|h>`` (:meth:`_record_leaf_inner_products`) and folds the accepted
+    source back. The tempered ensemble lives in the ``emri`` sub-state; the base mirrors its
+    row 0 into the main state with ``_sync_cold_row``. Only the scoring is replaced here.
+
     Args:
         *args: Positional arguments of :class:`ResidualAddOneRemoveOneMove`.
             ``waveform_gen`` stays the production generator: it owns the cross-check.
         direct_gen: the :class:`~lisatools.sources.emri.direct_signal_gen.EMRIDirectWDMSignalGen`,
-            or a ``DeviceLocalWaveGen`` resolving to one per device.
-        batch_max_size: rows per direct generation (``EMRI_BATCH_MAX_SIZE``). Each row
-            holds a full-grid ``(3, Nf, Nt)`` float64 accumulator while it is built
-            (~150 MB on the 6-month grid).
-        **kwargs: Keyword arguments of the base. ``dcga`` must be ``None``.
+            or a ``DeviceLocalWaveGen`` resolving to one per device. Required (``ValueError``
+            when ``None``).
+        batch_max_size (int): rows per direct generation (``EMRI_BATCH_MAX_SIZE``, default
+            8). Each row holds a full-grid ``(3, Nf, Nt)`` float64 accumulator while it is
+            built (~150 MB on the 6-month grid).
+        **kwargs: Keyword arguments of the base. ``dcga`` must be ``None`` (``ValueError``
+            otherwise).
+
+    Raises:
+        ValueError: ``dcga`` given, ``direct_gen`` missing, or the containers' data are
+            not on a :class:`~lisatools.domains.WDMSettings` domain.
+
+    Attributes:
+        direct_gen: See ``direct_gen``.
+        batch_max_size (int): See ``batch_max_size`` (floored at 1).
+        n_batch_fallbacks (int): Chunks scored through the container fallback.
+        last_batch_error (Exception or None): The last chunk exception that triggered it.
+        check_ll_tol (float): ``EMRI_CHECK_LL_TOL`` (default ``1.0`` nat).
+        check_ll_mm (float): ``EMRI_CHECK_LL_MM`` (default ``3e-4``), the mismatch term of
+            :meth:`_point_tolerance`.
+
+    Note:
+        Env knobs read here or by the base with this branch's ``EMRI`` prefix:
+        ``EMRI_CHECK_LL`` (``0`` off, ``1`` warn, ``strict`` raise; base default
+        ``ADDREMOVE_CHECK_LL`` then ``1``; the launchers set ``0``),
+        ``EMRI_CHECK_LL_EVERY`` (class default every 10th visit), ``EMRI_CHECK_LL_TOL``,
+        ``EMRI_CHECK_LL_MM`` and ``EMRI_RECORD_DH`` (class default ``1``: the record is
+        one direct batch).
+
+    Example:
+        Built by the stock layer, not by hand (``stock.erebor.source_runtime``):
+
+        .. code-block:: python
+
+            from lisatools.globalfit.recipe import EMRIDirectMoveBuilder
+
+            _, moves = EMRIDirectMoveBuilder(
+                wave_gen=wave_gen,          # production EMRI wrap (fallback + check)
+                direct_gen=direct,          # DeviceLocalWaveGen(get_emri_direct_gen, ...)
+                batch_max_size=8,
+            ).build(None, curr, acs, priors, state)
+            emri_pe = moves[0]
     """
 
     _record_dh_default = "1"
@@ -115,6 +168,7 @@ class EMRIDirectLikeMove(ResidualAddOneRemoveOneMove):
 
     @staticmethod
     def _new_stats():
+        """Fresh per-leaf telemetry dict for the ``[EMRI_DIRECT]`` line (:meth:`_flush_stats`)."""
         return dict(leaf=None, rows=0, seconds=0.0, chunks=0, fallbacks=0, refused=0,
                     gen_s=0.0, score_s=0.0)
 
@@ -123,6 +177,7 @@ class EMRIDirectLikeMove(ResidualAddOneRemoveOneMove):
     # ------------------------------------------------------------------
 
     def _adapter(self):
+        """The direct generator for the CURRENT device (resolves a ``DeviceLocalWaveGen``)."""
         resolve = getattr(self.direct_gen, "_resolve", None)
         return resolve() if callable(resolve) else self.direct_gen
 
@@ -131,6 +186,7 @@ class EMRIDirectLikeMove(ResidualAddOneRemoveOneMove):
         return MBHBatchedLikeMove._split_rows_static(self.acs, idx)
 
     def _device_context(self, device):
+        """cupy device context on ``device`` (a null context on numpy or ``None``)."""
         return device_context(getattr(self.acs, "xp", None), device)
 
     # ------------------------------------------------------------------
@@ -179,6 +235,26 @@ class EMRIDirectLikeMove(ResidualAddOneRemoveOneMove):
         super().setup_likelihood_here(coords)
 
     def compute_like_local(self, coords_in, data_index):
+        """Rank-local direct-to-WDM scorer (the base ``compute_like`` calls it).
+
+        Rows are grouped by owning walker shard, chunked by ``batch_max_size``
+        and scored by :meth:`_score_chunk`. Side outputs ``self._last_d_h`` /
+        ``self._last_h_h`` hold the per-row ``<r|h>`` / ``<h|h>`` (NaN where not
+        scored).
+
+        Args:
+            coords_in (xp.ndarray): Waveform-basis rows, shape ``(n, ndim)``.
+            data_index (xp.ndarray): Walker (container) index per row, shape ``(n,)``.
+
+        Returns:
+            np.ndarray: ``(n,)`` log-likelihoods in the container convention
+            (``offset[walker] + <r|h> - 1/2 <h|h>``); ``-1e300`` for a non-finite
+            row or one FEW refuses.
+
+        Raises:
+            RuntimeError: Called before :meth:`setup_likelihood_here` armed the
+                exposed-residual offset.
+        """
         if self._dcga is not None:  # unreachable (ctor guard); keep loud
             raise NotImplementedError("EMRIDirectLikeMove has no DCGA path.")
         if self._exposed_offset is None:
@@ -234,6 +310,13 @@ class EMRIDirectLikeMove(ResidualAddOneRemoveOneMove):
         self._box_checked = True
 
     def _score_chunk(self, adapter, coords, idx, leaf):
+        """Score one chunk: ``(ll, <r|h>, <h|h>)``, each ``(n,)``.
+
+        One ``adapter.templates`` call; rows it flags as refused keep the
+        ``-1e300`` floor (counted as ``refused``). Any exception from the
+        direct build goes to :meth:`_fallback`. A box mismatch
+        (:meth:`_check_box`) is a configuration error and is not masked.
+        """
         n = int(coords.shape[0])
         self._check_box(adapter)                    # a configuration error: never masked
         t_gen = time.perf_counter()
@@ -257,6 +340,12 @@ class EMRIDirectLikeMove(ResidualAddOneRemoveOneMove):
         return ll, dh, hh
 
     def _fallback(self, coords, idx, leaf, exc, t_gen):
+        """Score a chunk the direct path could not build through the production container path.
+
+        Uses ``waveform_gen`` explicitly (the installed generator may be the
+        direct template that just failed); warns once per leaf and counts
+        ``n_batch_fallbacks``. Returns ``(ll, nan, nan)`` (no ``<d|h>`` record).
+        """
         self._stats["gen_s"] += time.perf_counter() - t_gen
         self.n_batch_fallbacks += 1
         self._stats["fallbacks"] += 1
@@ -419,6 +508,7 @@ class EMRIDirectLikeMove(ResidualAddOneRemoveOneMove):
         logger.warning(msg)
 
     def _flush_stats(self):
+        """Log the finished leaf's ``[EMRI_DIRECT]`` line (if it scored rows) and reset."""
         st = self._stats
         if st["rows"]:
             logger.info(

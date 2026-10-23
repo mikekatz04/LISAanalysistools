@@ -1,4 +1,20 @@
-"""Standalone MBH search runner used as the seed step before global-fit PE."""
+"""Legacy standalone MBH search (MPI, per-time-split eryn runs); not used by the global fit.
+
+This was the MBH seed step of the pre-stock pipeline: :func:`run_mbh_search`
+searches one time split of the TD X/Y/Z data of a legacy settings dict
+(Sangria-era layout) with :class:`bbhx.waveformbuild.BBHWaveformFD`, and
+:class:`ParallelMBHSearchControl`
+farms the splits out over MPI ranks / GPUs and prunes duplicates. The stock
+global fits do not use it (their MBH branch is seeded from the catalogue or a
+warm start and sampled by the batched MBH moves). The only importer is the
+dev script ``scripts/mbh/dev_mbh_gf_search.py``, which imports
+:func:`search_likelihood_wrap` and then defines its own function of the same
+name.
+
+Import side effects: seeds the global NumPy RNG (``np.random.seed(111222)``)
+and, because ``use_gpu`` is hard-coded ``True``, raises ``ValueError`` when
+CuPy is not importable.
+"""
 
 # from global_fit_input.global_fit_settings import get_global_fit_settings
 import os
@@ -56,6 +72,7 @@ if use_gpu and not gpu_available:
     raise ValueError("Requesting gpu with no GPU available or cupy issue.")
 
 
+# TODO check: keep/remove/document -- used by unused run_mbh_search; dev_mbh_gf_search.py shadows it
 def search_likelihood_wrap(
     x,
     wave_gen,
@@ -118,6 +135,7 @@ def search_likelihood_wrap(
 
 
 # function call
+# TODO check: keep/remove/document -- only caller ParallelMBHSearchControl, itself uncalled
 def run_mbh_search(gpu, settings, rank, time_split, total_time_splits, best_points, num_run):
     """Run one MBH search worker on ``gpu`` for a given time-split.
 
@@ -535,6 +553,7 @@ def run_mbh_search(gpu, settings, rank, time_split, total_time_splits, best_poin
     return output_points, mbh_best, finished_this_split
 
 
+# TODO check: keep/remove/document -- no caller anywhere (legacy MPI search control)
 class ParallelMBHSearchControl:
     """MPI-driven controller that distributes MBH search across GPUs.
 

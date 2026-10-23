@@ -4,8 +4,8 @@
 2026-09: the multi-rank walker-block port — one MPI rank per GPU, walker
 blocks sharded across compute ranks — replaced the single-process
 multi-GPU model as the default. Full architecture:
-[`docs/superpowers/specs/2026-09-15-multirank-walker-blocks-design.md`](superpowers/specs/2026-09-15-multirank-walker-blocks-design.md).
-Cluster validation runbook: [`docs/multirank-cluster-gates.md`](multirank-cluster-gates.md).)*
+[`docs/superpowers/specs/2026-09-15-multirank-walker-blocks-design.md`](https://github.com/lisa-analysis-tools/lisa-analysis-tools/blob/dev/docs/superpowers/specs/2026-09-15-multirank-walker-blocks-design.md).
+Cluster validation runbook: [`docs/multirank-cluster-gates.md`](https://github.com/lisa-analysis-tools/lisa-analysis-tools/blob/dev/docs/multirank-cluster-gates.md).)*
 
 ## The model
 
@@ -35,6 +35,14 @@ pickling, bit-identical to the pre-port single-rank code
 - **SPARE**: exists only under `GF_LEGACY_RANK_LAYOUT=1` — builds like every
   other rank, then is sent `"stop"` at startup and exits without computing
   anything.
+- **MONITOR** (`GF_MONITOR_RANK=1`, set by the 9mo / 12mo launchers): the
+  highest WORLD rank is split off before the run is set up
+  (`monitor/rank.py::split_monitor_rank`, called at the top of the production
+  driver's `main()`, right after the memory recorder starts); it builds the monitor page and snapshot tar every
+  `GF_MONITOR_ITER` saves and never joins the run communicator. The roles
+  above are then resolved on the remaining ranks, so the saver is the highest
+  rank of the RUN communicator. Needs at least 4 world ranks (head + compute
+  + saver + monitor).
 
 (`communication/ranks.py::resolve_roles`/`build_layout`; `run.py`'s
 `role`/`RankRole` dispatch in `run_global_fit`.)
@@ -87,7 +95,7 @@ error, not a rounding fallback, when driven directly through `build_layout`
 | `{P}_INNER_MOVE_KIND` (`PSD_`, `GALFOR_`, `SGWB_`) | `eigen` when the rank's walker BLOCK holds fewer than 3 walkers (one-walker replica mode, and any walker-block layout with 1-2 walkers per rank, e.g. `NGPUS=4 NWALKERS=4`), `stretch` otherwise | the PSDMove inner proposal. The stretch's complement is the rank's LOCAL block (cross-rank pooling is WP8), so `stretch` with a 1-walker block is a hard error and a 2-walker block would only move along a line; an explicit value always wins. |
 | `{P}_EIGEN_REFRESH` | `10` | proposes between per-rung eigen table refreshes (eigen kind). |
 | `{P}_EIGEN_EPS_REL` | `1e-4` | finite-difference step for the eigen tables, fraction of the prior box. |
-| `{BRANCH}_EIGEN_INFO` (`SOBBH_`, `EMRI_`, `MBH_`: `ll` / `gram`; `PSD_`, `GALFOR_`, `SGWB_`: `ll` / `fisher`) | `ll` | which information matrix the eigen tables are built from: likelihood second differences (default), the Gram matrix of the move's own templates (`gram`, tuned by `{BRANCH}_EIGEN_GRAM_TARGET`, default `1e-3`), or the expected noise Fisher (`fisher`). Opt-in, CPU-validated, not yet run on a GPU (2026-10-06); any failure falls back to `ll`. Rank-local like every eigen table. See [`docs/eigen-info-routes.md`](eigen-info-routes.md). |
+| `{BRANCH}_EIGEN_INFO` (`SOBBH_`, `EMRI_`, `MBH_`: `ll` / `gram`; `PSD_`, `GALFOR_`, `SGWB_`: `ll` / `fisher`) | `ll` (code); the 9mo / 12mo launchers set `gram` for MBH / EMRI / SOBBH and `fisher` for PSD / galfor | which information matrix the eigen tables are built from: likelihood second differences (default), the Gram matrix of the move's own templates (`gram`, tuned by `{BRANCH}_EIGEN_GRAM_TARGET`, default `1e-3`), or the expected noise Fisher (`fisher`). Opt-in in the code; any failure falls back to `ll`. Rank-local like every eigen table. See [`docs/eigen-info-routes.md`](https://github.com/lisa-analysis-tools/lisa-analysis-tools/blob/dev/docs/eigen-info-routes.md). |
 
 - **`FSTAT_SIGHET_MULTIDEV=1` is inert under the walker-block layout.** It
   fans the F-stat scorer out over a rank's OWN devices, and the current
@@ -264,7 +272,7 @@ Plan 3/4 fan-out mixins' module docstrings for the code-level detail.
   the head only. `GB_INFOMAT_PER_BLOCK=1` (`infomat_per_block`) retires the
   old cross-device info-matrix borrow, and `GB_CHOL_CACHE=1` keeps each
   rank's GB in-model factors in that rank's host memory (one cache per rank
-  and branch; route map in [`docs/eigen-info-routes.md`](eigen-info-routes.md)).
+  and branch; route map in [`docs/eigen-info-routes.md`](https://github.com/lisa-analysis-tools/lisa-analysis-tools/blob/dev/docs/eigen-info-routes.md)).
   GB's frequency-window friend table
   (`BandSorter.build_friend_table`) is likewise rank-local, built from the
   rank's own walker block only.

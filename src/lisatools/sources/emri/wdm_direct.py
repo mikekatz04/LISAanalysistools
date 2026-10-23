@@ -1,5 +1,43 @@
 """EMRI templates built directly in the WDM domain (lookup table + plunge chunk).
 
+The production EMRI template of the 9mo / 12mo runs (``EMRI_LIKELIHOOD=direct``, reached
+through :class:`~lisatools.sources.emri.direct_signal_gen.EMRIDirectWDMSignalGen`; see
+``docs/emri-direct-wdm.md``). :class:`EMRIDirectWDM` assembles a template on the run's FULL
+wavelet grid without any dense time-domain transform:
+
+1. ONE FEW call per row on the integrator's own knots (``feed="knots"``) gives the kept modes
+   and the sparse holder; the trajectory's DOPR853 dense output gives exact harmonic phases.
+2. The TDI response: with ``response="dense"`` (production)
+   :class:`~lisatools.response.tdionfly.TDDenseTDIonTheFly` on a SPARSE time grid
+   (``response_grid="sparse"``: the knots plus a point every ``sparse_dt``), wrapped as
+   :class:`ExactPhaseTDIOutput` (exact carrier, splined slow residual); ``response="spline"``
+   uses :class:`~lisatools.sources.emri.emritdionfly.EMRITDIonFly`.
+3. Per harmonic and channel, the n_ref lookup table
+   (:class:`~lisatools.domains.WDMLookupTable`) maps the local ``(amp, phase, f, fdot)`` at each
+   pixel centre to the WDM coefficients of ``2 num_m_layers + 1`` frequency layers around the
+   carrier (the fused C++/CUDA kernel, :func:`lookup_sum_kernel`, with ``lookup="kernel"``).
+4. A harmonic whose local-quadratic model fails (curvature or ``|fdot|`` beyond the table
+   axis, :func:`handoff_pixel`) hands off to the plunge chunk: the exact dense TD of the
+   channels over even-start chunks of ``Nt_sub`` time layers, transformed with
+   :func:`lisatools.wdm_het.wdm_chunk_of_td`.
+
+Indexing conventions: pixel (time layer) ``n`` of the full grid is centred at the absolute time
+``data_t0 + n * layer_dt``; frequency layer ``m`` is the global layer index ``0 .. Nf - 1``
+(``m * layer_df``); the first and last ``pixel_edge`` time layers stay zero. FEW's clock is
+``t - t_start`` (``t_start`` = the catalogue reference epoch REF in mojito mode). Templates
+are ``(nch, Nf, Nt)`` (one) or ``(n_rows, nch, n_m, Nt)`` holding layers ``[m_lo, m_hi)`` of
+``f_band`` (batches); channels are the TDI ``X, Y, Z`` of ``tdi_config``.
+
+Environment knobs read here (explicit arguments win unless stated): ``EMRI_DIRECT_LOOKUP``
+(``kernel`` / ``python``, default ``kernel``), ``EMRI_DIRECT_RESPONSE_GRID`` (``sparse`` /
+``pixels``, default ``sparse``), ``EMRI_DIRECT_SPARSE_DT`` (43200 s),
+``EMRI_DIRECT_NUM_M_LAYERS`` (2; this one OVERRIDES the ``num_m_layers`` argument),
+``EMRI_DIRECT_PLUNGE_TAPER_S`` (120 s; no argument, always read),
+``EMRI_DIRECT_HANDOFF_BOUND`` (``1``), ``EMRI_DIRECT_TAIL_BLOCK_ELEMS`` and
+``EMRI_DIRECT_MODE_BLOCK_ELEMS`` (2e7), ``EMRI_DIRECT_LOOKUP_CHUNK`` (2e6), ``EMRI_TRACER``
+(``analytic``), ``EMRI_TRACER_H_FDOT`` (300 s), ``EMRI_TRACER_MAX_ELEMS`` (6e7). The response
+kind comes from the stock knob ``EMRI_DIRECT_RESPONSE`` (``dense``) through the getter.
+
 Harmonic tracks follow FEW's own conventions (few/waveform/base.py:357-364 and
 few/summation/directmodesum.py):
 
@@ -28,7 +66,18 @@ from scipy.interpolate import CubicSpline
 
 @dataclasses.dataclass
 class HarmonicTrack:
-    """One harmonic at pixel-centre times: h = amp * exp(-1j * phase)."""
+    """One harmonic at pixel-centre times: h = amp * exp(-1j * phase).
+
+    Attributes:
+        lmkn (tuple): ``(l, m, k, n)`` mode indices (negated ``m, k, n`` for a -m partner).
+        t (np.ndarray): Times [s], FEW clock, ``(P,)``.
+        amp (np.ndarray): Complex amplitude ``Y_lm A`` (or the -m partner's), ``(P,)``.
+        phase (np.ndarray): ``m Phi_phi + k Phi_theta + n Phi_r`` [rad], ``(P,)``.
+        f (np.ndarray | None): Source-frame harmonic frequency [Hz] (``None`` with
+            ``phase_only``).
+        fdot (np.ndarray | None): Its first time derivative [Hz/s].
+        fddot (np.ndarray | None): Its second time derivative [Hz/s^2].
+    """
 
     lmkn: tuple
     t: np.ndarray
@@ -40,6 +89,8 @@ class HarmonicTrack:
 
 
 def _phase_columns(integrator, t, order):
+    """The three fundamental phases ``(Phi_phi, Phi_theta, Phi_r)`` (``order = 0``) or their
+    ``order``-th time derivative at times ``t`` from the integrator splines: ``(len(t), 3)``."""
     if order == 0:
         cols = np.asarray(integrator.eval_integrator_spline(t))[:, 3:6]
     else:
@@ -50,15 +101,24 @@ def _phase_columns(integrator, t, order):
 def harmonic_tracks_from_holder(holder, integrator, t_pixels, *, a, xI0, phase_only=False):
     """Per-harmonic tracks at ``t_pixels`` [s, trajectory clock] from a FEW sparse holder.
 
+    Vectorised over modes (one matrix product per derivative order). The amplitudes are cubic
+    splines of the holder's Teukolsky amplitudes at its knots times ``Y_lm``; phases and their
+    derivatives come from the integrator (the conventions in the module docstring).
+
     Args:
-        holder: FEW ``SparseInfoHolder`` (``return_sparse_holder=True``).
+        holder: FEW ``SparseInfoHolder`` (``return_sparse_holder=True``), host copy.
         integrator: the trajectory integrator (``...inspiral_generator.inspiral_generator``)
-            exposing ``eval_integrator_spline`` / ``eval_integrator_derivative_spline``.
-        t_pixels: evaluation times, same clock as ``holder.t_arr``.
-        a, xI0: spin and inclination cosine (retrograde convention).
-        phase_only: skip the frequency derivatives (``f``, ``fdot``, ``fddot`` are None): the
-            response feed needs amplitude and phase only.
-    Vectorised over modes (one matrix product per derivative order).
+            exposing ``eval_integrator_spline`` / ``eval_integrator_derivative_spline``; it
+            must still hold ``holder``'s trajectory.
+        t_pixels (np.ndarray): evaluation times, same clock as ``holder.t_arr``.
+        a (float): spin (retrograde convention: ``xI0 < 0`` maps to ``(-a, +1)``).
+        xI0 (float): inclination cosine.
+        phase_only (bool, optional): skip the frequency derivatives (``f``, ``fdot``,
+            ``fddot`` are None): the response feed needs amplitude and phase only.
+
+    Returns:
+        list[HarmonicTrack]: The ``m >= 0`` modes in holder order, then the -m partners of the
+        ``m != 0`` modes (when the holder carries ``2 * nmodes`` Ylms).
     """
     t_pixels = np.asarray(t_pixels, dtype=float)
     if xI0 < 0:   # FEW's internal convention first (few/waveform/base.py:208-212)
@@ -117,9 +177,20 @@ def handoff_pixel(track, layer_dt, layer_df, fdot_axis_max, tol_rad=0.1):
     """First pixel index where the local-quadratic lookup stops being valid.
 
     Trips on the cubic phase term ``(pi/3) |fddot| tau^3 > tol_rad`` (tau = the wavelet
-    half-support) OR on ``|fdot|`` leaving the table's fdot axis, whichever comes
-    first. Never on fdot alone: the dominant harmonic can stay inside the fdot axis
-    and still fail on curvature. Returns ``len(track.t)`` if it never trips.
+    half-support, :data:`WDM_HALF_SUPPORT_LAYERS` ``* layer_dt``) OR on ``|fdot|`` leaving the
+    table's fdot axis, whichever comes first. Never on fdot alone: the dominant harmonic can
+    stay inside the fdot axis and still fail on curvature.
+
+    Args:
+        track (HarmonicTrack): The harmonic (needs ``fdot`` and ``fddot``).
+        layer_dt (float): WDM layer duration [s].
+        layer_df (float): WDM layer bandwidth [Hz]; unused by the test.
+        fdot_axis_max (float): Largest ``|fdot|`` of the table axis [Hz/s].
+        tol_rad (float, optional): Cubic-phase tolerance [rad]. Default ``0.1``.
+
+    Returns:
+        int: Index into ``track.t`` of the first tripping sample, or ``len(track.t)`` if it
+        never trips.
     """
     tau = WDM_HALF_SUPPORT_LAYERS * layer_dt
     cubic = (np.pi / 3.0) * np.abs(np.asarray(track.fddot)) * tau ** 3
@@ -128,6 +199,7 @@ def handoff_pixel(track, layer_dt, layer_df, fdot_axis_max, tol_rad=0.1):
     return int(idx[0]) if idx.size else int(np.asarray(track.t).size)
 
 
+# TODO check: keep/remove/document -- not reached by the 9mo/12mo runs (accumulate_harmonic_batch plans its chunks with tail_chunk_plan); only caller is tests/test_wdm_chunk_splice.py
 def plunge_chunk_wdm(td_tail_fn, n_h, Nt, Nf, dt, Nt_sub=128, n_end=None, ind_max_t=None, backend="cpu"):
     """WDM of the plunge tail ``[n_h, n_end)`` from ONE even-start chunk.
 
@@ -162,6 +234,8 @@ def plunge_chunk_wdm(td_tail_fn, n_h, Nt, Nf, dt, Nt_sub=128, n_end=None, ind_ma
 # ----------------------------------------------------------------------
 
 def _spline_vals(out, t, subs):
+    """``out.eval_spline_vals(t)`` (``(amp, tdi_phase, phase_ref)``), for the subset ``subs``
+    when given."""
     if subs is None:
         return out.eval_spline_vals(t)
     return out.eval_spline_vals(t, subs=subs)
@@ -195,7 +269,25 @@ def tracer_from_tof_output(out, t_pixels, h=30.0, h_fdot=None, max_elems=None, s
 
     Memory: evaluated in blocks of pixels so no temporary exceeds ``max_elems`` (env
     ``EMRI_TRACER_MAX_ELEMS``, default 6e7) elements per ``(S, nch, block)`` array, and the
-    amplitude is read at the pixel centres only. Returns arrays of shape ``(num_sub, nch, P)``.
+    amplitude is read at the pixel centres only.
+
+    Args:
+        out: Response output (:class:`SplinedTDIOutput`, :class:`ExactPhaseTDIOutput` or a
+            ``TDTDIOutput`` with splines).
+        t_pixels: Pixel-centre times [s, absolute], ``(P,)``.
+        h (float, optional): Stencil step [s] for ``f``. Default ``30.0``.
+        h_fdot (float, optional): Stencil step [s] for ``fdot``; ``None`` reads
+            ``EMRI_TRACER_H_FDOT`` (300).
+        max_elems (float, optional): Block budget; ``None`` reads ``EMRI_TRACER_MAX_ELEMS``.
+        subs (np.ndarray, optional): Rows (harmonics) to evaluate; ``None`` = all.
+        method (str, optional): ``"analytic"`` or ``"stencil"``; ``None`` reads
+            ``EMRI_TRACER`` (``"analytic"``).
+
+    Returns:
+        tuple: ``(amp, phase, f, fdot)``, each ``(num_sub, nch, P)`` on ``out.xp``.
+
+    Raises:
+        ValueError: For an unknown ``method``.
     """
     xp = getattr(out, "xp", np)
     t = xp.asarray(t_pixels, dtype=float)
@@ -249,7 +341,19 @@ def accumulate_harmonic_batch(acc, table, tracks, tracer, n_ok, tail_td, *, Nf, 
                               num_sub=None, lookup_kernel=None, common_handoff=False):
     """Vectorised :func:`_accumulate_harmonic_batch_loop`: ONE table evaluation for every
     (sub, channel, pixel) of the batch and one scatter-add, on the array module of ``acc``
-    (numpy or cupy). Same arguments, same result up to summation order.
+    (numpy or cupy). Same arguments, same result up to summation order. Adds in place into
+    ``acc``: the lookup part over the pixels before each sub's handoff (skipping pixels whose
+    channel ``|fdot|`` leaves the table or whose ``f <= 2 layer_df``), then the plunge chunks
+    (``tail_chunk_plan`` windows ending a quarter chunk past the last tracked pixel, capped at
+    ``Nt - pixel_edge``; ``wdm_chunk_of_td`` of ``tail_td`` per window and keep range).
+
+    The common arguments are those of :func:`_accumulate_harmonic_batch_loop`: ``acc``
+    (``(nch, n_m, Nt)``, or ``(n_templates, nch, n_m, Nt)`` with ``sub_row``), ``table``
+    (:class:`~lisatools.domains.WDMLookupTable`), ``tracer``, ``n_ok`` (ascending absolute
+    pixel indices of the tracer samples), ``tail_td`` (``ts -> (num_sub, nch, ts.size)``, or
+    ``(nch, ts.size)`` when ``tail_td.summed``), the grid ``Nf``, ``Nt``, ``dt``,
+    ``layer_dt``, ``layer_df``, ``t0`` (absolute time of pixel 0), ``Nt_sub``,
+    ``num_m_layers``, ``fdot_axis_max``, ``pixel_edge`` and ``backend``.
 
     ``tracks``: the subs' :class:`HarmonicTrack` (their handoff pixels), or ``None`` when no
     sub hands off inside ``n_ok`` (then ``num_sub`` or the tracer gives the number of subs).
@@ -267,7 +371,15 @@ def accumulate_harmonic_batch(acc, table, tracks, tracer, n_ok, tail_td, *, Nf, 
     ``common_handoff``: every sub hands off at the EARLIEST sub's handoff pixel (the chunk's
     time series is exact, so earlier is never worse), so each chunk window has one keep range
     and one transform. Implied by a summed ``tail_td`` (``tail_td.summed``: it returns the sum
-    over all subs, ``(nch, n)``, which only one shared keep range can use)."""
+    over all subs, ``(nch, n)``, which only one shared keep range can use).
+
+    Returns:
+        dict: ``lookup_pixels``, ``chunk_pixels``, ``dropped_pixels`` (plus the kernel's
+        counters with ``lookup_kernel``).
+
+    Raises:
+        NotImplementedError: If a plunge chunk is needed with ``sub_row`` (many templates).
+    """
     from ...wdm_het import tail_chunk_plan, wdm_chunk_of_td
     from ...utils.utility import get_array_module
 
@@ -350,7 +462,18 @@ def table_kernel_view(table):
     kernel cannot reproduce its evaluation: needs ``INTERP_METHOD == "spline"`` (the prefiltered
     uniform cubic B-spline, :class:`lisatools.domains._UniformCubicSpline`), an ``n_ref`` build
     and the ``quarter_turn`` basis cycle. Coefficients: the cos table (``Re(table_cx)``) and the
-    sin table with the build's ``(-1)^block`` bake undone (``WDMLookupTable._sin_unbaked_coeffs``)."""
+    sin table with the build's ``(-1)^block`` bake undone (``WDMLookupTable._sin_unbaked_coeffs``).
+
+    Args:
+        table (WDMLookupTable): The lookup table (its interpolators are read; the view is
+            cached on it as ``_kernel_view``, keyed on the interpolator identities).
+
+    Returns:
+        dict | None: Flat float64 ``coeff_c`` / ``coeff_s`` on ``table.xp``, the fdot and f
+        axes (``FD``, ``FF``, ``fdot0``, ``dfdot``, ``f0``, ``df``), the normalised f range
+        (``f_lo``, ``f_hi``), the reference parity ``ref_odd = (m_ref + n_ref) % 2`` and
+        ``layer_df``; ``None`` when the kernel cannot reproduce the table.
+    """
     if (getattr(table, "INTERP_METHOD", None) != "spline"
             or getattr(table, "build_kind", None) not in ("n_ref_only", "n_ref_complex")
             or getattr(table, "BASIS_CYCLE", None) != "quarter_turn"):
@@ -386,8 +509,34 @@ def lookup_sum_kernel(backend, resp, acc, table, *, sub_row, n_stop, n_lo, n_hi,
     ``resp`` (:class:`SplinedTDIOutput` / :class:`ExactPhaseTDIOutput`) -- the C++/CUDA
     ``wdm_lookup_sum`` of the backend. Same result as :func:`tracer_from_tof_output` (analytic) +
     :func:`accumulate_harmonic_batch`'s table lookup, up to summation order; nothing per pixel
-    is materialised. ``acc``: C-contiguous float64 ``(n_rows, nch, n_m, Nt)`` on the backend.
-    Returns ``dict(lookup_pixels, dropped_pixels)``."""
+    is materialised.
+
+    Args:
+        backend: The lisatools backend object (has ``wdm_lookup_sum`` and ``xp``).
+        resp (SplinedTDIOutput): The sparse response (its :meth:`~SplinedTDIOutput.kernel_inputs`).
+        acc (xp.ndarray): C-contiguous float64 ``(n_rows, nch, n_m, Nt)`` on the backend;
+            added to in place.
+        table (WDMLookupTable): A spline-interpolated n_ref table (:func:`table_kernel_view`).
+        sub_row (array-like): Template row of each harmonic, ``(num_sub,)`` int.
+        n_stop (array-like): Per harmonic, the first pixel NOT looked up (its handoff),
+            ``(num_sub,)`` int.
+        n_lo (int): First pixel of the contiguous range.
+        n_hi (int): One past the last pixel.
+        t0 (float): Absolute time of pixel 0 [s].
+        layer_dt (float): Layer duration [s].
+        Nf (int): Frequency layers of the full grid.
+        m_lo (int): First layer held in ``acc``.
+        num_m_layers (int): Layers each side of the carrier layer.
+        fdot_axis_max (float): Table fdot bound [Hz/s] (beyond it a pixel is dropped).
+        f_min (float): Lowest channel frequency looked up [Hz].
+
+    Returns:
+        dict: ``lookup_pixels`` and ``dropped_pixels``.
+
+    Raises:
+        ValueError: For a wrongly laid out ``acc``, a non-kernel table or a channel-count
+            mismatch.
+    """
     xp = backend.xp
     if acc.ndim != 4 or acc.dtype != np.float64 or not acc.flags.c_contiguous:
         raise ValueError("lookup_sum_kernel: acc must be a C-contiguous float64 (n_rows, nch, n_m, Nt) array")
@@ -400,6 +549,7 @@ def lookup_sum_kernel(backend, resp, acc, table, *, sub_row, n_stop, n_lo, n_hi,
         raise ValueError(f"lookup_sum_kernel: response has {ki['nch']} channels, acc {nch}")
 
     def i32(a):
+        """``a`` as a flat C-contiguous int32 array on ``xp``."""
         return xp.ascontiguousarray(xp.asarray(np.asarray(a, dtype=np.int32).reshape(-1)))
 
     no_d = xp.zeros(0, dtype=xp.float64)
@@ -419,6 +569,7 @@ def lookup_sum_kernel(backend, resp, acc, table, *, sub_row, n_stop, n_lo, n_hi,
     return dict(lookup_pixels=int(c[0]), dropped_pixels=int(c[1]))
 
 
+# TODO check: keep/remove/document -- per-sub reference loop of accumulate_harmonic_batch; not reached by the 9mo/12mo runs; only caller is tests/test_emri_wdm_direct.py
 def _accumulate_harmonic_batch_loop(acc, table, tracks, tracer, n_ok, tail_td, *, Nf, Nt, dt, layer_dt,
                                     layer_df, t0, Nt_sub=128, num_m_layers=2, fdot_axis_max=np.inf,
                                     pixel_edge=8, backend="cpu"):
@@ -486,6 +637,15 @@ def dense_inputs_from_holder(holder, integrator, *, a, xI0):
     adjustment, sign(xI0) on Phi_phi for a > 0, the holder's backwards offset), so the dense
     polynomial IS the track phase; the amplitude splines are the tracks' (scipy CubicSpline over
     the knots, monomial coefficients in ``t - t_knot``).
+
+    Args:
+        holder: Host FEW sparse holder of the template (knots feed).
+        integrator: The trajectory integrator, still holding ``holder``'s trajectory.
+        a (float): Spin.
+        xI0 (float): Inclination cosine (``< 0`` maps to ``(-a, +1)``).
+
+    Returns:
+        tuple: ``(t_k, phase_coeffs, mkn, amp_re, amp_im)``; ``t_k`` on the FEW clock.
     """
     if xI0 < 0:
         a, xI0 = -a, -xI0
@@ -575,7 +735,11 @@ def dense_eval_derivs(c, s):
 
 
 def dense_phase_eval(t_k, C, t):
-    """Evaluate DOPR853 dense-output coefficients ``C`` (K-1, P, 8) at ``t`` (reference for tests)."""
+    """Evaluate DOPR853 dense-output coefficients ``C`` (K-1, P, 8) on knots ``t_k`` at ``t``.
+
+    Returns ``(len(t), P)``; times outside the knots use the end segments. Used by
+    :func:`_dense_on_grid` and as the reference in tests.
+    """
     t = np.asarray(t, dtype=float)
     seg = np.clip(np.searchsorted(t_k, t, side="right") - 1, 0, t_k.size - 2)
     s = ((t - t_k[seg]) / np.diff(t_k)[seg])[:, None]
@@ -602,8 +766,21 @@ def sparse_response_grid(knots, a, b, sparse_dt, margin):
     trajectory end some delayed source times fall outside the trajectory and the channel
     amplitude drops to zero there. A cubic spline over half-day intervals across that drop
     rings back into the interior (2 % in amplitude, 0.3 rad in phase two intervals in), so the
-    sparse grid must never contain such a point; an in-window plunge is resolved by the dense
-    ``fine_dt_plunge`` segment instead."""
+    sparse grid must never contain such a point; an in-window plunge is resolved by the plunge
+    chunk's exact dense time series instead.
+
+    Args:
+        knots (np.ndarray): Trajectory knot times [s, FEW clock].
+        a (float): Window start [s, FEW clock].
+        b (float): Window end [s, FEW clock].
+        sparse_dt (float): Largest spacing [s].
+        margin (float): TDI delay margin [s].
+
+    Returns:
+        np.ndarray: Sorted grid times; ``[lo, lo + 1]`` when the restricted window is empty
+        (a trajectory shorter than about two margins: too few points for the response
+        splines, refused by :meth:`EMRIDirectWDM._dense_response`).
+    """
     knots = np.asarray(knots, dtype=float)
     lo = max(float(a), float(knots[0]) + margin)
     hi = min(float(b), float(knots[-1]) - margin)
@@ -616,7 +793,8 @@ def sparse_response_grid(knots, a, b, sparse_dt, margin):
 def pad_grid(g, N):
     """``g`` grown to ``N`` points by halving its longest intervals (stays inside ``g``'s span:
     a template's grid is padded to the batch's common length without leaving the region where
-    its response is complete)."""
+    its response is complete). Returns an ``np.ndarray`` (sorted when grown; the input as a
+    float array when it already has ``>= N`` points)."""
     g = np.asarray(g, dtype=float)
     while g.size < N:
         d = np.diff(g)
@@ -635,7 +813,19 @@ class SplinedTDIOutput:
     original construction: the grid must resolve the whole phase). Duck-types what
     :func:`tracer_from_tof_output` and the plunge tail read from a ``TDTDIOutput``: ``x``,
     ``xp``, ``nch``, ``eval_spline_vals(t, subs=None)`` (``(amp, r, carrier)``),
-    ``eval_phase(t, subs=None)`` and ``eval_tdi(t)``.
+    ``eval_phase(t, subs=None)`` and ``eval_tdi(t)``. Used with ``response_grid="pixels"``.
+
+    Args:
+        out (TDTDIOutput): Raw dense-kernel output (``return_spline=False``): ``x``
+            ``(num_sub, N)``, ``tdi_amp`` / ``tdi_phase`` ``(num_sub, nch, N)``, ``phase_ref``
+            ``(num_sub, N)``, ``build_spline``.
+        sub_mkn (np.ndarray): ``(num_sub, 3)`` harmonic ``(m, k, n)``.
+        sub_temp (np.ndarray): ``(num_sub,)`` template index of each harmonic.
+
+    Attributes:
+        x: Response times ``(num_sub, N)`` [s, absolute].
+        nch (int): Channels.
+        num_sub (int): Harmonics (all templates).
     """
 
     def __init__(self, out, sub_mkn, sub_temp):
@@ -650,12 +840,15 @@ class SplinedTDIOutput:
         self._car_spl = self._carrier_spline(out)
 
     def _residual(self, out):
+        """The splined channel phase: ``tdi_phase`` here (the whole phase minus the carrier)."""
         return out.tdi_phase
 
     def _carrier_spline(self, out):
+        """Spline of the kernel's ``phase_ref`` (the carrier)."""
         return out.build_spline(out.x, out.phase_ref)
 
     def _subs(self, subs):
+        """``subs`` as a flat int64 host array (all harmonics for ``None``)."""
         return np.arange(self.num_sub) if subs is None else np.asarray(subs, dtype=np.int64).reshape(-1)
 
     def _eval_chan(self, spl, t, subs, derivative=0):
@@ -698,6 +891,8 @@ class SplinedTDIOutput:
         return amp, xp.where(neg, -ph, ph), xp.where(neg, -f, f), xp.where(neg, -fdot, fdot)
 
     def eval_spline_vals(self, t, subs=None):
+        """``(amp, r, carrier)`` at the shared times ``t``: ``(S, nch, M)``, ``(S, nch, M)``,
+        ``(S, M)`` for ``S = len(subs)``."""
         subs = self._subs(subs)
         return (self._eval_chan(self._amp_spl, t, subs), self._eval_chan(self._res_spl, t, subs),
                 self.carrier(t, subs))
@@ -708,6 +903,7 @@ class SplinedTDIOutput:
         return self._eval_chan(self._res_spl, t, subs) + self.carrier(t, subs)[:, None, :]
 
     def eval_tdi(self, t, subs=None):
+        """Channel time series ``Re[amp exp(-i (r + carrier))]``, ``(len(subs), nch, len(t))``."""
         amp, res, car = self.eval_spline_vals(t, subs)
         return self.xp.real(amp * self.xp.exp(-1j * (res + car[:, None, :])))
 
@@ -727,6 +923,8 @@ class SplinedTDIOutput:
         return self._kernel_common(dict(carrier=0, res=res))
 
     def _kernel_common(self, d):
+        """Add the amplitude spline flats and the sizes (``N``, ``nch``, ``num_sub``, ``x``) to
+        the kernel-input dict ``d`` and return it."""
         xp = self.xp
         a = self._amp_spl
         d.update(N=int(a.length), nch=self.nch, num_sub=self.num_sub,
@@ -747,7 +945,18 @@ class ExactPhaseTDIOutput(SplinedTDIOutput):
     polarisation and transfer-function phase, the mode amplitude's own phase) -- so only
     ``amp`` and ``r`` are splined over the response grid. The response therefore needs only
     the trajectory's own knots plus a spacing cap, not one sample per pixel. The carrier is
-    evaluated on the output's array module (the GPU on a GPU run), per template.
+    evaluated on the output's array module (the GPU on a GPU run), per template. This is the
+    production response output (``response="dense"``, ``response_grid="sparse"``).
+
+    Args:
+        out (TDTDIOutput): Raw dense-kernel output on the sparse grid (see
+            :class:`SplinedTDIOutput`).
+        t_knots (list[np.ndarray]): Per template, the absolute knot times [s] of its DOPR853
+            dense output.
+        coeffs (list[np.ndarray]): Per template, the dense-output coefficients
+            ``(K - 1, 3, 8)``.
+        sub_mkn (np.ndarray): ``(num_sub, 3)`` harmonic ``(m, k, n)``.
+        sub_temp (np.ndarray): ``(num_sub,)`` template index of each harmonic.
     """
 
     def __init__(self, out, t_knots, coeffs, sub_mkn, sub_temp):
@@ -758,6 +967,7 @@ class ExactPhaseTDIOutput(SplinedTDIOutput):
         super().__init__(out, sub_mkn, sub_temp)
 
     def _residual(self, out):
+        """The slow residual ``tdi_phase + phase_ref - Phi_s`` on the response grid."""
         xp = self.xp
         carrier = xp.empty(out.phase_ref.shape)
         x = out.x
@@ -767,6 +977,7 @@ class ExactPhaseTDIOutput(SplinedTDIOutput):
         return out.tdi_phase + (out.phase_ref - carrier)[:, None, :]
 
     def _carrier_spline(self, out):
+        """No carrier spline: the carrier is exact (:meth:`carrier`)."""
         return None
 
     def _P3(self, b, t):
@@ -795,6 +1006,8 @@ class ExactPhaseTDIOutput(SplinedTDIOutput):
         return v, xp.where(held, 0.0, d1 / h), xp.where(held, 0.0, d2 / h ** 2)
 
     def carrier_derivs(self, t, subs=None):
+        """Exact carrier ``Phi_s`` and its first two time derivatives at ``t``, each
+        ``(len(subs), len(t))`` (zero derivatives outside the trajectory)."""
         xp = self.xp
         subs = self._subs(subs)
         t = xp.asarray(t, dtype=float)
@@ -846,14 +1059,19 @@ def feed_from_tracks(tracks, amp_factor):
     """Per-sub (amp, phase) with h = sum amp exp(-i phase) from harmonic tracks on the feed grid.
 
     A track term is ``track.amp * exp(-i track.phase)`` (FEW's mode sum, -m partners included),
-    so amp = |track.amp| * amp_factor and phase = track.phase - unwrap(arg(track.amp))."""
+    so ``amp = |track.amp| * amp_factor`` and ``phase = track.phase - unwrap(arg(track.amp))``.
+    Returns two ``(num_sub, n)`` ``np.ndarray`` (the spline-response knots feed)."""
     amp = np.stack([np.abs(tr.amp) for tr in tracks]) * amp_factor
     phase = np.stack([tr.phase - np.unwrap(np.angle(tr.amp)) for tr in tracks])
     return amp, phase
 
 
 def slice_holder(H, idx):
-    """The host holder restricted to modes ``idx`` (m >= 0 rows; the -m partners' Ylm follow)."""
+    """The host holder restricted to modes ``idx`` (m >= 0 rows; the -m partners' Ylm follow).
+
+    Returns a ``types.SimpleNamespace`` with the holder fields (``t_arr``, ``phases`` and
+    ``freqs`` shared, not copied). Used for the mode batches of :meth:`EMRIDirectWDM.__call__`.
+    """
     import types
 
     idx = np.asarray(idx)
@@ -882,7 +1100,7 @@ def track_rows(H, idx):
 
 
 def subset_track(tr, pos):
-    """A HarmonicTrack restricted to sample positions ``pos``."""
+    """A HarmonicTrack restricted to sample positions ``pos`` (needs ``f``, ``fdot``, ``fddot``)."""
     return HarmonicTrack(tr.lmkn, tr.t[pos], tr.amp[pos], tr.phase[pos], tr.f[pos], tr.fdot[pos], tr.fddot[pos])
 
 
@@ -891,30 +1109,94 @@ class EMRIDirectWDM:
 
     Per harmonic: the n_ref lookup up to its handoff pixel (curvature or fdot range),
     then even-start chunks of its own dense TDI-on-the-fly TD over the plunge tail.
-    Harmonics are processed in batches of ``mode_batch`` so the per-harmonic response
-    splines never all live at once (the scale-up constraint).
+    On the ``feed="fine"`` / fixed-``n_fine`` path of :meth:`__call__`, harmonics are processed
+    in batches of ``mode_batch`` so the per-harmonic response splines never all live at once
+    (the scale-up constraint); the knots path builds all harmonics in one response.
+    Production builds it in ``globalfit.stock.erebor.source_runtime.get_emri_direct_gen`` on
+    the run's FULL grid with ``response="dense"`` (``EMRI_DIRECT_RESPONSE``), the default
+    ``feed="knots"``, ``lookup="kernel"`` and ``response_grid="sparse"``, and
+    :class:`~lisatools.sources.emri.direct_signal_gen.EMRIDirectWDMSignalGen` sets ``f_band``.
 
     Args:
         few_gen: FEW generator (the production one; its inspiral options are restored
-            after every call by EMRITDIonFly).
-        table: :class:`lisatools.domains.WDMLookupTable` built on the same Nf, dt.
-        wdm_set: target :class:`WDMSettings` (grid starts at ``data_t0``).
-        orbits, tdi_config: as for :class:`EMRITDIonFly` (ICRS orbits, special frame).
-        t_start: FEW reference epoch (trajectory clock origin), e.g. MOJITO_REFERENCE_TIME.
-        data_t0: absolute time of WDM pixel 0.
-        n_fine: fixed number of fine trajectory points over the window. Default ``None``:
-            one per ``fine_dt`` (3600 s: direct-vs-production unchanged from 80 s to 3600 s; 6 months: 1800 and 3600 s identical, mm 1e-7..4e-7
-            on CD1L EMRI 1, 16 d), or one per ``fine_dt_plunge`` (80 s) when the
-            trajectory ends inside the window or the modes are given explicitly (the
-            plunge chunk reads the dense response from these splines).
-        pixel_edge: pixels dropped at each grid end (response spline support).
-        interp: table interpolation (``"spline"`` default: uniform cubic B-spline, CPU and GPU;
-            ``"cubic"`` scipy-only; ``None`` keeps the table's).
-        response_grid: with ``response="dense"``, where the response is evaluated:
-            ``"sparse"`` (default; env ``EMRI_DIRECT_RESPONSE_GRID``) the integrator knots plus a
-            point every ``sparse_dt`` s at most (default 43200; env ``EMRI_DIRECT_SPARSE_DT``),
-            with the exact dense-output carrier added at the pixels (:class:`ExactPhaseTDIOutput`);
-            ``"pixels"`` one sample per ``fine_dt`` with the whole phase splined.
+            after every call).
+        table (WDMLookupTable): :class:`lisatools.domains.WDMLookupTable` built on the same Nf,
+            dt. NOTE: ``interp`` switches this table's interpolators in place.
+        wdm_set (WDMSettings): target :class:`~lisatools.domains.WDMSettings` (the full grid;
+            pixel ``n`` is centred at ``data_t0 + n * layer_dt``).
+        orbits (Orbits): as for :class:`~lisatools.sources.emri.emritdionfly.EMRITDIonFly`
+            (``frame="icrs"`` orbits: the template uses the ``icrs_special`` frame).
+        tdi_config (TDIConfig): the TDI configuration (``nchannels`` sets the output channels).
+        t_start (float): FEW reference epoch (trajectory clock origin), e.g.
+            ``MOJITO_REFERENCE_TIME``.
+        data_t0 (float): absolute time of WDM pixel 0.
+        Nt_sub (int, optional): time layers per plunge chunk. Default ``128``.
+        n_fine (int, optional): fixed number of fine trajectory points over the window.
+            Default ``None``: one per ``fine_dt`` (3600 s: direct-vs-production unchanged from
+            80 s to 3600 s; 6 months: 1800 and 3600 s identical, mm 1e-7..4e-7 on CD1L EMRI 1,
+            16 d), densified to ``fine_dt_plunge`` from a chunk before a handoff to the end
+            (uniform at ``fine_dt_plunge`` with explicit modes on the ``feed="fine"`` path).
+        fine_dt (float, optional): coarse fine-grid step [s]. Default ``3600.0``.
+        fine_dt_plunge (float, optional): fine-grid step [s] near the plunge. Default ``80.0``.
+        mode_batch (int, optional): harmonics per response call on the non-knots paths;
+            ``None`` = all at once.
+        pixel_edge (int, optional): pixels left zero at each grid end (response spline
+            support). Default ``8``.
+        num_m_layers (int, optional): layers each side of the carrier layer per pixel. Default
+            ``2``; ``EMRI_DIRECT_NUM_M_LAYERS`` overrides it when set.
+        interp (str, optional): table interpolation (``"spline"`` default: uniform cubic
+            B-spline, CPU and GPU; ``"cubic"`` scipy-only; ``None`` keeps the table's).
+        force_backend (str, optional): backend name. Default ``"cpu"``.
+        feed (str, optional): ``"knots"`` (default: FEW amplitudes at the integrator knots,
+            phases from the dense output; one cheap FEW call) or ``"fine"`` (FEW on the fine
+            grid).
+        response (str, optional): ``"spline"`` (class default:
+            :class:`~lisatools.sources.emri.emritdionfly.EMRITDIonFly`) or ``"dense"``
+            (:class:`~lisatools.response.tdionfly.TDDenseTDIonTheFly`; exact dense-output
+            phases, many templates per launch; needs ``feed="knots"``).
+        response_grid (str, optional): with ``response="dense"``, where the response is
+            evaluated: ``"sparse"`` (default; env ``EMRI_DIRECT_RESPONSE_GRID``) the
+            integrator knots plus a point every ``sparse_dt`` s at most, with the exact
+            dense-output carrier added at the pixels (:class:`ExactPhaseTDIOutput`);
+            ``"pixels"`` one sample per ``fine_dt`` with the whole phase splined. Forced to
+            ``"pixels"`` with ``response="spline"``.
+        sparse_dt (float, optional): sparse-grid spacing cap [s]; ``None`` reads
+            ``EMRI_DIRECT_SPARSE_DT`` (43200).
+        lookup (str, optional): ``"kernel"`` (the fused C++/CUDA lookup, falling back to Python
+            with one warning when unavailable) or ``"python"``; ``None`` reads
+            ``EMRI_DIRECT_LOOKUP`` (``"kernel"``).
+        f_band (tuple[int, int], optional): layers ``[m_lo, m_hi)`` :meth:`batch` returns;
+            ``None`` = all ``Nf``.
+
+    Attributes:
+        fdot_axis_max (float): Largest ``|fdot|`` of the table's axis [Hz/s].
+        plunge_taper_s (float): Source-frame stop taper [s] (``EMRI_DIRECT_PLUNGE_TAPER_S``,
+            default 120).
+        last_stats (dict): Counters of the last call (``modes``, ``lookup_pixels``,
+            ``chunk_pixels``, ``dropped_pixels``, ...).
+        last_failed_rows (list[int]): Rows of the last :meth:`batch` FEW refused.
+
+    Raises:
+        ValueError: For an unknown ``feed``, ``response``, ``response_grid`` or ``lookup``, or
+            ``response="dense"`` with ``feed="fine"``.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.domains import WDMLookupTable, WDMSettings
+            from lisatools.response.tdiconfig import TDIConfig
+            from lisatools.sources.emri.wdm_direct import EMRIDirectWDM
+
+            table = WDMLookupTable.from_file(table_path, force_backend="cuda13x")
+            direct = EMRIDirectWDM(
+                few_gen, table, WDMSettings(Nf, Nt, dt, force_backend="cuda13x"),
+                orbits=icrs_orbits, tdi_config=TDIConfig("2nd generation",
+                                                         force_backend="cuda13x"),
+                t_start=ref_epoch, data_t0=data_t0, force_backend="cuda13x",
+                response="dense",
+            )
+            sig = direct(*few_params)            # WDMSignal (nch, Nf, Nt) on the full grid
+            arr = direct.batch(rows, chunk_rows=8)
     """
 
     #: TDI delay margin [s]: a source time contributes to response times up to this much later
@@ -993,6 +1275,8 @@ class EMRIDirectWDM:
         self.last_failed_rows = []
 
     def _band(self):
+        """``(m_lo, m_hi)`` of ``f_band`` (``(0, Nf)`` when unset); raises ``ValueError`` if it
+        falls outside the grid."""
         if self.f_band is None:
             return 0, int(self.wdm.Nf)
         m_lo, m_hi = self.f_band
@@ -1107,8 +1391,11 @@ class EMRIDirectWDM:
     def _mode_list(self, few_args, few_kwargs):
         """Modes kept at the call's threshold and the earliest in-window handoff time.
 
-        One FEW call on the coarse fine grid; the holder and its harmonic tracks are kept
-        (``_last_holder``, ``_last_tracks``) so the template reuses them."""
+        One FEW call (on the integrator knots with ``feed="knots"``, else on the coarse fine
+        grid); the holder, its harmonic tracks (``None`` when no harmonic can hand off) and
+        their pixels are kept (``_last_holder``, ``_last_tracks``, ``_last_track_n``) so the
+        template reuses them. Returns ``(modes, chunk_start)`` with ``modes`` a list of
+        ``(l, m, k, n)`` and ``chunk_start`` from :meth:`_chunk_start`."""
         if self.feed == "knots":
             H = self._few_knots(few_args, few_kwargs, mode_selection=few_kwargs.get("mode_selection"))
         else:
@@ -1441,6 +1728,31 @@ class EMRIDirectWDM:
         return WDMSignal(acc, wdm)
 
     def __call__(self, *few_args, **few_kwargs):
+        """ONE template on the full WDM grid.
+
+        With ``feed="knots"`` and no fixed ``n_fine`` (the default) this is
+        :meth:`_call_knots`: one FEW call on the knots, one response, the lookup and (when a
+        harmonic hands off) the plunge chunk. Otherwise FEW runs on the fine grid and the
+        harmonics go through :class:`~lisatools.sources.emri.emritdionfly.EMRITDIonFly` in
+        ``mode_batch`` blocks. Updates :attr:`last_stats`.
+
+        Args:
+            *few_args: The 14 FEW waveform-basis parameters ``(M, mu, a, p0, e0, xI0, dist,
+                qS, phiS, qK, phiK, Phi_phi0, Phi_theta0, Phi_r0)``.
+            **few_kwargs: FEW call kwargs (``mode_selection_threshold``, or an explicit
+                ``mode_selection`` list of ``(l, m, k, n)``).
+
+        Returns:
+            WDMSignal: ``(nch, Nf, Nt)`` on ``wdm_set`` (all layers, ignoring ``f_band``).
+
+        Note:
+            The mode-list / holder FEW calls (:meth:`_mode_list`, :meth:`_few_holder`) are not
+            wrapped in :func:`~lisatools.sources.emri.domain.few_domain_guard` here, so an
+            out-of-domain row can raise FEW's own ``ValueError`` / ``AssertionError``;
+            :meth:`batch` (and so
+            :class:`~lisatools.sources.emri.direct_signal_gen.EMRIDirectWDMSignalGen`) wraps
+            them into ``WaveformDomainError``.
+        """
         from ...domains import WDMSignal
         from .emritdionfly import EMRITDIonFly
 
@@ -1540,7 +1852,23 @@ class EMRIDirectWDM:
         FEW's out-of-domain failures are raised as
         :class:`~lisatools.utils.exceptions.WaveformDomainError` (``few_domain_guard``). With
         ``skip_domain_errors=True`` such a row is left all-zero instead, the others are built,
-        and its index (into ``rows``) is listed in ``last_failed_rows``."""
+        and its index (into ``rows``) is listed in ``last_failed_rows``.
+
+        Args:
+            rows (iterable): FEW waveform-basis rows (14 parameters each).
+            chunk_rows (int, optional): Rows per :meth:`_batch_chunk` call. Default ``16``.
+            consume (callable, optional): ``consume(row_indices, arr)`` per chunk.
+            skip_domain_errors (bool, optional): Zero-fill FEW-refused rows instead of raising.
+                Default ``False``.
+            **few_kwargs: FEW call kwargs for every row.
+
+        Returns:
+            xp.ndarray | None: ``(n_rows, nch, n_m, Nt)`` float64 on the backend, or ``None``
+            with ``consume``.
+
+        Raises:
+            WaveformDomainError: For a FEW-refused row when ``skip_domain_errors`` is ``False``.
+        """
         rows = list(rows)
         parts, tot, failed = [], {}, []
         for i in range(0, len(rows), max(1, int(chunk_rows))):

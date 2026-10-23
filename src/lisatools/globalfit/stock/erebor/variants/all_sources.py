@@ -1,38 +1,73 @@
 """Stock variant ``all_sources``: every branch, mojito or synthetic data.
 
-Six branches (``gb``, ``psd``, ``galfor``, ``mbh``, ``emri``, ``sobbh``) on a
-fixed smoke-friendly WDM grid (Nf=720, Nt=2160, dt=5 s -> 90 d; the mojito
-default doubles Nf and halves dt to match the 2.5 s L1 sampling).
-``general.data_mode`` selects the data pipeline: ``"mojito"`` (default —
-GB galaxy + selected MBHB/EMRI/SOBHB from the L1 folder, plus synthetic
-instrument noise for the psd branch), ``"synthetic"`` (all streams built
-in-process, no external data), or ``"sangria"`` (the legacy LDC file).
+THE PRODUCTION VARIANT. The 9mo and 12mo global fits run it: the launchers
+``scripts/fstat_proposal/submit_gf_9mo_v9.sh`` and
+``scripts/flagship/submit_gf_12mo.sh`` start
+``scripts/fstat_proposal/run_combined_staged.py`` under ``mpiexec``, which
+clones ``erebor.all_sources(nwalkers=4)`` (``NWALKERS``), sets the source ids
+and ``source_types`` from the environment, clears the fixed ``nf`` / ``nt``
+grid when ``TOBS_TARGET`` is set (23328000 s / 31104000 s), replaces
+``fit.recipe`` with its own staged recipe (``gb_search_seed``,
+``source_search``, ``gb_search_1``, ``gb_search_2``, ``full_pe``), then calls
+``fit.build()`` and ``fit.run(comm)``. The variant's :func:`setup_recipe`
+materializes that recipe at run start. (``full_year_combined`` is a separate,
+non-production variant.)
+
+Seven branches: ``gb``, ``vgb``, ``psd``, ``galfor``, ``mbh``, ``emri``,
+``sobbh``, plus ``sgwb`` with ``FIT_SGWB=1``. ``general.data_mode`` (env
+``DATA_MODE``) selects the data pipeline: ``"mojito"`` (default: the mojito
+L1 streams, optionally the pre-summed ``COMBINED`` brick, plus instrument
+noise: the real NOISE brick when found, else a synthetic draw),
+``"synthetic"`` (all streams built in-process, no
+external data), or ``"sangria"`` (the legacy LDC file). The class-default
+grid is ``dt = 5`` s, ``Nf = 720``, ``Nt = 2160`` (90 d); in mojito mode an
+untouched default grid becomes ``dt = 2.5`` s, ``Nf = 1440`` (still 90 d).
 
 This variant is a **composition of the canonical per-branch setups** — each
 branch is the same shared code the specialized variant runs:
 
 * **GB** = the ``gb_no_fg`` setup (``prepare_gb_branch`` + ``setup_gb_moves``:
-  chunked-het WDM likelihood, catalogue true-point seeding, dynamic
-  nleaves_max), with the GB band widened to the full data band so the f0
-  prior extends down to ~0.1 mHz (the only intended difference).
+  chunked-het WDM likelihood with the sig-het in-model engine, catalogue
+  true-point seeding in ``GB_MODE=pe``, dynamic ``nleaves_max``), with the GB
+  band widened to ``[1e-4, 2.5e-2]`` Hz by default (``GB_MIN_FREQ`` /
+  ``GB_MAX_FREQ``; the launchers use ``[5.5e-4, 2.2e-2]``). The driver sets
+  ``GB_MODE=search`` (zero-leaf start, RJ births).
+* **VGB** = the ``vgb`` setup (``prepare_vgb_branch`` + ``setup_vgb_moves``):
+  fixed-dimensional verification binaries, ``vgb_pe`` (+ ``vgb_ridge_gibbs``).
 * **PSD / galfor** = the ``noise`` setup (``prepare_psd_branch`` /
   ``prepare_galfor_branch`` + ``noise_sensitivity_init_kwargs`` threading the
-  per-branch noise-model choice onto the CompositeSensitivityBackend); both
-  ride the single PSDMove.
-* **MBH / EMRI / SOBBH** = the ``full_year_combined`` setup
-  (``..source_runtime``: phentax MBH via ``build_mbh_moves_phenom``,
-  TDI-on-the-fly SOBBH, legacy-ResponseWrapper EMRI, wide priors,
-  engine-side ``SourceSignalGen`` residual subtraction).
+  per-branch noise-model choice onto the CompositeSensitivityBackend); each
+  branch gets its own ``PSDMove`` (``psd_pe``, ``galfor_pe``). With
+  ``UNEQUAL_ARM=1`` (the launchers' setting) the instrument component is
+  :class:`~lisatools.sensitivity.UnequalArmInstrumentNoise` fed by the NOISE
+  brick's per-link delays; the class default (``0``) keeps the equal-arm
+  component.
+* **MBH / EMRI / SOBBH** = the shared
+  :mod:`~lisatools.globalfit.stock.erebor.source_runtime` setup (identical to
+  ``full_year_combined``): engine-side ``SourceSignalGen`` residual
+  subtraction, and on a WDM / XYZ run the fast likelihood paths by default
+  (``MBH_LIKELIHOOD=auto`` batched scoring, ``EMRI_LIKELIHOOD=auto``
+  direct-to-WDM, ``SOBBH_LIKELIHOOD=lookup``); waveform defaults SOBBH
+  TDI-on-the-fly, MBH legacy phentax (``fit.mbh.use_tdionfly``,
+  ``USE_TDIONFLY``).
 
-Usage::
+Example:
+    .. code-block:: python
 
-    from lisatools.globalfit.stock import erebor
+        from lisatools.globalfit.stock import erebor
 
-    fit = erebor.all_sources(nwalkers=4)
-    fit.remove_branch("galfor")            # sub whole branches in/out
-    fit.pop_move("sobbh_pe")               # sub moves in/out
-    fit.mbh.use_tdionfly = True            # swap the MBH waveform path
-    fit.build(); fit.run()
+        fit = erebor.all_sources(nwalkers=4)
+        fit.general.mojito_source_ids = {
+            "GB": [0], "VGB": [0], "MBHB": [2, 5], "EMRI": [0], "SOBHB": [0],
+        }
+        fit.remove_branch("galfor")            # sub whole branches in/out
+        fit.pop_move("sobbh_pe")               # sub moves in/out (stage full_pe)
+        fit.mbh.use_tdionfly = True            # swap the MBH waveform path
+        fit.build()
+        fit.run()                              # under mpiexec: fit.run(comm)
+
+        # laptop smoke on in-process data
+        fit = erebor.all_sources_lite(data_mode="synthetic")
 """
 
 from __future__ import annotations
@@ -110,7 +145,16 @@ class AllSourcesGBSettings(GBNoFgGBSettings):
 
     Identical to :class:`GBNoFgGBSettings` except the GB band spans the whole
     data band, extending the f0 prior floor down to ~0.1 mHz (snapped inward
-    to WDM layer boundaries like every gb_no_fg band).
+    to WDM layer boundaries like every gb_no_fg band). Reached as ``fit.gb``.
+    Every other field (and its env knob) is documented on
+    :class:`~lisatools.globalfit.stock.erebor.variants.gb_no_fg.GBNoFgGBSettings`
+    and :class:`~lisatools.globalfit.stock.erebor.gb.GBSettings`.
+
+    Attributes:
+        min_freq: GB band floor [Hz] before the inward layer snap. Env
+            ``GB_MIN_FREQ``. Default ``1e-4``; launchers ``5.5e-4``.
+        max_freq: GB band ceiling [Hz]. Env ``GB_MAX_FREQ``. Default
+            ``2.5e-2``; launchers ``2.2e-2``.
     """
 
     min_freq: float = dataclasses.field(
@@ -134,7 +178,103 @@ AllSourcesSGWBSettings = NoiseSGWBSettings
 
 @dataclasses.dataclass
 class AllSourcesGeneralSettings(EreborGeneralSettings):
-    """General block for ``all_sources`` (defaults mirror the legacy file)."""
+    """General block for ``all_sources`` (defaults mirror the legacy file).
+
+    Reached as ``fit.general``. Subclass of
+    :class:`~lisatools.globalfit.stock.erebor.fit.EreborGeneralSettings`
+    (every inherited field and env knob is documented there); the fields
+    below are the ones this variant adds or overrides. Launcher values are
+    those of ``submit_gf_9mo_v9.sh`` / ``submit_gf_12mo.sh``.
+
+    Attributes:
+        dt: Sample spacing [s]. Default ``5.0``; mojito mode turns an
+            untouched ``5.0`` into ``2.5`` (:meth:`AllSourcesGlobalFit.adjust_general`).
+        nf: Fixed WDM frequency-layer count. Default ``720`` (``1440`` after
+            the mojito flip); ``None`` derives the grid from ``tobs_target``.
+            The production driver clears it when ``TOBS_TARGET`` is set.
+        nt: Fixed WDM time-layer count. Default ``2160``; cleared likewise.
+        min_freq: Data-band floor [Hz]. Env ``MIN_FREQ``. Default ``1e-4``;
+            launchers ``2.5e-4``.
+        max_freq: Data-band ceiling [Hz]. Env ``MAX_FREQ``. Default ``2.5e-2``;
+            launchers ``2.5e-2``.
+        window_tukey_alpha: Tukey window parameter. Default ``0.0``
+            (rectangular).
+        edge_crop_wavelets: WDM time layers cropped at each end. Env
+            ``EDGE_CROP_WAVELETS``. Default ``20``; launchers ``60``.
+        file_store_dir: Output directory. Env ``FILE_STORE_DIR``. Default
+            ``"./gf_output/"``; launchers the run's ``STORE_DIR``.
+        base_file_name: Store file stem. Env ``BASE_FILE_NAME``. Default
+            ``"global_fit_smoke_test"``; launchers ``gf_prod_9mo`` /
+            ``gf_prod_12mo``.
+        likelihood_source_only: Drop the noise-normalization term. Env
+            ``LIKELIHOOD_SOURCE_ONLY``. Default ``False`` (the psd branch is
+            fit; ``run.py`` force-disables it whenever a psd branch exists).
+        data_mode: ``"mojito"``, ``"synthetic"`` or ``"sangria"``. Env
+            ``DATA_MODE``. Default ``"mojito"`` (launchers unset).
+        mojito_source_ids: ``{class: [ids]}`` for ``GB``, ``VGB``, ``MBHB``,
+            ``EMRI``, ``SOBHB``; gates which sources load (GB / VGB load the
+            whole catalogue file, the list only gates inclusion), filtered by
+            the branches present; in synthetic mode the list lengths are the
+            injection counts. Default ``{"GB": [0], "VGB": [0], "MBHB": [0],
+            "EMRI": [1], "SOBHB": [0]}``; the driver sets ``MBHB`` / ``EMRI``
+            / ``SOBHB`` from ``MBHB_IDS`` / ``EMRI_IDS`` / ``SOBHB_IDS``.
+        synthesize_missing_bricks: Mojito mode: build a missing per-source
+            MBHB / EMRI / SOBHB stream from its catalogue parameters instead
+            of failing. Env ``SYNTHESIZE_MISSING_BRICKS``. Default ``False``.
+        add_instrument_noise: ``True`` (default) resolves to ``"mojito"``
+            (the NOISE brick, mojito data and brick found) or
+            ``"synthetic"`` (an FD-correlated draw); ``"mojito"`` /
+            ``"synthetic"`` force one; ``False`` adds none. Env
+            ``ADD_INSTRUMENT_NOISE``.
+        noise_soms_d: Instrument ``Soms_d`` level (sqrt units). ``None``
+            (default) -> fit to the NOISE brick's tabulated estimates, else
+            :data:`~lisatools.globalfit.stock.erebor.variants.noise.PSD_INJECTION`.
+        noise_sa_a: Instrument ``Sa_a`` level (sqrt units), same rule.
+        noise_seed: Seed of the synthetic noise draw. Default ``12345``.
+        t_start: Synthetic-data start [s]; kept in sync with
+            ``synthetic_t_start``. Default ``10000.0``.
+        gb_injection_params: Synthetic mode: GB rows ``(N, 9)`` in the GBGPU
+            basis ``[A, f0, fdot, fddot, phi0, iota, psi, lam, beta]``.
+            ``None`` -> the stock two-source table.
+        psd_injection: ``[Soms_d, Sa_a]`` reference / start of the psd branch.
+            ``None`` -> ``[noise_soms_d, noise_sa_a]`` after resolution.
+        galfor_injection: Foreground reference parameters (informational in
+            mojito mode, where the foreground is the GB galaxy itself).
+            Default :data:`~lisatools.globalfit.stock.erebor.variants.noise.GALFOR_INJECTION`.
+        galfor_modulation_path: Tabulated foreground time-modulation file.
+            Env ``GALFOR_MODULATION_PATH``. Default ``"auto"``: on mojito data
+            with a ``galfor`` branch, the packaged
+            :data:`~lisatools.sensitivity.GALFOR_MODULATION_TABLE` with the
+            epoch defaulting to ``"data"``; stationary otherwise. ``None`` /
+            ``"none"`` -> stationary. Launchers pass the packaged table
+            ``src/lisatools/galfor_modulation/modulation_unequal.dat``.
+        galfor_modulation_t0: Epoch of the modulation table: ``None`` (table
+            already relative to the data start; ``"data"`` for the ``"auto"``
+            table), ``"data"`` (anchor at the data's first sample), or an
+            absolute epoch [s]. Env ``GALFOR_MODULATION_T0``. Default
+            ``None``; launchers ``data``.
+        coarse_Q: Coarse WDM noise-likelihood factor (``1`` = off). Env
+            ``COARSE_Q``. Default ``8``; launchers ``1``.
+        coarse_gpu_mode: Coarse-likelihood mode. Env ``COARSE_GPU_MODE``.
+            Default ``"delayed_acceptance"`` (exact two-stage); launchers
+            ``off``.
+        unequal_arm: Use :class:`~lisatools.sensitivity.UnequalArmInstrumentNoise`
+            with the NOISE brick's six link delays (mojito only). Env
+            ``UNEQUAL_ARM``. Default ``False``; launchers ``1``.
+        unequal_arm_stride: Decimation of the 2.5 s per-link delay table.
+            Env ``UNEQUAL_ARM_STRIDE``. Default ``200``; launchers ``200``.
+        wdm_psd_method: Backend-wide WDM PSD evaluation: ``None`` (the
+            backend's exact ``"fold"``), ``"layer_constant"`` or
+            ``"layer_calibrated"``. Env ``WDM_PSD_METHOD``. Default ``None``;
+            launchers ``layer_calibrated``.
+        fit_sgwb: Add a power-law ``sgwb`` branch fit with psd / galfor. Env
+            ``FIT_SGWB``. Default ``False`` (the stock data processors inject
+            no SGWB).
+        sgwb_injection: SGWB reference ``[log10_A, alpha]``. Default
+            ``[-9.5, 2/3]``.
+        sgwb_stochastic_fn: SGWB spectral model name. Default
+            ``"PowerLawSGWB"``.
+    """
 
     dt: float = 5.0
     nf: typing.Optional[int] = 720
@@ -346,8 +486,10 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     sgwb_stochastic_fn: str = "PowerLawSGWB"
 
     # --- properties read by the shared source_runtime glue (duck-typed) ---
+    # TODO check: keep/remove/document -- no reader (source_runtime does not read it)
     @property
     def active_source(self) -> typing.Optional[str]:
+        """The single non-GB class with ids, or ``None`` when zero or several have."""
         active = [
             k for k, v in self.mojito_source_ids.items() if v and k != "GB"
         ]
@@ -355,11 +497,16 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
 
     @property
     def n_injections(self) -> typing.Dict[str, int]:
+        """``{class: len(ids)}`` of :attr:`mojito_source_ids` (read by the source branch preps)."""
         return {k: len(v) for k, v in self.mojito_source_ids.items()}
 
     @property
     def mbh_waveform_t0(self) -> float:
-        """Epoch merger times (t_plunge) are referenced to."""
+        """Epoch [s] merger times (t_plunge) are referenced to.
+
+        :data:`~lisatools.globalfit.recipe.MOJITO_REFERENCE_TIME` in mojito
+        mode, ``0.0`` for sangria, ``t_start`` for synthetic data.
+        """
         if self.data_mode == "mojito":
             return MOJITO_REFERENCE_TIME
         if self.data_mode == "sangria":
@@ -368,12 +515,72 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
 
     @property
     def sobbh_reference_time(self) -> typing.Optional[float]:
-        """Epoch ``f_low`` is defined at (None -> the window start)."""
+        """Epoch [s] the SOBBH ``f_low`` is defined at.
+
+        :data:`~lisatools.globalfit.recipe.MOJITO_REFERENCE_TIME` in mojito
+        mode; ``None`` (the window start) otherwise.
+        """
         return MOJITO_REFERENCE_TIME if self.data_mode == "mojito" else None
 
 
 class AllSourcesGlobalFit(EreborFit):
-    """Six-branch global fit (gb+psd+galfor+mbh+emri+sobbh), mojito default."""
+    """All-source global fit (gb, vgb, psd, galfor, mbh, emri, sobbh), mojito default.
+
+    The production variant of the 9mo / 12mo runs (see the module
+    docstring for how the driver ``run_combined_staged.py`` uses it). Users
+    get it as ``erebor.all_sources(...)`` (a clone of the module default) or
+    ``erebor.get_stock("all_sources", ...)``; the laptop twin is
+    ``all_sources_lite`` (``lite=True``). Constructor knobs are those of
+    :class:`~lisatools.globalfit.stock.base.StockGlobalFit` (headline knobs
+    plus any field of :class:`AllSourcesGeneralSettings`).
+
+    Branch blocks (``fit.<name>``): ``gb``
+    :class:`AllSourcesGBSettings`; ``vgb``
+    :class:`~lisatools.globalfit.stock.erebor.vgb.VGBSettings`; ``psd``
+    :class:`~lisatools.globalfit.stock.erebor.variants.noise.NoisePSDSettings`
+    (2 parameters ``Soms_d``, ``Sa_a``); ``galfor``
+    :class:`~lisatools.globalfit.stock.erebor.noise.GalForSettings`; ``mbh`` /
+    ``emri`` / ``sobbh`` the
+    :class:`~lisatools.globalfit.stock.erebor.source_runtime.SourceMBHSettings`
+    family; ``sgwb``
+    :class:`~lisatools.globalfit.stock.erebor.variants.noise.NoiseSGWBSettings`
+    only with ``fit_sgwb``.
+
+    Default recipe (the driver replaces it in production): stage ``full_pe``
+    (kind ``pe``) with ``psd_pe``, ``galfor_pe`` (``sgwb_pe``), ``sobbh_pe``,
+    ``mbh_pe``, ``emri_pe``, ``rj_fstat_pe``; stage ``vgb_pe`` with
+    ``vgb_pe``. Both stages use ``share_temperature_control=False``.
+
+    Build hooks: :meth:`resolve_data_source` (noise source and levels),
+    :meth:`adjust_general` (mojito grid flip), :meth:`set_default_processor`
+    (mojito / sangria / synthetic processors), :meth:`finalize_general`
+    (coarse checks, unequal-arm wiring, sensitivity kwargs),
+    :meth:`prepare_branch_settings` (per-branch ``_prepare_<name>``),
+    :meth:`attach_runtime_objects` (source ``signal_gen``).
+
+    Attributes:
+        option_name: ``"all_sources"``.
+        setup_classes: ``gb`` GBSetup, ``vgb`` VGBSetup, ``psd`` PSDSetup,
+            ``galfor`` GalForSetup, ``mbh`` MBHSetup, ``emri`` EMRISetup,
+            ``sobbh`` SOBBHSetup, ``sgwb`` SGWBSetup.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.stock import erebor
+
+            fit = erebor.get_stock("all_sources", nwalkers=4, num_iterations=50)
+            print(fit.list_moves())          # "[pe] full_pe:" then psd_pe, galfor_pe, ...
+            fit.add_move("rj_prior_pe", stage="full_pe", branch="gb")
+            fit.build()
+            fit.run()
+
+        .. code-block:: bash
+
+            # what the production launchers run (-n $SLURM_NTASKS: 6 ranks at
+            # NGPUS=4 = head, 3 compute, saver, monitor)
+            mpiexec -n 6 python scripts/fstat_proposal/run_combined_staged.py
+    """
 
     option_name = "all_sources"
     description = (
@@ -395,6 +602,15 @@ class AllSourcesGlobalFit(EreborFit):
     }
 
     def resolve_data_source(self) -> None:
+        """Resolve the data source, then the instrument-noise source and levels.
+
+        After the base resolution, on the FIT-LEVEL ``self.general``:
+        ``add_instrument_noise`` becomes the concrete source
+        (:meth:`~lisatools.globalfit.stock.erebor.fit.EreborFit.resolve_noise_source`),
+        unset ``noise_soms_d`` / ``noise_sa_a`` are filled from the NOISE
+        brick fit (else ``PSD_INJECTION``), and an unset ``psd_injection``
+        becomes ``[noise_soms_d, noise_sa_a]``.
+        """
         super().resolve_data_source()
         # Resolve the noise source + levels on the FIT-LEVEL block (like the
         # base data-source resolution): prepare_psd_branch reads the fit-level
@@ -414,6 +630,16 @@ class AllSourcesGlobalFit(EreborFit):
             gs.psd_injection = [gs.noise_soms_d, gs.noise_sa_a]
 
     def adjust_general(self, gs: AllSourcesGeneralSettings) -> None:
+        """Variant hook on the build-time copy: mojito grid flip and ``t_start`` sync.
+
+        In mojito mode ``dt = 5`` becomes ``2.5`` and, if the grid is still
+        the default ``720 x 2160``, ``nf`` becomes ``1440`` (same 90 d span).
+        ``t_start`` and ``synthetic_t_start`` are synced (a non-default
+        value wins). A set ``gb.data_band_layers`` is ignored with a warning.
+
+        Args:
+            gs: The build-time general block (mutated in place).
+        """
         # Mojito L1 data is sampled at dt = 2.5 s (the class defaults are the
         # Sangria-legacy dt = 5 grid). When the user left the grid at its
         # defaults, keep the 90-d span and ~1-h wavelets by doubling Nf.
@@ -439,6 +665,10 @@ class AllSourcesGlobalFit(EreborFit):
             )
 
     def default_branches(self) -> typing.Dict[str, Settings]:
+        """Fresh ``gb``, ``vgb``, ``psd``, ``galfor``, ``mbh``, ``emri``, ``sobbh`` blocks.
+
+        Plus ``sgwb`` when ``general.fit_sgwb`` is set.
+        """
         branches = {
             "gb": AllSourcesGBSettings(),
             "vgb": VGBSettings(),
@@ -453,6 +683,11 @@ class AllSourcesGlobalFit(EreborFit):
         return branches
 
     def default_recipe(self) -> Recipe:
+        """Stages ``full_pe`` (noise, sobbh, mbh, emri, ``rj_fstat_pe``) and ``vgb_pe``.
+
+        Not what production runs: the driver replaces ``fit.recipe`` with its
+        staged search + PE recipe before the build.
+        """
         # One combined PE stage: noise moves first (split: psd / galfor /
         # sgwb each under their own ladder), then sobbh BEFORE mbh/emri
         # (user ruling 2026-08-27: the cheap branch banks its progress
@@ -493,6 +728,29 @@ class AllSourcesGlobalFit(EreborFit):
     # -- data processors ------------------------------------------------------
 
     def set_default_processor(self, gs: AllSourcesGeneralSettings) -> None:
+        """Pick the data processor for ``gs.data_mode`` (skipped when one is set).
+
+        - ``"mojito"`` (production):
+          :class:`~lisatools.globalfit.stock.erebor.injections.L1ProcessingStepWithSyntheticNoise`
+          on ``mojito_data_path`` with the present branches' source ids, the
+          instrument-noise options, ``Tobs`` and the MBH phenom kwargs (for a
+          synthesized missing brick). When ``source_types`` lists
+          ``COMBINED`` the list is passed through verbatim (the pre-summed
+          stream).
+        - ``"sangria"``: :class:`~lisatools.globalfit.preprocessing.SangriaProcessingStep`
+          on ``ldc_source_file``.
+        - ``"synthetic"``:
+          :class:`~lisatools.globalfit.stock.erebor.injections.SyntheticCombinedProcessingStep`
+          summing a GB stream and a source + noise stream built with the same
+          generators as the branch templates.
+
+        Args:
+            gs: The build-time general block (mutated in place).
+
+        Raises:
+            ValueError: On an unknown ``data_mode``, or when no present
+                branch can be loaded / injected.
+        """
         if gs.data_mode == "mojito":
             from ..injections import L1ProcessingStepWithSyntheticNoise
 
@@ -698,6 +956,7 @@ class AllSourcesGlobalFit(EreborFit):
         )
 
     def default_preprocess_kwargs(self) -> dict:
+        """No highpass / trim for mojito and synthetic data; the engine defaults for sangria."""
         if self.general.data_mode in ("mojito", "synthetic"):
             # Both emit exactly Tobs = Nf*Nt*dt samples (the mojito loader
             # trims at load via its Tobs kwarg); skip the engine's default
@@ -715,6 +974,19 @@ class AllSourcesGlobalFit(EreborFit):
     #    fit.psd.instrument_model_cls / fit.sgwb.stochastic_fn) --
 
     def finalize_general(self, gs: AllSourcesGeneralSettings) -> None:
+        """Last variant hook: coarse checks, unequal-arm wiring, sensitivity kwargs.
+
+        Validates the coarse-likelihood settings, wires the unequal-arm
+        instrument noise when ``unequal_arm`` (:meth:`_wire_unequal_arm`),
+        and builds ``gs.sensitivity_init_kwargs`` with
+        :func:`~lisatools.globalfit.stock.erebor.noise.noise_sensitivity_init_kwargs`
+        from the psd / galfor blocks, the foreground modulation (path and
+        epoch; ``"data"`` defers the anchor to the engine), ``wdm_psd_method``
+        and the SGWB model.
+
+        Args:
+            gs: The build-time general block (mutated in place).
+        """
         validate_coarse_settings(gs, all_source=True)
         psd = getattr(self, "psd", None) if "psd" in self._branch_names else None
         if gs.unequal_arm:
@@ -770,6 +1042,21 @@ class AllSourcesGlobalFit(EreborFit):
         :class:`~lisatools.sensitivity.LinkDelayTable` itself is built by
         ``GeneralSetup._resolve_deferred_noise_model`` once the data epoch
         (``data_t0``) is authoritative.
+
+        Sets ``psd.instrument_component_cls`` (when unset) and adds
+        ``ltts_l1_file``, ``ltts_stride`` and ``wdm_psd_method`` to
+        ``psd.instrument_component_kwargs`` (existing keys win). Duplicates
+        :func:`~lisatools.globalfit.stock.erebor.noise.wire_unequal_arm_psd`
+        (the noise variants' copy).
+
+        Args:
+            gs: The build-time general block.
+            psd: The psd branch block, or ``None``.
+
+        Raises:
+            ValueError: Without a psd branch, outside mojito mode, or when the
+                NOISE brick has no ``/ltts`` group.
+            FileNotFoundError: When no NOISE brick is found.
         """
         import h5py
 
@@ -812,6 +1099,7 @@ class AllSourcesGlobalFit(EreborFit):
         psd.instrument_component_kwargs = kwargs
 
     def _sgwb_sens_kwargs(self, gs: AllSourcesGeneralSettings) -> dict:
+        """``{"sgwb_stochastic_fn": ...}`` with an sgwb branch, else ``{}``."""
         if "sgwb" not in self._branch_names:
             return {}
         sgwb = getattr(self, "sgwb", None)
@@ -821,11 +1109,24 @@ class AllSourcesGlobalFit(EreborFit):
     # -- branch resolution --------------------------------------------------------
 
     def prepare_branch_settings(self, name: str, general_setup: GeneralSetup) -> Settings:
+        """Erebor completion (deepcopy, Tobs / dt, build seed, domain), then ``_prepare_<name>``.
+
+        Args:
+            name: Branch name.
+            general_setup: The built general setup.
+
+        Returns:
+            Settings: The prepared branch block.
+        """
         settings = super().prepare_branch_settings(name, general_setup)
         prep = getattr(self, f"_prepare_{name}", None)
         return prep(settings, general_setup) if prep is not None else settings
 
     def _prepare_gb(self, gb: AllSourcesGBSettings, general_setup: GeneralSetup):
+        """GB prep: :func:`~lisatools.globalfit.stock.erebor.variants.gb_no_fg.prepare_gb_branch`.
+
+        Sangria data with no ``t0`` uses :data:`GB_T_REF`.
+        """
         if gb.t0 is None and self.general.data_mode == "sangria":
             # Legacy constant (the Sangria stream carries no catalogue epoch).
             gb.t0 = GB_T_REF
@@ -837,17 +1138,21 @@ class AllSourcesGlobalFit(EreborFit):
         )
 
     def _prepare_vgb(self, vgb: VGBSettings, general_setup: GeneralSetup):
+        """VGB prep: :func:`~lisatools.globalfit.stock.erebor.vgb.prepare_vgb_branch`."""
         return prepare_vgb_branch(
             vgb, general_setup, data_mode=self.general.data_mode
         )
 
     def _prepare_psd(self, psd: AllSourcesPSDSettings, general_setup: GeneralSetup):
+        """PSD prep: priors / start around ``general.psd_injection`` (``prepare_psd_branch``)."""
         return prepare_psd_branch(psd, self.general.psd_injection)
 
     def _prepare_galfor(self, galfor: GalForSettings, general_setup: GeneralSetup):
+        """Galfor prep: ``prepare_galfor_branch``."""
         return prepare_galfor_branch(galfor)
 
     def _prepare_sgwb(self, sgwb: AllSourcesSGWBSettings, general_setup: GeneralSetup):
+        """SGWB prep: wide uniform priors (``log10_A`` in [-16, -9], ``alpha`` in [-1, 2])."""
         from eryn.prior import ProbDistContainer, uniform_dist
 
         if sgwb.initialize_kwargs is None:
@@ -865,12 +1170,15 @@ class AllSourcesGlobalFit(EreborFit):
         return sgwb
 
     def _prepare_mbh(self, mbh: AllSourcesMBHSettings, general_setup: GeneralSetup):
+        """MBH prep: ``source_runtime.prepare_mbh_branch``."""
         return prepare_mbh_branch(mbh, general_setup, self.general)
 
     def _prepare_emri(self, emri: AllSourcesEMRISettings, general_setup: GeneralSetup):
+        """EMRI prep: ``source_runtime.prepare_emri_branch``."""
         return prepare_emri_branch(emri, general_setup, self.general)
 
     def _prepare_sobbh(self, sobbh: AllSourcesSOBBHSettings, general_setup: GeneralSetup):
+        """SOBBH prep: ``source_runtime.prepare_sobbh_branch``."""
         return prepare_sobbh_branch(sobbh, general_setup, self.general)
 
     # -- runtime objects (post-deepcopy) -------------------------------------------
@@ -916,6 +1224,30 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     GB rides ``setup_gb_moves`` (the gb_no_fg stack), PSD/galfor/sgwb the
     single PSDMove, and MBH/EMRI/SOBBH the shared source_runtime builders
     (their residual subtraction already ran engine-side via ``signal_gen``).
+
+    The run's ``setup_function`` (``AllSourcesGlobalFit.default_setup_function``),
+    called on every compute rank at run start with whatever recipe
+    ``fit.recipe`` holds; in production that is the driver's staged recipe. A stack is
+    built only when the recipe asks for it: GB when any requested stock
+    name starts with ``rj_`` or ``gb_``; VGB for any ``vgb*`` name; one
+    ``<name>_pe`` / ``<name>_search`` pair per noise branch
+    (:func:`~lisatools.globalfit.recipe.build_noise_moves`, 5 repeats on
+    CPU, the branch's ``num_prop_repeats`` on GPU); MBH / EMRI / SOBBH when
+    ``<branch>_pe`` is requested. Then :meth:`Recipe.setup
+    <lisatools.globalfit.recipe.Recipe.setup>` materializes every stage.
+
+    Args:
+        recipe (Recipe): The fit's recipe.
+        engine_info: The engine settings handed to every move builder.
+        curr: The built current info (``general_info``, ``source_info``).
+        acs: The rank's ``AnalysisContainerArray``.
+        priors (dict): Per-branch priors.
+        state (GFState): The starting state.
+
+    Raises:
+        RuntimeError: When source moves are requested but no
+            ``SourceSignalGen`` was attached (fit not built through
+            :meth:`AllSourcesGlobalFit.build`).
     """
     general_info = curr.general_info
     nwalkers, ntemps = general_info.nwalkers, general_info.ntemps

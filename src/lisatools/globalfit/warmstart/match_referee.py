@@ -1,27 +1,43 @@
 """MATCH-STATISTIC REFEREE for the warm-start GB clustering.
 
-Judges the components npz produced by ``warmstart_fit_from_store.py``
-with actual waveform matches (existing machinery only -- stock GB
-transform + gbgpu FD templates, per the overlap-validation pattern of
-``gb_mojito_match.py``):
+Stage 2 of the warm-start build (:mod:`.fit_from_store` -> referee ->
+:mod:`.referee_apply`), run in-process by
+:func:`.build.ensure_warm_start_components` and by every self-refit epoch
+(:func:`.self_refit.build_self_epoch`) with only ``--npz`` / ``--store``
+given (every other option at its default). Judges the components npz
+produced by :mod:`.fit_from_store` with actual waveform matches (existing
+machinery only -- stock GB transform + gbgpu FD templates, per the
+overlap-validation pattern of ``gb_mojito_match.py``):
 
   1. WITHIN-GROUP COHERENCE: for each refereed component, real member
-     rows (re-extracted from the store by nearest-centroid assignment
-     in each component's own sigma-whitened space -- robust to the
-     fitter script being edited in parallel) are matched against the
-     member closest to the component mean ("anchor"). A good group has
-     median member match ~1.
-  2. MERGE TEST: for every same-island component pair with |delta f0|
-     <= ``--pair-bins`` / Tobs, the centroid-vs-centroid match. High
-     cross-match (> 0.9) with coherent groups = split artifact (should
-     merge); low (< 0.5) = genuinely distinct.
+     rows (re-extracted from the store -- the fit's own last
+     ``meta["last_k"]`` stored rows -- by nearest-centroid assignment
+     in each component's own sigma-whitened space, :func:`assign_members`)
+     are matched against the member closest to the component mean
+     ("anchor"). A good group has median member match ~1. Refereed:
+     every component with ``p > --p-core``, a random ``--tail-n`` of the
+     rest, and the island of ``--flagship-f0``.
+  2. MERGE TEST: for every same-island component pair with ``|delta f0|``
+     <= ``--pair-bins`` / Tobs (both with ``p > --pair-p-floor``, or in the
+     flagship island), the centroid-vs-centroid match. High cross-match
+     (> 0.9) with coherent groups = split artifact (should merge); low
+     (< 0.5) = genuinely distinct.
+
+For an observable-basis fit every check runs per MIXTURE COMPONENT (the
+per-cluster ``p`` / ``mult`` / ``n_members`` / ``island_id`` repeated per
+component), the geometry in the observable basis, the waveforms on the
+components' sampling-basis means.
 
 Match metric: normalized phase-maximized overlap summed over the X/Y/Z
 FD channels with FLAT weighting over the narrow band,
 ``|<a|b>| / sqrt(<a|a><b|b>)`` (fine for a same-band relative match --
 the PSD is constant to <~1% over a <~0.2 uHz-wide template support).
-Templates: ``GBGPU.run_wave`` on the run's L1 orbits (ICRS frame), t0 =
-data start, Tobs/dt from the run. The merge test is BATCHED (2026-10-13):
+Templates: ``GBGPU.run_wave`` on the L1 orbits of the data release
+(``MOJITO_DATA_PATH``; read as ICRS, the run frame), t0 = the hardcoded
+mojito data start :data:`DATA_T0`, Tobs from the npz meta (``--tobs``),
+``dt`` from ``--dt`` (default 10 s). GBGPU's FD response is an equal-arm
+approximation: adequate for this same-band RELATIVE match, and not the
+production (unequal-arm WDM) likelihood. The merge test is BATCHED (2026-10-13):
 each component's template is generated once per template length and the
 pair overlaps are computed in vectorized groups (``Matcher.pair_matches``
 / ``batched_overlaps``), equal to the per-pair ``Matcher.match`` it
@@ -33,18 +49,34 @@ and reproduces the cluster's 231,737 cross-matches to 3e-15.
 moves the orbits and templates to a GPU (``cuda``, or ``auto`` = CUDA
 when cupy sees a device); the default stays on the CPU until the CUDA path
 has run once on a GPU node. ``--chunk-gb`` (env
-``GB_WARM_START_REFEREE_CHUNK_GB``) bounds the memory of one chunk.
+``GB_WARM_START_REFEREE_CHUNK_GB``, default 1.0) bounds the memory of one
+chunk. Neither env knob is set by the 9mo / 12mo launchers (CPU referee).
+
+Output npz (default ``<npz stem>_referee.npz``): per-component
+``med_match``, ``min_match``, ``med_ratio`` (measured / sinc-predicted
+match; NaN = not refereed), ``n_sampled``, ``assigned_counts``, the
+refereed index list ``referee``, the merge-test ``pairs`` ``(P, 2)`` with
+their ``cross_match``, ``flagship`` and a ``meta`` JSON.
 
 Laptop rules: run with
-  OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+``OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 OPENBLAS_NUM_THREADS=1``
+(the module sets these three as defaults at import).
 Peak RSS ~2.4 GB, transient, during the L1 orbit load (the ltt table
 is materialized in full before trimming -- same peak the fit pays).
 
-Usage:
-  python warmstart_match_referee.py --npz <components.npz> --store <h5>
-      [--members-per-comp 8] [--tail-n 200] [--p-core 0.5]
-      [--pair-p-floor 0.2] [--pair-bins 4.0] [--flagship-f0 20.380]
-      [--backend cpu|cuda|auto] [--chunk-gb 1.0]
+Example:
+    The call the build makes (``--npz`` is the fitter output):
+
+    .. code-block:: bash
+
+        python -m lisatools.globalfit.warmstart.match_referee \\
+            --npz gf_prod_6mo_v9_4gpu_refereed_fit.npz --store gf_prod_6mo_testing.h5
+
+    All options: ``[--tobs S] [--dt 10] [--oversample 2]
+    [--members-per-comp 8] [--tail-n 200] [--p-core 0.5]
+    [--pair-p-floor 0.2] [--pair-bins 4.0] [--flagship-f0 20.380]
+    [--max-wf 20000] [--seed 11] [--backend cpu|cuda|auto] [--chunk-gb 1.0]
+    [--out PATH]``.
 """
 from __future__ import annotations
 
@@ -62,11 +94,21 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 import numpy as np
 
 def _orbit_source_file() -> str:
-    """An L1 file to read ORBITS from, resolved the way the runs resolve
-    data: ``MOJITO_DATA_PATH`` (the env every submit script exports;
-    default the local dev cache) -> the GB brick, else the COMBINED
-    stream file. The 6mo campaign's launch died here on a hardcoded
-    laptop dev-cache path (2026-09-14)."""
+    """An L1 file to read ORBITS from, resolved the way the runs resolve data.
+
+    ``MOJITO_DATA_PATH`` (the env every submit script exports --
+    ``/shared/data/mojito_cache`` on the 9mo / 12mo launchers; default the
+    local dev cache ``~/.mojito_cache/brickmarket/mojito_light_v1_0_0``) ->
+    the GB brick ``data/GB/L1``, else the COMBINED stream file
+    ``data/COMBINED/L1``. The 6mo campaign's launch died here on a
+    hardcoded laptop dev-cache path (2026-09-14).
+
+    Returns:
+        str: The L1 file path.
+
+    Raises:
+        FileNotFoundError: When neither is found.
+    """
     from lisatools.globalfit.preprocessing import (
         find_combined_file,
         find_file,
@@ -102,10 +144,12 @@ REPORT_PAIRS = 10          # merge-test pairs printed per class
 
 
 def rss_gb() -> float:
+    """Peak RSS for the progress prints: GB on macOS (bytes); 1024x too small on Linux (KB)."""
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 ** 3
 
 
 def circ_diff(x, m, period):
+    """Minimal-image difference ``x - m`` of a circular column, in ``[-period/2, period/2)``."""
     return (x - m + period / 2.0) % period - period / 2.0
 
 
@@ -131,7 +175,14 @@ def resolve_backend(spec) -> str:
     the same rule as ``fit_from_store.resolve_gmm_gpu``: a referee that
     runs on the CPU is recoverable, one that does not run blocks a launch.
     Any other name passes through lower-cased (``cpu``, ``cuda``,
-    ``cuda12x``, ...)."""
+    ``cuda12x``, ...).
+
+    Args:
+        spec (str or None): The option value; ``None`` / empty = ``"auto"``.
+
+    Returns:
+        str: The backend name (a ``force_backend`` value).
+    """
     s = str(spec or "auto").strip().lower()
     if s != "auto":
         return s
@@ -152,15 +203,25 @@ def resolve_backend(spec) -> str:
 # member re-extraction: nearest centroid in per-component sigma space
 # ------------------------------------------------------------------
 def load_leaf_rows(store: str, last_k: int):
-    """Cold-chain GB leaf rows over the last K written iterations: the SAME
-    rows the fit read (``fit_from_store.load_leaf_table``, with its
-    torn-tail and keep-window guards). Returns (X (n, 9), sample_id (n,)).
+    """Cold-chain GB leaf rows over the last K written STORED ROWS: the SAME rows the fit read.
+
+    Delegates to :func:`.fit_from_store.load_leaf_table` (with its
+    torn-tail and keep-window guards).
 
     This used to be a private copy of that loader that kept the old hard
-    ``last_safe = 471`` clamp, so on a store past row 471 the members were
+    clamp at row 471, so on a store past row 471 the members were
     re-extracted from the 300 rows ENDING AT 471 instead of the fit's rows
     (the 6mo -> 9mo build fitted rows 741-1040 and refereed its members
-    from rows 172-471)."""
+    from rows 172-471).
+
+    Args:
+        store (str): The store h5 the fit read.
+        last_k (int): The fit's ``meta["last_k"]``.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``X (n, 9)`` sampling-basis rows and
+        ``sample_id (n,)`` (``row * nwalkers + walker``).
+    """
     from .fit_from_store import load_leaf_table
 
     X, sample_id, _info = load_leaf_table(store, int(last_k))
@@ -168,9 +229,27 @@ def load_leaf_rows(store: str, last_k: int):
 
 
 def assign_members(X, means, covs, island_id, f0_window_edges):
-    """Nearest-centroid member assignment, per island, in each
-    component's own sqrt(diag(cov))-whitened space (circular columns
-    wrapped). Returns (assign (n,) int comp index or -1, dist (n,))."""
+    """Nearest-centroid member assignment, per island, in each component's whitened space.
+
+    Each row is located in its island by the (disjoint) island windows and
+    compared with that island's components in each component's own
+    ``sqrt(diag(cov))``-whitened space (circular columns 3 / 5 / 6
+    wrapped); a best distance above ``ASSIGN_RADIUS`` (6) leaves it
+    unassigned. Also the member count of :func:`.self_refit.consensus_filter`.
+
+    Args:
+        X (np.ndarray): ``(n, 9)`` rows in the FIT's basis.
+        means (np.ndarray): ``(ncomp, 9)`` component means (same basis).
+        covs (np.ndarray): ``(ncomp, 9, 9)``.
+        island_id (np.ndarray): ``(ncomp,)`` island of each component.
+        f0_window_edges (np.ndarray): ``(n_islands, 2)`` island windows on
+            column 1.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``assign (n,)`` int64 component index
+        or -1, and ``dist (n,)`` the best whitened distance (``inf`` for a
+        row in no island).
+    """
     n = len(X)
     assign = np.full(n, -1, dtype=np.int64)
     adist = np.full(n, np.inf)
@@ -204,8 +283,19 @@ def assign_members(X, means, covs, island_id, f0_window_edges):
 # waveforms + matches
 # ------------------------------------------------------------------
 def build_wave_gen(tobs: float, backend: str = "cpu"):
-    """GBGPU on the run's L1 orbits, both on ``backend`` (the orbit table
-    is trimmed on the host before ``configure`` uploads it)."""
+    """GBGPU on the data release's L1 orbits, both on ``backend``.
+
+    The orbit table is trimmed on the host to ``[DATA_T0 - 1e5 s, DATA_T0 +
+    tobs + 1e5 s]`` before ``configure`` uploads it; the orbits are read
+    with ``frame="icrs"`` and GBGPU's ``t0`` is :data:`DATA_T0`.
+
+    Args:
+        tobs (float): Template observation time [s].
+        backend (str, optional): ``force_backend`` name. Default ``"cpu"``.
+
+    Returns:
+        gbgpu.gbgpu.GBGPU: The waveform generator.
+    """
     from lisatools.detector import L1Orbits
     from gbgpu.gbgpu import GBGPU
 
@@ -223,16 +313,25 @@ def build_wave_gen(tobs: float, backend: str = "cpu"):
 
 
 def batched_overlaps(T, kmin, pairs, max_pairs=None) -> np.ndarray:
-    """``Matcher.match`` for every row of ``pairs``, vectorized.
+    """:meth:`Matcher.match` for every row of ``pairs``, vectorized.
 
-    T: (m, 3, N) complex templates sharing ONE length N (numpy or cupy);
-    kmin: (m,) their first frequency bins; pairs: (P, 2) indices into T.
     Two templates overlap on bins [max(ka, kb), min(ka, kb) + N), so for a
     fixed bin shift s = kb - ka both slices are fixed: the pairs are
     grouped by s and each group is one gathered product + sum (in
-    sub-batches of ``max_pairs`` to bound the scratch). |s| >= N shares no
+    sub-batches of ``max_pairs`` to bound the scratch). ``|s| >= N`` shares no
     bin -> 0, a zero-norm template -> 0, as in the scalar reference.
-    Returns (P,) numpy float."""
+
+    Args:
+        T (``xp.ndarray``): ``(m, 3, N)`` complex XYZ templates sharing ONE
+            length N (numpy or cupy).
+        kmin (array-like): ``(m,)`` their first frequency bins.
+        pairs (array-like): ``(P, 2)`` indices into ``T``.
+        max_pairs (int, optional): Sub-batch size. Default ``None`` = all
+            pairs of a shift at once.
+
+    Returns:
+        np.ndarray: ``(P,)`` float matches in ``[0, 1]``.
+    """
     pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
     out = np.zeros(len(pairs))
     if not len(pairs):
@@ -264,13 +363,25 @@ def batched_overlaps(T, kmin, pairs, max_pairs=None) -> np.ndarray:
 
 def merge_report_lines(pairs, cross_match, f0, p, mult, coher,
                        n_show: int = REPORT_PAIRS) -> list:
-    """The MERGE TEST log block: the class counts, then the ``n_show``
-    highest cross-matches of the merge (> 0.9) and middle (0.5-0.9]
-    classes, each followed by how many were not shown. Every pair and its
-    cross-match is in the output npz (``pairs``, ``cross_match``).
-    Printing every candidate (with a scan of all pairs per printed line)
-    put ~47k lines per self-refit build into the 9mo job log, 285k in job
-    763 by 2026-10-14."""
+    """The MERGE TEST log block, as a list of lines.
+
+    The class counts, then the ``n_show`` highest cross-matches of the
+    merge (> 0.9) and middle (0.5-0.9] classes, each followed by how many
+    were not shown. Every pair and its cross-match is in the output npz
+    (``pairs``, ``cross_match``). Printing every candidate (with a scan of
+    all pairs per printed line) put ~47k lines per self-refit build into
+    the 9mo job log, 285k in job 763 by 2026-10-14.
+
+    Args:
+        pairs (array-like): ``(P, 2)`` component pairs.
+        cross_match (array-like): ``(P,)`` their matches.
+        f0, p, mult, coher (array-like): Per-component f0 [mHz], ``p``,
+            ``mult`` and median member match, for the printed lines.
+        n_show: Lines per class. Default ``REPORT_PAIRS`` (10).
+
+    Returns:
+        list of str: The lines.
+    """
     pairs = np.asarray(pairs).reshape(-1, 2)
     cross_match = np.asarray(cross_match)
     hi_m = np.flatnonzero(cross_match > 0.9)
@@ -299,10 +410,18 @@ def merge_report_lines(pairs, cross_match, f0, p, mult, coher,
 
 
 def pair_chunks(pairs, max_templates) -> list:
-    """Split ``pairs`` (P, 2), in order, into consecutive blocks of pair
-    indices whose unique-template count stays <= ``max_templates`` (at
-    least 2). Greedy; a template shared across a block boundary is
-    generated in both blocks."""
+    """Split ``pairs`` into consecutive blocks with at most ``max_templates`` unique templates.
+
+    Greedy, in order; the cap is at least 2; a template shared across a
+    block boundary is generated in both blocks.
+
+    Args:
+        pairs (array-like): ``(P, 2)`` template-index pairs.
+        max_templates (int): Unique templates allowed per block.
+
+    Returns:
+        list of np.ndarray: int64 index arrays into ``pairs``.
+    """
     cap = max(2, int(max_templates))
     chunks, cur, seen = [], [], set()
     for n, (i, j) in enumerate(np.asarray(pairs, dtype=np.int64).tolist()):
@@ -318,8 +437,26 @@ def pair_chunks(pairs, max_templates) -> list:
 
 
 class Matcher:
-    """Sampled-basis rows -> XYZ FD templates -> matches, on the backend of
-    ``gb`` (its arrays are numpy or cupy)."""
+    """Sampled-basis rows -> XYZ FD templates -> matches, on the backend of ``gb``.
+
+    Rows go through the stock GB transform
+    (``make_gb_transform_container`` with chirp mass, astrophysical fdot
+    ratio and distance) to the 9 GBGPU parameters; template lengths follow
+    gbgpu's ``get_N`` (capped at ``N_CAP``).
+
+    Args:
+        gb (gbgpu.gbgpu.GBGPU): The waveform generator
+            (:func:`build_wave_gen`); its arrays are numpy or cupy.
+        tobs (float): Observation time [s].
+        dt (float): Sample cadence [s] handed to ``run_wave``.
+        oversample (int): ``get_N`` oversampling.
+        chunk_bytes (int, optional): Memory budget of one merge-test
+            template chunk plus its overlap scratch. Default 1 GiB.
+
+    Attributes:
+        tc: The GB transform container.
+        n_wf (int): Templates generated so far.
+    """
 
     def __init__(self, gb, tobs, dt, oversample,
                  chunk_bytes=int(DEFAULT_CHUNK_GB * 2 ** 30)):
@@ -334,15 +471,18 @@ class Matcher:
         self.n_wf = 0
 
     def row_n(self, p: np.ndarray) -> np.ndarray:
-        """Template length per TRANSFORMED row: gbgpu ``get_N`` on (amp, f0),
-        capped at ``N_CAP``. A call on several rows uses their max."""
+        """Template length per TRANSFORMED row: gbgpu ``get_N`` on (amp, f0), capped at ``N_CAP``.
+
+        A ``run_wave`` call on several rows uses their max. Returns an
+        ``(m,)`` int64 array.
+        """
         from gbgpu.utils.utility import get_N
 
         n = get_N(p[:, 0], p[:, 1], self.tobs, oversample=self.oversample)
         return np.minimum(N_CAP, np.asarray(n)).astype(np.int64)
 
     def waves(self, rows_sampled: np.ndarray):
-        """(m, 9) sampled rows -> host (XYZf (m, 3, N) complex, kmin (m,))."""
+        """``(m, 9)`` sampled rows -> host ``(XYZf (m, 3, N) complex, kmin (m,))``, one length N."""
         p = self.tc.both_transforms(np.atleast_2d(rows_sampled))
         N = int(self.row_n(p).max())
         self.gb.run_wave(*[p[:, i] for i in range(9)],
@@ -351,9 +491,10 @@ class Matcher:
         return _to_host(self.gb.XYZf), _to_host(self.gb.start_inds)
 
     def _templates(self, p: np.ndarray, N: int):
-        """Templates of the transformed rows ``p`` at ONE length ``N``, in
-        ``run_wave`` batches sized to the memory budget. Returns
-        (T (m, 3, N) on the backend, kmin (m,) host int)."""
+        """Templates of the transformed rows ``p`` at ONE length ``N``, batched to the budget.
+
+        Returns ``(T (m, 3, N) on the backend, kmin (m,) host int)``.
+        """
         m = len(p)
         per = max(1, self.chunk_bytes // (GEN_SCRATCH * 3 * N * 16))
         T = None
@@ -372,12 +513,21 @@ class Matcher:
         return T, kmin
 
     def pair_matches(self, rows_sampled: np.ndarray, pairs) -> np.ndarray:
-        """``match`` for every (i, j) row of ``pairs`` over the sampled
-        ``rows_sampled``, each pair at the length ``waves`` gives the two
-        rows together, N = max(N_i, N_j). Per length, the pairs are cut
-        into chunks of at most ~half the budget of templates; each template
-        of a chunk is generated once and the overlaps batched
-        (``batched_overlaps``, the other half). Returns (P,) numpy."""
+        """:meth:`match` for every (i, j) row of ``pairs`` over the sampled ``rows_sampled``.
+
+        Each pair is evaluated at the length ``waves`` gives the two rows
+        together, N = max(N_i, N_j). Per length, the pairs are cut into
+        chunks of at most ~half the budget of templates; each template of a
+        chunk is generated once and the overlaps batched
+        (:func:`batched_overlaps`, the other half).
+
+        Args:
+            rows_sampled (np.ndarray): ``(m, 9)`` sampling-basis rows.
+            pairs (array-like): ``(P, 2)`` indices into ``rows_sampled``.
+
+        Returns:
+            np.ndarray: ``(P,)`` matches.
+        """
         pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
         out = np.zeros(len(pairs))
         if not len(pairs):
@@ -402,7 +552,16 @@ class Matcher:
 
     @staticmethod
     def match(a, ka, b, kb):
-        """Phase-maximized normalized XYZ overlap, flat weighting."""
+        """Phase-maximized normalized XYZ overlap, flat weighting.
+
+        Args:
+            a, b (np.ndarray): ``(3, N_a)`` / ``(3, N_b)`` complex templates.
+            ka, kb (int): Their first frequency bins.
+
+        Returns:
+            float: ``|<a|b>| / sqrt(<a|a><b|b>)`` over the shared bins
+            (0 with no shared bin or a zero norm).
+        """
         lo = max(ka, kb)
         hi = min(ka + a.shape[-1], kb + b.shape[-1])
         if hi <= lo:
@@ -414,6 +573,19 @@ class Matcher:
 
 # ------------------------------------------------------------------
 def main(argv=None):
+    """CLI: referee a fitter npz against its store and write the referee npz.
+
+    The argparse description is the first line of the module docstring.
+    Members are re-extracted over the fit's ``meta["last_k"]`` rows, so the
+    fit must have been run with ``--last-k`` (every automatic build passes
+    it). The default ``--backend`` is ``GB_WARM_START_REFEREE_BACKEND``
+    (else ``cpu``), the default ``--chunk-gb``
+    ``GB_WARM_START_REFEREE_CHUNK_GB`` (else 1.0). Prints the report;
+    returns ``None``.
+
+    Args:
+        argv (list of str, optional): Arguments; ``None`` = ``sys.argv[1:]``.
+    """
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--npz", required=True)
     ap.add_argument("--store", required=True)

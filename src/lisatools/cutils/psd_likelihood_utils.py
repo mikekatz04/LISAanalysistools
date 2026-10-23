@@ -1,9 +1,14 @@
 """
 CuPy-based PSD likelihood computation.
 
-This module provides the same functionality as `psd_likelihood_numba.py` but uses
-CuPy's vectorized operations and vendor-optimized libraries (cuBLAS, cuSOLVER)
-instead of custom CUDA kernels. This approach:
+Status: not imported anywhere in ``lisatools`` (nor its tests / scripts); the global fit's
+PSD likelihood runs through :mod:`lisatools.sensitivity` and the backend kernels. The noise
+model here is the analytic EQUAL-ARM XYZ model (single ``LISA_L = 2.5e9`` m arm, TDI 1.5 or
+2.0 transfer factors) with hard-coded constants, not the production unequal-arm model.
+
+This module provides the same functionality as ``psd_likelihood_numba.py`` (no longer in the
+tree) but uses CuPy's vectorized operations and vendor-optimized libraries (cuBLAS,
+cuSOLVER) instead of custom CUDA kernels. This approach:
 
 - Leverages highly-optimized vendor libraries for linear algebra
 - Simplifies code maintenance (no manual kernel optimization)
@@ -11,6 +16,7 @@ instead of custom CUDA kernels. This approach:
 - More Pythonic and easier to debug
 
 Trade-offs:
+
 - Less fine-grained control over GPU execution
 - May use more temporary memory for intermediate arrays
 - Batch operations require careful broadcasting
@@ -372,6 +378,7 @@ if HAS_NUMBA:
 # =============================================================================
 
 
+# TODO check: keep/remove/document -- module imported nowhere in lisatools/tests/scripts; equal-arm analytic PSD likelihood, not reached by the 9mo/12mo runs
 def psd_likelihood_xyz_numba_fused(
     f_arr,
     data,
@@ -466,6 +473,7 @@ def _ensure_cupy_array(arr, dtype=None):
     return cp.asarray(arr, dtype=dtype)
 
 
+# TODO check: keep/remove/document -- module imported nowhere; duplicates lisatools.detector.LISAModel.lisanoises
 def lisanoises(f, Soms_d_in, Sa_a_in, return_relative_frequency=True):
     """LISA noise model (vectorized).
 
@@ -491,6 +499,7 @@ def lisanoises(f, Soms_d_in, Sa_a_in, return_relative_frequency=True):
     return Sa_d, Soms_d
 
 
+# TODO check: keep/remove/document -- module imported nowhere; not reached by the 9mo/12mo runs
 def extended_lisanoises(f, Soms_d_in, Sa_a_in, return_relative_frequency=True):
     """Extended LISA noise model with additional noise sources (all zeros for now).
 
@@ -505,6 +514,7 @@ def extended_lisanoises(f, Soms_d_in, Sa_a_in, return_relative_frequency=True):
     return Sa, Soms, zeros, zeros, zeros, zeros
 
 
+# TODO check: keep/remove/document -- module imported nowhere; not reached by the 9mo/12mo runs
 def sgal(fr, amp, alpha, sl1, kn, sl2):
     """Galactic confusion noise model (vectorized)."""
     xp = cp if HAS_CUPY else np
@@ -517,6 +527,7 @@ def sgal(fr, amp, alpha, sl1, kn, sl2):
     )
 
 
+# TODO check: keep/remove/document -- module imported nowhere; equal-arm XX PSD, not reached by the 9mo/12mo runs
 def noisepsd_xx(
     f,
     tm_noise,
@@ -556,6 +567,7 @@ def noisepsd_xx(
     return total_noise
 
 
+# TODO check: keep/remove/document -- module imported nowhere; equal-arm XY CSD, not reached by the 9mo/12mo runs
 def noisecsd_xy(
     f,
     tm_noise,
@@ -594,6 +606,7 @@ def noisecsd_xy(
     return total_noise
 
 
+# TODO check: keep/remove/document -- module imported nowhere; not reached by the 9mo/12mo runs
 def build_xyz_covariance(f_arr, Soms_d_all, Sa_a_all, Amp_all, alpha_all, sl1_all, kn_all, sl2_all):
     """Build 3×3 noise covariance matrices for XYZ channels.
 
@@ -653,6 +666,7 @@ def build_xyz_covariance(f_arr, Soms_d_all, Sa_a_all, Amp_all, alpha_all, sl1_al
     return cov
 
 
+# TODO check: keep/remove/document -- module imported nowhere; not reached by the 9mo/12mo runs
 def invert_covariance_batch(cov):
     """Invert batched 3×3 covariance matrices using Cholesky decomposition.
 
@@ -689,6 +703,7 @@ def invert_covariance_batch(cov):
     return inv_cov, logdet
 
 
+# TODO check: keep/remove/document -- module imported nowhere; not reached by the 9mo/12mo runs
 def psd_likelihood_xyz_cupy(
     f_arr,
     data,
@@ -839,6 +854,7 @@ def psd_likelihood_xyz_cupy(
 #     return inv_cov, logdet
 
 
+# TODO check: keep/remove/document -- module imported nowhere; not reached by the 9mo/12mo runs
 def psd_likelihood_xyz_cupy_optimized(
     f_arr,
     data,
@@ -950,6 +966,7 @@ def psd_likelihood_xyz_cupy_optimized(
 # =============================================================================
 
 
+# TODO check: keep/remove/document -- module imported nowhere; not reached by the 9mo/12mo runs
 def psd_likelihood_numba(
     f_arr,
     data,

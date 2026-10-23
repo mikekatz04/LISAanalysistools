@@ -12,7 +12,31 @@ on the AnalysisContainers, scored via ``acs.likelihood()``), and adds the
 stft_tof C++ XYZ-sensitivity kernel (``psd_likelihood_wrap`` shared-memory
 sums) as a fast path when the data basis is FD or STFT and the ACA holds a
 single shard. The WDM basis falls back to the ACA route until the WDM
-counterpart kernels land in domains.cu.
+counterpart kernels land in domains.cu; on the ACA route the walker-batched
+``PSD_BATCH`` scorer (default on) builds every walker's covariance in one
+batched pass (:meth:`PSDMove._compute_log_like_batched`).
+
+Pipeline position. :func:`lisatools.globalfit.recipe.build_noise_moves` builds
+one ``(search, pe)`` pair of :class:`PSDMove` per noise branch, each with its
+own ladder; the stock names are ``psd_pe`` / ``galfor_pe`` / ``sgwb_pe`` and
+``psd_search`` / ``galfor_search`` / ``sgwb_search`` (``docs/conventions.md``,
+"Noise moves are split"). On the 9mo / 12mo runs (``erebor.all_sources``, no
+sgwb branch) only ``psd_pe`` and ``galfor_pe`` run: in ``full_pe`` and inside
+``gb_search_2``'s cycle-end noise search (a
+:class:`~lisatools.globalfit.moves.globalfitmove.MaxLogLCombineMove` over the
+two); the noise is pinned at launch, so no noise-search stage runs and the
+``*_search`` twins are built but never staged.
+
+Knobs: ladder size ``PSD_NTEMPS`` / ``GALFOR_NTEMPS`` / ``SGWB_NTEMPS`` (settings
+fields, default 12; branches sampled by ONE move must share a size, else the build
+raises), repeats per
+propose ``{PSD,GALFOR,SGWB}_NUM_PROP_REPEATS`` (settings default 50; launchers 10;
+``full_pe`` raises them to ``PE_INMODEL_REPEATS=25`` at entry), the inner
+proposal ``{P}_INNER_MOVE_KIND`` (unset -> ``eigen`` for a block of fewer than
+three walkers), the eigen tables ``{P}_EIGEN_INFO`` (``ll`` default; launchers
+``fisher``), ``{P}_EIGEN_SCOPE``, ``{P}_EIGEN_TEMPER_SIGMAS``, ``{P}_EIGEN_REFRESH``,
+``{P}_EIGEN_EPS_REL``, the batched scorer ``PSD_BATCH``, and the debug plot hook
+``{P}_DEBUG*``; see :class:`PSDMove`.
 """
 
 import os
@@ -74,6 +98,7 @@ from .walkerfanout import WalkerFanoutMixin, pooled_ladder_step
 logger = logging.getLogger(__name__)
 
 
+# TODO check: keep/remove/document -- galfor ratchet only (PSDMove.forced_noise_step); GALFOR_RATCHET default 0, launchers 0, ratchet dropped from production 2026-10-03
 def clip_shift_to_prior(coords, delta, prior_fn, max_iter=48):
     """Shift every row of ``coords`` by ``delta``, pulling any row that would
     leave the prior back to the box edge DIMENSION BY DIMENSION.
@@ -158,27 +183,83 @@ DEBUG_MODE = False
 
 
 class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
-    """
-    Noise-model move: samples ``sampled_branches`` of the noise model
-    (``psd``, ``galfor``, ``sgwb``) while the likelihood always evaluates the
-    FULL noise model — non-sampled noise branches contribute their cold-chain
-    coordinates (per walker), the same "temper your own ensemble against the
-    cold-chain rest" structure the add/remove source branches use. With the
-    default ``sampled_branches=None`` every noise branch present in the state
-    is sampled jointly (the historical single-joint-move behavior).
+    """Noise-model move: samples ``sampled_branches`` of the noise model.
+
+    Samples ``sampled_branches`` of the noise model (``psd``, ``galfor``,
+    ``sgwb``) while the likelihood always evaluates the FULL noise model —
+    non-sampled noise branches contribute their cold-chain coordinates (per
+    walker), the same "temper your own ensemble against the cold-chain rest"
+    structure the add/remove source branches use. With the default
+    ``sampled_branches=None`` every noise branch present in the state is
+    sampled jointly (the historical single-joint-move behavior). The stock
+    recipes build one instance pair per branch
+    (:func:`~lisatools.globalfit.recipe.build_noise_moves`: ``psd_pe`` /
+    ``psd_search``, ``galfor_pe`` / ``galfor_search``, ``sgwb_pe`` / ``sgwb_search``).
+
+    The ``propose(model, state)`` contract. ``propose`` is the
+    :class:`~lisatools.globalfit.moves.walkerfanout.WalkerFanoutMixin`'s: with one
+    compute rank it calls :meth:`propose_local` directly; with several it slices
+    the state per walker block, runs :meth:`propose_local` on every rank and
+    merges. :meth:`propose_local` then:
+
+    1. :meth:`_begin_propose`: checks the noise branches' cold rows against their
+       sub-states, freezes the NON-sampled noise branches at their cold rows
+       (``_fixed_noise_coords``), builds the working state from the sampled
+       branches' SUB-STATES (this move's own ladder, shape
+       ``(ntemps_module, nwalkers)``), resolves the inner proposal and, for
+       ``eigen``, refreshes the eigen tables every ``eigen_refresh_every``
+       visits;
+    2. runs the inner loop: ``num_repeats`` x :meth:`run_move`
+       (:meth:`run_move_for_loop`, the PE path), the plateau loop
+       (``max_logl_mode``, :meth:`run_move_max_likelihood`) or the tiled ensemble
+       search (search stages with ``ensemble_search``);
+    3. :meth:`_finish_propose`: writes each SAMPLED branch's full ladder into its
+       sub-state (coords, ``log_like``, ``log_prior``, ``betas`` and this
+       iteration's in-model / swap counters), mirrors row 0 into the main state
+       (``_sync_cold_row``), sets the cold ``log_prior`` to the FULL noise-model
+       prior sum, publishes every walker's cold-row noise model on its container
+       (``sens_mat``, then ``reset_linear_psd_arr``) and sets the cold
+       ``log_like`` to the refreshed container likelihoods (``acs.likelihood``).
+
+    It returns ``(new_state, accepted)`` with ``accepted`` cut to the engine
+    ladder. Non-sampled branches' sub-states are never written: each noise
+    sub-state is owned by the move that samples it.
+
+    Ladders and swaps. Each instance carries its own ``temperature_control``
+    (built by ``build_noise_moves`` with ``ntemps`` from the lead branch's
+    ``{P}_NTEMPS``, default 12, or its ``betas``; ``Tmax`` 1e6;
+    ``walker_inds`` excluded from swaps). Every repeat of :meth:`run_move` runs
+    an identity-paired swap within each walker; the walker-permuting ("fancy")
+    swap fires every ``permute_every`` repeats and never with one walker per
+    block (the production layout). Under several compute ranks the ranks'
+    ladders are frozen and the head adapts the shared ladder once per propose
+    from the pooled swap tallies (:meth:`fanout_merge_extra`).
 
     Args:
-        acs: AnalysisContainerArray containing the data and sensitivity information.
-        priors: dictionary of priors for the parameters.
-        *args: additional arguments for the Move class.
+        acs: AnalysisContainerArray containing the data and sensitivity information
+            (``dcga.acs`` when ``None`` and a ``dcga`` is given).
+        priors (dict): Branch name -> prior container for the noise branches.
+        *args: Forwarded to :class:`GlobalFitMove` and eryn's
+            :class:`~eryn.moves.StretchMove`.
         sampled_branches: which noise branches THIS move samples (subset of
-            ``["psd", "galfor", "sgwb"]``). ``None`` samples all present
-            branches jointly. Each move instance carries its own
-            ``temperature_control`` ladder for its sampled block.
-        num_repeats: number of times to repeat the move before returning.
-        max_logl_mode: if True, will keep running the move until the maximum log likelihood does not change for a certain number of checks. This is useful for finding the maximum likelihood point.
-        psd_kwargs: additional keyword arguments for the psd_log_like function.
-        sensitivity_backend: instance of XYZSensitivityBackend to use for computing the likelihood.
+            ``["psd", "galfor", "sgwb"]``, reordered canonically; an unknown name
+            raises ``ValueError``). ``None`` samples all present branches
+            jointly. Each move instance carries its own ``temperature_control``
+            ladder for its sampled block.
+        num_repeats: In-model repeats per propose (and per plateau-loop pass).
+            Default 1; ``build_noise_moves`` passes the branch's
+            ``num_prop_repeats``.
+        max_logl_mode: True makes :meth:`propose_local` run
+            :meth:`run_move_max_likelihood` (repeat until the cold-chain maximum
+            stops improving for 5 passes): the ``*_search`` instances. Default
+            ``False``.
+        psd_kwargs: Extra keyword arguments forwarded to :meth:`psd_log_like`
+            (kernel fast path only), which currently ignores them. Default ``{}``.
+        sensitivity_backend: The run's sensitivity backend
+            (``general_info.sensitivity_backend``: a
+            :class:`~lisatools.sensitivity.CompositeSensitivityBackend` on the
+            stock WDM runs, an :class:`~lisatools.sensitivity.XYZSensitivityBackend`
+            on the kernel fast path).
         psd_transform_fn: TransformContainer for transforming the PSD parameters.
         galfor_transform_fn: TransformContainer for transforming the galactic
             foreground parameters. NOTE the long-standing order convention is
@@ -187,22 +268,38 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
             reads ``[Amp, alpha, f_1, kn, f_2]`` (see
             :meth:`prepare_likelihood_inputs`; history in the commented
             reorder block in ``run.py``). Do not reorder here.
-        sgwb_transform_fn: TransformContainer hook for the SGWB parameters
-            (plumbed for symmetry; SGWB coordinates are currently consumed
-            untransformed on the ACA route, matching historical behavior).
-        permute_every: number of repeats after which to permute the walkers during a temperature swap. This helps with the mixing of the chains.
-        tolerance: minimum allowed distance between spline knot positions in the sensitivity model.
+        sgwb_transform_fn: TransformContainer for the SGWB parameters. Applied
+            on the ACA routes (:meth:`_build_sensitivity_for_walker`, the
+            batched scorer); the kernel fast path has no SGWB term and is
+            refused for an sgwb-bearing model.
+        permute_every: Cadence, in repeats, of the walker-permuting ("fancy")
+            temperature swap (fires on repeat indices divisible by it, and only
+            with more than one walker in the block). ``<= 0`` (e.g. -1) turns
+            it off. Default 10; ``build_noise_moves`` passes 50. Identity swaps
+            run every repeat.
+        tolerance: minimum allowed distance between spline knot positions in the
+            sensitivity model (kernel fast path with splines only). Default 0.
+        dcga: Run the kernel fast path on per-device replicas (multi-GPU
+            single-process runs). Default ``None``.
+        run_async: Forwarded to the DCGA likelihood. Default ``False``.
+        run_threaded: Threaded per-split dispatch. Default ``False``.
+        build_threads: CPU threads for per-walker sensitivity builds (see
+            :attr:`build_threads`). Default 1.
+        coarse_runtime (CoarseWDMRuntime, optional): The all-source coarse sidecar
+            (``COARSE_GPU_MODE``); ``None`` (default, and the 9mo / 12mo runs)
+            leaves every route on the fine likelihood.
         inner_move_kind: the in-model proposal, ``"eigen"`` (eryn
             ``EigenAxisMove`` on per-rung information-matrix tables) or
             ``"stretch"``; ``None`` resolves from the walker count (see
             :meth:`_resolve_inner_kind`). Settings field ``inner_move_kind``,
             env ``{PSD,GALFOR,SGWB}_INNER_MOVE_KIND``.
         eigen_refresh_every: proposes between eigen table refreshes (Settings
-            field, env ``{P}_EIGEN_REFRESH``).
+            field, env ``{P}_EIGEN_REFRESH``). Default 10.
         eigen_eps_rel: finite-difference step of both information-matrix
             routes (likelihood second differences, and the covariance
             differences of the ``"fisher"`` route), as a fraction of each
-            prior-box width (Settings field, env ``{P}_EIGEN_EPS_REL``).
+            prior-box width (Settings field, env ``{P}_EIGEN_EPS_REL``). Default
+            1e-4.
         eigen_info: information-matrix route of the eigen tables, ``"ll"``
             (likelihood second differences, the default) or ``"fisher"``
             (the expected noise Fisher, :meth:`_noise_fisher`; PSD_BATCH
@@ -211,9 +308,32 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
             ``{BRANCH}_EIGEN_INFO`` per branch (``PSD_EIGEN_INFO``,
             ``GALFOR_EIGEN_INFO``, ``SGWB_EIGEN_INFO``), then ``"ll"``. See
             ``docs/eigen-info-routes.md``.
-        **kwargs: additional keyword arguments for the Move class.
+        ensemble_search: Arm the tiled per-walker ensemble search in
+            search-kind stages (:meth:`run_move_ensemble_search`; settings field,
+            env ``{P}_ENSEMBLE_SEARCH``). Default ``False``.
+        ensemble_repeats: Tile copies ``R`` per walker (floored at 2).
+            Default 10.
+        ensemble_spread_lo: Lower target of each walker's tiled lnL
+            spread. Default 1.0.
+        ensemble_spread_hi: Upper target of the spread. Default 10.0.
+        ensemble_scale0: Starting perturbation scale, in prior-box
+            fractions. Default 1e-3.
+        ensemble_scale_tries: Rescaling rounds of the spread loop (floored
+            at 1). Default 4.
+        **kwargs: Forwarded to :class:`GlobalFitMove` (``name``, required) and
+            eryn's :class:`~eryn.moves.StretchMove` (``temperature_control``,
+            ``live_dangerously``, ``use_gpu``, ``periodic``, ...).
 
-    Env knobs:
+    Attributes:
+        NOISE_BRANCHES (tuple): ``("psd", "galfor", "sgwb")``, the canonical order.
+        sampled_branches (list[str] or None): See ``sampled_branches``.
+        num_repeats (int): See ``num_repeats`` (the fan-out ships a live value to
+            the ranks, e.g. ``PE_INMODEL_REPEATS`` in ``full_pe``).
+        max_logl_mode (bool): See ``max_logl_mode``.
+        psd_batch (bool): ``PSD_BATCH`` at construction (see the note).
+        prev_logl (np.ndarray): The last :meth:`compute_log_like` output.
+
+    Note:
         ``PSD_BATCH`` (seeds :attr:`psd_batch`, default ``1``): on the ACA
         (composite / WDM) route, score each walker batch through ONE batched
         covariance build + ONE batched likelihood per shard instead of the
@@ -230,8 +350,32 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         engages only when supported (CompositeSensitivityBackend with the
         instrument basis cache, a linear-in-noise-levels instrument model,
         3x3 channel structure, no frequency-layer mask, full-likelihood
-        containers); anything else silently keeps the per-walker path.
-        ``{BRANCH}_EIGEN_INFO``: see ``eigen_info`` above.
+        containers); anything else keeps the per-walker path, with one
+        ``[PSD_BATCH] ... OFF (reason)`` log line.
+
+        Other env knobs read by this class: ``{BRANCH}_EIGEN_INFO`` (see
+        ``eigen_info``); ``{P}_EIGEN_SCOPE`` (:meth:`_eigen_scope`) and
+        ``{P}_EIGEN_TEMPER_SIGMAS`` (:meth:`_eigen_temper_sigmas`), with ``P`` =
+        ``PSD`` / ``GALFOR`` / ``SGWB`` after the sampled branch;
+        ``{P}_DEBUG``, ``{P}_DEBUG_DIR``, ``{P}_DEBUG_PLOT_WALKER``,
+        ``{P}_DEBUG_EVERY`` (the residual-vs-model plot hook; ``FG_*`` aliases the
+        galfor prefix); ``GB_PROP_TIMING_SYNC`` (device sync in the
+        ``[PSD_TIMING]`` span timer, default ``0``).
+
+    Example:
+        The stock layer builds the instances; a recipe names them:
+
+        .. code-block:: python
+
+            from lisatools.globalfit.recipe import build_noise_moves
+
+            psd_search, psd_pe = build_noise_moves(
+                engine_info, curr, acs, priors, sampled_branches=["psd"])
+            galfor_search, galfor_pe = build_noise_moves(
+                engine_info, curr, acs, priors, sampled_branches=["galfor"])
+
+            # on a stock fit the recipe refers to them by stock name:
+            fit.recipe.get_move("psd_pe", stage="full_pe")
     """
     fanout_flat_body = False  # see the mixin: PSD reads walker count/devices off the LOCAL ACA
 
@@ -537,14 +681,17 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
 
     @property
     def dcga(self) -> DomainComputationGroupArray:
+        """The multi-device DCGA the move was built with (``None`` on the stock runs)."""
         return self._dcga
 
     @property
     def run_async(self) -> bool:
+        """Forwarded to the DCGA likelihood (``run_async`` constructor argument)."""
         return self._run_async
 
     @property
     def run_threaded(self) -> bool:
+        """Force threaded per-split dispatch (``run_threaded`` constructor argument)."""
         return self._run_threaded
 
     @property
@@ -694,15 +841,21 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
     # ------------------------------------------------------------------
 
     def transform_coords(self, coords: list, return_cupy: bool = False, xp=None):
-        """
-        Prepare the coordinates for the move. This can include transforming the parameters if necessary.
+        """Map sampling-basis noise rows to the kernel fast path's physical basis.
+
+        Kernel fast path only (FD / STFT basis; :meth:`psd_log_like`). Applies
+        ``psd_transform_fn`` / ``galfor_transform_fn`` when set.
 
         Args:
-            coords: list of numpy arrays containing the parameters for the move. The first element should be the PSD parameters, and the second element (if present) should be the galactic foreground parameters.
-            return_cupy: if True, will return the transformed coordinates as cupy arrays for use on the GPU. If False, will return numpy arrays.
-            xp: the array library to use (numpy or cupy).
+            coords: ``[psd_rows]`` or ``[psd_rows, galfor_rows]``, each
+                ``(n, ndim)``. Without galfor rows a negligible foreground
+                ``[1e-200, 1e-3, 1.0, 1.0, 1.0]`` is tiled in.
+            return_cupy: Return arrays converted with ``xp.asarray``. Default
+                ``False``.
+            xp (module, optional): Array module; default ``self.acs.xp``.
+
         Returns:
-            A tuple containing the transformed PSD parameters and galactic foreground parameters (if present) in the target array library.
+            tuple: ``(psd_pars, galfor_pars)``, each ``(n, ndim)``.
         """
         if xp is None:
             xp = self.acs.xp  # Use the array library from the analysis container
@@ -727,8 +880,25 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         return psd_pars, galfor_pars
 
     def prepare_likelihood_inputs(self, psd_pars, galfor_pars) -> tuple:
-        """
-        Prepare the inputs for the likelihood computation. This can include placing the data on the correct device and formatting the parameters as needed.
+        """Unpack physical-basis rows into the C++ XYZ kernel's argument tuple.
+
+        Kernel fast path only. Every component is copied into its own
+        allocation (no aliasing of the input buffers while an async kernel
+        runs). With ``sensitivity_backend.use_splines`` the spline knot
+        positions / amplitudes (columns ``3::2`` / ``2:-1:2``) are split into
+        the two noise levels and sorted by position.
+
+        Args:
+            psd_pars (xp.ndarray): ``(n, >=2)`` physical PSD rows (column 0
+                ``Soms_d``, 1 ``Sa_a``, then spline knots when used).
+            galfor_pars (xp.ndarray): ``(n, 5)`` rows unpacked as
+                ``[Amp, alpha, f_1, kn, f_2]`` (see the ``galfor_transform_fn`` note
+                in the class docstring).
+
+        Returns:
+            tuple: nine arrays, ``Soms_d``, ``Sa_a``, ``Amp``, ``alpha``,
+            ``f_1``, ``kn``, ``f_2``, knot positions, knot amplitudes; the last
+            two are ``None`` without splines.
         """
 
         xp = self.acs.xp  # Use the appropriate array library (numpy or cupy)
@@ -797,15 +967,25 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         return likelihood_args
 
     def psd_log_like(self, x: list, supps=None, **sens_kwargs) -> np.ndarray:
-        """
-        Internal method to compute the log likelihood for the PSD parameters via the C++ XYZ sensitivity kernel (stft_tof fast path).
+        """Score noise rows through the C++ XYZ sensitivity kernel (stft_tof fast path).
+
+        Used by :meth:`_score_rows` when :meth:`_kernel_fast_path_available`
+        (FD / STFT basis, single shard or a DCGA, no sgwb branch); never on a
+        WDM run. With a DCGA it routes to :meth:`_psd_log_like_dcga`. Rows whose
+        spline knots sit closer than ``tolerance`` score ``-1e300``.
 
         Args:
-            x: list of numpy arrays containing the parameters for the move. The first element should be the PSD parameters, and the second element (if present) should be the galactic foreground parameters.
-            supps: supplemental information for the likelihood computation, such as walker indices.
-            **sens_kwargs: additional keyword arguments to pass to the sensitivity backend for likelihood computation.
+            x: ``[psd_rows]`` or ``[psd_rows, galfor_rows]`` (sampling basis).
+            supps (dict): ``{"walker_inds": (n,) ints}``, the walker (data row)
+                of each row. Required.
+            **sens_kwargs: ``psd_kwargs``; accepted and not used by either
+                path.
+
         Returns:
-            A numpy array containing the log likelihood values for each set of parameters.
+            np.ndarray: ``(n,)`` log-likelihoods (host).
+
+        Raises:
+            ValueError: ``supps`` is ``None``.
         """
         if supps is None:
             raise ValueError("Must provide supps to identify the data streams.")
@@ -1581,6 +1761,16 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         return self._batch_route_state
 
     def _resolve_batched_route(self) -> bool:
+        """Check every PSD_BATCH precondition; on failure record the reason.
+
+        False (with ``_batch_route_reason`` set) for ``PSD_BATCH=0``, a backend
+        that is not a :class:`~lisatools.sensitivity.CompositeSensitivityBackend`
+        with an instrument basis cache and an ``InstrumentNoise`` component, a
+        coarse-WDM basis, a domain other than FD / WDM, an instrument model not
+        linear in the noise levels, an ACA without the batched plumbing or with a
+        channel structure other than 3 x 3, a compressing frequency-layer mask,
+        or a ``likelihood_source_only`` container.
+        """
         def _no(reason):
             self._batch_route_reason = reason
             return False
@@ -2123,27 +2313,37 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         return tmp_logl
 
     def compute_log_like(self, coords, inds=None, logp=None, supps=None, branch_supps=None):
-        """Compute the PSD/galfor branch log-likelihood.
+        """Compute the full-noise-model log-likelihood of the proposed rows (eryn callback).
 
-        Hybrid routing (stft_tof merge): when the C++ XYZ kernel fast path is
-        available (FD/STFT basis, single shard), score the proposals directly
-        through ``XYZSensitivityBackend.compute_log_like``. Otherwise fall
-        back to the dev-side, domain-agnostic route: install the proposed PSD
-        (and optional galactic foreground) into each walker's
-        :class:`AnalysisContainer` ``sens_mat`` and read the per-walker
-        likelihood from the shared :class:`AnalysisContainerArray` (works for
-        FD / STFT / WDM alike).
+        Rows with a ``-inf`` prior keep ``-1e300``. The surviving rows are
+        merged with the frozen non-sampled branches (:meth:`_merged_noise_rows`,
+        each row's walker from ``walker_inds``) and scored through
+        :meth:`compute_psd_rows` -> :meth:`_score_rows`, whose tiers are, in
+        order: the C++ XYZ kernel fast path (FD / STFT basis, single shard; the
+        stft_tof hybrid routing), the CPU coarse-WDM galfor sub-band and coarse
+        batch routes, the walker-batched ``PSD_BATCH`` route (the stock WDM
+        runs), and the per-walker container route (install each proposed
+        noise model as the walker container's ``sens_mat`` in one-row-per-walker
+        batches, read the containers' likelihoods, then restore the originals).
 
         Args:
-            coords: Branch-keyed dict of coordinates from the current state.
-            inds: Branch-keyed dict of leaf occupancy flags (unused here).
-            logp: Optional pre-computed log prior; computed if ``None``.
-            supps: Eryn supplemental information; ``walker_inds`` selects
-                which physical walker each row maps to.
-            branch_supps: Branch-supplemental dict (unused here).
+            coords (dict): Branch-keyed coordinates, each
+                ``(ntemps, nwalkers, 1, ndim)`` in the sampling basis.
+            inds (dict, optional): Branch-keyed leaf occupancy flags (only
+                forwarded to :meth:`compute_log_prior`, which ignores them).
+            logp (np.ndarray, optional): Pre-computed ``(ntemps, nwalkers)`` log
+                prior; computed if ``None``.
+            supps (eryn.state.BranchSupplemental): Eryn supplemental information;
+                ``walker_inds`` selects which physical walker each row maps to.
+                Required unless every row has a ``-inf`` prior.
+            branch_supps (dict, optional): Branch supplementals (unused here).
 
         Returns:
-            Tuple ``(logl, blobs)`` matching the eryn signature.
+            tuple[np.ndarray, None]: ``(logl, None)``, ``logl`` shaped like ``logp``
+            (also kept on :attr:`prev_logl` when any row survives the prior cut).
+
+        Raises:
+            ValueError: ``supps`` is ``None`` while some row has a finite prior.
         """
         if logp is None:
             logp = self.compute_log_prior(coords, inds=inds, supps=supps, branch_supps=branch_supps)
@@ -2309,7 +2509,26 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         return tmp_logl
 
     def compute_psd_rows(self, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords):
-        """The scoring seam: scatters the rows over the replicas in one-walker replica mode."""
+        """The scoring seam: scatters the rows over the replicas in one-walker replica mode.
+
+        Every likelihood this move needs goes through here: the proposal
+        scoring (:meth:`compute_log_like`) and the ``ll`` eigen-table route
+        (:meth:`_refresh_eigen_tables`). Without an active row fan-out (one-walker
+        replica mode, opt-in through ``GF_GPU_ROUTING=1``, with the
+        ``{P}_LIKELIHOOD_FANOUT`` knob on) this is :meth:`_score_rows` on this
+        rank's ACA.
+
+        Args:
+            walker_inds_keep (np.ndarray): ``(n,)`` walker (container) index per row.
+            psd_coords (np.ndarray): ``(n, ndim_psd)`` sampling-basis rows.
+            galfor_coords (np.ndarray or None): ``(n, ndim_galfor)`` rows, or ``None``
+                (no galfor).
+            sgwb_coords (np.ndarray or None): ``(n, ndim_sgwb)`` rows, or ``None``
+                (no sgwb).
+
+        Returns:
+            np.ndarray: ``(n,)`` log-likelihoods of the full noise model.
+        """
         if not self.rows_active():
             return self._score_rows(walker_inds_keep, psd_coords, galfor_coords, sgwb_coords)
         # NOT WALKER-ROUTED, AND IT DOES NOT NEED TO BE (2026-09-23).
@@ -2342,6 +2561,7 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         return out["ll"]
 
     def _serve_psd_rows_local(self, rows):
+        """Score one row chunk of a replica scatter: ``{"ll": (n,)}`` (empty-safe)."""
         n = int(np.shape(rows["walker_inds"])[0])
         if n == 0:
             return {"ll": np.zeros(0)}
@@ -2349,6 +2569,7 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         return {"ll": np.asarray(ll, dtype=float).reshape(n)}
 
     def serve_psd_rows(self, payload, clock, model):
+        """Compute-rank handler of the ``psd_rows`` scatter (one-walker replica mode)."""
         return self._serve_psd_rows_local(payload["rows"])
 
     # ---- replays: every replica mirrors the head's propose-begin prep and
@@ -2357,6 +2578,7 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
     # that knob only changes who SCORES rows; it must not stop the replays
     # that keep every replica's fixed-noise state / sens_mat aligned. ----
     def _replay_noise_begin(self):
+        """Run the propose-begin prep (:meth:`_apply_noise_begin`) here and on every replica."""
         payload = {
             "kind": "begin",
             "fixed_noise_coords": {
@@ -2369,6 +2591,14 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         self.row_fanout.replay("psd_replay", payload, local_body=self._apply_psd_replay)
 
     def _apply_noise_begin(self, payload):
+        """Install the frozen noise rows and rebuild the fixed-component caches.
+
+        Sets ``_fixed_noise_coords`` from the payload, then
+        :meth:`_prepare_fixed_component_covariances` (builds only on a CPU
+        sensitivity backend with ``component_covariance`` and at least one
+        frozen branch, without a DCGA; a no-op on GPU runs) and, with a coarse
+        sidecar, its refresh and coarse fixed covariances.
+        """
         self._fixed_noise_coords = {
             k: np.asarray(v, dtype=np.float64) for k, v in payload["fixed_noise_coords"].items()
         }
@@ -2391,6 +2621,10 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         self.row_fanout.replay("psd_replay", payload, local_body=self._apply_psd_replay)
 
     def _apply_psd_replay(self, payload):
+        """Apply one replay payload: ``"begin"`` (frozen rows) or ``"publish"`` (walker 0's model).
+
+        Raises ``ValueError`` on any other ``kind``.
+        """
         kind = payload["kind"]
         if kind == "begin":
             self._apply_noise_begin(payload)
@@ -2409,6 +2643,7 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
             raise ValueError(f"unknown noise replay kind {kind!r}")
 
     def serve_psd_replay(self, payload, clock, model):
+        """Compute-rank handler of the ``psd_replay`` command (replica mode); returns ``None``."""
         self._apply_psd_replay(payload)
         return None
 
@@ -2424,6 +2659,7 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         )
 
     def fanout_knob_prefix(self):
+        """Upper-cased lead sampled branch (``PSD`` / ``GALFOR`` / ``SGWB``) for knob names."""
         return str((self.sampled_branches or ["psd"])[0]).upper()
 
     def compute_log_prior(self, branches_coords, *args, **kwargs):
@@ -2435,10 +2671,14 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         would double-count them against another noise move).
 
         Args:
-            branches_coords: Branch-keyed dict of coordinates.
+            branches_coords: Branch-keyed dict of coordinates, each
+                ``(ntemps, nwalkers, 1, ndim)``.
+            *args: Ignored (eryn callback signature).
+            **kwargs: Ignored (eryn callback signature).
 
         Returns:
-            ``(ntemps, nwalkers)`` array of prior log probabilities.
+            np.ndarray: ``(ntemps, nwalkers)`` prior log probabilities (``None``
+            when no sampled branch is in ``branches_coords``).
         """
         # wait to get ntemps, nwalkers
         logp = None
@@ -2573,16 +2813,26 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         return new_state, keep
 
     def run_move(self, move_i, model, state):
-        """Run one stretch-move iteration and (optionally) a tempering swap.
+        """Run one in-model repeat: the inner proposal, then the temperature swaps.
+
+        The inner proposal is :meth:`_inner_propose` (eigen-axis MH or eryn
+        stretch), or :meth:`_propose_delayed_acceptance` with a coarse sidecar in
+        ``delayed_acceptance`` mode. Its acceptances are added to the per-propose
+        in-model tallies. Then ``temperature_control.temperature_swaps`` runs:
+        identity-paired swaps every repeat, the walker-permuting swap when
+        ``move_i`` is a multiple of ``permute_every`` and the block holds more
+        than one walker;
+        the swap acceptances are added to the swap tallies (written into the
+        sub-states by :meth:`_finish_propose`).
 
         Args:
-            move_i: Iteration index used to schedule the periodic
-                :attr:`permute_every` temperature swap.
-            model: Eryn ``Model`` object.
-            state: Current sampler state.
+            move_i (int): Repeat index used to schedule the walker-permuting swap.
+            model (eryn.model.Model): The working model of :meth:`_begin_propose`.
+            state (GFState): Current working (module-ladder) state.
 
         Returns:
-            Tuple ``(new_state, accepted)``.
+            tuple: ``(new_state, accepted)``, ``accepted`` shaped
+            ``(ntemps_module, nwalkers)``.
         """
         if (
             self.coarse_sidecar_active
@@ -2663,7 +2913,17 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         return new_state, accepted
 
     def run_move_for_loop(self, model, state, num_repeats):
-        """Run :meth:`run_move` ``num_repeats`` times sequentially."""
+        """Run :meth:`run_move` ``num_repeats`` times sequentially (the PE path).
+
+        Args:
+            model (eryn.model.Model): The working model of :meth:`_begin_propose`.
+            state (GFState): Working (module-ladder) state.
+            num_repeats (int): Repeat count (``self.num_repeats`` from
+                :meth:`propose_local`).
+
+        Returns:
+            tuple: ``(state, accepted)`` of the last repeat.
+        """
         for i in tqdm(
             range(num_repeats), desc="psd update",
             disable=not getattr(self, "progress", False),
@@ -2674,9 +2934,11 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
     def run_move_max_likelihood(self, model, state):
         """Repeat :meth:`run_move_for_loop` until the max log-like plateaus.
 
-        Used in search-style runs (``max_logl_mode=True``). The loop counts
-        consecutive iterations during which the cold-chain max log-likelihood
-        no longer increases and exits after ``num_checks`` such iterations.
+        Used in search-style runs (``max_logl_mode=True``, the ``*_search``
+        instances). The loop counts consecutive iterations during which the
+        cold-chain max log-likelihood no longer increases (counting only after
+        it has changed once) and exits after ``num_checks`` (hard-coded 5)
+        such iterations. There is no iteration cap.
 
         Under several compute ranks this plateau is the RANK's walker block's
         maximum, so search termination is per block -- see the module docstring
@@ -2916,6 +3178,7 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
                                         nt, B, R, scale)
 
     def _ensemble_inner_move(self):
+        """The cached eryn ``StretchMove`` of the ensemble search (``periodic`` re-synced)."""
         if getattr(self, "_ensemble_inner", None) is None:
             # live_dangerously: the red/blue floor is about the OUTER
             # ensemble's dimensionality; here the complement is manufactured
@@ -3042,6 +3305,7 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         return kind
 
     def _eigen_inner_move(self):
+        """The cached eryn ``EigenAxisMove`` (axis mode), synced to this move's ladder and wrap."""
         if self._eigen_inner is None:
             from eryn.moves import EigenAxisMove
 
@@ -3289,9 +3553,11 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
     # different swap population from single mode's), and the control's own
     # swaps_accepted stored by eryn/HDF is the head block's count.
     def fanout_temperature_controls(self):
+        """The one ladder this move adapts (frozen on the ranks by the fan-out install)."""
         return [self.temperature_control]
 
     def fanout_payload_extra(self):
+        """Head -> ranks: the current ``betas`` (and a pending ratchet shift, if any)."""
         extra = {"betas": np.array(self.temperature_control.betas, dtype=float, copy=True)}
         if self._forced_step_deltas is not None:
             # the galfor ratchet's forced shift: every rank applies the same
@@ -3302,6 +3568,7 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         return extra
 
     def fanout_apply_extra(self, extra):
+        """Rank side: rebind the shipped ``betas``; set (or clear) the forced shift."""
         if "betas" in extra:
             # rebind, never write in place: the control may alias the recipe's betas array
             self.temperature_control.betas = np.asarray(extra["betas"], dtype=float).copy()
@@ -3314,9 +3581,11 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
 
     @staticmethod
     def _tally_or_empty(arr):
+        """``arr`` as a flat float array, or an empty one for ``None``."""
         return np.zeros(0) if arr is None else np.asarray(arr, dtype=float).ravel()
 
     def fanout_reply_extra(self, part):
+        """Rank -> head: this block's per-propose swap tallies (accepted, proposed)."""
         return {
             "swaps_accepted": self._tally_or_empty(self._tally_swaps_accepted),
             "swaps_proposed": self._tally_or_empty(self._tally_swaps_proposed),
@@ -3353,9 +3622,14 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         Builds a temporary :class:`GFState` containing only THIS move's
         sampled noise branches (non-sampled noise branches are frozen at
         their cold rows and merged into every likelihood evaluation), runs
-        the inner stretch-move loop, then writes the accepted coordinates
-        back into a copy of ``state`` and refreshes each walker's
-        sensitivity matrix in :attr:`acs`.
+        the inner loop -- :meth:`run_move_max_likelihood` with
+        ``max_logl_mode``, else :meth:`run_move_ensemble_search` when
+        :meth:`_ensemble_search_active`, else :meth:`run_move_for_loop` (the
+        production path) -- then writes the accepted coordinates back into a
+        copy of ``state`` (full ladder into the sampled branches' sub-states,
+        cold row mirrored into the main state) and refreshes each walker's
+        sensitivity matrix in :attr:`acs`. See the class docstring for the
+        full contract.
 
         Runs on the FULL state single-process and on this rank's walker slice
         under several compute ranks (``WalkerFanoutMixin.propose`` dispatches).
@@ -3365,8 +3639,20 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         :meth:`forced_noise_step` so a forced step publishes through exactly
         this path.
 
+        Args:
+            model (eryn.model.Model): The eryn model (``analysis_container_arr``,
+                ``map_fn``, ``random``).
+            state (GFState): The current state (this rank's block under the
+                fan-out).
+
         Returns:
-            Tuple ``(new_state, accepted)``.
+            tuple: ``(new_state, accepted)``, ``accepted`` cut to the engine
+            ladder (the cold row).
+
+        Raises:
+            ValueError: A configured sampled branch is missing from the state,
+                the sampled branches' ladders differ in shape, or a cold-row
+                check fails.
         """
         deltas = self._forced_step_deltas
         ctx = self._begin_propose(model, state, resolve_inner=deltas is None)
@@ -3410,6 +3696,7 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
     #: ``extra`` (:meth:`fanout_payload_extra` / :meth:`fanout_apply_extra`).
     _forced_step_deltas = None
 
+    # TODO check: keep/remove/document -- only caller is noise_ratchet.py (galfor ratchet); GALFOR_RATCHET default 0, launchers 0, dropped from production 2026-10-03
     def forced_noise_step(self, model, state, deltas):
         """Shift sampled noise coordinates by a fixed vector and PUBLISH.
 
@@ -3924,6 +4211,7 @@ class PSDMove(WalkerFanoutMixin, GlobalFitMove, StretchMove):
         return ll
 
 
+# TODO check: keep/remove/document -- deprecated alias; no callers in src/scripts/LATW (exported from moves/__init__ + rst; used by tests/test_psd_move_multi_shard.py, tests/test_walkerfanout_mixin.py)
 class MultiGPUPSDMove(PSDMove):
     """Deprecated alias — :class:`PSDMove` is ONE structure that takes
     ``dcga=`` directly (2026-07 multi-GPU pass). This shim maps the legacy

@@ -1,6 +1,9 @@
 # EMRI direct-to-WDM templates: status and measurements
 
-Branch `emri-direct-wdm` (LAT). Plan: `~/.claude/plans/scalable-napping-toast.md`.
+Developed on branch `emri-direct-wdm` (LAT), now on `dev`: the direct template is the
+production EMRI path of the 9mo / 12mo runs (`EMRI_LIKELIHOOD=direct`,
+`EMRI_DIRECT_LOOKUP=kernel`, `EMRI_DIRECT_RESPONSE=dense`, `EMRI_TRAJ_WORKERS=8` in the
+launchers). The measurements below are point-in-time. Plan: `~/.claude/plans/scalable-napping-toast.md`.
 All numbers below are laptop CPU runs on CD1L (mojito light) data or synthetic sources;
 mismatch is `1 - Re(O)` with no time or phase maximisation, per TDI channel X, Y, Z.
 
@@ -318,13 +321,15 @@ choreography is untouched, only the scoring changes.
   would re-import `run_combined_staged.py` (and MPI); a warm-up that did not start every worker is
   refused. Any pool failure disables it for the run. Counters (rows, trajectories computed, cache
   hits/misses) are logged as `[EMRI_DIRECT] trajectory pool:` every 50 pooled batches.
-* **Launcher** (`submit_gf_6mo_v9_4gpu.sh`, EMRI block after `EMRI_EPS`): default `direct` since
+* **Launcher** (`submit_gf_6mo_v9_4gpu.sh`, and the same block in the 9mo v9 and flagship
+  launchers, EMRI block after `EMRI_EPS`): default `direct` since
   10-03 (`EMRI_LIKELIHOOD=full` restores production for scoring and template generation); the
   `# EMRI PREFLIGHT.` heredoc resolves the knobs through the settings class and, for direct, checks
   `EDGE_CROP_WAVELETS >= pixel_edge` (8), runs `tests.test_tdi_dense.TDDenseGPUParityTest` and
   (`EMRI_DIRECT_LOOKUP=kernel`) the fused kernel's GPU-vs-CPU test on the node's GPU (a skip
   refuses) and finds or builds the lookup table. The self-dispatch
-  passes `--cpus-per-task = 2 + EMRI_TRAJ_WORKERS` (4) when direct; `OMP_NUM_THREADS` stays 1.
+  passes `--cpus-per-task = 2 + EMRI_TRAJ_WORKERS` when direct (10: 8 workers since 2026-10-07,
+  was 4); `OMP_NUM_THREADS` stays 1.
 
 | check (laptop CPU, CD1L EMRI 1, 16 d, dt 20 s, dense, real getters + real move) | result |
 |---|---|
@@ -371,7 +376,8 @@ GPU's tables to another. `LISATOOLS_ORBITS_CACHE=0` bypasses the cache.
    times); one vectorised table call + one scatter-add per batch; interpolation `"spline"` (uniform
    cubic B-spline via ndimage, same code on scipy/cupyx; default); one tracer spline call.
    Remaining CPU cost: two FEW calls (~1.4 s) and the response (~0.9 s). Code is numpy/cupy
-   agnostic but has NOT run on a GPU yet: `scripts/emri/emri_batch_speed.py --direct-table`.
+   agnostic (written before its first GPU run; it has run on the cluster GPUs since, see the
+   H100 timing above, and in production since 10-03): `scripts/emri/emri_batch_speed.py --direct-table`.
 4. Memory: every FEW EMRI generator reads the whole 5.1 GB amplitude file at construction
    (`few/amplitude/ampinterp2d.py:235`), a ~6 GB transient footprint. One per process.
 5. EMRIs 0, 2-7: their L1 bricks are not on the laptop; run

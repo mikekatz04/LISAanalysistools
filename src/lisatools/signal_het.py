@@ -15,6 +15,16 @@ The WDM analysis window itself is NOT re-implemented here -- it is taken directl
 from :attr:`lisatools.domains.WDMSettings.window` (``phitilde`` sampled at the full
 ``Nt`` grid). The reference ``c0`` is produced by the source backend
 (``gb_signal_het_make_reference``), not by any Python polyphase.
+
+In the 9-month and 12-month runs these back the GB in-model scorer
+:class:`gbgpu.gbsignalhetcomputations.GBSignalHetComputations` (reference built in
+``setup_in_model``; the ``SIGHET_NT_LAYER`` knob sets ``nt_layer``: 180 on the
+9-month run, 240 on the 12-month run). The heterodyne ratio ``r = c1 / c0`` (proposed over reference
+coefficient) is evaluated on the sparse grid and expanded linearly inside each bin
+(``r + dr * n_off``), so ``<d|h>`` and ``<h|h>`` reduce to the per-bin moments
+returned by :func:`bin_fold_real`. See ``LISAanalysistools/CLAUDE.md`` ("V2
+signal-heterodyne likelihood path") and ``docs/conventions.md`` (narrowband
+mismatches ``mm2`` / ``mm5``) for the validation metrics.
 """
 from __future__ import annotations
 
@@ -29,6 +39,20 @@ def sparse_time_grid(Nt: int, Nt_active: int, nt_layer: int):
     positions ``stride//2 + arange(N_sparse_t) * stride`` (LOCAL active-time indices,
     ``int32``). These are the polyphase iFFT output positions the sig-het kernel and
     the backend reference producer share.
+
+    Args:
+        Nt: Fine WDM time pixels of the full grid.
+        Nt_active: Active time pixels.
+        nt_layer: Target sparse-grid resolution (``Nt // nt_layer`` pixels per bin).
+
+    Returns:
+        tuple[int, int, np.ndarray]: ``(stride, N_sparse_t, n_sparse_local)``.
+
+    Example:
+        >>> from lisatools.signal_het import sparse_time_grid
+        >>> stride, n_sparse, centres = sparse_time_grid(Nt=1440, Nt_active=1400, nt_layer=180)
+        >>> stride, n_sparse, centres[:3].tolist()
+        (8, 175, [4, 12, 20])
     """
     stride = int(Nt) // int(nt_layer)
     N_sparse_t = int(Nt_active) // stride
@@ -61,6 +85,22 @@ def bin_fold_real(data_complex, c0_complex, invC, n_b_idx_local, stride,
     xp-generic: the array module follows ``data_complex`` (numpy or cupy) so
     the GPU sig-het setup can fold device-resident residual slabs without a
     host round-trip.
+
+    Args:
+        data_complex: Complex WDM data ``(..., nch, Nf_active, Nt_active)``; only
+            its real part enters.
+        c0_complex: Complex reference carrier, same trailing shape.
+        invC: WDM inverse sensitivity: ``(..., nch, nch, Nf_active, Nt_active)``
+            for ``"XYZ"``, ``(..., nch, Nf_active, Nt_active)`` otherwise; only its
+            real part enters.
+        n_b_idx_local: ``(N_sparse_t,)`` bin-centre positions from
+            :func:`sparse_time_grid` (numpy or cupy).
+        stride (int): Pixels per bin (the last bin runs to ``Nt_active``).
+        Nt_active (int): Active time pixels.
+        tdi_type (str): ``"XYZ"`` (full 3x3 ``invC``) or a diagonal flavor.
+
+    Returns:
+        tuple: ``(A0p, A1p, B0, B1, B0nc, B1nc)`` as described above.
     """
     try:
         from .utils.utility import get_array_module

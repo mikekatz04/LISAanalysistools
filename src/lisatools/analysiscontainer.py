@@ -1,4 +1,35 @@
-"""High-level analysis containers combining data, sensitivity, and signal generation."""
+"""High-level analysis containers combining data, sensitivity, and signal generation.
+
+- :class:`AnalysisContainer`: one data / residual signal (a
+  :class:`~lisatools.domains.DomainBase`) + one sensitivity matrix + an optional signal
+  generator. The central likelihood object: data-only scores (:meth:`AnalysisContainer.snr`,
+  :meth:`AnalysisContainer.likelihood`), template scores
+  (:meth:`AnalysisContainer.template_likelihood`, ...), parameter scores through the
+  generator (:meth:`AnalysisContainer.calculate_signal_likelihood`, the Eryn hooks).
+- :class:`AnalysisContainerArray`: many containers (one per walker in the global fit) whose
+  residuals and inverse PSDs are repacked into contiguous per-GPU buffers
+  (``linear_data_arr`` / ``linear_psd_arr``), split across ``gpus`` and optionally run
+  one thread per split (``run_threaded``). The global fit builds one in
+  ``lisatools.globalfit.run`` (``setup_acs``) and every move scores against it.
+- :class:`BandView`: global-band-id view over a sharded array's buffers (the GB band
+  buffers), with :func:`band_gpu_assignment` / :func:`shard_lookup_maps` for the shard
+  layout.
+
+Example:
+    .. code-block:: python
+
+        from lisatools.analysiscontainer import AnalysisContainer
+        from lisatools.domains import FDSettings, FDSignal
+        from lisatools.sensitivity import XYZ2SensitivityMatrix
+
+        fd = FDSettings(N=data_length, df=df, min_freq=2.5e-3, max_freq=3.5e-3,
+                        force_backend="cpu")
+        data = FDSignal(xyz_fd, fd)  # (3, N) XYZ, sliced to the band
+        # analytic stock matrix for a quick start; the global fit builds a
+        # CompositeSensitivityMatrix per walker with UnequalArmInstrumentNoise
+        ac = AnalysisContainer(data, XYZ2SensitivityMatrix(fd, model="sangria"))
+        print(ac.snr(), ac.likelihood(source_only=True))
+"""
 
 from __future__ import annotations
 
@@ -45,6 +76,7 @@ from .utils.utility import AET, get_array_module, asnumpy
 from .utils.exceptions import BatchNotLaunchable
 
 
+# Type of ``AnalysisContainer.signal_gen``: one callable, or {model_name: callable}.
 SignalGenSpec = Union[Callable, Mapping[str, Callable]]
 
 
@@ -103,6 +135,14 @@ _CONTAINER_LEVEL_KWARGS = frozenset({"per_model_per_signal"})
 class AnalysisContainer:
     """Combinatorial container that combines sensitivity and data information.
 
+    The central likelihood object: scores the data / residual itself (:meth:`snr`,
+    :meth:`inner_product`, :meth:`likelihood`), a template against it
+    (:meth:`template_snr`, :meth:`template_inner_product`, :meth:`template_likelihood`), or
+    parameters through :attr:`signal_gen` (:meth:`calculate_signal_likelihood`,
+    :meth:`eryn_likelihood_function`, :meth:`eryn_likelihood_wrap`). Templates may cover a
+    sub-region of the data (STFT / WDM); the data and matrix are sliced to match. In the
+    global fit one container per walker sits in an :class:`AnalysisContainerArray`.
+
     Args:
         data: Data / Residual / Signal information. May be a :class:`DomainBase`
             child (e.g. :class:`~lisatools.domains.FDSignal`,
@@ -122,8 +162,9 @@ class AnalysisContainer:
             - a single ``Callable`` (legacy single-model usage), or
             - a ``dict`` mapping ``model_name -> Callable``. When a dict is
               given, the multi-model API in
-              :meth:`calculate_signal_likelihood` / ``_inner_product`` /
-              ``_snr`` is enabled: pass a ``dict`` of per-model parameter
+              :meth:`calculate_signal_likelihood` /
+              :meth:`calculate_signal_inner_product` /
+              :meth:`calculate_signal_snr` is enabled: pass a ``dict`` of per-model parameter
               arrays (1D or 2D), and per-model templates are summed within
               each model along axis 0 and then across models before the
               inner-product step.
@@ -136,13 +177,6 @@ class AnalysisContainer:
             a class (the auto-instantiate path). Must be empty when
             ``sens_mat`` is already an instance.
 
-        batch_evaluation: Attempt to evaluate a 2-D parameter block in ONE
-            generator call rather than looping. Inert unless the installed
-            generator declares ``supports_batch``, so the default is safe for
-            every generator that has not opted in.
-        batch_max_size: Split a batch into chunks of at most this many rows
-            (``None`` = one launch). Bounds peak memory, which grows linearly
-            in the batch.
         likelihood_source_only: Container-level default for the ``source_only``
             flag of the likelihood methods (:meth:`likelihood`,
             :meth:`calculate_signal_likelihood`, ...). When ``True``, calls
@@ -153,13 +187,59 @@ class AnalysisContainer:
             PSD the noise term is an overall constant, so dropping it leaves
             all likelihood *differences* unchanged while making the readout
             directly interpretable as the residual inner product. An
-            explicit ``source_only=`` at a call site always wins.
-
-        data_res_arr: Deprecated alias of ``data`` (kept for backward compatibility).
-        coarse_stats: Optional precomputed real-WDM coarse statistic. When set,
+            explicit ``source_only=`` at a call site always wins. Default ``False``.
+        coarse_stats (lisatools.coarsewdm.CoarseWDMStatistic, optional): Optional
+            precomputed real-WDM coarse statistic. When set,
             the sensitivity matrix may use a smaller coarse time geometry than
-            the fine data and likelihood calls use the coarse noise reduction.
+            the fine data and likelihood calls use the coarse noise reduction
+            (:func:`lisatools.coarsewdm.coarse_wdm_log_likelihood`). Default ``None``.
+        batch_evaluation: Attempt to evaluate a 2-D parameter block in ONE
+            generator call rather than looping. Inert unless the installed
+            generator declares ``supports_batch``, so the default (``True``) is
+            safe for every generator that has not opted in.
+        batch_max_size: Split a batch into chunks of at most this many rows
+            (``None`` = one launch). Bounds peak memory, which grows linearly
+            in the batch.
+        data_res_arr: Deprecated keyword-only alias of ``data`` (kept for
+            backward compatibility).
 
+    Raises:
+        TypeError: When ``data`` or ``sens_mat`` is missing, ``data`` is neither a
+            :class:`DomainBase` nor a :class:`DataResidualArray`, ``sens_mat`` is not a
+            :class:`~lisatools.sensitivity.SensitivityMatrixBase` instance or subclass, or
+            ``signal_gen`` is not callable / a dict of callables.
+        ValueError: When ``sens_mat_kwargs`` is given with a ``sens_mat`` instance, or
+            ``signal_gen`` is an empty dict.
+
+    Attributes:
+        likelihood_source_only (bool): See the argument of the same name.
+        coarse_stats: See the argument of the same name.
+        non_marg_d_h: Complex ``<d|h>`` of the last :meth:`template_snr` /
+            :meth:`template_likelihood` call (set by those methods).
+        last_d_h: ``<d|h>`` as used by the last :meth:`template_likelihood` call (after
+            phase / amplitude maximization).
+        last_h_h: ``<h|h>`` as used by that call (after amplitude maximization).
+        last_d_d: ``<d|d>`` of that call.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.analysiscontainer import AnalysisContainer
+            from lisatools.domains import FDSettings, FDSignal
+            from lisatools.sensitivity import XYZ2SensitivityMatrix
+
+            fd_band = FDSettings(N=data_length, df=df, min_freq=2.5e-3, max_freq=3.5e-3,
+                                 force_backend="cpu")
+            data = FDSignal(injection, fd_band)          # (3, N) XYZ, auto-sliced
+            ac = AnalysisContainer(data, XYZ2SensitivityMatrix(fd_band, model="sangria"))
+            ac.inner_product()                    # <d|d>
+            ac.snr()                              # sqrt(<d|d>)
+            ac.likelihood(source_only=True)       # -<d|d>/2
+            opt, det = ac.template_snr(FDSignal(template, fd_band))
+
+            # score parameters directly: wire in a generator returning a DomainBase
+            ac.signal_gen = my_generator          # fn(*params) -> DomainBase / array
+            ll = ac.calculate_signal_likelihood(*params, source_only=True)
     """
 
     def __init__(
@@ -228,9 +308,11 @@ class AnalysisContainer:
         #: Split a batch into chunks of at most this many rows (``None`` = one
         #: launch). Bounds peak memory, which grows linearly in the batch.
         self.batch_max_size: Optional[int] = batch_max_size
-        #: How many times a batched launch was refused/failed and fell back to
-        #: the serial loop. A silent fallback is indistinguishable from a
-        #: batched path that never ran, so this is counted and warned about.
+        #: How many times a batched launch was refused
+        #: (:class:`~lisatools.utils.exceptions.BatchNotLaunchable`) and fell back to
+        #: the serial loop in :meth:`eryn_likelihood_wrap`. A silent fallback is
+        #: indistinguishable from a batched path that never ran, so this is
+        #: counted and warned about.
         self.n_batch_fallbacks: int = 0
         #: The exception from the most recent fallback, for diagnosis.
         self.last_batch_error: Optional[BaseException] = None
@@ -487,8 +569,16 @@ class AnalysisContainer:
                 (default) for generators that do not accept the kwarg.
 
         Returns:
-            A :class:`DomainBase` template (or a structured dict when
+            DomainBase or dict: A :class:`DomainBase` template in ``self.data.settings`` (or
+            a structured ``{model_name: list[DomainBase]}`` dict when
             ``per_model_per_signal=True`` in multi-model mode).
+
+        Raises:
+            TypeError: When ``params`` does not match the single- / multi-model form of
+                :attr:`signal_gen`.
+            KeyError: When ``params`` names a model absent from :attr:`signal_gen`.
+            ValueError: When a generator output cannot be transformed into the data
+                domain, or per-model params are neither 1D nor 2D.
         """
         with self._swapped_signal_gen(signal_gen):
             return self._build_template(
@@ -630,6 +720,16 @@ class AnalysisContainer:
         template from :attr:`signal_gen`; ``waveform_kwargs`` / ``signal_gen``
         / ``apply_transform`` are forwarded to it (call-time generator swap and
         transform control — see :meth:`build_template`).
+
+        Args:
+            template: Template signal or parameters, see above.
+            sign: ``+1`` (default) adds, ``-1`` subtracts.
+            waveform_kwargs: Forwarded to :meth:`build_template`.
+            signal_gen: Forwarded to :meth:`build_template`.
+            apply_transform: Forwarded to :meth:`build_template`.
+
+        Returns:
+            DomainBase: ``self.data``, modified in place.
         """
         if isinstance(template, (DomainBase, DataResidualArray)):
             tmpl = self._to_data_domain(template)
@@ -644,15 +744,29 @@ class AnalysisContainer:
         return self._data
 
     def subtract_signal_from_data(self, template, **kwargs) -> DomainBase:
-        """Subtract ``template`` from ``self.data`` (in-place, see :meth:`add_signal_to_data`)."""
+        """Subtract ``template`` from ``self.data`` (in-place, see :meth:`add_signal_to_data`).
+
+        Args:
+            template: Template signal or parameters, as for :meth:`add_signal_to_data`.
+            **kwargs: Forwarded to :meth:`add_signal_to_data` (``waveform_kwargs``,
+                ``signal_gen``, ``apply_transform``).
+
+        Returns:
+            DomainBase: ``self.data``, modified in place.
+        """
         return self.add_signal_to_data(template, sign=-1, **kwargs)
 
     def loglog(self) -> Tuple[plt.Figure, plt.Axes]:
         """Produce loglog plot of both source and sensitivity information.
 
-        Returns:
-            Matplotlib figure and axes object in a 2-tuple.
+        Draws ``f |d(f)|`` per channel over the sensitivity matrix's
+        ``loglog(char_strain=True)`` panels. FD data only.
 
+        Returns:
+            tuple[plt.Figure, plt.Axes]: Matplotlib figure and axes object in a 2-tuple.
+
+        Raises:
+            AssertionError: When the data are not in the frequency domain.
         """
         assert isinstance(self._data.settings, domains.FDSettings)
         fig, ax = self.sens_mat.loglog(char_strain=True)
@@ -679,14 +793,16 @@ class AnalysisContainer:
         return (fig, ax)
 
     def inner_product(self, **kwargs: dict) -> float | complex:
-        """Return the inner product of the current set of information
+        """Return the inner product of the current set of information: ``<d|d>``.
+
+        The data (residual) against itself, weighted by :attr:`sens_mat`.
 
         Args:
-            **kwargs: Inner product keyword arguments.
+            **kwargs: Keyword arguments for :func:`lisatools.diagnostic.inner_product`
+                (a ``psd`` entry is dropped: :attr:`sens_mat` is always used).
 
         Returns:
-            Inner product value.
-
+            float or complex: Inner product value.
         """
         if "psd" in kwargs:
             kwargs.pop("psd")
@@ -694,14 +810,13 @@ class AnalysisContainer:
         return inner_product(self._data, self._data, psd=self.sens_mat, **kwargs)
 
     def snr(self, **kwargs: dict) -> float:
-        """Return the SNR of the current set of information
+        """Return the SNR of the current set of information: ``sqrt(Re <d|d>)``.
 
         Args:
-            **kwargs: Inner product keyword arguments.
+            **kwargs: Forwarded to :meth:`inner_product`.
 
         Returns:
-            SNR value.
-
+            float: SNR value.
         """
         return self.inner_product(**kwargs).real ** (1 / 2)
 
@@ -715,6 +830,14 @@ class AnalysisContainer:
 
         Args:
             template: Template signal (``DomainBase`` or legacy ``DataResidualArray``).
+
+        Returns:
+            tuple: ``(data, template, sens_mat)``, unsliced when the settings are equal,
+            otherwise restricted to the template's region (STFT and WDM only).
+
+        Raises:
+            ValueError: When the data and template domains differ in type.
+            NotImplementedError: When the settings differ in a domain other than STFT / WDM.
         """
         template = _coerce_to_domain_base(template)
         data_settings = self._data.settings
@@ -804,15 +927,18 @@ class AnalysisContainer:
     def template_inner_product(
         self, template: Union[DomainBase, DataResidualArray], **kwargs: dict
     ) -> float | complex:
-        """Calculate the inner product of a template with the data.
+        """Calculate the inner product of a template with the data: ``<d|h>``.
+
+        The data and sensitivity matrix are first restricted to the template's region
+        (:meth:`_slice_to_template`).
 
         Args:
-            template: Template signal.
-            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`.
+            template: Template signal (batched templates give one value per template).
+            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
+                (``psd`` and ``include_psd_info`` entries are dropped).
 
         Returns:
-            Inner product value.
-
+            float or complex or xp.ndarray: Inner product value(s).
         """
         if "psd" in kwargs:
             kwargs.pop("psd")
@@ -830,14 +956,18 @@ class AnalysisContainer:
     ) -> Tuple[float, float]:
         """Calculate the SNR of a template, both optimal and detected.
 
+        ``opt = sqrt(Re <h|h>)`` and ``det = Re <d|h> / opt`` (``|<d|h>|`` when
+        ``phase_maximize``), on the template's region of the data. Stores the complex
+        ``<d|h>`` on ``self.non_marg_d_h``.
+
         Args:
             template: Template signal.
             phase_maximize: If ``True``, maximize over an overall phase.
-            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`.
+            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
+                (``psd`` and ``complex`` entries are dropped).
 
         Returns:
-            ``(optimal snr, detected snr)``.
-
+            tuple: ``(optimal snr, detected snr)``.
         """
         kwargs_in = kwargs.copy()
         if "psd" in kwargs:
@@ -874,16 +1004,24 @@ class AnalysisContainer:
     ) -> float:
         """Calculate the Likelihood of a template against the data.
 
+        Returns ``-1/2 Re(<d|d> + <h|h> - 2 <d|h>)``, i.e. ``-1/2 <d - h|d - h>`` without
+        forming the difference: ``<d|d>`` uses the full data and sensitivity matrix, the
+        other two terms the template's region (:meth:`_slice_to_template`). A batched
+        template gives one value per template. Stores ``non_marg_d_h`` (complex ``<d|h>``)
+        and ``last_d_h`` / ``last_h_h`` / ``last_d_d`` (after maximization) on ``self``.
+
         Args:
             template: Template signal.
-            include_psd_info: If ``True``, add the PSD term to the Likelihood value.
+            include_psd_info: If ``True``, add the PSD term to the Likelihood value
+                (:meth:`likelihood` with ``noise_only=True``). Ignored when
+                :attr:`likelihood_source_only` is set.
             phase_maximize: If ``True``, maximize over an overall phase.
             amp_maximize: If ``True``, maximize over an overall amplitude.
-            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`.
+            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
+                (``psd`` and ``complex`` entries are dropped).
 
         Returns:
-            Likelihood value.
-
+            float or xp.ndarray: Likelihood value(s).
         """
         kwargs_in = kwargs.copy()
         if "psd" in kwargs_in:
@@ -939,7 +1077,13 @@ class AnalysisContainer:
     def likelihood(
         self, source_only: Optional[bool] = None, noise_only: bool = False, **kwargs: dict
     ) -> float | complex:
-        """Return the likelihood of the current arangement.
+        """Return the likelihood of the current arrangement (data / residual against noise).
+
+        With :attr:`coarse_stats` set, delegates to
+        :func:`lisatools.coarsewdm.coarse_wdm_log_likelihood`; otherwise to
+        :func:`~lisatools.diagnostic.noise_likelihood_term` (``noise_only``),
+        :func:`~lisatools.diagnostic.residual_source_likelihood_term` (``source_only``) or
+        :func:`~lisatools.diagnostic.residual_full_source_and_noise_likelihood`.
 
         Args:
             source_only: If ``True`` return the source-only Likelihood
@@ -950,8 +1094,12 @@ class AnalysisContainer:
             **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`.
 
         Returns:
-            Likelihood value.
+            float or complex: Likelihood value.
 
+        Raises:
+            ValueError: When ``noise_only`` and ``source_only`` are both in effect (passed or
+                defaulted from :attr:`likelihood_source_only`), or ``source_only`` is
+                requested with :attr:`coarse_stats` set.
         """
         source_only_explicit = source_only is not None
         if source_only is None:
@@ -1012,7 +1160,9 @@ class AnalysisContainer:
             calc: One of ``"likelihood"``, ``"inner_product"``, ``"snr"``.
             *args: Parameter input. For the **single-model** case (signal_gen
                 is a callable), this is the waveform's positional parameter
-                list (1D), or a single 2D ndarray to batch-sum within model.
+                list (1D), or a single 2D ndarray to batch-sum within model (that
+                form currently raises, see the Warning of
+                :meth:`calculate_signal_likelihood`).
                 For the **multi-model** case (signal_gen is a dict), pass
                 exactly one positional argument: a ``dict`` mapping
                 ``model_name -> 1D/2D params``.
@@ -1157,6 +1307,35 @@ class AnalysisContainer:
         per-source results instead of the combined-template scalar.
         ``source_only=None`` falls back to the container-level
         :attr:`likelihood_source_only` setting.
+
+        Args:
+            *args: Parameters, see above.
+            source_only: Leave out the noise term; ``None`` uses
+                :attr:`likelihood_source_only`.
+            waveform_kwargs: Forwarded to the generator(s).
+            per_model_per_signal: Multi-model only: return per-source results.
+            **kwargs: ``transform_fn``, ``signal_gen``, ``apply_transform`` (see
+                :meth:`_calculate_signal_operation`) or keywords of
+                :meth:`template_likelihood` / :func:`~lisatools.diagnostic.inner_product`.
+
+        Returns:
+            float or complex or dict: The log-likelihood of the combined template
+            (``-1/2 <d - h|d - h>`` plus the noise term unless ``source_only``), or the
+            structured per-source dict.
+
+        Warning:
+            In single-model mode the "single 2D ndarray" form does not reach the summing
+            path: the positional arguments arrive as a tuple, which
+            :meth:`_call_single_model` turns into a 3D object array and rejects
+            (``ValueError``). Sum several sources with :meth:`build_template` (which takes
+            the 2D array directly) and :meth:`template_likelihood`, or use the multi-model
+            dict form.
+
+        Example:
+            .. code-block:: python
+
+                ac = AnalysisContainer(data, sens_mat, signal_gen=gen)
+                ll = ac.calculate_signal_likelihood(*params)       # one source
         """
 
         return self._calculate_signal_operation(
@@ -1180,6 +1359,18 @@ class AnalysisContainer:
 
         See :meth:`calculate_signal_likelihood` for the multi-model API and
         ``per_model_per_signal`` flag.
+
+        Args:
+            *args: Parameters, as for :meth:`calculate_signal_likelihood`.
+            source_only: Accepted for signature symmetry; not used by the inner product.
+                Default ``False``.
+            waveform_kwargs: Forwarded to the generator(s).
+            per_model_per_signal: Multi-model only: return per-source results.
+            **kwargs: As for :meth:`calculate_signal_likelihood`.
+
+        Returns:
+            float or complex or dict: ``<d|h>`` of the combined template, or the structured
+            per-source dict.
         """
 
         return self._calculate_signal_operation(
@@ -1203,6 +1394,19 @@ class AnalysisContainer:
 
         See :meth:`calculate_signal_likelihood` for the multi-model API and
         ``per_model_per_signal`` flag.
+
+        Args:
+            *args: Parameters, as for :meth:`calculate_signal_likelihood`.
+            source_only: Accepted for signature symmetry; not used by the SNR. Default
+                ``False``.
+            waveform_kwargs: Forwarded to the generator(s).
+            per_model_per_signal: Multi-model only: return per-source results.
+            **kwargs: As for :meth:`calculate_signal_likelihood` (e.g. ``phase_maximize``
+                of :meth:`template_snr`).
+
+        Returns:
+            tuple or dict: ``(optimal snr, detected snr)`` of the combined template, or the
+            structured per-source dict.
         """
 
         return self._calculate_signal_operation(
@@ -1225,13 +1429,16 @@ class AnalysisContainer:
 
         Args:
             x: Parameters. Can be 1D list, tuple, array or 2D array.
-                If a 2D array is input, the computation is done serially.
-            *args: Likelihood args.
-            **kwargs: Likelihood kwargs.
+                If a 2D array is input, the computation is done serially (one
+                :meth:`calculate_signal_likelihood` call per row, rows NOT summed).
+            *args: Extra positional parameters appended to each row.
+            **kwargs: Forwarded to :meth:`calculate_signal_likelihood`.
 
         Returns:
-            Likelihood value(s).
+            float or np.ndarray: Likelihood value (1D input) or ``(nrows,)`` values.
 
+        Raises:
+            ValueError: When ``x`` is neither 1D nor 2D.
         """
         assert self.signal_gen is not None
 
@@ -1461,12 +1668,33 @@ class AnalysisContainer:
             use_vmap: Vectorize via :func:`jax.vmap`. Requires
                 ``signal_gen`` to be jax-traceable and to return a JAX
                 array of shape ``(nchannels, basis_length)``.
-            source_only: Forwarded to :meth:`template_likelihood`.
-            **kwargs: Forwarded to :meth:`template_likelihood`.
+            source_only: Forwarded to :meth:`calculate_signal_likelihood` /
+                :meth:`batched_signal_likelihood`. Default ``False`` (not ``None``), so the
+                flag itself does not fall back to :attr:`likelihood_source_only`; the noise
+                term is still left out on a ``likelihood_source_only`` container, because
+                :meth:`template_likelihood` skips it there. On the ``use_vmap`` path the
+                flag is not translated (that path never adds the noise term unless
+                ``include_psd_info=True`` is passed in ``kwargs``).
+            **kwargs: Forwarded to :meth:`calculate_signal_likelihood` (serial),
+                :meth:`batched_signal_likelihood` or :meth:`template_likelihood` (vmap).
 
         Returns:
-            Scalar (1D input) or ``(nwalkers,)`` array (2D input) of
-            log-likelihood values.
+            float or np.ndarray: Scalar (1D input) or ``(nwalkers,)`` array (2D input) of
+            log-likelihood values (a JAX array on the ``use_vmap`` path).
+
+        Raises:
+            ValueError: When ``x`` is neither 1D nor 2D.
+            RuntimeError: When ``use_vmap=True`` and JAX is not installed.
+            NotImplementedError: When ``use_vmap=True`` with a multi-model generator.
+
+        Note:
+            Without ``use_vmap``, a 2D ``x`` is evaluated in ONE batched launch
+            (:meth:`batched_signal_likelihood`) when :attr:`batch_evaluation` is on, the
+            generator declares ``supports_batch``, the generator is single-model, there is
+            more than one row, no extra ``*args`` are given and no ``per_model_per_signal``
+            keyword is passed. A :class:`~lisatools.utils.exceptions.BatchNotLaunchable`
+            refusal falls back to the serial loop with a ``RuntimeWarning`` and increments
+            :attr:`n_batch_fallbacks`.
         """
         assert self.signal_gen is not None
 
@@ -1508,14 +1736,14 @@ class AnalysisContainer:
                 and not args
                 # Container-level keywords are consumed by
                 # ``_calculate_signal_operation`` on the serial route, NOT by
-                # ``template_likelihood``. The batched builder cannot express
-                # them: ``transform_fn`` must be applied before generation,
-                # ``apply_transform`` injected into the generator's kwargs,
-                # and ``signal_gen`` installed via ``_swapped_signal_gen`` --
-                # which _build_batched_template does not enter, so the gate
-                # would also be reading a DIFFERENT generator from the one
-                # building the template. Decline the batch and let the serial
-                # route handle them correctly rather than half-honouring them.
+                # ``template_likelihood``. Only ``per_model_per_signal``
+                # (``_CONTAINER_LEVEL_KWARGS``) is declined here: the batched
+                # path cannot express it. ``transform_fn``, ``apply_transform``
+                # and ``signal_gen`` pass through to batched_signal_likelihood,
+                # which applies / injects / installs them (see the note at
+                # ``_CONTAINER_LEVEL_KWARGS``). Caveat: the ``supports_batch``
+                # test above reads the generator installed BEFORE a
+                # ``signal_gen`` override is swapped in.
                 and not (_CONTAINER_LEVEL_KWARGS & kwargs.keys())
             )
             if can_batch:
@@ -1610,6 +1838,13 @@ def shard_lookup_maps(aca) -> tuple:
     Works on any holder exposing ``acs_total_entries`` / ``split_map`` /
     ``gpu_splits`` (the multi-shard test fakes included). Callers must not
     mutate the returned arrays.
+
+    Args:
+        aca (AnalysisContainerArray): The sharded array (or a duck-typed holder).
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``(split_map_host, global_to_intra)``, int arrays
+        of shape ``(acs_total_entries,)``.
     """
     n = int(aca.acs_total_entries)
     n_splits = len(aca.gpu_splits)
@@ -1660,7 +1895,31 @@ class BandView:
 
     The view does NOT support arithmetic in place; callers that need to
     do math on the gathered buffer should call ``.copy()`` (or index by
-    the full band range) to materialise a single ndarray first.
+    the full band range) to materialise a single ndarray first (or use
+    :meth:`accumulate` for an in-place ``+=``). Tuple fancy indices
+    (``view[band_idx, chan, freq]``) and :meth:`swap_rows` are routed per shard as well.
+    A scalar band index returns a live view of the owning shard's row.
+
+    Args:
+        aca (AnalysisContainerArray): The (possibly sharded) array whose buffers are
+            viewed.
+        kind (str): ``"data"`` (residual buffer, :attr:`AnalysisContainerArray.data_shaped`)
+            or ``"psd"`` (inverse-PSD buffer). Default ``"data"``.
+        n_bands (int, optional): Expose only the first ``n_bands`` bound slots of a
+            fixed-capacity array (the GB RJ sub-band buffer); ``None`` (default) exposes
+            every slot.
+
+    Raises:
+        ValueError: When ``kind`` is invalid or ``n_bands`` is outside
+            ``(0, acs_total_entries]``.
+
+    Example:
+        .. code-block:: python
+
+            view = aca.data_shaped_view()      # BandView(aca, kind="data")
+            rows = view[np.array([3, 7])]      # gathered onto gpus[0]
+            view[np.array([3, 7])] = 0.0       # written on each owning shard
+            view.accumulate(np.array([3]), update)
     """
 
     def __init__(
@@ -1700,6 +1959,7 @@ class BandView:
 
     @property
     def _shards(self):
+        """Per-shard buffers (front-sliced to the bound rows when ``n_bands`` is set)."""
         shards = (
             self._aca.data_shaped if self._kind == "data" else self._aca.psd_shaped
         )
@@ -1740,6 +2000,7 @@ class BandView:
 
     @property
     def shape(self) -> tuple:
+        """``(num_bound_bands, *per_band_shape)`` of the viewed buffer."""
         shards = (
             self._aca.data_shaped if self._kind == "data" else self._aca.psd_shaped
         )
@@ -1748,6 +2009,7 @@ class BandView:
 
     @property
     def dtype(self):
+        """Dtype of the viewed buffer."""
         shards = (
             self._aca.data_shaped if self._kind == "data" else self._aca.psd_shaped
         )
@@ -1755,6 +2017,7 @@ class BandView:
 
     @property
     def ndim(self) -> int:
+        """Number of dimensions of :attr:`shape`."""
         return len(self.shape)
 
     def __len__(self) -> int:
@@ -1767,7 +2030,7 @@ class BandView:
         return shard, intra
 
     def _resolve_array(self, band_inds) -> tuple:
-        """Per-row ``(shard_ids, intra_indices)`` arrays for a 1-D band index."""
+        """Per-row ``(shard_ids, intra_indices, band_inds)`` host arrays for a 1-D band index."""
         band_inds = np.asarray(asnumpy(band_inds), dtype=int)
         # Cached static lookup (perf, 2026-08): the per-call
         # argsort/searchsorted of the static gpu_splits is replaced by two
@@ -2074,6 +2337,7 @@ class BandView:
         return None
 
     def _write_to_shard(self, shard: int, intra: int, val) -> None:
+        """Write ``val`` into row ``intra`` of shard ``shard`` inside the shard's device."""
         if self._aca.gpus is None:
             self._shards[shard][intra] = val
             return
@@ -2189,6 +2453,11 @@ class BandView:
             self._aca.xp.cuda.runtime.setDevice(main)
 
     def _scatter(self, band_inds: np.ndarray, val) -> None:
+        """Write rows ``band_inds`` on their owning shards (inverse of :meth:`_gather`).
+
+        ``val`` is a scalar (broadcast) or an array whose leading axis matches
+        ``band_inds``; on GPU each shard's rows are copied in its own device context.
+        """
         shard_ids, intra, _ = self._resolve_array(band_inds)
         shards = self._shards
         # Scalar broadcast vs per-row payload
@@ -2278,7 +2547,7 @@ class BandView:
             self._aca.xp.cuda.runtime.setDevice(main)
 
     def gather(self):
-        """Materialise the full (num_bands, *per_band_shape) ndarray on gpus[0]."""
+        """Materialise the full ``(num_bands, *per_band_shape)`` ndarray on ``gpus[0]``."""
         return self._gather(np.arange(self.shape[0]))
 
     def copy(self):
@@ -2296,40 +2565,48 @@ def band_gpu_assignment(
 
     Used by the GB special-move Buffer to shard its per-cell slabs across
     GPUs. ``num_bands`` is really the number of buffer SLOTS (one per active
-    (temp, walker, band) cell).
+    (temp, walker, band) cell). Pass the result as ``gpu_assignment=`` to
+    :class:`AnalysisContainerArray`.
 
-    Parameters
-    ----------
-    num_bands:
-        Number of buffer slots (== ``num_acs`` of the per-cell ACA).
-    gpus:
-        Available GPU ids. ``None`` or a single-GPU list returns ``None``
-        (no custom assignment needed; legacy contiguous partition kicks in).
-    mode:
-        ``"striped"`` (default) — ``gpu_map[slot] = gpus[slot % len(gpus)]``.
-        Fine-grained load balance over slots.
+    Args:
+        num_bands: Number of buffer slots (== ``num_acs`` of the per-cell ACA).
+        gpus: Available GPU ids. ``None`` or a single-GPU list returns ``None``
+            (no custom assignment needed; legacy contiguous partition kicks in).
+        mode: Slot layout when ``group_ids`` is not given:
 
-        ``"block"`` — contiguous-block split (legacy). Use only for testing;
-        per the plan, this can violate the no-overlap invariant at shard
-        seams when bands within a BandSorter pass touch their neighbours'
-        edge buffers.
-    group_ids:
-        Optional per-slot BAND ids (parallel-resources plan P1): slots with
-        the same band are placed on the SAME shard, so every cell of a band
-        is device-local — in particular the tempering swap pairs (same
-        band, adjacent temps), which under plain slot striping always
-        landed on DIFFERENT shards (slot order puts a row's temps in
-        consecutive slots) and paid a host-hop per swap. Bands round-robin
-        across GPUs WITHIN each even/odd parity class (ranked by first
-        appearance): the GB move activates bands in parity rotation, so
-        ranking across classes could put all of one parity on a single
-        device (e.g. active bands 3,4,7,8,... at ngpus=2). Overrides
-        ``mode``.
+            - ``"striped"`` (default) — ``gpu_map[slot] = gpus[slot % len(gpus)]``.
+              Fine-grained load balance over slots.
+            - ``"block"`` — contiguous-block split (legacy). Use only for testing;
+              per the plan, this can violate the no-overlap invariant at shard
+              seams when bands within a BandSorter pass touch their neighbours'
+              edge buffers.
 
-    Returns
-    -------
-    ``np.ndarray`` of shape ``(num_bands,)`` with GPU ids, or ``None`` when
-    no custom assignment is needed.
+        group_ids: Optional per-slot BAND ids, shape ``(num_bands,)``
+            (parallel-resources plan P1): slots with
+            the same band are placed on the SAME shard, so every cell of a band
+            is device-local — in particular the tempering swap pairs (same
+            band, adjacent temps), which under plain slot striping always
+            landed on DIFFERENT shards (slot order puts a row's temps in
+            consecutive slots) and paid a host-hop per swap. Bands round-robin
+            across GPUs WITHIN each even/odd parity class (ranked by first
+            appearance): the GB move activates bands in parity rotation, so
+            ranking across classes could put all of one parity on a single
+            device (e.g. active bands 3,4,7,8,... at ngpus=2). Overrides
+            ``mode``.
+
+    Returns:
+        Optional[np.ndarray]: Int array of shape ``(num_bands,)`` with GPU ids, or ``None``
+        when no custom assignment is needed.
+
+    Raises:
+        ValueError: When ``group_ids`` has the wrong shape or ``mode`` is unknown.
+
+    Example:
+        >>> from lisatools.analysiscontainer import band_gpu_assignment
+        >>> band_gpu_assignment(4, [0, 1]).tolist()
+        [0, 1, 0, 1]
+        >>> band_gpu_assignment(4, [0, 1], group_ids=[5, 5, 7, 7]).tolist()
+        [0, 0, 1, 1]
     """
     if gpus is None or len(gpus) <= 1:
         return None
@@ -2365,30 +2642,81 @@ class AnalysisContainerArray:
     """Container for multiple :class:`AnalysisContainer` objects.
 
     Useful for parallelization and batching across many independent analyses
-    (for example one container per source). Provides a flat view (``acs``) and
-    preserves the original shape (``acs_shape``).
+    (for example one container per source, or one per walker in the global fit). Keeps
+    the containers in ``acs`` with their original shape (``acs_shape``); :meth:`flatten`
+    gives the flat view, whose order defines the global container index used by
+    ``index`` / ``data_index`` arguments.
+
+    Construction repacks every container: each container's data array and
+    ``sens_mat.invC`` are copied into the per-split contiguous buffers and REBOUND as
+    views into them (:meth:`reset_linear_data_arr`, :meth:`reset_linear_psd_arr`), so
+    later in-place updates through either the container or the buffer are shared. The
+    caller's current CUDA device is restored afterwards.
 
     Args:
         analysis_containers: Can be a single :class:`AnalysisContainer`, a 1D
             list of :class:`AnalysisContainer`, or a NumPy object array of
-            :class:`AnalysisContainer`. If a 2D or higher list/array is input,
-            it will be flattened to 1D and the original shape will be stored
-            in ``acs_shape``.
+            :class:`AnalysisContainer` (any shape; the shape is stored in
+            ``acs_shape``). A nested (2D) list raises ``ValueError``.
         gpus: If not ``None``, list of GPU ids to use for storing data and
-            sensitivity information. The data and sensitivity information for
-            each container will be split across the GPUs as evenly as possible.
-            If ``None``, everything is stored on the CPU.
+            sensitivity information (an ``int`` is treated as a one-element list).
+            The data and sensitivity information for
+            each container will be split across the GPUs as evenly as possible
+            (``np.array_split`` of the flat container order).
+            If ``None``, everything is stored on the CPU (numpy).
         complex_psd: If ``True``, allocate a complex-valued PSD buffer. Complex
             sensitivity matrices also select this automatically, so Hermitian
             XYZ cross-spectra are not truncated during repacking.
+        gpu_assignment: Explicit per-container GPU ids, shape
+            ``(acs_total_entries,)``, each in ``gpus`` (e.g. from
+            :func:`band_gpu_assignment`); replaces the contiguous split. Ignored when
+            ``gpus`` is ``None``.
         run_threaded: If ``True``, the array-level analysis ops
             (:meth:`_vectorized_dispatch` consumers — ``likelihood``,
             ``inner_product``, ``calculate_signal_*`` — and the domain-aware
             :meth:`signal_operation`) execute their per-split batches
             concurrently, one thread per split (GPU splits each enter their
             own device context; CPU splits rely on GIL-releasing work). The
-            default ``False`` preserves the serial per-split loops.
+            default ``False`` preserves the serial per-split loops. The global fit sets
+            it when it runs on more than one GPU.
+        psd_storage: ``"per_ac"`` (default): one inverse-PSD slab per container,
+            repacked into ``linear_psd_arr``. ``"none"``: no per-container inverse-PSD
+            storage (zero-length buffers; :meth:`reset_linear_psd_arr` is a no-op), used
+            by the GB sub-band buffer in shared-PSD mirror mode.
 
+    Raises:
+        ValueError: When the containers are not a single container / 1D list / object
+            array, their sensitivity shapes differ, ``gpu_assignment`` is malformed, or
+            ``psd_storage`` is invalid.
+        TypeError: When a ``gpus`` entry is not an ``int``.
+
+    Attributes:
+        acs (np.ndarray): Object array of the containers, original shape.
+        acs_shape (tuple): Shape of ``acs``.
+        acs_total_entries (int): Number of containers.
+        gpus (list[int] or None): The GPU ids.
+        gpu_splits (list[np.ndarray]): Per split, the flat container indices it holds.
+        gpu_map (np.ndarray): Per container, its GPU id (``0`` on CPU).
+        split_map (np.ndarray): Per container, its split index.
+        linear_data_arr (list): Per split, the flat residual buffer.
+        linear_psd_arr (list): Per split, the flat inverse-PSD buffer.
+        nchannels (int): Data channels per container.
+        end_shape (tuple): Basis shape per channel (``(N,)`` FD, ``(m, n)`` 2-D domains).
+        data_dtype: ``float`` for WDM data, else ``complex``.
+        noise_dtype: ``complex`` with ``complex_psd`` or a complex matrix, else ``float``.
+        input_data_residual_array: The data the residuals were built from, when the owner
+            sets it (the global fit's ``setup_acs``); ``None`` otherwise.
+        run_threaded (bool): See the argument of the same name.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.analysiscontainer import AnalysisContainer, AnalysisContainerArray
+
+            acs = [AnalysisContainer(data_w, sens_w) for data_w, sens_w in walkers]
+            aca = AnalysisContainerArray(acs, gpus=[0, 1], run_threaded=True)
+            ll = aca.likelihood(source_only=True)                  # one value per container
+            ll_rows = aca.calculate_signal_likelihood(params, index=walker_of_row)
     """
 
     @property
@@ -2577,7 +2905,7 @@ class AnalysisContainerArray:
         self.split_map = np.zeros(self.acs_total_entries, dtype=int)
         self.linear_data_arr = []
         self.linear_psd_arr = []
-        # psd_storage="none": zero-length per split (see __init__ docstring).
+        # psd_storage="none": zero-length per split (see the class docstring).
         _psd_len = (
             0 if self._psd_storage == "none"
             else self.psd_data_length * np.prod(shape_sens)
@@ -2622,10 +2950,12 @@ class AnalysisContainerArray:
             # Restore whatever device the caller was on before __init__.
             self.xp.cuda.runtime.setDevice(self._main_device_at_init)
 
+    # TODO check: keep/remove/document -- shadowed by the identical flatten() defined later in this class; unreachable
     def flatten(self):
         return self.acs.flatten()
     
     def synchronize(self):
+        """Block until every configured GPU has finished its queued work (no-op on CPU)."""
         if self.gpus is not None:
             for gpu in self.gpus:
                 with self.xp.cuda.device.Device(gpu):
@@ -2703,7 +3033,14 @@ class AnalysisContainerArray:
                 self.xp.get_default_memory_pool().free_all_blocks()
 
     def reset_linear_data_arr(self):
-        """Repack each container's data residual into the contiguous per-GPU data buffer."""
+        """Repack each container's data residual into the contiguous per-GPU data buffer.
+
+        Copies each container's data into its slot of ``linear_data_arr[split]`` (through
+        the host when the source sits on another device) and rebinds the container's
+        array to a ``(nchannels, *end_shape)`` view of that slot. Then frees the CuPy pool
+        blocks once per device (unless ``ACA_REPACK_FREE_BLOCKS=0``) and restores the
+        current device.
+        """
         if self.gpus is not None:
             main_gpu = self.xp.cuda.runtime.getDevice()
 
@@ -2749,6 +3086,10 @@ class AnalysisContainerArray:
         key their refresh off it. With ``psd_storage="none"`` there is no
         plane to repack and this returns immediately (the containers keep
         whatever ``invC`` they hold).
+
+        Otherwise each container's ``sens_mat.invC`` is copied into its slot (through the
+        host when it sits on another device) and ``sens_mat.invC`` is reassigned to a
+        ``(*shape_sens, *psd_end_shape)`` view of that slot.
         """
         if getattr(self, "_psd_storage", "per_ac") == "none":
             return
@@ -2854,39 +3195,45 @@ class AnalysisContainerArray:
         """Apply ``op_name`` on each row of ``payload`` against the AC named by ``index[row]``.
 
         This is the single dispatcher that replaces the legacy
-        :meth:`_loop_operation`. It is the multi-GPU entry point for every
+        ``_loop_operation`` (removed). It is the multi-GPU entry point for every
         analysis op on :class:`AnalysisContainerArray` (likelihood, inner
         product, SNR, calculate_signal_*, template_*, property reads).
 
-        Parameters
-        ----------
-        op_name:
-            Name of the attribute (callable method or scalar property) on
-            each :class:`AnalysisContainer`.
-        payload:
-            Per-row input passed as the first positional argument to the op.
-            May be ``None`` (data-only / property), a single ``np.ndarray`` /
-            ``cp.ndarray`` whose leading axis is the row count, or a
-            ``Mapping`` of ``{model_name: ndarray}`` (multi-model signal_gen
-            case) with a consistent leading axis across entries. When
-            ``index`` is None, the leading axis must equal ``num_acs``.
-        index:
-            Optional 1-D int array of length ``N`` with
-            ``index[i] in [0, num_acs)``. When None, defaults to
-            ``arange(num_acs)``; in that case the result is reshaped to
-            ``acs_shape`` for backwards compatibility with the legacy
-            ``_loop_operation`` return.
-        op_kwargs:
-            Extra keyword arguments forwarded to the op.
-        reshape_to_acs_shape:
-            When True and ``index`` was None, reshape the output from
-            ``(num_acs,)`` to ``self.acs_shape``.
+        Rows are grouped by owning split and run through :meth:`_run_per_split` (inside
+        each split's device context on GPU); every per-row result is pulled to the host.
 
-        Returns
-        -------
-        np.ndarray of shape ``(N,)`` (or ``acs_shape`` when ``index`` is
-        None and reshape requested), or a tuple of such arrays when the op
-        returns a tuple (e.g. ``snr -> (opt_snr, det_snr)``).
+        Args:
+            op_name: Name of the attribute (callable method or scalar property) on
+                each :class:`AnalysisContainer`.
+            payload: Per-row input passed as the first positional argument to the op.
+                May be ``None`` (data-only / property), a single ``np.ndarray`` /
+                ``cp.ndarray`` whose leading axis is the row count, or a
+                ``Mapping`` of ``{model_name: ndarray}`` (multi-model signal_gen
+                case) with a consistent leading axis across entries. When
+                ``index`` is None, the leading axis must equal ``num_acs``.
+            index: Optional 1-D int array of length ``N`` with
+                ``index[i] in [0, num_acs)``. When None, defaults to
+                ``arange(num_acs)``; in that case the result is reshaped to
+                ``acs_shape`` for backwards compatibility with the legacy
+                ``_loop_operation`` return.
+            op_kwargs: Extra keyword arguments forwarded to the op.
+            reshape_to_acs_shape: When True and ``index`` was None, reshape the output
+                from ``(num_acs,)`` to ``self.acs_shape``.
+            domain_error_value: When not ``None``, a row whose op raises
+                :class:`~lisatools.utils.exceptions.WaveformDomainError` gets this value
+                (samplers pass ``-1e300``) instead of aborting the batch.
+            payload_to_device: On GPU, move each payload row onto the split's device
+                before the call (template ops). ``False`` keeps host rows (params-based
+                ops). Default ``True``.
+
+        Returns:
+            np.ndarray or tuple: Array of shape ``(N,)`` (or ``acs_shape`` when ``index`` is
+            None and reshape requested), or a tuple of such arrays when the op
+            returns a tuple (e.g. ``snr -> (opt_snr, det_snr)``).
+
+        Raises:
+            ValueError: When the payload's leading axis does not match ``num_acs`` /
+                ``len(index)``, or an ``index`` entry is out of range.
         """
         op_kwargs = op_kwargs or {}
 
@@ -3185,13 +3532,29 @@ class AnalysisContainerArray:
         Sharded by ``index``: each AC's call runs on its owning GPU.
         ``index=None`` evaluates every AC (legacy behaviour); pass an
         ``index`` array to evaluate a subset.
+
+        Args:
+            index (np.ndarray, optional): Container indices to evaluate (repeats allowed).
+            **kwargs: Forwarded to :meth:`AnalysisContainer.inner_product`.
+
+        Returns:
+            np.ndarray: One value per row (``acs_shape`` when ``index`` is ``None``).
         """
         return self._vectorized_dispatch(
             "inner_product", payload=None, index=index, op_kwargs=kwargs
         )
 
     def likelihood(self, index=None, **kwargs):
-        """Data-only likelihood per AC. See :meth:`inner_product` for ``index`` semantics."""
+        """Data-only likelihood per AC. See :meth:`inner_product` for ``index`` semantics.
+
+        Args:
+            index (np.ndarray, optional): Container indices to evaluate.
+            **kwargs: Forwarded to :meth:`AnalysisContainer.likelihood` (``source_only``,
+                ``noise_only``, ...).
+
+        Returns:
+            np.ndarray: One log-likelihood per row (``acs_shape`` when ``index`` is ``None``).
+        """
         return self._vectorized_dispatch(
             "likelihood", payload=None, index=index, op_kwargs=kwargs
         )
@@ -3220,7 +3583,19 @@ class AnalysisContainerArray:
         Returns a host ``np.ndarray`` of per-row likelihoods. The
         dispatcher groups rows by ``self.gpu_map[index]`` so the per-AC
         compute runs on the owning GPU; CuPy stream concurrency lets
-        multiple GPUs work in parallel from a single Python thread.
+        multiple GPUs work in parallel from a single Python thread (and
+        :attr:`run_threaded` runs the splits in threads). Parameter rows stay on the host.
+
+        Args:
+            params (np.ndarray or Mapping): Row-major parameters, leading axis ``N``.
+            index (np.ndarray, optional): Container index per row.
+            domain_error_value (float, optional): Score for out-of-domain rows; ``None``
+                re-raises.
+            **kwargs: Forwarded to :meth:`AnalysisContainer.calculate_signal_likelihood`.
+
+        Returns:
+            np.ndarray: Per-row log-likelihoods, shape ``(N,)`` (``acs_shape`` when
+            ``index`` is ``None``).
         """
         return self._vectorized_dispatch(
             "calculate_signal_likelihood",
@@ -3338,6 +3713,15 @@ class AnalysisContainerArray:
             start_index: Kept for backward compatibility with raw-array calls.
                 Ignored when domain-aware templates are supplied.
 
+        Domain-aware templates run per owning split (:meth:`_run_per_split`, threaded with
+        :attr:`run_threaded`); templates made on another GPU are moved onto the owning
+        device through the host first (:meth:`_signal_on_device`). The legacy raw-array
+        path loops serially, adding into ``data[:, start : start + len]``.
+
+        Raises:
+            TypeError: For an unsupported ``templates`` type.
+            AssertionError: When ``data_index`` is ``None`` and the template count differs
+                from ``acs_total_entries``, or a ``data_index`` entry is out of range.
         """
         # ---- normalise *templates* to a flat list of DomainBase ----
         if isinstance(templates, DomainBaseArray):
@@ -3514,6 +3898,10 @@ class AnalysisContainerArray:
                 template as zero (logged) — the sampling convention where
                 the row's likelihood carries the ``-1e300`` sentinel
                 elsewhere.
+
+        Raises:
+            ValueError: When ``domain_error`` is invalid or the params' leading axis does
+                not match ``num_acs`` / ``len(index)``.
         """
         import gc
 

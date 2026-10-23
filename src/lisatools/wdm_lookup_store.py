@@ -17,6 +17,22 @@ far was built with (``scripts/wdm/build_wdm_lookup_gpu.py --build-kind n_ref_com
 --m-ref 21 --eps-freq 0.005 --num-layers-diff 2 --eps-fdot 0.01 --fdot-max-factor 8
 --time-layers 32 --nchannels 1``), so its canonical names are the existing files'
 (``wdm_lookup_emri_cx_NF1440_DT2p5_TL32_fd8x0p01_nld2.h5`` on the 6-month grid).
+The SOBBH lookup likelihood uses the same recipe; the GB lookup engine uses
+:data:`GB_TABLE_RECIPE` through :func:`resolve_gb_lookup_table`.
+
+In the global fit the source runtimes
+(:mod:`lisatools.globalfit.stock.erebor.source_runtime`) and the stock GB block call
+:func:`lookup_table_path` / :func:`ensure_lookup_table` (or
+:func:`resolve_gb_lookup_table`) at build time, then load the file with
+:meth:`lisatools.domains.WDMLookupTable.from_file`.
+
+Example:
+    .. code-block:: python
+
+        from lisatools.wdm_lookup_store import ensure_lookup_table, lookup_table_path
+
+        path = lookup_table_path(None, "/path/to/run_dir", Nf=1440, dt=2.5)
+        status = ensure_lookup_table(path, Nf=1440, dt=2.5)   # "found" / "built" / "waited"
 """
 
 from __future__ import annotations
@@ -62,11 +78,29 @@ WAIT_TIMEOUT = 6 * 3600.0
 
 
 def _tag(x) -> str:
+    """File-name tag of a number: ``%g`` with ``.`` replaced by ``p`` (``2.5 -> "2p5"``)."""
     return f"{float(x):g}".replace(".", "p")
 
 
 def lookup_table_name(Nf: int, dt: float, recipe: Optional[dict] = None) -> str:
-    """Canonical file name of a ``recipe`` table on the ``(Nf, dt)`` grid."""
+    """Canonical file name of a ``recipe`` table on the ``(Nf, dt)`` grid.
+
+    ``<prefix>_NF<Nf>_DT<dt>_TL<time_layers>_fd<fdot_max_factor>x<eps_fdot>_nld<k>.h5``,
+    with numbers tagged by ``%g`` and ``.`` -> ``p``.
+
+    Args:
+        Nf: WDM frequency layers.
+        dt: Time-domain sample step (s).
+        recipe: Overrides merged over :data:`EMRI_TABLE_RECIPE`.
+
+    Returns:
+        str: The file name (no directory).
+
+    Example:
+        >>> from lisatools.wdm_lookup_store import lookup_table_name
+        >>> lookup_table_name(1440, 2.5)
+        'wdm_lookup_emri_cx_NF1440_DT2p5_TL32_fd8x0p01_nld2.h5'
+    """
     r = dict(EMRI_TABLE_RECIPE, **(recipe or {}))
     return (f"{r['prefix']}_NF{int(Nf)}_DT{_tag(dt)}_TL{int(r['time_layers'])}"
             f"_fd{_tag(r['fdot_max_factor'])}x{_tag(r['eps_fdot'])}_nld{int(r['num_layers_diff'])}.h5")
@@ -74,7 +108,7 @@ def lookup_table_name(Nf: int, dt: float, recipe: Optional[dict] = None) -> str:
 
 #: The GB table: the shared recipe with a 128-layer build record (the 32-layer record
 #: carries an in-layer-offset norm bias up to 2.5e-5; 128 -> 5e-9) and a narrow fdot axis
-#: (+-0.1 layer_df / layer_dt; GB |fdot| is <~1e-6 of that, fdot = 0 is a node). Built on
+#: (+-0.1 layer_df / layer_dt; GB ``|fdot|`` is <~1e-6 of that, fdot = 0 is a node). Built on
 #: the cheap Nf 180 / dt 20 grid: it depends only on the 3600-s layer duration, so it serves
 #: the Nf 1440 / dt 2.5 production grid too.
 GB_TABLE_RECIPE = dict(prefix="wdm_lookup_gb_cx", fdot_max_factor=0.1, time_layers=128,
@@ -86,7 +120,18 @@ def resolve_gb_lookup_table(table: Optional[str] = None,
                             table_dir: Optional[str] = None) -> str:
     """Path of the GB lookup table: ``table`` when given, else the :data:`GB_TABLE_RECIPE`
     table in ``table_dir`` (default ``~/.cache/gb_lookup_tables``), built there first
-    (atomic, lock-protected) when missing."""
+    (atomic, lock-protected) when missing.
+
+    The default table lives on the :data:`GB_TABLE_GRID` ``(Nf, dt) = (180, 20.0)``
+    grid. Called by the stock GB sig-het builder when ``SIGHET_REF_BUILD=lookup``.
+
+    Args:
+        table: Explicit table path (returned as an absolute path, not checked).
+        table_dir: Directory for the canonical table.
+
+    Returns:
+        str: Absolute path of the table.
+    """
     if table:
         return os.path.abspath(os.path.expanduser(str(table)))
     d = table_dir or os.path.expanduser("~/.cache/gb_lookup_tables")
@@ -98,7 +143,21 @@ def resolve_gb_lookup_table(table: Optional[str] = None,
 
 def lookup_table_path(table: Optional[str], table_dir: Optional[str], Nf: int, dt: float,
                       recipe: Optional[dict] = None) -> str:
-    """``table`` when given (a pointer to a specific file), else ``table_dir/<canonical name>``."""
+    """``table`` when given (a pointer to a specific file), else ``table_dir/<canonical name>``.
+
+    Args:
+        table: Explicit table path, or ``None`` / ``""``.
+        table_dir: Directory for the canonical name (``~`` expanded).
+        Nf: WDM frequency layers.
+        dt: Time-domain sample step (s).
+        recipe: Recipe overrides for the canonical name.
+
+    Returns:
+        str: Absolute path.
+
+    Raises:
+        ValueError: If neither ``table`` nor ``table_dir`` is given.
+    """
     if table:
         return os.path.abspath(os.path.expanduser(str(table)))
     if not table_dir:
@@ -109,7 +168,25 @@ def lookup_table_path(table: Optional[str], table_dir: Optional[str], Nf: int, d
 
 def build_lookup_table(path: str, *, Nf: int, dt: float, force_backend: str = "cpu",
                        recipe: Optional[dict] = None, verbose: bool = False) -> str:
-    """Build the ``recipe`` table on the ``(Nf, dt)`` grid and save it at ``path`` (atomic)."""
+    """Build the ``recipe`` table on the ``(Nf, dt)`` grid and save it at ``path`` (atomic).
+
+    Builds :class:`~lisatools.domains.WDMLookupTable` on
+    ``WDMSettings(Nf, recipe["Nt"], dt, min_freq, max_freq)`` with the recipe's axes
+    (:meth:`~lisatools.domains.WDMLookupTable.apply_eps_frequency` /
+    :meth:`~lisatools.domains.WDMLookupTable.apply_eps_fdot`), writing to a
+    host/pid-tagged temporary file that is renamed onto ``path``.
+
+    Args:
+        path: Output HDF5 path.
+        Nf: WDM frequency layers.
+        dt: Time-domain sample step (s).
+        force_backend: Backend of the build. Default ``"cpu"``.
+        recipe: Overrides merged over :data:`EMRI_TABLE_RECIPE`.
+        verbose: Print build progress.
+
+    Returns:
+        str: ``path``.
+    """
     from .domains import WDMLookupTable, WDMSettings
 
     r = dict(EMRI_TABLE_RECIPE, **(recipe or {}))
@@ -136,6 +213,7 @@ def build_lookup_table(path: str, *, Nf: int, dt: float, force_backend: str = "c
 
 
 def _check_grid(path: str, Nf: int, dt: float) -> None:
+    """Raise ``ValueError`` unless the table at ``path`` reads and matches ``(Nf, dt)``."""
     import h5py
 
     from .domains import WDMLookupTable
@@ -161,6 +239,23 @@ def ensure_lookup_table(path: str, *, Nf: int, dt: float, force_backend: str = "
     building it). A lock whose builder died without a table is taken over once it has not
     been touched for ``wait_timeout`` seconds. A found table on another grid raises
     ``ValueError`` (never rebuilt over).
+
+    Args:
+        path: Table path (its directory is created if needed).
+        Nf: WDM frequency layers.
+        dt: Time-domain sample step (s).
+        force_backend: Backend of a build. Default ``"cpu"``.
+        recipe: Recipe overrides for a build.
+        wait_timeout: Seconds to wait for another builder (and the stale-lock age).
+            Default :data:`WAIT_TIMEOUT` (6 h).
+        poll: Seconds between checks while waiting. Default ``10.0``.
+
+    Returns:
+        str: ``"found"``, ``"built"`` or ``"waited"``.
+
+    Raises:
+        ValueError: If the table at ``path`` is unreadable or on another grid.
+        TimeoutError: If another process's build does not finish in time.
     """
     if os.path.exists(path):
         _check_grid(path, Nf, dt)

@@ -1,34 +1,79 @@
 """Warm-start GB proposal fitter: previous-run store -> Gaussian components npz.
 
-Workstream B (docs/6mo-run-prep.md) real-data builder implementing the
-3-stage pipeline of docs/warm-start-gb-proposal.md on a finished run's
-cold-chain leaf table (validated prototype: proto_warmstart_cluster.py):
+Stage 1 of the warm-start build (fit -> :mod:`.match_referee` ->
+:mod:`.referee_apply`), run in-process by
+:func:`.build.ensure_warm_start_components` (the parent warm start, first
+launch of a child run) and by :func:`.self_refit.build_self_epoch` (every
+self-refit epoch, on the head's ``leaf_rows.h5`` copy of the run's own last
+rows), or by hand on a login node. Workstream B (docs/6mo-run-prep.md)
+real-data builder implementing the 3-stage pipeline of
+docs/warm-start-gb-proposal.md on a finished run's cold-chain leaf table
+(validated prototype: proto_warmstart_cluster.py):
 
+  0. Leaf table (:func:`load_leaf_table`): every ALIVE cold-chain GB leaf of
+     the last ``--last-k`` STORED ROWS, all walkers; one posterior sample =
+     one (row, walker). Rows, not iterations: a numbered search stage stores
+     3 rows per cycle under ``GB_SEARCH_LEGS=1``, ``full_pe`` one per
+     iteration.
   1. f0 DENSITY-VALLEY segmentation at 1/Tobs bins with a count floor
-     (0.5% of posterior samples per bin); islands padded by one bin.
+     (0.5% of posterior samples per bin); islands padded by one bin,
+     recursively split at density valleys, force-split above 64 bins.
   2. Within-island split (SWAPPABLE strategy, ``split(island_rows) ->
-     labels``): robust-MAD-whiten (f0, Mc, ln dist, alpha, sin_delta),
-     SINGLE-linkage on a <=1500-row subsample cut at 2.0 whitened units,
-     nearest-centroid assignment with junk radius 6 (label -1), plus the
-     v1 satellite-fragment merge pass.
-  3. Cluster -> component: Gaussian mean/cov over the full 9-col sampled
-     basis with CIRCULAR handling for phi0/psi/alpha (v1) and covariance
-     eigenvalue floors (v1); inclusion probability
-     p = distinct posterior samples containing a member / n_samples,
-     and leaf multiplicity mult = members / distinct samples.
+     labels``): robust-MAD-whiten five cluster features, SINGLE-linkage on
+     a <=1500-row subsample cut at 2.0 whitened units, nearest-centroid
+     assignment with junk radius 6 (label -1), plus the v1
+     satellite-fragment merge pass; then (stage 3.5) a recursive ward
+     re-split of wide blends (p > 0.5 and mult > ``--resplit-mult``).
+  3. Cluster -> component. Inclusion probability
+     p = distinct posterior samples containing a member / n_samples, and
+     leaf multiplicity mult = members / distinct samples.
 
-Waveform-free by design: numpy/scipy/h5py only, no lisatools import.
+     * ``--basis observable`` (the CLI default and the production path):
+       the rows are mapped to the observable basis at intake
+       (:func:`to_observable`; features ``f_mid, fdot, lnA, alpha,
+       sin_delta``) and each cluster is fitted as a min-BIC Gaussian
+       MIXTURE (:func:`fit_cluster_gmms`, on a GPU when ``--gmm-gpu`` names
+       one), written in the packed ``gmm_*`` layout.
+     * ``--basis sampling`` (the pre-2026-09-18 fit; :func:`run`'s library
+       default): one Gaussian mean/cov per cluster over the 9 sampled
+       columns (features ``f0, Mc, ln dist, alpha, sin_delta``) with
+       CIRCULAR handling for phi0/psi/alpha, covariance eigenvalue floors
+       and truncated-normal MLE on the bounded columns.
+
+The sampling path is numpy/scipy/h5py only; the observable path imports
+the lisatools basis map and GMM fitter lazily. No waveform is built here.
 CPU budget: run with OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1
 OPENBLAS_NUM_THREADS=1. Reads the chain iteration-by-iteration (streamed).
 
 Sampled basis (verified against stock/erebor/gb.py init_sampling_info and
-the store's column ranges; the store keeps NO column names itself):
+the store's column ranges; the store keeps NO column names itself)::
+
   0 dist [kpc], 1 f0 [mHz], 2 Mc [Msol], 3 phi0 [rad, 2pi], 4 cos_iota,
   5 psi [rad, pi], 6 alpha [rad, 2pi], 7 sin_delta, 8 fdot_astro_ratio.
 
-Usage:
-  python warmstart_fit_from_store.py --store <h5> [--last-k N]
-      [--tobs 7776000] [--out components.npz]
+Output npz: ``meta`` (JSON: store, tobs, last_k, basis, column names,
+bounded_cols, knobs, counts, walls; plus ``map_params``, ``feat_names``
+and ``gmm`` on the observable path), per-cluster ``p``, ``mult``,
+``n_members``, ``island_id`` and per-island ``f0_window_edges``, plus
+``gmm_ncomp`` / ``gmm_weights`` / ``gmm_means`` / ``gmm_covs`` /
+``gmm_invcovs`` / ``gmm_dets`` / ``gmm_mins`` / ``gmm_maxs`` (observable) or
+``means`` / ``covs`` (sampling). Clusters are in ascending column-1 order.
+
+Example:
+    The parent build the 9mo launcher would run by hand (``--tobs`` is the
+    SOURCE store's Tobs; ``GB_WARM_START_LAST_K=300`` rows):
+
+    .. code-block:: bash
+
+        OMP_NUM_THREADS=1 python -m lisatools.globalfit.warmstart.fit_from_store \\
+            --store gf_prod_6mo_testing.h5 --last-k 300 --tobs 15552000 \\
+            --out gf_prod_6mo_v9_4gpu_refereed_fit.npz
+
+    A self-refit epoch's call (from :func:`.self_refit.build_self_epoch`):
+    ``--store epoch_NNNN/leaf_rows.h5 --last-k N_ROWS --tobs RUN_TOBS
+    --out epoch_NNNN/self_fit.npz --gmm-gpu DEVICE`` (``N_ROWS`` = every row
+    of the copy, ``RUN_TOBS`` = the run's own Tobs [s], ``DEVICE`` = the
+    builder's CUDA index or ``cpu``).
 """
 from __future__ import annotations
 
@@ -126,6 +171,13 @@ def basis_df(tobs: float, basis: str) -> float:
     map's ``f_mid``). Passing the mHz width against Hz data would make the
     segmentation bins 1000x too wide and collapse the whole band into a
     few islands.
+
+    Args:
+        tobs: Observation time [s].
+        basis: ``"observable"`` or anything else (= sampling).
+
+    Returns:
+        float: ``1/tobs`` in Hz (observable) or mHz (sampling).
     """
     if basis == "observable":
         return 1.0 / float(tobs)
@@ -137,6 +189,15 @@ def to_observable(x_all: np.ndarray, obs_map) -> np.ndarray:
 
     THE intake seam: after this call no stage of the pipeline sees sampling
     columns until the referee, the SNR gate or the proposal converts back.
+
+    Args:
+        x_all: ``(n, 9)`` sampling-basis rows (f0 in mHz).
+        obs_map (GBObservableFiberBasis): The intake map
+            (:func:`build_observable_map`).
+
+    Returns:
+        np.ndarray: ``(n, 9)`` float64 observable rows (``lnA, f_mid [Hz],
+        fdot [Hz/s], phi0, cos_iota, psi, alpha, sin_delta, Mc``).
     """
     return np.asarray(obs_map.to_internal(np.asarray(x_all, dtype=float)),
                       dtype=float)
@@ -148,6 +209,21 @@ def build_observable_map(tobs: float, transform_container=None,
 
     Lazily imported so the sampling-basis path keeps this module free of
     any lisatools dependency.
+
+    Args:
+        tobs: The SOURCE store's Tobs [s].
+        transform_container (optional): A real GB transform container,
+            checked against :data:`COLUMN_NAMES`. Default ``None`` = a
+            stand-in carrying :data:`COLUMN_NAMES`.
+        shear: Map shear. Default ``0.5``.
+        fiber_coord: Fiber coordinate. Default ``"Mc"``.
+
+    Returns:
+        GBObservableFiberBasis: The map (:func:`.basis.build_map`).
+
+    Raises:
+        ValueError: When ``transform_container``'s ``input_basis`` is not
+            :data:`COLUMN_NAMES`.
     """
     from . import basis as wb
 
@@ -185,6 +261,11 @@ CORR_EIG_FLOOR = 1e-4              # eigenvalue floor on the correlation mat
 
 
 def rss_gb() -> float:
+    """Peak RSS of this process for the progress prints, in GB IF ``ru_maxrss`` is in bytes.
+
+    ``ru_maxrss`` is bytes on macOS but KILOBYTES on Linux, so on the
+    cluster the printed number is 1024x too small (diagnostic only).
+    """
     ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return ru / 1024 ** 3  # macOS: bytes
 
@@ -193,13 +274,37 @@ def rss_gb() -> float:
 # stage 0: streamed cold-chain leaf-table extraction
 # --------------------------------------------------------------------------
 def load_leaf_table(store: str, last_k: int | None, max_iter: int | None = None):
-    """Read the cold-chain GB leaf table over the last K stored iterations.
+    """Read the cold-chain GB leaf table over the last K stored rows.
 
-    Returns (X (n, 9) float64, sample_id (n,) int64, info dict).
-    sample_id = stored_iteration_index * nwalkers + walker.
+    "Written" rows are the stored rows where any walker's cold-chain
+    ``log_like`` is nonzero; trailing written rows whose coordinate slab is
+    all zeros (a crash mid-save) are dropped, then the last ``last_k`` are
+    kept. K counts STORED ROWS, not iterations: a numbered search stage
+    stores 3 rows per cycle under ``GB_SEARCH_LEGS=1``, ``full_pe`` one per
+    iteration. Rows of a snapshot extract outside its keep window read as
+    zeros and are dropped with a warning. Also used by
+    :func:`.match_referee.load_leaf_rows` and
+    :func:`.self_refit.consensus_filter`, so the referee re-extracts members
+    from exactly the rows the fit read.
+
     Handles both the gf_format_version-2 layout
     [it, nsamplers, ntemps, nwalkers, nleaves, ndim] and the legacy
     [it, ntemps, nwalkers, nleaves, ndim] one (top group "mcmc").
+
+    Args:
+        store: The store h5 (``global_fit`` or legacy ``mcmc`` group).
+        last_k: Rows to keep, counted back from the last written one.
+            ``None`` = every written row.
+        max_iter: Ignore stored rows with a larger index. Default ``None``.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray, dict]: ``(X, sample_id, info)``. ``X``
+        is ``(n, 9)`` float64 alive leaf rows in the SAMPLING basis (f0 in
+        mHz); ``sample_id`` is ``(n,)`` int64 =
+        ``stored_row_index * nwalkers + walker``; ``info`` holds
+        ``iterations`` (first / last row read), ``n_iterations`` (rows read),
+        ``nwalkers``, ``ndim``, ``n_samples`` (rows x walkers),
+        ``leaves_per_walker`` and ``store_iteration_attr``.
     """
     with h5py.File(store, "r") as f:
         g = f["global_fit"] if "global_fit" in f else f["mcmc"]
@@ -274,8 +379,20 @@ def load_leaf_table(store: str, last_k: int | None, max_iter: int | None = None)
 def segment_f0(f0_mhz: np.ndarray, df_mhz: float, n_samples: int):
     """Islands = contiguous 1/Tobs bins above the count floor, padded by 1.
 
-    Returns (bin_index_per_row, island list [(b0, b1) half-open bins],
-    f_edge0, floor).
+    The floor is ``max(5, 0.005 * n_samples)`` rows per bin; touching
+    islands merge, then each is recursively split at density valleys
+    (``VALLEY_FRAC``) and force-split above ``MAX_ISLAND_BINS``.
+
+    Args:
+        f0_mhz: ``(n,)`` column 1 of the rows (despite the name, in the
+            units of the working basis: mHz sampling, Hz observable).
+        df_mhz: The bin width in the same units (:func:`basis_df`).
+        n_samples: Posterior samples (rows x walkers) of the table.
+
+    Returns:
+        tuple: ``(bin_index_per_row (n,) int64, islands [(b0, b1)] half-open
+        bin ranges sorted ascending, f_edge0 (the frequency of bin 0),
+        floor)``.
     """
     f_lo = np.floor(f0_mhz.min() / df_mhz) * df_mhz
     idx = ((f0_mhz - f_lo) / df_mhz).astype(np.int64)
@@ -330,12 +447,22 @@ def segment_f0(f0_mhz: np.ndarray, df_mhz: float, n_samples: int):
 # --------------------------------------------------------------------------
 def make_cluster_features(x_all: np.ndarray,
                           basis: str = "sampling") -> np.ndarray:
-    """rows -> (n, 5) cluster features, alpha rotated so the 2pi wrap sits
-    in the emptiest region of the island's alpha histogram.
+    """Rows -> ``(n, 5)`` cluster features, with alpha's 2pi wrap moved to the emptiest region.
 
-    ``basis="sampling"``   -> (f0,    Mc,   ln dist, alpha, sin_delta)
-    ``basis="observable"`` -> (f_mid, fdot, lnA,     alpha, sin_delta)
+    The alpha column is rotated so its wrap sits in the emptiest of 36 bins
+    of the island's alpha histogram::
+
+        basis="sampling"   -> (f0,    Mc,   ln dist, alpha, sin_delta)
+        basis="observable" -> (f_mid, fdot, lnA,     alpha, sin_delta)
+
     Alpha is column 6 in BOTH bases, so the rotation below is shared.
+
+    Args:
+        x_all: ``(n, 9)`` rows in ``basis``.
+        basis: ``"sampling"`` (default) or ``"observable"``.
+
+    Returns:
+        np.ndarray: ``(n, 5)`` features.
     """
     alpha = x_all[:, 6]
     hist = np.bincount((alpha / (2 * np.pi) * 36).astype(int) % 36,
@@ -362,6 +489,16 @@ def cluster_scale_floor(feats: np.ndarray, df_seg: float,
     delete the separator this basis change exists to add, and no fixed
     absolute number works across five decades either. The floor is
     therefore taken RELATIVE to the island's own chirp scale.
+
+    Args:
+        feats: ``(n, 5)`` :func:`make_cluster_features` output.
+        df_seg: ``1/Tobs`` in the units of feature 0 (:func:`basis_df`).
+        basis: ``"sampling"`` (default) or ``"observable"``.
+
+    Returns:
+        np.ndarray: ``(5,)`` floors: ``0.05 df_seg``, then ``1e-4`` (Mc) or
+        ``max(FDOT_SCALE_FLOOR_FRAC * median|fdot|, 1e-30)``, then ``1e-3``
+        for the last three.
     """
     if basis == "observable":
         fdot_scale = float(np.median(np.abs(feats[:, 1])))
@@ -375,7 +512,10 @@ def _satellite_merge(labels, zw, stats):
     """v1 refinement: merge satellite fragments in whitened space.
 
     Any centroid pair closer than SAT_MERGE_CUT merges; a cluster smaller
-    than SAT_FRAC of a bigger one merges into it within SAT_RADIUS."""
+    than SAT_FRAC of a bigger one merges into it within SAT_RADIUS. Up to 5
+    passes; ``stats["satellite_merges"]`` counts the merges. Returns the
+    compacted labels (``-1`` junk kept).
+    """
     for _ in range(5):
         ks = np.unique(labels[labels >= 0])
         if len(ks) < 2:
@@ -418,8 +558,19 @@ def split_single_linkage(island_rows: np.ndarray, rng: np.random.Generator,
                          df_seg: float, stats: dict) -> np.ndarray:
     """Default swappable splitter: split(island_rows) -> labels (-1 = junk).
 
-    island_rows: (n, 9) rows of ONE island, in ``stats["basis"]``.
-    ``df_seg`` is 1/Tobs in the units of column 1 of THAT basis.
+    MAD-whitened single linkage on a ``SUB``-row subsample cut at ``T_CUT``,
+    nearest-centroid assignment of every row (junk beyond ``JUNK_RADIUS``),
+    then :func:`_satellite_merge`.
+
+    Args:
+        island_rows: ``(n, 9)`` rows of ONE island, in ``stats["basis"]``.
+        rng: The fit's generator (subsample draw).
+        df_seg: ``1/Tobs`` in the units of column 1 of THAT basis.
+        stats: The fit's running counters (reads ``"basis"``, updates
+            ``"satellite_merges"``).
+
+    Returns:
+        np.ndarray: ``(n,)`` int labels, ``-1`` = junk.
     """
     basis = stats.get("basis", "sampling")
     feats = make_cluster_features(island_rows, basis=basis)
@@ -449,7 +600,16 @@ def split_single_linkage(island_rows: np.ndarray, rng: np.random.Generator,
 # stage 3: cluster -> Gaussian component (circular params + eigval floors)
 # --------------------------------------------------------------------------
 def circular_wrap(x: np.ndarray, period: float) -> np.ndarray:
-    """Wrap samples of a circular parameter around their circular mean."""
+    """Wrap samples of a circular parameter around their circular mean.
+
+    Args:
+        x: ``(n,)`` samples.
+        period: The column's period (``2 pi`` or ``pi``).
+
+    Returns:
+        np.ndarray: ``(n,)`` samples shifted by whole periods into
+        ``[m - period/2, m + period/2)`` around the circular mean ``m``.
+    """
     ang = x * (2 * np.pi / period)
     m = np.arctan2(np.sin(ang).mean(), np.cos(ang).mean())
     m *= period / (2 * np.pi)
@@ -460,7 +620,11 @@ def _trunc_mle_1d(x: np.ndarray, lo: float, hi: float):
     """Truncated-normal MLE on [lo, hi]; returns (mu, sigma, fitted).
 
     fitted=False = the fast path (sample >= 3.5 sigma interior on both
-    edges, truncation negligible, moments returned)."""
+    edges, truncation negligible, moments returned). Otherwise a
+    Nelder-Mead fit of ``(mu, ln sigma)``, with ``mu`` clipped to
+    ``[lo - 2 span, hi + 2 span]`` and ``sigma`` to
+    ``[1e-5 span, 3 span]``.
+    """
     span = hi - lo
     m0, s0 = float(x.mean()), max(float(x.std()), 1e-4 * span)
     if (lo < m0 - 3.5 * s0) and (m0 + 3.5 * s0 < hi):
@@ -485,9 +649,26 @@ def _trunc_mle_1d(x: np.ndarray, lo: float, hi: float):
 
 
 def fit_component(rows: np.ndarray, stats: dict):
-    """(m, 9) member rows -> (mean, cov) with circular phi0/psi/alpha,
-    eigenvalue-floored covariance (v1 refinements), and truncated-normal
-    MLE on the bounded columns (stats["bounded_cols"], 2026-09-11)."""
+    """``(m, 9)`` member rows -> one Gaussian ``(mean, cov)`` (the SAMPLING-basis path).
+
+    Circular phi0/psi/alpha are wrapped around their circular means (means
+    returned in ``[0, period)``), the covariance is eigenvalue-floored
+    (v1 refinements: a diagonal floor -- ``dist`` 1e-4 relative, ``f0``
+    0.02/Tobs, ``Mc`` 1e-5 Msol, the rest 1e-3 -- then ``CORR_EIG_FLOOR`` on
+    the correlation spectrum), and the bounded columns
+    (``stats["bounded_cols"]``, 2026-09-11) get a truncated-normal MLE
+    (:func:`_trunc_mle_1d`) when there are >= 8 members.
+
+    Args:
+        rows: ``(m, 9)`` member rows, sampling basis (f0 in mHz).
+        stats (dict): The fit's counters; reads ``"df_mhz"`` and
+            ``"bounded_cols"``, updates the ``cov_floor_*`` and
+            ``trunc_mle_fits`` counts.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``mean (9,)``, ``cov (9, 9)``
+        (positive definite).
+    """
     x = rows.copy()
     for col, period in CIRCULAR_COLS.items():
         x[:, col] = circular_wrap(x[:, col], period)
@@ -562,6 +743,15 @@ def _unscale_gmm_components(comps):
     that class applies the affine ITSELF, so it must NOT be handed these
     unscaled arrays. ``meta["gmm"]["components_basis"] = "physical"``
     records which convention a file is in.
+
+    Args:
+        comps (list): The seven ragged lists ``[weights, means, covs,
+            invcovs, dets, mins, maxs]`` of ``vec_fit_gmm_min_bic`` (one
+            entry per group; numpy or cupy).
+
+    Returns:
+        list: The same seven lists as host numpy arrays, means / covs /
+        invcovs / dets in physical coordinates.
     """
     weights, means, covs, invcovs, dets, mins, maxs = comps
     out_means, out_covs, out_invcovs, out_dets = [], [], [], []
@@ -598,7 +788,17 @@ def resolve_gmm_gpu(spec):
     does, and on a login node it must still run. Anything that fails to
     report a device falls back to the host path with a printed reason
     rather than raising -- a warm start that fits slowly is recoverable, a
-    warm start that does not fit at all blocks a launch.
+    warm start that does not fit at all blocks a launch. The parent build
+    (:func:`.build.ensure_warm_start_components`) leaves it at ``auto``; the
+    self refit passes the head's device or ``cpu``.
+
+    Args:
+        spec (str or None): ``None`` / ``"cpu"`` / ``"none"`` / ``"-1"`` ->
+            CPU; ``"auto"`` -> device 0 when cupy sees one, else CPU; any
+            other value -> ``int(spec)``.
+
+    Returns:
+        int or None: The CUDA device index, ``None`` = CPU.
     """
     if spec is None:
         return None
@@ -652,10 +852,27 @@ def fit_cluster_gmms(cluster_rows, *, n_samples: int = 4096,
     does. Device and host EM take different code paths inside ``gmm.py``,
     so results are reproducible per device, not across devices.
 
-    Returns the seven ragged lists ``[weights, means, covs, invcovs, dets,
-    mins, maxs]``, one entry per cluster, in PHYSICAL coordinates (see
-    :func:`_unscale_gmm_components`), ready for
-    :func:`lisatools.sampling.fstat_proposal.pack_gmm_components`.
+    Also used by :func:`.para_search.write_epoch` (one cluster per merged
+    source).
+
+    Args:
+        cluster_rows (list of np.ndarray): One ``(n_k, ndim)`` member block
+            per cluster (observable basis on the production path).
+        n_samples: Rows each cluster is resampled to. Default ``4096``
+            (``--gmm-samples``).
+        max_comp: Mixture component cap. Default ``12``.
+        min_members: Members per allowed component. Default ``25``.
+        seed: Resampling and EM seed. Default ``7``.
+        gpu (int, optional): CUDA device index, ``None`` = CPU. Default
+            ``None``.
+        verbose: Forwarded to the fitter. Default ``False``.
+
+    Returns:
+        list: The seven ragged lists ``[weights, means, covs, invcovs, dets,
+        mins, maxs]``, one entry per cluster in the input order, in PHYSICAL
+        coordinates (see :func:`_unscale_gmm_components`), ready for
+        :func:`lisatools.sampling.fstat_proposal.pack_gmm_components`.
+        ``mins`` / ``maxs`` are each cluster's ``(ndim,)`` member box.
     """
     from lisatools.sampling.gmm import vec_fit_gmm_min_bic
 
@@ -729,7 +946,10 @@ def _ward_split(rows, sid, rng, df_seg, basis="sampling"):
     """One ward 2-split in the cluster's own whitened frame.
 
     Returns [(rows, sid), (rows, sid)] or None when the split is
-    degenerate (a tiny piece) or makes no mult progress."""
+    degenerate (a piece under 3 rows) or a piece does not lower mult by
+    more than 0.1. Clusters above ``SUB`` rows are split on a subsample and
+    assigned by nearest centroid.
+    """
     feats = make_cluster_features(rows, basis=basis)
     med = np.median(feats, axis=0)
     mad = 1.4826 * np.median(np.abs(feats - med), axis=0)
@@ -755,7 +975,21 @@ def _ward_split(rows, sid, rng, df_seg, basis="sampling"):
 
 def resplit_blends(rows, sid, n_samples, mult_max, rng, df_seg, stats,
                    max_depth=4):
-    """Recursively re-split clusters with p > 0.5 and mult > mult_max."""
+    """Recursively re-split clusters with p > 0.5 and mult > mult_max (stage 3.5).
+
+    Args:
+        rows (np.ndarray): ``(m, 9)`` member rows of one cluster.
+        sid (np.ndarray): ``(m,)`` their sample ids.
+        n_samples (int): Posterior samples of the table (for ``p``).
+        mult_max (float): The trigger (``--resplit-mult``, default 2.0).
+        rng (np.random.Generator): The fit's generator.
+        df_seg (float): ``1/Tobs`` in column-1 units.
+        stats (dict): Counters (``blend_resplits``, ``blend_unsplit``).
+        max_depth (int, optional): Recursion cap. Default ``4``.
+
+    Returns:
+        list[tuple[np.ndarray, np.ndarray]]: The ``(rows, sid)`` pieces.
+    """
     out, queue = [], [(rows, sid, 0)]
     while queue:
         r, s, depth = queue.pop()
@@ -803,6 +1037,34 @@ def run(store: str, last_k: int | None, tobs: float, out: str,
 
     ``gmm_*`` configure the observable path's per-cluster mixture (see
     :func:`fit_cluster_gmms`); they are ignored on the sampling path.
+
+    Args:
+        store: The source store h5.
+        last_k: STORED ROWS to fit, counted back from the last written one
+            (``None`` = all; see :func:`load_leaf_table`).
+        tobs: The SOURCE store's Tobs [s]: sets the 1/Tobs segmentation
+            bins and the intake map.
+        out: Output npz path.
+        split_fn (callable, optional): The within-island splitter
+            ``split_fn(island_rows, rng, df_seg, stats) -> labels``. Default
+            :func:`split_single_linkage`.
+        seed: Generator seed (subsamples, re-splits, GMM). Default ``7``.
+        max_iter: Ignore stored rows past this index. Default ``None``.
+        resplit_mult: Stage-3.5 trigger; ``<= 0`` disables. Default ``2.0``.
+        ratio_max: ``fdot_astro_ratio`` half-width, the sampling path's
+            column-8 truncation box. Default ``5.0``.
+        basis: ``"sampling"`` (default) or ``"observable"``.
+        transform_container (optional): See above. Default ``None``.
+        gmm_samples: Default ``4096``.
+        gmm_max_comp: Default ``12``.
+        gmm_min_members: Default ``25``.
+        gmm_gpu: CUDA device for the mixture fit, ``None`` = CPU.
+
+    Returns:
+        str: ``out`` (the npz layout is in the module docstring).
+
+    Raises:
+        ValueError: For an unknown ``basis``.
     """
     if basis not in ("observable", "sampling"):
         raise ValueError(
@@ -1012,6 +1274,14 @@ def run(store: str, last_k: int | None, tobs: float, out: str,
 
 
 def main(argv=None):
+    """CLI: parse ``argv`` and run :func:`run` (``--basis observable`` by default).
+
+    The argparse description is the first line of the module docstring.
+    Called in-process with an argv list by :func:`.build._default_runner`.
+
+    Args:
+        argv (list of str, optional): Arguments; ``None`` = ``sys.argv[1:]``.
+    """
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--store", required=True, help="previous-run h5 store")
     ap.add_argument("--last-k", type=int, default=None,

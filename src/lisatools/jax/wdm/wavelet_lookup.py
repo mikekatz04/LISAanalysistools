@@ -1,4 +1,10 @@
-"""JAX port of ``WaveletLookupTable`` (TDIonTheFly.cu:455-591).
+"""JAX port of ``WaveletLookupTable`` (formerly ``TDIonTheFly.cu:455-591``).
+
+The C++ per-pixel ``WaveletLookupTable`` path was retired at Phase 3L
+(replaced by the chunked-heterodyne kernels; see ``gbgpu/cutils/gb_tdi_on_the_fly.hh``),
+so this JAX class is now the only implementation; its consumer is
+``gbgpu.jax.wdm.kernels`` / ``gbgpu.jax.wdm.computation_group``. The line
+references in this module point at the pre-absorption lisa-on-gpu file.
 
 Two table layouts are supported, matching the C++ ``LookupKind`` enum:
 
@@ -10,7 +16,7 @@ Two table layouts are supported, matching the C++ ``LookupKind`` enum:
 
 The per-pixel WDM coefficient construction matches
 ``WaveletLookupTable::get_w_mn_lookup`` byte-for-byte (modulo FMA
-re-orderings):
+re-orderings)::
 
     w_mn = c_nm * Re(M') + s_nm * Im(M')
 
@@ -32,10 +38,34 @@ LOOKUP_N_REF_ONLY = 1
 class WaveletLookupTableWrapJAX:
     """Pure-JAX analog of ``WaveletLookupTableWrap``.
 
-    Constructor signature matches the C++ wrapper (17 args). All
-    array inputs are converted to ``jnp.ndarray``; the scalar /
-    integer parameters stay as Python attributes so that downstream
-    JIT traces them as static.
+    Takes 20 constructor arguments (the two tables plus 18 scalars). The two
+    table arrays are converted to ``jnp.ndarray`` through the host
+    (``np.asarray``); the scalar / integer parameters stay as Python
+    attributes so that downstream JIT traces them as static. Every argument is
+    stored under its own name, plus ``Nf_active`` / ``Nt_active``.
+
+    Args:
+        c_nm_all (array-like): Cosine-coefficient table, ``(Nt, num_fdot, num_f)``
+            for ``LOOKUP_PER_N`` or ``(num_fdot, num_f)`` for ``LOOKUP_N_REF_ONLY``.
+        s_nm_all (array-like): Sine-coefficient table, same layout.
+        num_f: Table points along the scaled frequency.
+        num_fdot: Table points along fdot (1 = 1-D interpolation in f).
+        df_interp: Scaled-frequency step of the table [Hz].
+        dfdot_interp: fdot step of the table [Hz/s].
+        min_f_scaled: First scaled frequency of the table [Hz].
+        min_fdot: First fdot of the table [Hz/s].
+        layer_df: WDM frequency-layer width [Hz].
+        layer_dt: WDM time-pixel width [s].
+        Nf: Number of frequency layers.
+        Nt: Number of time pixels.
+        num_channel: Number of TDI channels.
+        ind_min_t: First time pixel of the active band.
+        ind_max_t: Last time pixel of the active band (inclusive).
+        ind_min_f: First frequency layer of the active band.
+        ind_max_f: Last frequency layer of the active band.
+        m_ref: Reference layer of the table.
+        n_ref: Reference time pixel of the table (``LOOKUP_N_REF_ONLY``).
+        kind: ``LOOKUP_PER_N`` (0) or ``LOOKUP_N_REF_ONLY`` (1).
     """
 
     def __init__(
@@ -97,7 +127,10 @@ class WaveletLookupTableWrapJAX:
         Designed to be called from inside ``jax.vmap`` (one pixel at a
         time); ``f_scaled``, ``fdot``, ``layer_n`` are scalars from
         the caller's perspective. The vmap rebroadcasts to whatever
-        batch shape the caller uses.
+        batch shape the caller uses. Points outside the table return 0.
+        In the bilinear branch the f-axis knots are ``df_interp * index``
+        without the ``min_f_scaled`` offset (verbatim from the C++), while
+        the 1-D branch includes the offset.
         """
         # Pick the (num_fdot, num_f) slice for this layer_n.
         if self.kind == LOOKUP_PER_N:
@@ -158,11 +191,22 @@ class WaveletLookupTableWrapJAX:
     def get_w_mn_lookup(self, tdi_channel_val: jnp.ndarray,
                         f: jnp.ndarray, fdot: jnp.ndarray,
                         layer_m: jnp.ndarray, layer_n: jnp.ndarray) -> jnp.ndarray:
-        """Mirrors ``WaveletLookupTable::get_w_mn_lookup``
-        (TDIonTheFly.cu:520-575).
+        """Return the WDM coefficient ``w_mn`` of one channel value at pixel (m, n).
 
-        ``tdi_channel_val`` is a *complex* tracer (M' in C++ convention,
-        already rotated by ``conj(M * exp(-i pi/2))``).
+        Mirrors ``WaveletLookupTable::get_w_mn_lookup`` (formerly
+        ``TDIonTheFly.cu:520-575``).
+
+        Args:
+            tdi_channel_val: Complex value ``M'`` (C++ convention, already
+                rotated by ``conj(M * exp(-i pi/2))``; see
+                :func:`~lisatools.jax.wdm.fast_inner.fast_wdm_inner_jax`).
+            f: Instantaneous frequency [Hz].
+            fdot: Frequency derivative [Hz/s].
+            layer_m: Frequency layer ``m``.
+            layer_n: Time pixel ``n``.
+
+        Returns:
+            jnp.ndarray: The real coefficient.
         """
         f_scaled = f - layer_m * self.layer_df
         _c_nm = self._linear_interp(f_scaled, fdot, self.c_nm_all, layer_n)
@@ -192,8 +236,19 @@ class WaveletLookupTableWrapJAX:
                                        m: jnp.ndarray, n: jnp.ndarray) -> jnp.ndarray:
         """Mirrors ``WaveletLookupTable::get_wdm_in_channel_over_layers``.
 
-        Returns 0 if ``m`` is outside ``[ind_min_f, ind_max_f)`` to
-        match the C++ guard.
+        :meth:`get_w_mn_lookup` with a band guard: returns 0 if ``m`` is
+        outside ``[ind_min_f, ind_max_f)`` (upper end exclusive) to match the
+        C++ guard.
+
+        Args:
+            tdi_channel_val: Complex ``M'`` value.
+            f: Instantaneous frequency [Hz].
+            fdot: Frequency derivative [Hz/s].
+            m: Frequency layer.
+            n: Time pixel.
+
+        Returns:
+            jnp.ndarray: The real coefficient (0 outside the band).
         """
         in_band = (m >= self.ind_min_f) & (m < self.ind_max_f)
         w_mn = self.get_w_mn_lookup(tdi_channel_val, f, fdot, m, n)

@@ -11,8 +11,10 @@ Rules that apply everywhere: [`conventions.md`](conventions.md) and the repo
 backends) is [`codebase-map.md`](codebase-map.md); this guide is only about
 the global-fit pipeline on top of it.
 
-_Last verified against `dev` 8917eac2 on 2026-10-11. Line numbers drift;
-every pointer below is a name you can grep for._
+_Last verified against `dev` 8917eac2 on 2026-10-11; the production variant,
+file sizes, rung counts and PE draw-one shares re-checked against `dev`
+a0d0b0a4 on 2026-10-22 (docs audit). Line numbers drift; every pointer below
+is a name you can grep for._
 
 ---
 
@@ -37,7 +39,7 @@ launcher (bash; ~500 env knobs)          scripts/fstat_proposal/submit_gf_<run>.
 ```
 
 Everything a run does is decided by (a) which **stock variant** it builds
-(`full_year_combined` for every production run), (b) the **env knobs** the
+(`all_sources` for every production run; `gb_no_fg` only with `GB_ONLY=1`), (b) the **env knobs** the
 launcher exports, and (c) the **recipe** the driver composes from them. A
 knob you cannot find in the launcher is at its code default; a code default
 you cannot find is a dataclass field in `stock/erebor/*.py`.
@@ -55,7 +57,7 @@ Vocabulary (the user's words; use them):
 | **row** = **stored iteration** | one saved state in the store; `global_fit.attrs["iteration"]` is the count. |
 | **band** / **sub-band** | the GB frequency bands (1232 at 6-9 months); the unit of GB work, tempering and gating. |
 | **pair** | a (walker, band) pair; the unit the per-walker RJ valve judges. |
-| **rung** | one temperature of a branch's internal ladder (GB 24, PSD 12, MBH/EMRI/SOBBH 8 on the v9 launchers; the code default for the three sources is 4). The main store holds the cold chain only. |
+| **rung** | one temperature of a branch's internal ladder (GB 24, VGB 8, PSD / galfor 12, MBH 8, EMRI 12, SOBBH 8 on the 9mo / 12mo launchers; code defaults MBH / EMRI 24, SOBBH 4, VGB 12). The main store holds the cold chain only. |
 | **valve** / **gate** | a mechanism that stops work in a band or pair once it has converged (section 4). |
 | **epoch** | one F-stat grid fit (`gb_fstat_fit/shared_search/epoch_NNNN/`). |
 | **q** | always the binary mass ratio. Never reuse it for anything else (user ruling). |
@@ -66,14 +68,14 @@ Vocabulary (the user's words; use them):
 
 | file | lines | how to use it |
 |---|---|---|
-| `src/lisatools/globalfit/moves/gbspecialstretch.py` | ~33,000 | grep for a method or a log tag, then read that method. Never read it top to bottom. |
-| `src/lisatools/globalfit/recipe.py` | ~6,900 | class list in section 2; grep by name. |
-| `scripts/fstat_proposal/submit_gf_9mo_v9.sh` (and every launcher) | ~5,900 | grep for the knob; read its comment block (every knob has one with the ruling and the date). |
-| `scripts/flagship/launcher.sh.in` | ~5,500 | the same body as a template. |
-| `src/lisatools/globalfit/moves/psdmove.py` | ~3,900 | grep. |
-| `src/lisatools/globalfit/run.py` | ~3,600 | grep `def run_global_fit`, `prepare_main`, `setup_acs`, `_seed_rank_streams`. |
-| `scripts/fstat_proposal/run_combined_staged.py` | ~2,900 | read `V9_SEARCH_STAGE_PROFILES`, `search_stage_profiles`, `build_fit`, `describe_recipe`. |
-| `src/lisatools/globalfit/moves/addremovemove.py` | ~2,900 | grep. |
+| `src/lisatools/globalfit/moves/gbspecialstretch.py` | ~40,000 | grep for a method or a log tag, then read that method. Never read it top to bottom. |
+| `src/lisatools/globalfit/recipe.py` | ~9,300 | class list in section 2; grep by name. |
+| `scripts/fstat_proposal/submit_gf_9mo_v9.sh` (and every launcher) | ~6,000-6,400 | grep for the knob; read its comment block (every knob has one with the ruling and the date). |
+| `scripts/flagship/launcher.sh.in` | ~6,000 | the same body as a template. |
+| `src/lisatools/globalfit/moves/addremovemove.py` | ~6,000 | grep. |
+| `src/lisatools/globalfit/moves/psdmove.py` | ~4,200 | grep. |
+| `src/lisatools/globalfit/run.py` | ~4,100 | grep `def run_global_fit`, `prepare_main`, `setup_acs`, `_seed_rank_streams`. |
+| `scripts/fstat_proposal/run_combined_staged.py` | ~3,100 | read `V9_SEARCH_STAGE_PROFILES`, `search_stage_profiles`, `build_fit`, `describe_recipe`. |
 | `src/lisatools/globalfit/monitor/_generator.py` | large | a SCRIPT: it runs on import and exits on import. Helpers are pulled out by name (`_short.py`, `_logs.py`). Never `import` it to inspect it. |
 | a `slurm_stdout_<job>.log` | 10^5 to 10^6 lines | grep by tag (section 7). Stream a tar with `tar -xOzf ... | grep` instead of extracting the whole thing. |
 
@@ -104,7 +106,9 @@ monitor module) and the **design specs** under `docs/superpowers/specs/`
 
 This is what `mpiexec` runs in production, not `scripts/run_global.py`. It:
 
-- builds `erebor.full_year_combined` with the env knobs (`build_fit`);
+- builds `erebor.all_sources` with the env knobs (`build_fit`; `erebor.gb_no_fg`
+  under `GB_ONLY=1`), then sets the source ids and `source_types` and replaces
+  `fit.recipe` with the staged recipe below;
 - composes the stage list: `gb_search_seed` x N (`GB_SEARCH_SEED_ITERS`,
   `FixedIterationStop`), `source_search` (`JointMaxLogLSearch` over the
   MBH/EMRI/SOBBH moves, `SOURCE_SEARCH_POSITION`), the numbered GB search
@@ -145,7 +149,7 @@ recipe change therefore reaches only NEW stores.
 | `mbh.py`, `emri.py`, `sobbh.py`, `source_runtime.py` | the three source branches: waveform path knobs (`MBH_LIKELIHOOD`, `EMRI_LIKELIHOOD`, `SOBBH_LIKELIHOOD`), batching, ladders, repeats, warm starts; `source_runtime.py` is the runtime selection (which move class, which table) and builds the MBH inner-move stack (`make_mbh_inner_moves`: the eigen/stretch move plus the LISA-frame sky-mode hops of `sampling/moves/skymodehop.py` in the ICRS basis, `MBH_SKY_MOVE_{BOTH,LAT,LONG}_WEIGHT` = 0.02 / 0.04 / 0.02 of the per-leaf draws; the hops read the constellation phase off the run's orbits). |
 | `noise.py`, `stochastic.py` | PSD + galfor (+ SGWB) settings, priors (`GALFOR_FK/F1/F2_PRIOR`), start params, the reference-fit pins. |
 | `injections.py`, `transforms.py`, `wrappers.py` | catalogue -> sampling basis, parameter transforms, waveform wrappers. |
-| `variants/full_year_combined.py` | the production variant (every branch). `all_sources`, `gb_no_fg`, `noise*`, `blank` are the smaller ones. |
+| `variants/all_sources.py` | the production variant (every branch: `gb`, `vgb`, `psd`, `galfor`, `mbh`, `emri`, `sobbh`, + `sgwb` with `FIT_SGWB=1`); the driver replaces its default recipe. `gb_no_fg` (GB only; its module-level `prepare_gb_branch` / `setup_gb_moves` ARE the production GB path), `full_year_combined` (MBH / EMRI / SOBBH on fixed noise), `vgb`, `noise*`, `blank` are the smaller ones. |
 | `stock/base.py` | `StockGlobalFit`, `ENV_ALIASES`, `add_move` / `add_branch` / `sample`. The knob-naming rule: **env knob = the capitalized attribute name**, branch-prefixed. |
 
 To find which code reads a knob: `grep -rn '"KNOB_NAME"' src/lisatools scripts/fstat_proposal/run_combined_staged.py`.
@@ -156,12 +160,12 @@ Three spellings occur: `env_default("K", ...)` (stock fields),
 
 | name | role |
 |---|---|
-| `Recipe`, `Stage` | the declarative stage list AND the runtime step engine (`docs/stock-stages-and-moves.md` for the API; that doc predates the `gb_search` / `replica_pe` stage kinds and the standalone `in_model*` moves, so read it for the mechanics, not the production composition). `Recipe.__call__` is the per-iteration hook (stage advance, residual snapshot). |
+| `Recipe`, `Stage` | the declarative stage list AND the runtime step engine (`docs/stock-stages-and-moves.md` for the API; it covers the mechanics, including the `gb_search` / `replica_pe` stage kinds and the standalone `in_model*` moves, while the production composition is section 2.2). `Recipe.__call__` is the per-iteration hook (stage advance, residual snapshot). |
 | `RecipeStep` -> `SearchRecipeStep` / `PERecipeStep` / `RJRecipeStep` / `ReplicaPERecipeStep` | kind-specific stopping rules. `PERecipeStep.note_recipe_step` applies the PE declarations (RJ flip fraction, in-model repeats). |
 | `SearchStageProfileStep` | the numbered GB search stages. `note_recipe_step` (head-only stage entry: `_apply_profile`, valve release / reset, legs resume, ratchet), `setup_run`, `_stopping_rules` (the stage-end rules), `_drive_ratchet`. Every mutation prints a `[V9-STAGE]` line. |
 | `band_shutoff_w_pending_total`, `band_shutoff_w_armed` | the stage-end clock: active (occupied, not shut) pairs; 0 ends the stage under `GB_SEARCH_STAGE_END_ON_SHUTOFF`. |
 | `release_band_shutoff_window`, `reset_band_logl_max`, `revive_band_shutoff_on_state`, `apply_shutoff_floor_to_state`, `force_fstat_refit` | the valve operations a stage entry can perform on the live state. |
-| `build_gb_moves`, `build_vgb_moves`, `build_noise_moves` / `build_psd_moves`, the `SourceMoveBuilder` family (`MBHBatchedMoveBuilder`, `EMRIDirectMoveBuilder`, `SOBBHChunkedMoveBuilder`, ...) | the stock move constructors; `resume_ladder_wins` (a stored rung count beats `{BRANCH}_NTEMPS`); `resolve_resumed_ladders` (a resumed MBH / EMRI / SOBBH store keeps its stored per-leaf ladders unless `{BRANCH}_LADDER_RESET_ON_RESUME=1`; before 2026-10-13 every resume re-tiled the configured ladder); `_warm_start_seed`. The default per-leaf ladder is `make_ladder(ndim, {BRANCH}_NTEMPS)` (`stock/erebor/common.py::default_source_ladder`, user ruling 2026-10-13; was 1/1.2^k). |
+| `build_gb_moves`, `build_vgb_moves`, `build_noise_moves` (`build_psd_moves` is its deprecated wrapper, no callers), the `SourceMoveBuilder` family (`MBHBatchedMoveBuilder`, `EMRIDirectMoveBuilder`, `SOBBHChunkedMoveBuilder`, ...) | the stock move constructors; `resume_ladder_wins` (a stored rung count beats `{BRANCH}_NTEMPS`); `resolve_resumed_ladders` (a resumed MBH / EMRI / SOBBH store keeps its stored per-leaf ladders unless `{BRANCH}_LADDER_RESET_ON_RESUME=1`; before 2026-10-13 every resume re-tiled the configured ladder); `_warm_start_seed`. The default per-leaf ladder is `make_ladder(ndim, {BRANCH}_NTEMPS)` (`stock/erebor/common.py::default_source_ladder`, user ruling 2026-10-13; was 1/1.2^k). |
 | `apply_rj_flip_fraction`, `apply_inmodel_repeats` | PE-stage declarations, applied on entry and shipped to every rank (`GB_RANK_LIVE_ATTRS`). |
 
 ### 2.5 Moves: `src/lisatools/globalfit/moves/`
@@ -175,7 +179,7 @@ Three spellings occur: `env_default("K", ...)` (stock fields),
 | `mbhbatchedmove.py`, `emridirectmove.py`, `sobbhspecialmove.py` | the fast scoring paths (batched windowed MBH, direct-to-WDM EMRI, lookup SOBBH); defaults since 2026-09-30 / 10-03. `docs/emri-direct-wdm.md`, `docs/sobbh-wdm-lookup.md`. |
 | `psdmove.py` | `PSDMove`: psd / galfor / sgwb (one instance each), `PSD_BATCH`, `forced_noise_step` (ratchet), the noise Fisher. |
 | `eigen_refresh.py`, `eigen_table_persist.py` | eigen tables from an information matrix and their sidecar pkl (with `{BRANCH}_EIGEN_AXIS_ADAPT` on, the entry also carries `sigmas_fisher`); the step-scale adaptation helpers (`cold_unit_deviations`, `empirical_axis_widths`, `adapt_axis_sigmas`, `axis_caps`, `carried_axis_widths`). Route map: `docs/eigen-info-routes.md`. |
-| `walkerfanout.py`, `multigpumove.py` | the head <-> compute-rank fan-out mixin (`fanout_propose`, live attrs, pooled ladder adaptation). |
+| `walkerfanout.py` | `WalkerFanoutMixin`, the head <-> compute-rank fan-out mixin (`fanout_propose`, live attrs, pooled ladder adaptation). (`multigpumove.py`, `MultiGPUMoveBase`, is unused legacy: no subclass, no importer.) |
 | `gbspecialstretch.GBParaSearchRJMove` + `warmstart/para_search.py` | `rj_para_search_pe`, the GB parallel residual search (user ruling 2026-10-16, `docs/gb-para-search.md`): every compute rank searches its own walker's residual, one GB per sub-band (comb-seeded F-stat PT to per-band convergence, a cluster split for 2+ sources, a full-likelihood stage, SNR gate 5), the head merges the walkers' finds into one observable-basis GMM epoch under `<run_dir>/warmstart/parasearch/` and the move's RJ births draw from it (one-draw lag, PE stages only, op `gb_para_search`, payload key `"para_search"`). Offline: `python -m lisatools.globalfit.warmstart.para_search --store ... --walker w`. |
 
 | knob | where | default | meaning |
@@ -211,8 +215,8 @@ narrowest axis where hot rungs straddle sky- / phase-degenerate solutions).
 | `{EMRI,MBH,SOBBH}_EIGEN_TEMPER_SIGMAS` | Settings field `eigen_temper_sigmas` -> stamped likewise | `False` | rung k steps `sigma / sqrt(beta_k)`, capped at the table cap, never below the cold sigma; the stored / persisted table stays cold |
 | `{EMRI,MBH,SOBBH}_EIGEN_ADAPT_MAX_FACTOR` | Settings field `eigen_adapt_max_factor` -> stamped likewise | 100 | the adapted width may exceed the Fisher sigma by at most this factor (applied before the Fisher floor, also to a scale adopted from the sidecar at a relaunch; `<= 0` / `inf` = uncapped); inert unless `_EIGEN_AXIS_ADAPT` is on |
 | `{EMRI,MBH,SOBBH}_EIGEN_AXIS_ACC_LOG` | Settings field `eigen_axis_acc_log` -> stamped likewise | `False` | per-axis proposals / acceptances of the eigen move (cold vs hot rungs), one line per refresh per rank, plus the widened axes' acceptance on the adaptation line; telemetry only (2026-10-18, `docs/emri-sampling-audit.md`; launchers: 1 for all three) |
-| `{EMRI,MBH,SOBBH}_EIGEN_AXIS_ACC_TUNE` (+ `_ACC_MIN` 0.1 / `_ACC_MAX` 0.5 / `_ACC_FACTOR` 2) | Settings fields -> stamped likewise | `False` | the acceptance controller: an axis below `_ACC_MIN` cold acceptance over a refresh window is divided by `_ACC_FACTOR` (floor the Fisher sigma), above `_ACC_MAX` multiplied (ceiling the adapted width); multiplier in the sidecar (`axis_tune`); launchers: EMRI 1 |
-| `{EMRI,MBH,SOBBH}_DE_JUMP_MIX` / `_DE_JUMP_MODE_FRAC` | Settings fields `de_jump_mix` / `de_jump_mode_frac` -> the inner-move stack (`common.make_default_inner_moves`) | 0 / 0.5 | the cross-walker difference jump (`sampling/moves/walkerdiffjump.py`): stack weight and gamma = 1 share; partners = the other walker group's start-of-propose rung ensembles (groups by walker-index parity, alternating by iteration), shipped in the propose payload (`de_pool`); launchers: EMRI 0.2 / 0.5 |
+| `{EMRI,MBH,SOBBH}_EIGEN_AXIS_ACC_TUNE` (+ `_ACC_MIN` 0.1 / `_ACC_MAX` 0.5 / `_ACC_FACTOR` 2) | Settings fields -> stamped likewise | `False` | the acceptance controller: an axis below `_ACC_MIN` cold acceptance over a refresh window is divided by `_ACC_FACTOR` (floor the Fisher sigma), above `_ACC_MAX` multiplied (ceiling the adapted width); multiplier in the sidecar (`axis_tune`); launchers: 1 for all three |
+| `{EMRI,MBH,SOBBH}_DE_JUMP_MIX` / `_DE_JUMP_MODE_FRAC` | Settings fields `de_jump_mix` / `de_jump_mode_frac` -> the inner-move stack (`common.make_default_inner_moves`) | 0 / 0.5 | the cross-walker difference jump (`sampling/moves/walkerdiffjump.py`): stack weight and gamma = 1 share; partners = the other walker group's start-of-propose rung ensembles (groups by walker-index parity, alternating by iteration), shipped in the propose payload (`de_pool`); launchers: mix EMRI 0.2 / MBH 0.1 / SOBBH 0.2, mode frac EMRI 0.5 |
 | `{EMRI,MBH,SOBBH}_LADDER_TOP_SNR` (+ `_LADDER_TMAX_MIN` 4, `_LADDER_TOP_SNR_REFRESH` 0, `_LADDER_TOP_SNR_REFRESH_PE` off) | Settings fields `ladder_top_snr` / `ladder_tmax_min` / `ladder_top_snr_refresh` / `ladder_top_snr_refresh_pe` -> `recipe.resolve_snr_keyed_ladders` (construction) and the move kwargs (`_maybe_update_snr_ladders`, the last step of `fanout_prepare_state`) | 0 (off) | SNR-keyed per-leaf ladders (ruling 2026-10-18): leaf k gets `make_ladder(ndim, ntemps, Tmax=clip((SNR_k / TOP)^2, TMAX_MIN, {BRANCH}_LADDER_TMAX))`, with SNR_k = sqrt(h_h) at the max-lnL cold walker; `_LADDER_TMAX` is the ceiling then; on / true / yes = 2.0. Built at a fresh store's construction (deferred to a leaf's first recorded SNR) and at `_LADDER_RESET_ON_RESUME=1`; a plain resume keeps the stored ladders. The refresh rebuilds a leaf whose SNR moved > 20 % every N proposes, between proposes, search stages only unless `_REFRESH_PE=1` (adaptive). The rung count stays per branch, so a leaf below the ceiling gets a denser ladder. Migration: `rerung_store_branches.py --top-snr [--ntemps-from-tmax]`. Not in any launcher. `docs/emri-sampling-audit.md`, last section |
 
 The scale changes only at a table refresh (`{BRANCH}_EIGEN_REFRESH`), so
@@ -452,15 +456,20 @@ fixed, no source moves in the 6mo (sources every cycle in the 9mo/1yr);
 sources every cycle, valves reset at the fresh entry, noise at the cycle end.
 `full_pe` = every move every iteration, no maximization anywhere
 (`feedback`: no maximizing over parameters in PE), one draw-one GB RJ move per
-iteration (`GB_PE_RJ_DRAW_ONE`; the three-way draw `GB_PE_RJ_FSTAT_FRACTION`
-0.45 / `GB_PE_RJ_WARM_FRACTION` 0.1 / the prior move the rest; with
+iteration (`GB_PE_RJ_DRAW_ONE`; the draw on the 9mo / 12mo launchers:
+`GB_PE_RJ_FSTAT_FRACTION` 0.45, split by `GB_PE_RJ_FSTAT_RESIDUAL_SPLIT` 0.9
+into `rj_fstat_pe_residual` 0.405 (live-residual grid) and `rj_fstat_pe` 0.045
+(GB-free galaxy grid), `GB_PE_RJ_WARM_FRACTION` 0.4 (`rj_warm_pe`), the prior
+move `rj_prior_pe` the remaining 0.15; with
 `GB_WARM_SELF=1` the warm move itself then draws one third each from the
 original warm start, the run's full refit and its filtered refit, section 2.8). The PE
 declarations applied on entry by `PERecipeStep.note_recipe_step`:
 `PE_INMODEL_REPEATS=25` (`apply_inmodel_repeats`; `GB_NUM_REPEAT_PROPOSALS=25`
 is the global export), `GB_PE_RJ_FLIP_FRACTION=0.1` (`apply_rj_flip_fraction`),
-`GB_FSTAT_REFIT_EVERY_PE=250`; a PE refit fits a RANDOM cold walker
-(`GB_FSTAT_PE_REF`, seeded; search refits fit the min-lnL walker).
+`GB_FSTAT_REFIT_EVERY_PE=150` (the residual grid; the GB-free grid fits once,
+`GB_FSTAT_REFIT_EVERY_PE_GB_FREE=0`); a PE residual refit fits a RANDOM cold walker
+(`GB_FSTAT_PE_REF`, code default `random`, seeded; search refits rotate through
+the walkers, `GB_FSTAT_SEARCH_REF=rotate`, section 2.8).
 
 Two facts needed to read leaf counts and SNR tails: the opt-SNR floor tests
 `sqrt(h_h)` of the PROPOSED template, so a current source that falls below
@@ -525,10 +534,14 @@ over bands now count each layer up to 8 times
 `gb_band_evo` fallback folds "window-sharing pairs" by adjacency, which
 under rule 2 folds whole runs of bands: both written for rule 1.
 
-How a shut level-3 pair behaves (user ruling 2026-09-28): it runs NOTHING
-until the next stage: no births, no deaths, no in-model repeats, no pure
-in-model passes, no vertical swaps. Shut pairs never reopen within a stage
-(`judge` only sets `shut`); a stage entry releases every pair
+How a shut level-3 pair behaves (user ruling 2026-09-28): while shut it runs
+NOTHING: no births, no deaths, no in-model repeats, no pure
+in-model passes, no vertical swaps. Under the all-walker rule
+(`GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS=1`, code default and launchers since
+2026-10-17, section 2.8's table) a shut band reopens on every walker within
+the stage at the judge where any walker holding a source in it stops being
+converged (`judge` clears `shut` on those pairs); with the knob at 0 (the
+per-walker valve) shut pairs never reopen within a stage. A stage entry releases every pair
 (`release_band_shutoff_window`, log `per-walker RJ valve RELEASED at step
 entry`) and `gb_search_2`'s fresh entry also revives the empty bands
 (`reset_valves`). The all-time max persists across stages except where a

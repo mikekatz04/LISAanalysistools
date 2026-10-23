@@ -11,9 +11,17 @@ boundaries -- between the wrapped moves of a
 between leaves of the per-leaf add/remove PE moves -- so a relaunch
 resumes from the newest snapshot instead of losing the whole iteration.
 
-Semantics
----------
-A checkpoint is a full, coherent state snapshot. Resuming from it simply
+Status in the 9mo/12mo runs: OFF. The code default is ON
+(``GeneralSettings.midit_checkpoint = True``; the stock fits read env
+``MIDIT_CHECKPOINT``, default ``True``), but both launchers export
+``MIDIT_CHECKPOINT=0`` (their note: under ``GB_SEARCH_LEGS=1`` a row lands
+after every search leg instead). What still runs while disarmed:
+:func:`load_for_resume` at every start (returns ``None`` when no sidecar
+exists), :func:`checkpoint_path`, :func:`armed` (the combine-move gate),
+:func:`note_saved` / :func:`maybe_write` (immediate no-ops) and
+:func:`main_store_path` (returns ``None``).
+
+Semantics. A checkpoint is a full, coherent state snapshot. Resuming from it simply
 STARTS A NEW ITERATION from that state: MCMC needs no replay of the
 interrupted iteration's remaining moves, because every accepted sub-move
 is already folded into the snapshot (and re-proposing a branch that
@@ -69,7 +77,19 @@ _STATE: typing.Dict[str, typing.Any] = {
 
 
 def checkpoint_path(main_file_path: str) -> str:
-    """Sidecar checkpoint path for a main backend file."""
+    """Sidecar checkpoint path for a main backend file.
+
+    Args:
+        main_file_path: The run's main HDF backend path.
+
+    Returns:
+        str: ``<main_file_path without extension>_midit_checkpoint.pkl``.
+
+    Example:
+        >>> from lisatools.globalfit.midit_checkpoint import checkpoint_path
+        >>> checkpoint_path("/runs/gf_prod_9mo_parameter_estimation_main.h5")
+        '/runs/gf_prod_9mo_parameter_estimation_main_midit_checkpoint.pkl'
+    """
     base, _ = os.path.splitext(main_file_path)
     return base + "_midit_checkpoint.pkl"
 
@@ -80,6 +100,11 @@ def arm(
     stored_iteration: int = 0,
 ) -> None:
     """Enable checkpointing for this process.
+
+    Called by :meth:`~lisatools.globalfit.run.GlobalFit._open_run_backend` on
+    the head when ``general.midit_checkpoint`` is true (env
+    ``MIDIT_CHECKPOINT``; the 9mo/12mo launchers set it to 0, so this is not
+    called there).
 
     Args:
         main_file_path: The run's main HDF backend path (the checkpoint
@@ -107,13 +132,26 @@ def arm(
 
 
 def disarm() -> None:
-    """Disable checkpointing (e.g. for tests)."""
+    """Disable checkpointing (e.g. for tests).
+
+    The inverse of :func:`arm` for the write side: :func:`armed` returns
+    ``False`` and :func:`maybe_write` / :func:`note_saved` become no-ops. The
+    stored main path is kept, so :func:`main_store_path` still answers.
+    """
     _STATE["enabled"] = False
     _STATE["path"] = None
 
 
 def armed() -> bool:
-    """Whether this process writes mid-iteration checkpoints."""
+    """Whether this process writes mid-iteration checkpoints.
+
+    Read every propose by
+    :class:`~lisatools.globalfit.moves.globalfitmove.GFCombineMove` (with
+    ``GF_MOVE_TIMING`` off and no coarse sidecar, a disarmed process takes the
+    plain eryn combine path instead of the per-move sequence loop) and once by
+    :meth:`~lisatools.globalfit.run.GlobalFit.prepare_main` to gate
+    :func:`self_test`.
+    """
     return bool(_STATE["enabled"])
 
 
@@ -124,6 +162,11 @@ def main_store_path() -> typing.Optional[str]:
     for the other sidecars that live next to the same h5 (the eigen
     proposal tables, ``moves.eigen_table_persist``). Armed on the
     sampling rank only, so a reader also inherits that rank guard.
+
+    Returns:
+        str | None: The path given to :func:`arm`; ``None`` when this process
+        was never armed (every rank of the 9mo/12mo runs, where
+        ``MIDIT_CHECKPOINT=0``).
     """
     return _STATE["main_path"]
 
@@ -166,7 +209,8 @@ def maybe_write(
         force: Skip the throttle (tests / final-boundary writes).
 
     Returns:
-        True iff a checkpoint file was written.
+        bool: True iff a checkpoint file was written (always False while
+        disarmed).
     """
     if not _STATE["enabled"]:
         return False
@@ -267,7 +311,8 @@ def self_test(state, validate=None, logger_=None) -> bool:
         logger_: Logger for the verdict lines.
 
     Returns:
-        True iff the write and the read-back both succeeded.
+        bool: True iff the write and the read-back both succeeded (False,
+        without writing, when the module is not armed).
     """
     log = logger_ or logger
     if not _STATE["enabled"]:
@@ -323,6 +368,10 @@ def load_for_resume(
 ):
     """Load the checkpoint next to ``main_file_path`` if it should win.
 
+    Called unconditionally by :meth:`~lisatools.globalfit.run.GlobalFit.load_info`
+    at every start (also with ``MIDIT_CHECKPOINT=0``): a sidecar left by an
+    earlier armed job is still honoured or rejected here.
+
     Args:
         main_file_path: The run's main HDF backend path.
         stored_iteration: The store's current stored iteration count (0
@@ -337,7 +386,10 @@ def load_for_resume(
             logger).
 
     Returns:
-        ``(state, meta)`` when the checkpoint is usable, else ``None``.
+        tuple | None: ``(state, meta)`` when the checkpoint is usable, else
+        ``None`` (no file, unreadable or wrong-format file, stale, or rejected
+        by ``validate``). ``meta`` holds ``format``, ``stored_iteration``,
+        ``tag`` and ``unix_time``.
     """
     log = logger_ or logger
     path = checkpoint_path(main_file_path)

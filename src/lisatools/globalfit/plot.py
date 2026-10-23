@@ -1,4 +1,16 @@
-"""Diagnostic plot helpers used by global-fit run reporting."""
+"""Legacy diagnostic plots of the pre-stock ``current_info`` layout (unused).
+
+These helpers read the retired ``current_info`` API (``gb_info`` /
+``mbh_info`` / ``psd_info`` reader dicts, ``get_data_psd``,
+``general_info["fd"]``) that :class:`~lisatools.globalfit.run.GlobalFitSetup`
+no longer provides, and nothing calls them. The module is still imported at
+load time by :mod:`lisatools.globalfit.hdfbackend` (for
+:class:`RunResultsProduction`, which it does not use), so every importer of
+the backend pulls in ``corner`` and ``matplotlib``. The running fit plots
+through eryn's ``PlotContainer``
+(:meth:`~lisatools.globalfit.run.GlobalFit.make_plot_container`); see
+:mod:`lisatools.globalfit.diagnosticplot` for the maintained plot producers.
+"""
 
 import corner
 import matplotlib.pyplot as plt
@@ -7,8 +19,9 @@ import numpy as np
 # from bbhx.utils.transform import LISA_to_SSB
 
 
+# TODO check: keep/remove/document -- only caller RunResultsProduction.build_plots (never run)
 def produce_mbh_plots(mbh_reader, num_leaves, discard=0, save_file=None, fig=None):
-    """Produce a corner plot of MBH samples (one trace per leaf).
+    """Produce one MBH corner plot per leaf plus an ``m_T``-vs-``t_c`` scatter.
 
     Args:
         mbh_reader: HDF backend with the MBH chain.
@@ -80,6 +93,7 @@ def produce_mbh_plots(mbh_reader, num_leaves, discard=0, save_file=None, fig=Non
     plt.close()
 
 
+# TODO check: keep/remove/document -- no live caller; LISA_to_SSB is not imported (NameError)
 def produce_sky_plot(current_info, save_file=None, fig=None):
     """Produce an all-source sky-localization plot (GB / MBH / etc.).
 
@@ -124,8 +138,9 @@ def produce_sky_plot(current_info, save_file=None, fig=None):
     plt.close()
 
 
+# TODO check: keep/remove/document -- only caller RunResultsProduction.build_plots (never run)
 def produce_gbs_plots(gb_reader, discard=0, save_file=None, fig=None):
-    """Produce diagnostic plots of the galactic-binary chain (frequency / SNR / count).
+    """Produce GB chain diagnostics (leaf-count trace and histogram, log-likelihood trace).
 
     Args:
         gb_reader: HDF backend with the GB chain.
@@ -165,6 +180,7 @@ def produce_gbs_plots(gb_reader, discard=0, save_file=None, fig=None):
     plt.close()
 
 
+# TODO check: keep/remove/document -- only caller RunResultsProduction.build_plots (never run)
 def produce_psd_plots(psd_reader, discard=0, save_file=None, fig=None):
     """Produce diagnostic plots of the PSD / galactic-foreground chain.
 
@@ -201,6 +217,7 @@ def produce_psd_plots(psd_reader, discard=0, save_file=None, fig=None):
     plt.close()
 
 
+# TODO check: keep/remove/document -- no live caller; needs the retired current_info.get_data_psd
 def make_current_plot(current_info, save_file=None, add_mbhs=False, add_gbs=False, **kwargs):
     """Render a combined diagnostic figure summarizing the current fit.
 
@@ -257,6 +274,7 @@ def make_current_plot(current_info, save_file=None, add_mbhs=False, add_gbs=Fals
     plt.close()
 
 
+# TODO check: keep/remove/document -- dead hdfbackend import only; run_results_production lacks self
 class RunResultsProduction:
     """Async-driven plot producer that listens to ``head_rank`` for new states.
 

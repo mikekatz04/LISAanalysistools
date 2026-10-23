@@ -1,20 +1,55 @@
 """Rank roles, walker-block layout, per-rank device pinning and seeds.
 
-Roles: HEAD (rank 0: sequences the recipe, owns the full host state, AND
-computes walker block 0), COMPUTE (one device list + one walker block each),
-SAVER (highest rank, unchanged; aliased to the head below 3 ranks). The
-mapping between ranks and GPUs is general in both directions:
-``gpus_per_rank`` (a rank owns several devices, sharded in-process) and
-``ranks_per_gpu`` (several ranks share one device); at most one exceeds 1.
+Every rank of the RUN communicator calls :func:`prepare_rank` once, before
+``fit.build()``. It resolves one :class:`WalkerBlockLayout` that is identical
+on every rank (:func:`build_layout`, one collective ``allgather``), pins the
+rank's GPU(s) (:func:`select_rank_device`, before any CUDA initialisation)
+and stamps the result on the fit. :class:`~lisatools.globalfit.run.GlobalFit`
+then reads the layout to decide what each rank does.
 
-``GF_LEGACY_RANK_LAYOUT=1`` restores today's roles (one compute rank owning
-the whole pool, other non-saver ranks are stopped SPARE ranks).
+Roles (:class:`RankRole`, resolved by :func:`resolve_roles`):
 
-``GF_GPU_ROUTING=1`` enables the unified GPU-count routing (see
-:data:`GPU_ROUTING_ENV`). It is OPT-IN, so merging it changes nothing until
-a run asks for it.
+- HEAD (``main_rank``, rank 0 by default): sequences the recipe, owns the
+  full host :class:`~lisatools.globalfit.state.GFState`, AND computes walker
+  block 0 like any other compute rank.
+- COMPUTE: one device list and one walker block each; runs the
+  :class:`~lisatools.globalfit.communication.fanout.ComputeService` loop.
+- SAVER: the highest non-head rank at communicator size >= 3, which runs the
+  HDF5 save loop. Below 3 ranks the role is aliased to the head (synchronous
+  saves), except in the size-2 fallback of :func:`build_layout`, where the
+  non-head rank saves and the head computes every walker.
+- SPARE: only under ``GF_LEGACY_RANK_LAYOUT=1``.
 
-``mpi4py`` is imported lazily and only for real communicators.
+The MONITOR rank is not a role here. With ``GF_MONITOR_RANK=1`` the driver
+splits the highest WORLD rank off first
+(:func:`lisatools.globalfit.monitor.rank.split_monitor_rank`) and passes the
+remaining run communicator to :func:`prepare_rank`. The 9mo/12mo launchers
+run ``NGPUS=4`` (2 nodes x 2 GPUs) with ``NWALKERS=4``: world ranks 0-5, run
+ranks 0 (head, walker 0), 1-3 (compute, one walker and one GPU each),
+4 (saver), and world rank 5 is the monitor. That shape factorizes as
+``(n_blocks, R, block) = (4, 1, 1)`` (:func:`factorize_layout`).
+
+The mapping between ranks and GPUs is general in both directions:
+``gpus_per_rank`` (a rank owns several devices, sharded in-process; env
+``GPUS_PER_RANK``) and ``ranks_per_gpu`` (several ranks share one device;
+env ``RANKS_PER_GPU``). At most one may exceed 1. The values are read from
+the fit's general block (:class:`~lisatools.globalfit.stock.erebor.fit.EreborGeneralSettings`).
+
+Environment knobs read here:
+
+- ``GF_LEGACY_RANK_LAYOUT=1`` (:data:`LEGACY_ENV`): the pre-port roles (one
+  compute rank owning the whole pool; the other non-saver ranks are SPARE
+  and stop at startup). Launchers export ``0``.
+- ``GF_GPU_ROUTING=1`` (:data:`GPU_ROUTING_ENV`): the unified GPU-count
+  routing. It is OPT-IN; the 9mo/12mo jobs at ``NGPUS=4`` leave it unset.
+- ``GF_ONE_WALKER_REPLICAS`` (:data:`ONE_WALKER_ENV`): ``0`` refuses any
+  layout with several ranks per walker block.
+- ``GF_LAYOUT_DRY_RUN=1``: :func:`layout_dry_run` prints the layout and
+  tells the driver to exit before the build.
+
+``mpi4py`` is imported lazily and only for real communicators, so the
+in-process :mod:`~lisatools.globalfit.communication.fakecomm` stand-in runs
+the same code.
 """
 
 from __future__ import annotations
@@ -67,17 +102,44 @@ GPU_ROUTING_ENV = "GF_GPU_ROUTING"
 
 
 def gpu_routing_enabled(env=None) -> bool:
-    """Is the unified GPU-count routing switched on? (default: NO)
+    """Report whether the unified GPU-count routing is switched on (default: no).
 
     Deliberately the OPPOSITE polarity to :data:`ONE_WALKER_ENV`, which is
     an opt-OUT of a shipped feature. This is an opt-IN to a new one, so an
     unset variable, an empty one and a typo all mean "legacy".
+
+    Args:
+        env (Mapping[str, str], optional): Environment to read. Default
+            ``None`` reads :data:`os.environ`.
+
+    Returns:
+        bool: ``True`` only when ``GF_GPU_ROUTING`` is ``1``, ``true``,
+        ``yes`` or ``on`` (case-insensitive, surrounding spaces ignored).
+
+    Example:
+        >>> from lisatools.globalfit.communication.ranks import gpu_routing_enabled
+        >>> gpu_routing_enabled({"GF_GPU_ROUTING": "1"})
+        True
+        >>> gpu_routing_enabled({})
+        False
     """
     raw = (os.environ if env is None else env).get(GPU_ROUTING_ENV, "")
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
 class RankRole(enum.Enum):
+    """The role a rank of the run communicator plays (see the module docstring).
+
+    Attributes:
+        HEAD: Sequences the recipe, owns the full host state, computes
+            walker block 0.
+        COMPUTE: Computes one walker block and serves head commands.
+        SAVER: Runs the HDF5 save loop (communicator size >= 3, or the
+            non-head rank in the size-2 fallback of :func:`build_layout`).
+        SPARE: Built then stopped at startup; ``GF_LEGACY_RANK_LAYOUT=1``
+            only.
+    """
+
     HEAD = "head"
     COMPUTE = "compute"
     SAVER = "saver"
@@ -86,12 +148,28 @@ class RankRole(enum.Enum):
 
 @dataclasses.dataclass(frozen=True)
 class RankPlacement:
+    """Where one rank sits: role, node, devices and walker block.
+
+    Built by :func:`build_layout` (one per rank of the run communicator) and
+    stored in :attr:`WalkerBlockLayout.placements`.
+
+    Attributes:
+        rank: Rank in the run communicator.
+        role: The rank's :class:`RankRole`.
+        node: Processor name of the rank's node.
+        local_index: The rank's index among the ranks of its node (from a
+            shared-memory ``Split_type``).
+        w0: First walker of the rank's block (``0`` for SAVER / SPARE).
+        w1: One past the last walker of the block (``0`` for SAVER / SPARE).
+    """
+
     rank: int
     role: RankRole
     node: str
     local_index: int
     #: the rank's device list in the per-node pool's numbering (empty on CPU);
-    #: several ranks list the same device when ranks_per_gpu > 1
+    #: several ranks list the same device when ranks_per_gpu > 1. SAVER /
+    #: SPARE ranks list one device they build on and then release.
     devices: tuple
     #: this rank's index among the ranks sharing its device
     device_slot: int
@@ -105,6 +183,36 @@ class RankPlacement:
 
 @dataclasses.dataclass(frozen=True)
 class WalkerBlockLayout:
+    """The resolved rank layout of one run: roles, devices and walker blocks.
+
+    Returned by :func:`build_layout` (identical on every rank) and stored as
+    ``fit.rank_layout`` by :func:`prepare_rank`. The walkers are split into
+    ``n_blocks`` equal contiguous blocks of ``block`` walkers; each block is
+    computed by ``R = ranks_per_block`` compute ranks
+    (``n_compute == n_blocks * R``). ``R == 1`` is the walker-block layout of
+    the 9mo/12mo runs; ``R > 1`` is replica mode (:attr:`replica_mode`).
+
+    The communicator helpers :meth:`make_fanout_comm`,
+    :meth:`make_group_comm` and :meth:`make_reps_comm` are collectives; see
+    each one for which ranks must call it.
+
+    Attributes:
+        size: Size of the run communicator.
+        head_rank: The HEAD rank.
+        saver_rank: The SAVER rank. Equals ``head_rank`` below 3 ranks,
+            except in the size-2 fallback, where the non-head rank saves and
+            the head computes everything.
+        compute_ranks: Ranks that compute a walker block, head included, in
+            ascending order. The position of a rank in this tuple is its
+            fan-out rank (:meth:`fanout_rank`).
+        nwalkers: Total walker count.
+        block: Walkers per block.
+        placements: ``{rank: RankPlacement}`` for every rank of the run
+            communicator.
+        ranks_per_gpu: Compute ranks sharing one device.
+        legacy: ``True`` under ``GF_LEGACY_RANK_LAYOUT=1``.
+    """
+
     size: int
     head_rank: int
     saver_rank: int
@@ -112,18 +220,19 @@ class WalkerBlockLayout:
     nwalkers: int
     block: int
     placements: dict
-    #: resolved value when uniform across nodes; ``None`` when AUTO resolved
-    #: to different per-node values (mixed node shapes)
+    #: resolved devices per compute rank when uniform across nodes; ``None``
+    #: when AUTO resolved to different per-node values (mixed node shapes)
     gpus_per_rank: typing.Optional[int] = 1
     #: True when ``gpus_per_rank`` was requested as AUTO (``None`` input)
     gpus_per_rank_auto: bool = False
     ranks_per_gpu: int = 1
     legacy: bool = False
-    #: human-readable notes about non-default choices (e.g. the size-2 fallback)
+    #: human-readable notes about non-default choices (the size-2 fallback, a
+    #: gcd-1 AUTO resolution); each was also emitted as a ``UserWarning``
     notes: tuple = ()
     #: walker blocks; ``n_compute == n_blocks * ranks_per_block`` always
     n_blocks: int = 1
-    #: R: compute ranks sharing one walker block. 1 = today's walker-block
+    #: ``R``: compute ranks sharing one walker block. 1 = today's walker-block
     #: layout; ``n_compute`` at ``nwalkers == 1`` = today's replica mode.
     ranks_per_block: int = 1
     #: True when ``ranks_per_block`` was requested as AUTO (``None`` input)
@@ -138,6 +247,7 @@ class WalkerBlockLayout:
 
     @property
     def n_compute(self) -> int:
+        """Number of compute ranks (head included)."""
         return len(self.compute_ranks)
 
     @property
@@ -154,9 +264,11 @@ class WalkerBlockLayout:
 
     @property
     def worker_ranks(self) -> tuple:
+        """Compute ranks other than the head (the ranks a fan-out sends to)."""
         return tuple(r for r in self.compute_ranks if r != self.head_rank)
 
     def is_single(self) -> bool:
+        """Return ``True`` when one rank computes every walker (no fan-out)."""
         return self.n_compute == 1
 
     @property
@@ -195,12 +307,18 @@ class WalkerBlockLayout:
         return tuple(self.block_lead(b) for b in range(int(self.n_blocks)))
 
     def is_block_lead(self, rank) -> bool:
+        """Return ``True`` when ``rank`` is replica 0 of its block."""
         return int(self.replica_index(rank)) == 0
 
     def role_of(self, rank) -> RankRole:
+        """Return the :class:`RankRole` of ``rank``."""
         return self.placements[int(rank)].role
 
     def block_of(self, rank) -> tuple:
+        """Return ``(w0, w1)``, the walker block ``[w0, w1)`` of ``rank``.
+
+        ``(0, 0)`` for the SAVER and SPARE ranks.
+        """
         p = self.placements[int(rank)]
         return p.w0, p.w1
 
@@ -236,6 +354,7 @@ class WalkerBlockLayout:
         return ranks, w - int(w0)
 
     def local_gpus(self, rank):
+        """Return the pool device ids of ``rank`` as a list, or ``None`` on CPU."""
         devices = self.placements[int(rank)].devices
         return list(devices) if devices else None
 
@@ -243,7 +362,9 @@ class WalkerBlockLayout:
         """This rank's index in the fan-out communicator (== compute-rank order)."""
         return self.compute_ranks.index(int(rank))
 
+    # TODO check: keep/remove/document -- no caller outside tests/test_rank_layout.py
     def ranks_on_device(self, node, device) -> tuple:
+        """Return the HEAD/COMPUTE ranks on ``node`` whose device list holds ``device``."""
         return tuple(
             r
             for r, p in sorted(self.placements.items())
@@ -253,7 +374,22 @@ class WalkerBlockLayout:
         )
 
     def make_fanout_comm(self, comm):
-        """Split ``comm`` into the head+compute communicator (saver: null comm)."""
+        """Split ``comm`` into the head+compute (fan-out) communicator.
+
+        COLLECTIVE on ``comm`` (the run communicator): every rank, the saver
+        included, must call it. Compute ranks keep their run-rank order, so
+        a rank's rank in the new communicator is :meth:`fanout_rank`. The
+        saver (and any SPARE rank) receives the null communicator.
+        ``GlobalFit`` calls it only when the layout is not single.
+
+        Args:
+            comm: The run communicator (mpi4py ``Comm`` or
+                :class:`~lisatools.globalfit.communication.fakecomm.FakeComm`).
+
+        Returns:
+            Comm: The fan-out communicator, or the null communicator off the
+            compute ranks.
+        """
         rank = int(comm.Get_rank())
         color = 0 if rank in self.compute_ranks else _undefined(comm)
         return comm.Split(color, key=rank)
@@ -295,6 +431,13 @@ class WalkerBlockLayout:
         return comm.Split(color, key=key)
 
     def describe(self) -> str:
+        """Return the multi-line layout table logged at startup.
+
+        One header line (sizes, block shape, ``gpus_per_rank`` /
+        ``ranks_per_gpu``, routing, ``LEGACY`` / ``REPLICAS`` flags), one line
+        per rank (role, node, devices, walker block, block / replica index)
+        and one line per note. Identical on every rank by construction.
+        """
         if self.gpus_per_rank_auto:
             gpk = "AUTO" if self.gpus_per_rank is None else f"AUTO->{self.gpus_per_rank}"
         else:
@@ -323,6 +466,12 @@ class WalkerBlockLayout:
         return "\n".join(lines)
 
     def digest(self) -> str:
+        """Return the first 16 hex digits of the sha256 of :meth:`describe`.
+
+        Answered by every rank to the ``ping`` command
+        (:meth:`~lisatools.globalfit.communication.fanout.WalkerFanout.ping`),
+        which raises when the ranks disagree.
+        """
         return hashlib.sha256(self.describe().encode()).hexdigest()[:16]
 
 
@@ -332,6 +481,7 @@ class WalkerBlockLayout:
 
 
 def _comm_type_shared(comm):
+    """``COMM_TYPE_SHARED`` from ``comm`` (fake comms) or from mpi4py."""
     value = getattr(comm, "COMM_TYPE_SHARED", None)
     if value is not None:
         return value
@@ -341,6 +491,7 @@ def _comm_type_shared(comm):
 
 
 def _undefined(comm):
+    """The ``UNDEFINED`` split colour from ``comm`` (fake comms) or from mpi4py."""
     value = getattr(comm, "UNDEFINED", None)
     if value is not None:
         return value
@@ -350,6 +501,7 @@ def _undefined(comm):
 
 
 def _proc_name(comm) -> str:
+    """The node name: ``comm.Get_processor_name()`` or mpi4py's module function."""
     fn = getattr(comm, "Get_processor_name", None)
     if fn is not None:
         return str(fn())
@@ -364,9 +516,31 @@ def _proc_name(comm) -> str:
 
 
 def resolve_roles(size, main_rank=0):
-    """``(head, saver, compute_ranks)``: saver = highest non-head rank at
-    ``size >= 3`` (aliased to the head below that, as today); every other
-    rank computes, the head included. No spares."""
+    """Assign head, saver and compute ranks for a communicator size.
+
+    The saver is the highest non-head rank at ``size >= 3`` (aliased to the
+    head below that); every other rank computes, the head included. No
+    spares (the legacy layout and the size-2 fallback are applied later, in
+    :func:`build_layout`).
+
+    Args:
+        size (int): Communicator size, >= 1.
+        main_rank (int): The head rank. Default ``0``.
+
+    Returns:
+        tuple[int, int, tuple[int, ...]]: ``(head, saver, compute_ranks)``.
+
+    Raises:
+        ValueError: When ``size < 1`` or ``main_rank`` is not a rank of the
+            communicator.
+
+    Example:
+        >>> from lisatools.globalfit.communication.ranks import resolve_roles
+        >>> resolve_roles(5)
+        (0, 4, (0, 1, 2, 3))
+        >>> resolve_roles(2)
+        (0, 0, (0, 1))
+    """
     size = int(size)
     if size < 1:
         raise ValueError("communicator size must be >= 1")
@@ -394,24 +568,43 @@ def factorize_layout(nwalkers, n_compute, ranks_per_block=None, *, gpu_routing=T
     the launcher does. :func:`build_layout` uses it and adds the placement,
     the device pinning and the advisory warnings on top.
 
-    Raises ``ValueError`` on a shape the engine would refuse, with the same
-    message the launcher would print.
+    With routing on and ``ranks_per_block=None`` (AUTO) the rule maximizes
+    walker blocks: ``n_blocks = gcd(nwalkers, n_compute)``,
+    ``R = n_compute // n_blocks``. With routing off only two shapes are
+    accepted: ``nwalkers % n_compute == 0`` (``R = 1``) and ``nwalkers == 1``
+    (``R = n_compute``).
 
-    >>> factorize_layout(4, 4)      # today's production run
-    (4, 1, 1)
-    >>> factorize_layout(4, 16)     # GPUs > walkers
-    (4, 4, 1)
-    >>> factorize_layout(24, 8)     # PE, blocks wider than one walker
-    (8, 1, 3)
-    >>> factorize_layout(1, 4)      # one-walker replica mode
-    (1, 4, 1)
+    Args:
+        nwalkers (int): Total walker count.
+        n_compute (int): Number of compute ranks (head included).
+        ranks_per_block (int, optional): ``R``, compute ranks per walker
+            block. Default ``None`` is AUTO. Must divide ``n_compute``; a
+            value other than 1 needs routing on.
+        gpu_routing (bool): The resolved :data:`GPU_ROUTING_ENV` switch.
+            Default ``True`` here, unlike at the launcher: this function
+            answers "what IS the rule", so a planner or a dry run can price
+            a shape the current deployment has not opted into yet.
+            :func:`build_layout` defaults it from the environment instead,
+            which is what decides whether a run actually starts.
 
-    ``gpu_routing`` is the resolved :data:`GPU_ROUTING_ENV` switch. It
-    defaults to TRUE here, unlike at the launcher: this function answers
-    "what IS the rule", so a planner or a dry run can price a shape the
-    current deployment has not opted into yet. :func:`build_layout` defaults
-    it from the environment instead, which is what decides whether a run
-    actually starts.
+    Returns:
+        tuple[int, int, int]: ``(n_blocks, ranks_per_block, block)``, with
+        ``block`` the walkers per block.
+
+    Raises:
+        ValueError: On a shape the engine would refuse, with the same
+            message the launcher would print.
+
+    Example:
+        >>> from lisatools.globalfit.communication import factorize_layout
+        >>> factorize_layout(4, 4)      # today's production run
+        (4, 1, 1)
+        >>> factorize_layout(4, 16)     # GPUs > walkers
+        (4, 4, 1)
+        >>> factorize_layout(24, 8)     # PE, blocks wider than one walker
+        (8, 1, 3)
+        >>> factorize_layout(1, 4)      # one-walker replica mode
+        (1, 4, 1)
     """
     return _factorize(nwalkers, n_compute, ranks_per_block, [], gpu_routing=gpu_routing)
 
@@ -532,6 +725,20 @@ def devices_beyond_walkers_message(rank, devices, w0, w1, n_compute, nwalkers,
     Shared by :func:`build_layout` (the layout-time check) and
     ``GlobalFit.setup_acs`` (the build-time backstop for a path that never
     resolved a layout), so the two say the same thing.
+
+    Args:
+        rank (int): The offending rank.
+        devices (Sequence[int]): Its device list.
+        w0 (int): First walker of its block.
+        w1 (int): One past the last walker of its block.
+        n_compute (int): Number of compute ranks.
+        nwalkers (int): Total walker count.
+        gpu_routing (bool): Whether ``GF_GPU_ROUTING`` is on (changes the
+            advice). Default ``False``.
+
+    Returns:
+        str: The error message naming both ways out (one GPU per rank with
+        the replica routing, or enough walkers per rank).
     """
     n_dev, n_w = len(devices), int(w1) - int(w0)
     routing = ("it is already on, so this is GPUS_PER_RANK>1 on a replicated "
@@ -604,6 +811,47 @@ def build_layout(
     ``gpu_routing=None`` (the default) resolves :data:`GPU_ROUTING_ENV`,
     which is OFF unless set -- so an existing runbook keeps the exact layout
     it had. Pass ``True``/``False`` to pin it (tests, dry runs).
+
+    Special cases: a size-2 launch on a pool that cannot host two compute
+    ranks makes rank 1 a dedicated saver and the head computes every walker
+    (recorded as a note and warned). Any advice the factorization records
+    (:func:`_factorize`) is re-emitted here as a ``UserWarning``.
+
+    Args:
+        comm: The run communicator (mpi4py or fake). COLLECTIVE: every rank
+            must call this with the same arguments.
+        nwalkers (int): Total walker count.
+        gpu_pool (Sequence[int] or None): Per-node device ids; empty or
+            ``None`` for a CPU run.
+        gpus_per_rank (int, optional): ``k``; ``None`` is AUTO (see above).
+        ranks_per_gpu (int): ``m``. Default ``1``.
+        ranks_per_block (int, optional): ``R``; ``None`` is AUTO. See
+            :func:`factorize_layout`.
+        main_rank (int): The head rank. Default ``0``.
+        legacy (bool, optional): Legacy roles. Default ``None`` reads
+            ``GF_LEGACY_RANK_LAYOUT`` (``"1"`` enables).
+        gpu_routing (bool, optional): Default ``None`` reads
+            ``GF_GPU_ROUTING`` via :func:`gpu_routing_enabled`.
+
+    Returns:
+        WalkerBlockLayout: The resolved layout (same on every rank).
+
+    Raises:
+        ValueError: On ``gpus_per_rank`` / ``ranks_per_gpu`` < 1 or both > 1,
+            a shape :func:`factorize_layout` refuses, ``R > 1`` with
+            ``GF_ONE_WALKER_REPLICAS=0``, more compute ranks on a node than
+            the pool supports, or a rank owning more GPUs than walkers.
+
+    Example:
+        Two-node layout in one process with the fake communicator:
+
+        .. code-block:: python
+
+            from lisatools.globalfit.communication import FakeWorld, build_layout
+
+            world = FakeWorld(5, nodes=[0, 0, 1, 1, 1])
+            layouts = world.run(lambda r, comm: build_layout(comm, 4, [0, 1]))
+            print(layouts[0].describe())
     """
     if legacy is None:
         legacy = os.environ.get(LEGACY_ENV, "0") == "1"
@@ -757,7 +1005,21 @@ def build_layout(
 
 
 def derive_rank_seed(base_seed, layout, rank) -> int:
-    """Per-compute-rank seed: ``SeedSequence(base).spawn(n_compute)[i]``, deterministic."""
+    """Derive the deterministic per-compute-rank seed of a run.
+
+    ``SeedSequence([base_seed, 0x5AFE]).spawn(n_compute)[i]`` with ``i`` the
+    rank's fan-out rank, reduced to one ``uint32``. Used by
+    ``GlobalFit._seed_rank_streams`` to seed the global numpy / cupy streams
+    of each compute rank (multi-rank runs only).
+
+    Args:
+        base_seed (int): The run's seed base (``GlobalFit._resolve_seed_base``).
+        layout (WalkerBlockLayout): The run layout.
+        rank (int): A compute rank (head included).
+
+    Returns:
+        int: The rank's seed, ``0 <= seed < 2**32``.
+    """
     sequence = np.random.SeedSequence([int(base_seed), 0x5AFE])
     children = sequence.spawn(layout.n_compute)
     child = children[layout.fanout_rank(rank)]
@@ -791,6 +1053,18 @@ def rank_build_seed(fit):
 
     A rank with no walker block (the saver) has nothing to sample, so it
     takes the head's sub-seed rather than an index error.
+
+    Called by
+    :meth:`~lisatools.globalfit.stock.base.StockGlobalFit.prepare_branch_settings`
+    to fill ``build_seed`` on the branch blocks that declare it (GB, VGB).
+
+    Args:
+        fit: The stock fit (reads ``fit.general.random_seed``,
+            ``fit.rank_layout`` and ``fit.rank``).
+
+    Returns:
+        int or None: The build seed, or ``None`` when ``random_seed`` is
+        unset.
     """
     seed = getattr(getattr(fit, "general", None), "random_seed", None)
     if seed is None:
@@ -821,6 +1095,7 @@ _CUDART_NAMES = (
 
 
 def _load_cudart():
+    """Load the CUDA runtime library via ctypes; ``None`` when none is found."""
     import ctypes
 
     for name in _CUDART_NAMES:
@@ -845,6 +1120,7 @@ def _cudart_device_count():
 
 
 def _cudart_set_device(device):
+    """``cudaSetDevice(device)`` via ctypes; raises ``RuntimeError`` on failure."""
     lib = _load_cudart()
     if lib is None:
         raise RuntimeError("cudaSetDevice fallback requested but no CUDA runtime is loadable")
@@ -869,6 +1145,31 @@ def select_rank_device(
     devices as ``0..k-1``); ``"setdevice"`` (the runtime was already
     initialised, e.g. by a CUDA-aware MPI, so the env is restored and
     ``cudaSetDevice`` pins the first device; the rank keeps the pool ids).
+
+    When ``CUDA_VISIBLE_DEVICES`` is already set (e.g. narrowed by Slurm),
+    the pool ids index the currently visible list; when unset they are
+    physical ids. Must run before any CUDA initialisation on the rank.
+
+    Args:
+        layout (WalkerBlockLayout): The run layout.
+        rank (int): This process's rank in the run communicator.
+        environ (MutableMapping[str, str], optional): Environment to edit.
+            Default ``None`` is :data:`os.environ`.
+        device_count_fn (Callable[[], int or None], optional): Device count
+            seen by the CUDA runtime. Default: ``cudaGetDeviceCount`` via
+            ctypes (``None`` when no runtime loads).
+        set_device_fn (Callable[[int], None], optional): Device pinning for
+            the ``"setdevice"`` fallback. Default: ``cudaSetDevice`` via
+            ctypes.
+        logger (logging.Logger, optional): Receives a warning on the
+            ``"setdevice"`` fallback.
+
+    Returns:
+        tuple[list[int] or None, str]: ``(gpus, mode)`` as above.
+
+    Raises:
+        ValueError: When the pool ids do not fit the inherited
+            ``CUDA_VISIBLE_DEVICES`` list.
     """
     environ = os.environ if environ is None else environ
     device_count_fn = _cudart_device_count if device_count_fn is None else device_count_fn
@@ -939,7 +1240,8 @@ def prepare_rank(
 
     Idempotent (returns the stored layout on a second call). Reads the
     pre-build settings ``fit.general.nwalkers`` / ``.gpus`` (the per-node
-    pool) / ``.gpus_per_rank`` / ``.ranks_per_gpu``; writes the rank-local
+    pool) / ``.gpus_per_rank`` / ``.ranks_per_gpu`` / ``.ranks_per_block``
+    and ``fit.main_rank``; writes the rank-local
     ``fit.general.gpus``, ``fit.rank``, ``fit.rank_layout`` and
     ``fit.rank_device_mode``. ``gpus_per_rank`` is passed through unchanged
     (``None`` stays ``None``, AUTO) — it is never coerced to 1.
@@ -947,6 +1249,45 @@ def prepare_rank(
     ``fit.rank`` is stamped here (``GlobalFit.__init__`` sets it too, but
     that is AFTER the build) so build-time helpers — :func:`rank_build_seed`
     — can tell which block this process owns.
+
+    The production driver (``scripts/fstat_proposal/run_combined_staged.py``)
+    calls it on the run communicator returned by
+    :func:`~lisatools.globalfit.monitor.rank.split_monitor_rank`, then
+    :func:`layout_dry_run`, then ``fit.build()``.
+
+    Args:
+        fit: The pre-build stock fit
+            (:class:`~lisatools.globalfit.stock.base.StockGlobalFit`).
+        comm: The run communicator. COLLECTIVE: every rank calls it.
+        logger (logging.Logger, optional): Receives the layout table and the
+            rank's device mode at INFO.
+        environ (MutableMapping[str, str], optional): Forwarded to
+            :func:`select_rank_device`.
+        device_count_fn (Callable, optional): Forwarded to
+            :func:`select_rank_device`.
+        set_device_fn (Callable, optional): Forwarded to
+            :func:`select_rank_device`.
+
+    Returns:
+        WalkerBlockLayout: The resolved layout.
+
+    Raises:
+        RuntimeError: When called on a built fit in a multi-rank run (the
+            build has already allocated on a device).
+        ValueError: Propagated from :func:`build_layout` /
+            :func:`select_rank_device`.
+
+    Example:
+        .. code-block:: python
+
+            from mpi4py import MPI
+            from lisatools.globalfit.stock import erebor
+            from lisatools.globalfit.communication import prepare_rank
+
+            fit = erebor.all_sources(nwalkers=4)
+            layout = prepare_rank(fit, MPI.COMM_WORLD)
+            fit.build()
+            fit.run(MPI.COMM_WORLD)
     """
     layout = getattr(fit, "rank_layout", None)
     if layout is not None:
@@ -1008,6 +1349,17 @@ def layout_dry_run(layout, comm, *, environ=None, out=print) -> bool:
     prefix theirs with ``rank_tag`` since this runs before ``GlobalFit``
     exists and installs ``prefix_stdout`` for the run proper. With
     ``comm=None`` (no rank to distinguish) the text is printed unprefixed.
+
+    Args:
+        layout (WalkerBlockLayout): The resolved layout.
+        comm: The run communicator, or ``None``.
+        environ (Mapping[str, str], optional): Environment to read. Default
+            ``None`` is :data:`os.environ`.
+        out (Callable[[str], None]): Printer. Default :func:`print`.
+
+    Returns:
+        bool: ``True`` when ``GF_LAYOUT_DRY_RUN=1`` (the table was printed and
+        the caller must stop), else ``False``.
     """
     env = os.environ if environ is None else environ
     if env.get("GF_LAYOUT_DRY_RUN", "0") != "1":
@@ -1034,6 +1386,20 @@ def install_mpi_abort_on_error(comm):
     their receive loops for the whole allocation. Returns ``comm`` when it
     installed the hooks, ``None`` for a single-process run (normal Python
     exception behaviour is kept there).
+
+    Replaces :data:`sys.excepthook` (and :data:`threading.excepthook` where
+    available) with a hook that prints an ``[MPI-ABORT]`` banner and the
+    traceback to stderr, then calls ``comm.Abort(1)`` (``os._exit(1)`` if
+    that fails). The production driver installs it on ``MPI.COMM_WORLD``
+    (so the monitor rank is aborted too); ``GlobalFit`` also installs it on
+    the run communicator.
+
+    Args:
+        comm: The communicator to abort, or ``None``.
+
+    Returns:
+        Comm or None: The ``comm`` passed in when the hooks were installed
+        (size >= 2), else ``None``.
     """
     if comm is None or int(comm.Get_size()) < 2:
         return None
@@ -1071,6 +1437,19 @@ def install_mpi_abort_on_error(comm):
 
 
 def rank_tag(layout, rank) -> str:
+    """Return the short log tag of a rank.
+
+    ``r<rank>/head``, ``r<rank>/saver``, ``r<rank>/spare``, or
+    ``r<rank>/c<fanout rank>`` for a compute rank. Used as the stdout prefix
+    of the non-head ranks (:func:`prefix_stdout`).
+
+    Args:
+        layout (WalkerBlockLayout): The run layout.
+        rank (int): A rank of the run communicator.
+
+    Returns:
+        str: The tag.
+    """
     role = layout.role_of(rank)
     if role == RankRole.HEAD:
         return f"r{int(rank)}/head"
@@ -1108,7 +1487,17 @@ class _PrefixedStream:
 
 
 def prefix_stdout(tag):
-    """Prefix every stdout line of this process with ``[tag] `` (idempotent)."""
+    """Prefix every stdout line of this process with ``"[tag] "`` (idempotent).
+
+    Wraps :data:`sys.stdout` in a line-prefixing stream once; a second call
+    keeps the first wrapper (and its tag).
+
+    Args:
+        tag (str): The prefix text, e.g. from :func:`rank_tag`.
+
+    Returns:
+        TextIO: The (wrapped) :data:`sys.stdout`.
+    """
     if not isinstance(sys.stdout, _PrefixedStream):
         sys.stdout = _PrefixedStream(sys.stdout, f"[{tag}] ")
     return sys.stdout

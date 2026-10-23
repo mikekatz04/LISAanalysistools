@@ -21,13 +21,32 @@ the lock and builds while the others poll for the npz. A crashed builder
 releases the lock in ``finally``; a lock left behind by a killed process is
 taken over once it is older than the timeout.
 
+Where it sits: ``recipe.build_gb_moves`` calls
+:func:`ensure_warm_start_components` on every rank with
+``GB_WARM_START_COMPONENTS`` before either warm twin loads the npz. On the
+9mo / 12mo launchers that path is ``${STORE_DIR}/warmstart/<parent>_refereed.npz``
+inside the run directory, so it is built on the FIRST launch only and every
+resume finds it (a ``.source`` sidecar records the store it was fitted
+from, and a later launch against a different seed store logs a warning).
+The same three-step runner (:func:`_default_runner`) also runs every
+self-refit epoch (:func:`.self_refit.build_self_epoch`).
+
 Env knobs (read here, not Settings fields -- they configure a one-shot
-offline build, not the sampler): ``GB_WARM_START_SOURCE_STORE`` (the
-previous run's FULL FINAL h5 -- never a make_snapshots extract),
-``GB_WARM_START_LAST_K`` (default 10), ``GB_WARM_START_SOURCE_TOBS`` (the
-SOURCE store's Tobs, default 7776000.0 = 3 months -- NOT this run's Tobs;
-``WarmStartComponents.from_npz(new_tobs=...)`` does the rescale at load),
-``GB_WARM_START_BUILD_TIMEOUT`` (seconds a waiting rank polls, default 7200).
+offline build, not the sampler):
+
+* ``GB_WARM_START_SOURCE_STORE`` -- the previous run's FULL FINAL h5 (never a
+  make_snapshots extract). Launchers: ``${GF_SEED_STORE}``.
+* ``GB_WARM_START_LAST_K`` -- default 10; the number of the source store's
+  last STORED ROWS fitted (x every walker). A parent ``full_pe`` stores one
+  row per iteration; a numbered search stage stores 3 rows per cycle under
+  ``GB_SEARCH_LEGS=1``. Launchers: 300.
+* ``GB_WARM_START_SOURCE_TOBS`` -- the SOURCE store's Tobs [s], default
+  7776000.0 = 3 months -- NOT this run's Tobs;
+  ``WarmStartComponents.from_npz(new_tobs=...)`` does the rescale at load.
+  Launchers: the parent's Tobs (15552000 on the 9mo, 23328000 on the 12mo).
+* ``GB_WARM_START_BUILD_TIMEOUT`` -- seconds a waiting rank polls (and the
+  age at which a lock is taken over as stale), default 7200. Launchers:
+  unset.
 """
 
 from __future__ import annotations
@@ -46,10 +65,24 @@ _STEPS = ("fit_from_store", "match_referee", "referee_apply")
 
 def _manual_recipe(path: str, store: str, last_k: typing.Optional[int] = None,
                    tobs: typing.Optional[float] = None) -> str:
-    """The three by-hand commands, with THIS build's last_k / source tobs
-    (``None`` = the environment, as the build itself resolves them; the hint
+    """The three by-hand commands, with THIS build's last_k / source tobs.
+
+    ``None`` = the environment, as the build itself resolves them (the hint
     used to print the 3mo-parent values 10 / 7776000 whatever the run was
-    configured with; 2026-10-13)."""
+    configured with; 2026-10-13). Used in the ``FileNotFoundError`` text of
+    :func:`ensure_warm_start_components`.
+
+    Args:
+        path: The target refereed npz.
+        store: The source store h5 (or a placeholder string).
+        last_k: Stored rows to fit. Default ``None`` = ``GB_WARM_START_LAST_K``
+            (else 10).
+        tobs: Source Tobs [s]. Default ``None`` = ``GB_WARM_START_SOURCE_TOBS``
+            (else 7776000).
+
+    Returns:
+        str: Three newline-separated ``python -m`` commands.
+    """
     if last_k is None:
         last_k = int(os.environ.get("GB_WARM_START_LAST_K", "10"))
     if tobs is None:
@@ -68,11 +101,22 @@ def _manual_recipe(path: str, store: str, last_k: typing.Optional[int] = None,
 
 
 def _default_runner(cmd: typing.Sequence) -> None:
-    """Run one pipeline step: a PLAIN PYTHON CALL to the installed sibling
-    module's ``main(argv)`` (``cmd`` = ``[step_name, *args]``). SystemExit
-    with a non-zero code (argparse errors, explicit exits) surfaces as a
-    RuntimeError; the stage modules import lazily so the exists-check fast
-    path of :func:`ensure_warm_start_components` stays light."""
+    """Run one pipeline step as a PLAIN PYTHON CALL to the sibling module's ``main(argv)``.
+
+    The stage modules import lazily so the exists-check fast path of
+    :func:`ensure_warm_start_components` stays light. Also the runner of
+    every self-refit epoch (:func:`.self_refit.build_self_epoch`).
+
+    Args:
+        cmd: ``[step_name, *args]``; ``step_name`` is ``"fit_from_store"``,
+            ``"match_referee"`` or ``"referee_apply"``; ``args`` are
+            stringified and passed as ``argv``.
+
+    Raises:
+        RuntimeError: When the step raises ``SystemExit`` with a non-zero
+            code (argparse errors, explicit exits).
+        KeyError: For an unknown ``step_name``.
+    """
     from . import fit_from_store, match_referee, referee_apply
 
     mods = {"fit_from_store": fit_from_store,
@@ -90,6 +134,7 @@ def _default_runner(cmd: typing.Sequence) -> None:
 
 
 def _require(path: str, step: str) -> None:
+    """Raise ``RuntimeError`` when ``step`` returned without writing ``path``."""
     if not os.path.exists(path):
         raise RuntimeError(
             f"[WARMSTART-BUILD] {step} completed without producing "
@@ -102,6 +147,7 @@ _PROVENANCE_SUFFIX = ".source"
 
 
 def _provenance_path(path: str) -> str:
+    """``<path>.source``: the sidecar holding the absolute source-store path."""
     return str(path) + _PROVENANCE_SUFFIX
 
 
@@ -131,6 +177,11 @@ def _check_warm_start_provenance(path: str, store: str, log) -> None:
     existed has no provenance to check, and a deliberate cross-seeding is a
     legitimate (if unusual) thing to ask for. The log line is what makes it
     a decision instead of an accident.
+
+    Args:
+        path: The existing refereed npz.
+        store: This launch's source store (empty = no check).
+        log (logging.Logger): Where the warning goes.
     """
     if not store:
         return
@@ -170,11 +221,53 @@ def ensure_warm_start_components(
 ) -> str:
     """The refereed warm-start npz at ``path`` -- built if missing.
 
-    Returns ``path``. When the file already exists this is a pure check.
-    Otherwise the fit -> referee -> apply pipeline runs against ``store``
-    (or ``GB_WARM_START_SOURCE_STORE``), under a lock directory so that
-    concurrent MPI ranks build exactly once; the output lands atomically
-    (tmp + ``os.replace``), so a waiting rank never sees a partial npz.
+    When the file already exists this is a pure check (plus the provenance
+    warning of :func:`_check_warm_start_provenance`). Otherwise the fit ->
+    referee -> apply pipeline runs against ``store`` (or
+    ``GB_WARM_START_SOURCE_STORE``), under a lock directory
+    ``<path>.build.lock`` so that concurrent MPI ranks build exactly once;
+    the output lands atomically (``<path>.building.npz`` + ``os.replace``),
+    so a waiting rank never sees a partial npz. The intermediates
+    ``<stem>_fit.npz`` and ``<stem>_fit_referee.npz`` stay next to ``path``,
+    and ``<path>.source`` records the source store. The fit step runs with
+    the fitter's CLI defaults otherwise (observable basis, ``--gmm-gpu
+    auto``), the referee with its defaults (``--backend`` from
+    ``GB_WARM_START_REFEREE_BACKEND``, default ``cpu``).
+
+    Args:
+        path: The refereed npz (``GB_WARM_START_COMPONENTS``).
+        store: Source store h5. Default ``None`` = ``GB_WARM_START_SOURCE_STORE``.
+        last_k: Source rows to fit (STORED ROWS x every walker). Default
+            ``None`` = ``GB_WARM_START_LAST_K`` (else 10).
+        tobs: The SOURCE store's Tobs [s]. Default ``None`` =
+            ``GB_WARM_START_SOURCE_TOBS`` (else 7776000.0).
+        timeout: Seconds a waiting rank polls before giving up, and the age
+            [s] of a lock taken over as stale. Default ``None`` =
+            ``GB_WARM_START_BUILD_TIMEOUT`` (else 7200).
+        poll: Seconds between a waiting rank's checks. Default ``5.0``.
+        runner: ``runner([step, *argv])`` runs one step. Default ``None`` =
+            :func:`_default_runner` (in-process ``main(argv)``).
+        log: Logger. Default ``None`` = this module's.
+
+    Returns:
+        str: ``path``.
+
+    Raises:
+        FileNotFoundError: When the npz is missing and no source store is
+            set (the message carries the three by-hand commands), or when
+            the source store does not exist.
+        RuntimeError: When a waiting rank times out, or a step fails or
+            writes no output.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.warmstart import ensure_warm_start_components
+
+            npz = ensure_warm_start_components(
+                "gf_prod_9mo/warmstart/gf_prod_6mo_v9_4gpu_refereed.npz",
+                store="gf_prod_6mo_v9_4gpu/gf_prod_6mo_testing.h5",
+                last_k=300, tobs=15552000.0)
     """
     log = log or logger
     store = (store or os.environ.get("GB_WARM_START_SOURCE_STORE", "")

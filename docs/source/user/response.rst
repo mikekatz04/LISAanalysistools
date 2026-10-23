@@ -6,6 +6,11 @@ LISA arm-projection and TDI machinery. **Absorbed from**
 LISA sprint 2026 reorganization. Old ``fastlisaresponse.*`` imports
 have been retired; use the ``lisatools.response`` paths below.
 
+Sky angles are read in the frame of the orbits; the global fit runs in ICRS (``lam`` = RA,
+``beta`` = Dec, with :class:`~lisatools.detector.L1Orbits` loaded with ``frame="icrs"``), and
+the per-call ``convert_to_ra_dec=True`` conversion is deprecated. Choose the backend per
+object with ``force_backend=``.
+
 Direct Response (``lisatools.response.directresponse``)
 ========================================================
 
@@ -16,6 +21,7 @@ Fast Response Function
     :members:
     :show-inheritance:
     :inherited-members:
+    :exclude-members: xp
 
 Response Function Wrapper
 --------------------------
@@ -27,6 +33,11 @@ Response Function Wrapper
 
 Coordinate Transforms
 ----------------------
+
+These use ``astropy``'s ``barycentrictrueecliptic`` frame. The global-fit recipe, the EMRI
+catalogue glue and the MBH LISA-frame proposal map use the fixed-obliquity
+:func:`lisatools.sources.utils.icrs_to_ecliptic` / :func:`lisatools.sources.utils.ecliptic_to_icrs`
+instead (see :doc:`sources`).
 
 .. autofunction:: lisatools.response.directresponse.ecliptic_to_icrs
 
@@ -98,5 +109,16 @@ matching source-class frontend (``GBWDMComputations``,
     :show-inheritance:
 
 .. autoclass:: lisatools.response.tdionfly.GBFDTDIonTheFly
+    :members:
+    :show-inheritance:
+
+Multi-harmonic Dense TDI (EMRI)
+--------------------------------
+
+Runs on the LISA Analysis Tools backend itself (``TDDenseTDIWaveformWrap``); it is the
+``EMRI_DIRECT_RESPONSE=dense`` path of :class:`~lisatools.sources.emri.wdm_direct.EMRIDirectWDM`
+that both production launchers select.
+
+.. autoclass:: lisatools.response.tdionfly.TDDenseTDIonTheFly
     :members:
     :show-inheritance:

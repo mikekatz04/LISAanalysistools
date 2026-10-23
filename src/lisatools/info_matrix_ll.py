@@ -30,6 +30,11 @@ likelihood peak this equals the Fisher matrix; away from it the two differ by
 ``<r | d_i d_j h>``, whose expectation vanishes. Because that term is not
 sign-definite the result can have non-positive eigenvalues; callers that need a
 Cholesky must handle that (see ``regularize``).
+
+**Where it runs.** :class:`gbgpu.gbsignalhetcomputations.GBSignalHetComputations`
+calls :func:`information_matrix_from_ll` for the GB in-model proposal covariance when
+``SIGHET_INFOMAT=1`` (set on the 9-month and 12-month runs); the ``SIGHET_INFOMAT_*``
+knobs are read through :func:`infomat_knob`.
 """
 
 from __future__ import annotations
@@ -46,7 +51,24 @@ __all__ = ["information_matrix_from_ll", "infomat_knob", "regularize"]
 
 
 def infomat_knob(name: str, default):
-    """Env knob resolver for the SIGHET_INFOMAT_* family."""
+    """Env knob resolver for the SIGHET_INFOMAT_* family.
+
+    An unset or blank variable gives ``default``. A bool ``default`` parses the raw
+    string as true unless it is ``"0"``, ``"false"`` or ``"False"``; any other
+    default is converted with ``type(default)(raw)``.
+
+    Args:
+        name: Environment variable name.
+        default: Default value; its type sets the parse.
+
+    Returns:
+        The parsed value (type of ``default``).
+
+    Example:
+        >>> from lisatools.info_matrix_ll import infomat_knob
+        >>> infomat_knob("SIGHET_INFOMAT_UNSET_EXAMPLE", 4096)
+        4096
+    """
     raw = os.environ.get(name, "").strip()
     if raw == "":
         return default
@@ -61,7 +83,17 @@ def regularize(gamma, xp, floor_rel: float = 1e-10):
     The observed information can be indefinite (see the module docstring), and
     ``_proposal_cholesky`` needs a factor. Eigen-decompose, clip eigenvalues at
     ``floor_rel * max_eig``, rebuild. A no-op for matrices that are already
-    comfortably PSD.
+    comfortably PSD. Logs a warning with the count of matrices that had a
+    non-positive eigenvalue.
+
+    Args:
+        gamma: ``(n, ndim, ndim)`` matrices on ``xp``.
+        xp: Array module (numpy or cupy).
+        floor_rel: Eigenvalue floor relative to each matrix's largest eigenvalue.
+            Default ``1e-10``.
+
+    Returns:
+        ``xp.ndarray``: Symmetric positive-definite ``(n, ndim, ndim)`` matrices.
     """
     g = 0.5 * (gamma + xp.swapaxes(gamma, -1, -2))
     w, v = xp.linalg.eigh(g)
@@ -103,23 +135,34 @@ def information_matrix_from_ll(
         G_ij = -[ll(+i,+j) - ll(+i,-j) - ll(-i,+j) + ll(-i,-j)] / (4 e_i e_j)
         G_ii = -[ll(+i)    - 2 ll(0)   + ll(-i)]               / (e_i^2)
 
+    All corner rows (central, ``+/-`` per dimension, four corners per pair) are
+    assembled once and scored in batches of ``batch`` rows, with batch boundaries
+    rounded down to whole ``n``-row blocks so a caller that tiles per-source
+    metadata onto the rows stays aligned. Non-finite results become identity
+    matrices (with a warning).
+
     Args:
         call_ll: ``fn(params_2d) -> ll_1d``. Must accept an arbitrary row
             count (rows are chunked by ``batch``) and must NOT mutate the
             residual -- an add-delta scorer is what this wants.
         params: ``(n, nparams)`` rows, in whatever basis ``call_ll`` consumes.
+        xp: Array module (numpy or cupy) of the computation.
         param_eps: per-parameter step, ``(nparams,)`` or ``(n, nparams)``.
             ``eps <= 0`` FREEZES that dimension (the existing gradient
             convention): its row/column comes back 0 with 1 on the diagonal so
             the matrix stays invertible.
         inds: parameter indices to include (default: all).
-        batch: rows per ``call_ll`` call (default ``FSTAT``-style 4096).
+        batch: rows per ``call_ll`` call (default ``SIGHET_INFOMAT_BATCH``, else
+            4096).
         one_sided: forward differences -- fewer evaluations, lower accuracy.
-            Diagnostic only.
-        psd_project: run :func:`regularize` on the result.
+            Diagnostic only (the GB sig-het caller reads it from
+            ``SIGHET_INFOMAT_ONESIDED``, unset on the production runs): the diagonal
+            is then ``G_ii = -(ll(+i) - ll(0)) / e_i^2``, a first difference rather
+            than a second derivative.
+        psd_project: run :func:`regularize` on the result. Default ``True``.
 
     Returns:
-        ``(n, ndim, ndim)`` on ``xp``, where ``ndim = len(inds)``.
+        ``xp.ndarray``: ``(n, ndim, ndim)`` float64, where ``ndim = len(inds)``.
     """
     p = xp.asarray(xp.atleast_2d(params))
     n, nparams = int(p.shape[0]), int(p.shape[1])

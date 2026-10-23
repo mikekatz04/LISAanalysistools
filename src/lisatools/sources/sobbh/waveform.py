@@ -5,6 +5,18 @@ The math is unchanged — this module just packages it as an importable
 piece of ``lisatools`` and exposes a small :class:`SOBBHWaveform` class
 that mirrors the call signature ``ResponseWrapper`` expects from EMRI
 waveform generators.
+
+The free PN functions (:func:`phase`, :func:`time_to_merger`, :func:`tau_to_x`, and
+:func:`frequency` / :func:`frequency_derivative`) work in geometric units: ``M`` is the total
+mass in seconds (``(m1 + m2) * MTsun``), ``x = (pi M f)^(2/3)`` and the dimensionless time to
+merger ``tau = eta (tc - t) / (5 M)``. They are written with ``jnp`` (numpy when jax is absent;
+importing this module turns on ``jax_enable_x64``). On the 9mo / 12mo runs
+(``SOBBH_LIKELIHOOD=lookup``) :func:`~lisatools.sources.sobbh.wdm_direct.sobbh_amp_phase_batch`
+calls :func:`phase`, :func:`time_to_merger` and :func:`tau_to_x` row-vectorized;
+:class:`SOBBHWaveform` serves the TDI-on-the-fly cross-check wrap and the legacy paths.
+
+Module constants: ``GM_sun``, ``pc`` (m), ``c`` (m/s) from ``lisaconstants`` and the derived
+``MTsun = GM_sun / c^3`` (s); ``EulerGamma`` is a literal (the Euler-Mascheroni constant).
 """
 
 from __future__ import annotations
@@ -41,14 +53,15 @@ def phase(x, sigma, delta, eta, s):
     """3.5PN aligned-spin phase. See PNpedia for the closed form.
 
     Args:
-        x: PN expansion parameter ``(pi M f)**(2/3)``.
-        sigma: reduced spin ``(m2 s2 - m1 s1) / M``.
-        delta: mass asymmetry ``(m1 - m2) / M``.
-        eta: symmetric mass ratio ``m1 m2 / M**2``.
-        s: spin parameter ``(m1**2 s1 + m2**2 s2) / M**2``.
+        x (float | array-like): PN expansion parameter ``(pi M f)**(2/3)``.
+        sigma (float | array-like): reduced spin ``(m2 s2 - m1 s1) / M``.
+        delta (float | array-like): mass asymmetry ``(m1 - m2) / M``.
+        eta (float | array-like): symmetric mass ratio ``m1 m2 / M**2``.
+        s (float | array-like): spin parameter ``(m1**2 s1 + m2**2 s2) / M**2``.
 
     Returns:
-        ``Phi_0 - phi`` (waveform phase modulo coalescence offset).
+        float | jnp.ndarray: ``Phi_0 - phi`` [rad] (orbital phase measured from coalescence,
+        modulo the coalescence offset); broadcast shape of the inputs.
     """
     Phi_0_minus_phi = (
         1
@@ -141,7 +154,16 @@ def phase(x, sigma, delta, eta, s):
 def frequency(tau, sigma, delta, eta, s):
     """3.5PN aligned-spin frequency as a function of dimensionless time-to-merger.
 
-    Returns ``M*f`` (dimensionless); divide by ``M`` to get Hz.
+    Args:
+        tau (float | array-like): ``eta (tc - t) / (5 M)``.
+        sigma (float | array-like): reduced spin, as in :func:`phase`.
+        delta (float | array-like): mass asymmetry, as in :func:`phase`.
+        eta (float | array-like): symmetric mass ratio.
+        s (float | array-like): spin parameter, as in :func:`phase`.
+
+    Returns:
+        float | jnp.ndarray: ``M*f`` (dimensionless; ``f`` is the GW frequency of
+        ``x = (pi M f)**(2/3)``); divide by ``M`` [s] to get Hz.
     """
     F = (
         (
@@ -197,7 +219,10 @@ def frequency(tau, sigma, delta, eta, s):
 
 
 def frequency_derivative(tau, sigma, delta, eta, s):
-    """Time derivative of :func:`frequency`. Dimensionless; multiply by ``1/M**2`` for Hz/s."""
+    """Time derivative of :func:`frequency`. Dimensionless; multiply by ``1/M**2`` for Hz/s.
+
+    Same arguments as :func:`frequency`; returns ``M^2 df/dt`` (float or ``jnp.ndarray``).
+    """
     dFdt = eta * (
         (
             (-7729 * jnp.pi) / 860160.0
@@ -253,7 +278,12 @@ def frequency_derivative(tau, sigma, delta, eta, s):
 
 
 def time_to_merger(x, sigma, delta, eta, s):
-    """Series-inverted t(x) at 3.5PN. Returns dimensionless ``tc / M``."""
+    """Series-inverted t(x) at 3.5PN: the time to coalescence from PN parameter ``x``.
+
+    Same spin / mass arguments as :func:`phase`; ``x`` is ``(pi M f)**(2/3)``. Returns the
+    dimensionless ``tc / M`` (float or ``jnp.ndarray``). The callers use it only as the initial
+    guess of a Newton solve on :func:`tau_to_x` (it is ~5e-9 off in ``f``).
+    """
     tc = (
         1
         / eta
@@ -316,7 +346,11 @@ def time_to_merger(x, sigma, delta, eta, s):
 
 
 def tau_to_x(tau, sigma, delta, eta, s):
-    """Direct evaluation of x(tau) used to build :func:`frequency`."""
+    """Direct 3.5PN evaluation of ``x(tau)`` (the series :func:`frequency` is built from).
+
+    Same arguments as :func:`frequency`. Returns ``x = (pi M f)**(2/3)`` (float or
+    ``jnp.ndarray``) at the dimensionless time to merger ``tau``.
+    """
     x = (
         1
         + (
@@ -420,6 +454,20 @@ def _pn_amp_phase_core(
     ``-(mojito eta_ij)`` on every link (verified pre-TDI vs the mojito L1
     ``eta_ij``; the shared ``pyResponseTDI`` is correct). Flipped to ``+`` to
     match the LDC / lisagwresponse strain-sign convention mojito uses.
+
+    Args:
+        m1 (float): Primary mass [Msun].
+        m2 (float): Secondary mass [Msun].
+        D (float): Luminosity distance [pc].
+        f_low (float): GW frequency [Hz] at the reference epoch (PN time 0).
+        s1 (float): Dimensionless aligned spin of the primary.
+        s2 (float): Dimensionless aligned spin of the secondary.
+        times (array-like): PN times [s], measured from the reference epoch.
+        reference_phase (float, optional): Orbital phase [rad] at the reference epoch.
+            Default ``0.0``.
+
+    Returns:
+        tuple: ``(A, Phi, t_subset)``, each of length ``len(t_subset)``.
     """
     m1 = m1 * MTsun
     m2 = m2 * MTsun
@@ -489,22 +537,26 @@ def waveform_generate_h_plus_cross(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Generate ``(hp, hx)`` for an aligned-spin SOBBH PN inspiral.
 
+    ``hp = A (1 + cos^2 inc) cos(2 Phi)`` and ``hx = A (2 cos inc) sin(2 Phi)`` with the
+    amplitude and orbital phase of :func:`_pn_amp_phase_core` (no polarization rotation).
+
     Args:
-        m1: primary mass (solar masses).
-        m2: secondary mass (solar masses).
-        D: luminosity distance (parsec).
-        inc: inclination (rad).
-        f_low: starting GW frequency (Hz).
-        s1: dimensionless aligned spin of primary.
-        s2: dimensionless aligned spin of secondary.
-        times: time grid (seconds) on which to evaluate.
-        reference_phase: orbital phase at the REFERENCE time (i.e. at
+        m1 (float): primary mass (solar masses).
+        m2 (float): secondary mass (solar masses).
+        D (float): luminosity distance (parsec).
+        inc (float): inclination (rad).
+        f_low (float): GW frequency (Hz) at the reference epoch (PN time 0).
+        s1 (float): dimensionless aligned spin of primary.
+        s2 (float): dimensionless aligned spin of secondary.
+        times (array-like): PN time grid (seconds, measured from the reference epoch) on
+            which to evaluate.
+        reference_phase (float, optional): orbital phase at the REFERENCE time (i.e. at
             ``f_low`` / ``x0``), in rad. This is the catalogue convention
             (``TrueAnomaly`` is the phase at the reference epoch), so the
-            inspiral is anchored there rather than at coalescence.
+            inspiral is anchored there rather than at coalescence. Default ``0.0``.
 
     Returns:
-        ``(hp, hx, t_subset)`` with ``hp``/``hx`` of length ``len(t_subset)``,
+        tuple: ``(hp, hx, t_subset)`` with ``hp``/``hx`` of length ``len(t_subset)``,
         which is the subset of ``times`` strictly before the estimated tc.
     """
     A, Phi, t_subset = _pn_amp_phase_core(
@@ -545,11 +597,18 @@ def waveform_generate_amp_phase(
       :func:`waveform_generate_h_plus_cross`.
 
     Args:
-        Same as :func:`waveform_generate_h_plus_cross` minus ``inc`` (which is
-        applied by the response, not baked into the amplitude here).
+        m1 (float): primary mass (solar masses).
+        m2 (float): secondary mass (solar masses).
+        D (float): luminosity distance (parsec).
+        f_low (float): GW frequency (Hz) at the reference epoch.
+        s1 (float): dimensionless aligned spin of primary.
+        s2 (float): dimensionless aligned spin of secondary.
+        times (array-like): PN time grid (seconds from the reference epoch).
+        reference_phase (float, optional): orbital phase (rad) at the reference epoch.
+            Default ``0.0``.
 
     Returns:
-        ``(gw_amp, gw_phase, t_subset)``, each of length ``len(t_subset)``.
+        tuple: ``(gw_amp, gw_phase, t_subset)``, each of length ``len(t_subset)``.
     """
     A, Phi, t_subset = _pn_amp_phase_core(
         m1, m2, D, f_low, s1, s2, times, reference_phase=reference_phase
@@ -563,33 +622,58 @@ def waveform_generate_amp_phase(
 class SOBBHWaveform:
     """Lisa-side SOBBH waveform generator.
 
-    Mirrors the call-signature contract that ``fastlisaresponse.ResponseWrapper``
-    expects from EMRI waveform generators:
+    Mirrors the call-signature contract that
+    :class:`~lisatools.response.directresponse.ResponseWrapper` (formerly
+    ``fastlisaresponse.ResponseWrapper``) expects from EMRI waveform generators:
 
-    * ``__call__(*params, **kwargs) -> (hp, hx)`` arrays evaluated on the
+    * ``__call__(*params, **kwargs) -> hp + 1j hx``, evaluated on the
       internal ``times`` grid.
     * Internal time grid built from ``(Tobs, dt, t0)`` at construction time
       so the call stays parameter-only.
 
-    Sampling-basis parameter order (12 params, matching the EMRI structure
-    with explicit ``fill_values`` for the two non-sampled entries):
+    It also provides the amplitude / phase form (:meth:`compute_amp_phase`) that
+    :class:`bbhx.sobbhtdionfly.SOBBHTDIonFly` consumes (the ``all_sources`` TDI-on-the-fly wrap,
+    the cross-check of the production lookup scorer).
 
-      0  m1   (M_sun)
-      1  m2   (M_sun)
-      2  s1   (dimensionless aligned spin)
-      3  s2   (dimensionless aligned spin)
-      4  dist (Gpc)
-      5  inc  (rad)
-      6  f_low (Hz)              -- starting GW frequency
-      7  lam  (ecliptic longitude, rad)
-      8  beta (ecliptic latitude, rad)
-      9  psi  (polarization, rad)
-      10 phi0 (orbital phase at the REFERENCE epoch / f_low, rad --
-            i.e. the catalogue ``TrueAnomaly``, NOT the coalescence phase)
-      11 t_shift (seconds)       -- time offset, default 0
+    Call parameter order (11 waveform parameters plus an optional ``t_shift``):
+
+    - 0 ``m1`` (M_sun)
+    - 1 ``m2`` (M_sun)
+    - 2 ``s1`` (dimensionless aligned spin)
+    - 3 ``s2`` (dimensionless aligned spin)
+    - 4 ``dist`` (Gpc)
+    - 5 ``inc`` (rad)
+    - 6 ``f_low`` (Hz): the GW frequency at ``reference_time``
+    - 7 ``lam`` (rad): sky longitude in the response orbits' frame (ICRS RA with
+      ``frame="icrs"`` orbits); unused here, consumed by the response
+    - 8 ``beta`` (rad): sky latitude in the same frame; unused here
+    - 9 ``psi`` (polarization, rad)
+    - 10 ``phi0`` (orbital phase at the REFERENCE epoch / f_low, rad, i.e. the catalogue
+      ``TrueAnomaly``, NOT the coalescence phase)
+    - 11 ``t_shift`` (seconds): time offset, default 0
 
     The wrapper applies polarization rotation; ``ResponseWrapper`` handles
     the sky-direction projection onto LISA TDI channels.
+
+    Args:
+        Tobs: Data span [s]; ``N = round(Tobs / dt)`` samples.
+        dt: Sample step [s].
+        t0: Absolute start [s] of the internal grid ``arange(N) * dt + t0``. Default ``0.0``.
+        reference_time: Absolute epoch [s] at which ``f_low`` and ``phi0`` are defined
+            (``MOJITO_REFERENCE_TIME`` in mojito mode); ``None`` means ``t0``.
+        force_backend: Stored only; the PN evaluation runs on numpy / jnp. Default ``"cpu"``.
+        pad_zeros: Zero-pad the output to ``N`` samples when the source merges inside the
+            grid (default ``True``); otherwise return only the pre-merger samples.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.sources.sobbh import SOBBHWaveform
+
+            wave = SOBBHWaveform(Tobs=60 * 86400.0, dt=10.0, t0=0.0)
+            # (m1, m2, s1, s2, dist [Gpc], inc, f_low, lam, beta, psi, phi0)
+            h = wave(45.0, 38.0, 0.0, 0.0, 0.1, 0.9, 1.2e-2, 2.0, 0.4, 1.0, 1.0)
+            t_abs, amp, gw_phase = wave.compute_amp_phase(45.0, 38.0, 0.0, 0.0, 0.1, 1.2e-2, 1.0)
     """
 
     def __init__(
@@ -624,10 +708,12 @@ class SOBBHWaveform:
 
     @property
     def N(self) -> int:
+        """Number of samples of the internal grid."""
         return self._N
 
     @property
     def times(self) -> np.ndarray:
+        """Absolute times [s] of the internal grid, ``(N,)``."""
         return self._times_np
 
     def __call__(
@@ -649,14 +735,34 @@ class SOBBHWaveform:
         """Evaluate the polarization-rotated waveform on the internal time grid.
 
         Returns a single complex array ``h = hp + 1j * hx`` so the call
-        signature matches what ``fastlisaresponse.ResponseWrapper`` expects
+        signature matches what ``ResponseWrapper`` expects
         (it reads ``h.real`` / ``h.imag`` to get the two polarizations).
         Set ``flip_hx=True`` on ``ResponseWrapper`` to get the standard
         ``h.real - 1j h.imag`` convention.
 
         ``dist`` is in Gpc; converted to parsec inside.
         ``lam`` / ``beta`` are accepted but unused here — they're forwarded
-        through ``ResponseWrapper`` for sky-projection.
+        through ``ResponseWrapper`` for sky-projection. The PN time is the grid time minus
+        ``reference_time`` minus ``t_shift``; the polarizations are rotated by ``2 psi``.
+
+        Args:
+            m1 (float): Primary mass [Msun].
+            m2 (float): Secondary mass [Msun].
+            s1 (float): Primary aligned spin.
+            s2 (float): Secondary aligned spin.
+            dist (float): Luminosity distance [Gpc].
+            inc (float): Inclination [rad].
+            f_low (float): GW frequency [Hz] at ``reference_time``.
+            lam (float): Unused (sky longitude, for the response).
+            beta (float): Unused (sky latitude, for the response).
+            psi (float): Polarization angle [rad].
+            phi0 (float): Orbital phase [rad] at ``reference_time``.
+            t_shift (float, optional): Extra time offset [s]. Default ``0.0``.
+            **kwargs: Ignored (``T``, ``dt`` and ``convert_to_ra_dec`` injected by the
+                response are dropped).
+
+        Returns:
+            np.ndarray: Complex ``(N,)`` (or the pre-merger length without ``pad_zeros``).
         """
         del lam, beta  # consumed by ResponseWrapper, not the source waveform
         # ResponseWrapper injects ``T`` and ``dt`` into kwargs; ignore.
@@ -738,16 +844,21 @@ class SOBBHWaveform:
         epoch where ``f_low`` is defined), identically to :meth:`__call__`.
 
         Args:
-            m1, m2, s1, s2, dist, f_low, phi0: as in the sampling basis
-                (``dist`` in Gpc, ``phi0`` the reference-epoch orbital phase).
+            m1 (float): Primary mass [Msun].
+            m2 (float): Secondary mass [Msun].
+            s1 (float): Primary aligned spin.
+            s2 (float): Secondary aligned spin.
+            dist (float): Luminosity distance [Gpc].
+            f_low (float): GW frequency [Hz] at ``reference_time``.
+            phi0 (float): Reference-epoch orbital phase [rad].
             times (np.ndarray, optional): absolute time grid (sec). Defaults to
                 the internal data grid ``arange(N)*dt + t0``.
-            t_shift (float, optional): extra time offset (sec). (default: 0)
+            t_shift (float, optional): extra time offset (sec). Default ``0.0``.
 
         Returns:
-            ``(abs_times, gw_amp, gw_phase)`` -- ``abs_times`` are the absolute
-            times (same epoch convention as the input grid) strictly before
-            ``tc``; ``gw_amp = A``; ``gw_phase = 2*Phi``.
+            tuple[np.ndarray, np.ndarray, np.ndarray]: ``(abs_times, gw_amp, gw_phase)`` --
+            ``abs_times`` are the absolute times (same epoch convention as the input grid)
+            strictly before ``tc``; ``gw_amp = A``; ``gw_phase = 2*Phi``.
         """
         if times is None:
             times = self._times_np

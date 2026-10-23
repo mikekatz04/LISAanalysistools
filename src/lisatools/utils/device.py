@@ -35,6 +35,7 @@ __all__ = [
 
 
 def _first_gpu(gpus: Union[int, Sequence[int], None]) -> Optional[int]:
+    """Return the main device id: ``gpus`` itself for an int, ``gpus[0]`` for a sequence."""
     if gpus is None:
         return None
     if isinstance(gpus, int):
@@ -45,9 +46,22 @@ def _first_gpu(gpus: Union[int, Sequence[int], None]) -> Optional[int]:
 def device_context(xp, device: Optional[int]):
     """Context manager placing work on ``device`` under ``xp``.
 
-    Returns ``xp.cuda.Device(device)`` on the CuPy path and a
-    ``nullcontext()`` when ``device`` is None or ``xp`` has no ``cuda``
-    (numpy / CPU path).
+    Entering it makes ``device`` CuPy's current device for this thread; leaving restores the
+    previous one.
+
+    Args:
+        xp (module): Array module (``numpy`` or ``cupy``).
+        device: CUDA device id, or ``None``.
+
+    Returns:
+        contextlib.AbstractContextManager: ``xp.cuda.Device(device)`` on the CuPy path, a
+        ``nullcontext()`` when ``device`` is None or ``xp`` has no ``cuda`` (numpy / CPU path).
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.utils.device import device_context
+        >>> with device_context(np, 1):
+        ...     x = np.zeros(3)
     """
     if device is None or not hasattr(xp, "cuda"):
         return nullcontext()
@@ -79,6 +93,10 @@ def order_after_array(xp, arr) -> None:
     running. No-op when ``arr`` is already on the current device, when it
     is a host array, and for NumPy / any ``xp`` without a CuPy-like
     ``cuda.get_current_stream``.
+
+    Args:
+        xp (module): Array module (``numpy`` or ``cupy``).
+        arr (array): The array about to be read from another device.
     """
     cuda = getattr(xp, "cuda", None)
     get_stream = getattr(cuda, "get_current_stream", None)
@@ -98,9 +116,16 @@ def order_after_array(xp, arr) -> None:
 def pin_main_device(xp, gpus: Union[int, Sequence[int], None]) -> Optional[int]:
     """Pin the process-current device to the run's main GPU (``gpus[0]``).
 
-    No-op on CPU (``gpus is None`` or numpy ``xp``). Returns the previous
-    device id (None when nothing was pinned) so callers that need to restore
-    can ``xp.cuda.runtime.setDevice(prev)`` afterwards.
+    No-op on CPU (``gpus is None`` or numpy ``xp``). Unlike :func:`device_context` this is
+    not scoped: the device stays current until something else sets it.
+
+    Args:
+        xp (module): Array module (``numpy`` or ``cupy``).
+        gpus: The run's GPU list (an int is treated as a one-element list), or ``None``.
+
+    Returns:
+        Optional[int]: The previous device id (None when nothing was pinned), so callers that
+        need to restore can ``xp.cuda.runtime.setDevice(prev)`` afterwards.
     """
     first = _first_gpu(gpus)
     if first is None or not hasattr(xp, "cuda"):
@@ -111,7 +136,15 @@ def pin_main_device(xp, gpus: Union[int, Sequence[int], None]) -> Optional[int]:
 
 
 def current_device(xp) -> Optional[int]:
-    """The process-current device id under ``xp`` (None on the CPU path)."""
+    """Return the current device id under ``xp`` (None on the CPU path).
+
+    Args:
+        xp (module): Array module (``numpy`` or ``cupy``).
+
+    Returns:
+        Optional[int]: ``xp.cuda.runtime.getDevice()``, or ``None`` when ``xp`` has no
+        ``cuda``.
+    """
     if not hasattr(xp, "cuda"):
         return None
     return int(xp.cuda.runtime.getDevice())
@@ -128,7 +161,15 @@ def to_current_device(xp, arr):
     between GPUs on some nodes; a same-device ufunc against it then raises
     "device where the array resides differs from the current device").
 
-    No-op for NumPy/CPU and for arrays already on the current device.
+    No-op for NumPy/CPU and for arrays already on the current device. A host array under a
+    CuPy ``xp`` is uploaded with ``xp.asarray``.
+
+    Args:
+        xp (module): Array module (``numpy`` or ``cupy``).
+        arr (array): Array to place.
+
+    Returns:
+        array: ``arr`` itself, or a copy on the current device.
     """
     if not hasattr(xp, "cuda"):
         return arr
@@ -157,6 +198,15 @@ def to_current_device_cached(xp, owner, tag, arrays):
     source objects (an ``is`` check, so a rebuilt source re-copies). The
     cache lives in ``owner._device_copy_cache``; an owner that is pickled
     or deep-copied must drop that key in ``__getstate__``. A no-op on CPU.
+
+    Args:
+        xp (module): Array module (``numpy`` or ``cupy``).
+        owner (object): Object whose ``__dict__`` holds the cache.
+        tag (hashable): Cache key for this group of arrays.
+        arrays (Iterable): The source arrays.
+
+    Returns:
+        tuple: The arrays on the current device, in input order.
     """
     arrays = tuple(arrays)
     if not hasattr(xp, "cuda"):
@@ -190,6 +240,15 @@ def sensitivity_to_current_device(xp, sm):
     device first. The clone is built with ``object.__new__`` + the instance
     dict, not ``copy.copy``, so no ``__getstate__`` / ``__deepcopy__`` hook
     runs. A no-op on CPU and when both arrays are already local.
+
+    Args:
+        xp (module): Array module (``numpy`` or ``cupy``).
+        sm (SensitivityMatrix): The sensitivity matrix
+            (:class:`~lisatools.sensitivity.SensitivityMatrix` or a subclass).
+
+    Returns:
+        SensitivityMatrix: ``sm`` itself, or the shallow clone with local ``invC`` /
+        ``detC``.
     """
     if not hasattr(xp, "cuda"):
         return sm
@@ -227,6 +286,9 @@ def synchronize(xp) -> None:
 
     No-op for NumPy / any ``xp`` without a ``cuda`` attribute, and for
     ``xp is None``.
+
+    Args:
+        xp (module): Array module (``numpy`` or ``cupy``), or ``None``.
     """
     cuda = getattr(xp, "cuda", None)
     if cuda is None:
@@ -254,6 +316,13 @@ def jax_device_context(device: Optional[int], *, kind: str = "gpu"):
     the run's primary device), when JAX is unavailable, or when JAX cannot
     see a device at ``jax.devices(kind)[device]`` -- so call sites need no
     guards and single-GPU/CPU behaviour is unchanged.
+
+    Args:
+        device: CuPy device id, or ``None``.
+        kind: JAX platform passed to ``jax.devices``. Default ``"gpu"``.
+
+    Returns:
+        contextlib.AbstractContextManager: ``jax.default_device(...)`` or ``nullcontext()``.
     """
     if device is None:
         return nullcontext()

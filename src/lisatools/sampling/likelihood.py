@@ -1,4 +1,12 @@
-"""Likelihood wrappers for ``eryn`` samplers used in LISA analyses."""
+"""Legacy likelihood wrappers for ``eryn`` samplers used in LISA analyses.
+
+Holds :class:`Likelihood` (single source, frequency- or time-domain arrays,
+``use_gpu`` era) and :class:`GlobalLikelihood` (multi-source). Neither is
+used by the global fit or the stock variants: the only import, in the dev MBH
+search :mod:`lisatools.globalfit.mbhsearch`, is unused. New code should use
+:meth:`~lisatools.analysiscontainer.AnalysisContainer.eryn_likelihood_function`
+(the ``DomainBase``-aware log-likelihood; see LATW tutorial 07).
+"""
 
 import warnings
 
@@ -14,6 +22,7 @@ except (ModuleNotFoundError, ImportError):
     pass
 
 
+# TODO check: keep/remove/document -- no callers; only an unused import in globalfit/mbhsearch.py
 class Likelihood(object):
     """Single-source Gaussian likelihood wrapper around a waveform generator.
 
@@ -640,6 +649,7 @@ class Likelihood(object):
         """
 
 
+# TODO check: keep/remove/document -- no callers (src, tests, scripts, LATW); LATW 07: deprecated
 class GlobalLikelihood(Likelihood):
     """Multi-source extension of :class:`Likelihood` for the LISA global fit.
 

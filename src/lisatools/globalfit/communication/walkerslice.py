@@ -6,6 +6,15 @@ counters zeroed, and ``supplemental["walker_inds"]`` REMAPPED to ``0..B-1``
 because a rank's ACA has exactly ``B`` rows. :func:`merge_state` writes a
 slice's walker columns back and SUM-adds the counters; ladders and the
 head's global ``walker_inds`` are never written back.
+
+Used by the multi-rank fan-out: the head slices each compute rank's block
+out of its full state, ships it with the command, and merges the rank's
+returned slice (:mod:`lisatools.globalfit.moves.walkerfanout`); also by
+``run.py`` and the GB moves.
+
+Attributes:
+    WALKER_INDS_KEY (str): ``"walker_inds"``, the supplemental key that is
+        remapped on slicing and skipped on merging.
 """
 
 from __future__ import annotations
@@ -19,11 +28,13 @@ WALKER_INDS_KEY = "walker_inds"
 
 
 def _nwalkers_of(state) -> int:
+    """Walker count of ``state`` (from its first branch)."""
     first = next(iter(state.branches.values()))
     return int(first.nwalkers)
 
 
 def _walker_block(w0, w1, nwalkers):
+    """Validate ``0 <= w0 < w1 <= nwalkers`` and return ``(w0, w1)`` as ints."""
     w0, w1 = int(w0), int(w1)
     if not (0 <= w0 < w1 <= int(nwalkers)):
         raise ValueError(f"walker block [{w0}, {w1}) is not inside [0, {nwalkers}).")
@@ -45,12 +56,28 @@ def _slice_supp(supp, w0, w1):
 def slice_state(full, w0, w1, *, sub_states="all"):
     """A ``GFState`` holding walkers ``[w0, w1)`` of ``full`` (all copies).
 
+    Coordinates, ``inds``, branch and state supplementals, ``log_like``,
+    ``log_prior`` and ``blobs`` are cut on the walker axis (axis 1); the
+    ``betas`` ladder and ``sub_state_bases`` are copied whole;
+    ``supplemental["walker_inds"]`` becomes ``0..B-1`` on every temperature.
+    Only initialized tempered sub-states are sliced
+    (:meth:`~lisatools.globalfit.state.ModuleSubState.slice_walkers`, counters
+    start at zero).
+
     Args:
-        full: the head's full ``GFState``.
-        w0, w1: the walker block.
-        sub_states: ``"all"`` slices every tempered sub-state; a list of
-            branch names slices only those (the rest are ``None``); ``[]``
-            slices none.
+        full (GFState): The head's full state.
+        w0 (int): First walker of the block.
+        w1 (int): One past the last walker of the block.
+        sub_states (str or list[str]): ``"all"`` slices every tempered
+            sub-state; a list of branch names slices only those (the rest are
+            ``None``); ``[]`` slices none. Default ``"all"``.
+
+    Returns:
+        GFState: The block's state with ``B = w1 - w0`` walkers.
+
+    Raises:
+        ValueError: When the block is outside ``[0, nwalkers)`` or
+            ``sub_states`` names an unknown branch.
     """
     w0, w1 = _walker_block(w0, w1, _nwalkers_of(full))
     if sub_states != "all":
@@ -103,6 +130,22 @@ def merge_state(full, part, w0, w1):
 
     Sub-state delta counters are SUM-added; ladders and the head's global
     ``supplemental["walker_inds"]`` are untouched.
+
+    Modifies ``full`` in place: coordinates, ``inds``, branch supplementals,
+    ``log_like``, ``log_prior``, ``blobs``, the state supplemental (minus
+    ``walker_inds``), and every sub-state present on both sides
+    (:meth:`~lisatools.globalfit.state.ModuleSubState.merge_walkers`).
+
+    Args:
+        full (GFState): The head's full state (updated in place).
+        part (GFState): A slice with ``w1 - w0`` walkers, e.g. from
+            :func:`slice_state` after a rank ran a command on it.
+        w0 (int): First walker of the block.
+        w1 (int): One past the last walker of the block.
+
+    Raises:
+        ValueError: When the block is invalid or ``part`` has the wrong
+            walker count.
     """
     w0, w1 = _walker_block(w0, w1, _nwalkers_of(full))
     if _nwalkers_of(part) != w1 - w0:

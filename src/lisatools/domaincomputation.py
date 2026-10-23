@@ -1,5 +1,26 @@
-"""Python wrapper around C++ STFTDomainWrap / FDDomainWrap for batched
-likelihood computation of (d|h) and (h|h) inner products."""
+"""Batched ``(d|h)`` / ``(h|h)`` likelihood groups over the C++ domain wraps, per GPU split.
+
+* :class:`BaseDomainComputationGroup` and its domain children
+  :class:`FDComputationGroup` (``FDDomainWrap``), :class:`STFTComputationGroup`
+  (``STFTDomainWrap`` + ``STFTFresnelWrap``) and :class:`WDMComputationGroup`
+  (``WDMDomainWrap``): one instance per GPU split of an
+  :class:`~lisatools.analysiscontainer.AnalysisContainerArray`. Each holds the
+  split's flat data / inverse-noise buffers, a device-local copy of the orbits and
+  sensitivity backend, and the C++ domain object that scores template batches.
+* :class:`DomainComputationGroupArray` (DCGA): one group per split, plus the
+  routing tables and device loops that partition a walker batch across GPUs,
+  dispatch per-split work (optionally threaded) and gather the results.
+
+Dispatch to the group class is by ``isinstance`` on the ACA's settings
+(:attr:`DomainComputationGroupArray.computation_group_class`), never by string.
+
+In the global fit the DCGA is built lazily, once per run, by
+:func:`lisatools.globalfit.recipe.get_shared_dcga` and handed to the GB add/remove,
+PSD and MBH moves. It is built only on multi-GPU runs whose sensitivity matrix
+carries orbits; ``get_shared_dcga`` returns ``None`` otherwise (including the
+stock runs' ``CompositeSensitivityBackend``), and the moves then use their own
+shard-aware paths.
+"""
 
 from __future__ import annotations
 
@@ -37,17 +58,36 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
     """Wraps C++ DomainWrap for batched likelihood computation on the AnalysisContainerArray data.
 
     One instance per GPU split.  Holds references to the linearized arrays
-    to prevent GC from invalidating the C++ domain's pointers.
+    to prevent GC from invalidating the C++ domain's pointers. Construction
+    extracts the split (:meth:`extract_from_acs`) and rebuilds the orbits and
+    sensitivity backend on this split's device (:meth:`build_cpp_objects`); the
+    domain subclasses then create their C++ domain object. The ``(d|d)`` terms
+    must be filled (:meth:`compute_d_d_term`) before
+    :meth:`compute_signal_likelihood`.
 
     Args:
-        acs : AnalysisContainerArray
-            The AnalysisContainerArray containing the data and noise arrays.
-        split_index : int, optional
-            The index of the GPU split to use from the AnalysisContainerArray. Only used if `acs` is provided. Default is 0.
-        tdi_type : str, optional
-            The TDI type to use for the likelihood computation. Default is "XYZ". Must be a key in the backend's TDITypeDict.
-        force_backend : str, optional
-            If provided, forces the use of the specified backend. Must be one of the supported backends for the domain computation. Default is 'cpu'.
+        acs: The AnalysisContainerArray containing the data and noise arrays.
+            Its reference sensitivity matrix must expose ``orbits`` (with
+            ``kwargs``) and ``kwargs``.
+        split_index: The index of the GPU split to use. Default ``0``.
+        tdi_type: TDI type for the likelihood, a key of the backend's
+            ``TDITypeDict`` (``"XYZ"`` default).
+        force_backend: Backend for this group. Default ``"cpu"``; a CPU backend
+            requires ``acs.gpus is None``, a GPU backend a device for the split.
+
+    Raises:
+        AssertionError: If the backend and the split's device disagree, or the
+            sensitivity matrix lacks ``orbits`` / ``kwargs``.
+        ValueError: If the split holds no containers.
+
+    Attributes:
+        data_arr: The split's flat data buffer (``acs.linear_data_arr[split_index]``).
+        invC_arr: The split's flat inverse-noise buffer.
+        num_channels (int): Number of TDI channels.
+        num_data (int): Containers in this split.
+        split_acs (list[AnalysisContainer]): The split's containers.
+        device (int or None): GPU id of the split, ``None`` on CPU.
+        d_d: ``(num_data,)`` ``(d|d)`` values once computed, else ``None``.
     """
 
     def __init__(
@@ -66,14 +106,14 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         self.build_cpp_objects()  # create orbits and sensitivity backend on the correct device.
 
     def extract_from_acs(self, acs: AnalysisContainerArray, split_index: int):
-        """
-        Extracts the necessary arrays and Args: from the given AnalysisContainerArray for the specified split index.
+        """Extract one split's buffers, containers and device from ``acs``.
 
         Args:
-            acs : AnalysisContainerArray
-                The AnalysisContainerArray containing the data and noise arrays.
-            split_index : int
-                The index of the GPU split to use from the AnalysisContainerArray.
+            acs: The AnalysisContainerArray containing the data and noise arrays.
+            split_index: The index of the GPU split to use.
+
+        Raises:
+            AssertionError: If a CPU backend meets a GPU split or vice versa.
         """
         self.split_index = split_index
         self.data_arr = acs.linear_data_arr[split_index]
@@ -107,7 +147,16 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
             yield
 
     def build_cpp_objects(self):
-        """Builds the C++ domain objects for this computation group. Should be called after extracting arrays from the AnalysisContainerArray."""
+        """Rebuild the orbits and sensitivity backend on this group's device.
+
+        Reconstructs ``orbits.__class__(*orbits.args, **orbits.kwargs)`` and the
+        sensitivity backend from its ``kwargs`` inside the split's device context.
+        Called after :meth:`extract_from_acs`.
+
+        Raises:
+            ValueError: If the split holds no containers.
+            AssertionError: If the sensitivity matrix lacks ``orbits`` / ``kwargs``.
+        """
 
         ref_analysis_container = self.split_acs[0] if self.split_acs else None
         if ref_analysis_container is None:
@@ -150,16 +199,19 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
 
     @property
     def xp(self) -> ArrayModule:
+        """Array module of this group's backend (numpy or cupy)."""
         return self.backend.xp
 
     @property
     def orbits(self) -> Orbits:
+        """Device-local orbits built by :meth:`build_cpp_objects` (``ValueError`` before)."""
         if not hasattr(self, "_orbits"):
             raise ValueError("Orbits have not been created yet. Call build_cpp_objects first.")
         return self._orbits
 
     @property
     def sensitivity_backend(self) -> XYZSensitivityBackend:
+        """Device-local sensitivity backend built by :meth:`build_cpp_objects`."""
         if not hasattr(self, "_sensitivity_backend"):
             raise ValueError(
                 "Sensitivity matrix has not been created yet. Call build_cpp_objects first."
@@ -168,11 +220,13 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
 
     @property
     def cpp_domain(self):
+        """The C++ domain wrap that scores template batches (``ValueError`` before creation)."""
         if not hasattr(self, "_cpp_domain"):
             raise ValueError("C++ domain has not been created yet. Call _create_cpp_domain first.")
         return self._cpp_domain
 
     def _create_cpp_domain(self):
+        """Create ``self._cpp_domain`` (implemented by the domain subclasses)."""
         raise NotImplementedError("Subclasses must implement _create_cpp_domain")
 
     #: dtype of the (d|h) / (h|h) outputs returned by
@@ -195,22 +249,21 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         return d_h_out, h_h_out, start_freqs, data_index, noise_index, start_times
 
     def compute_d_d_term(self, out: bool = False, **kwargs):
-        """
-        Compute the :math:`\\langle d | d\\rangle` term for the containers in this split only.
+        r"""Compute the :math:`\langle d | d\rangle` term for the containers in this split only.
+
+        Calls ``ac.inner_product(**kwargs)`` per container and stores the result in
+        :attr:`d_d`, shape ``(num_data,)``, indexed by intra-split index.
 
         Args:
-            out : bool, optional
-                If True, return the computed :math:`\\langle d | d\\rangle` term. Otherwise, store it in the instance variable `self.d_d`. Default is False.
-            **kwargs
-                Additional keyword arguments to pass to the `inner_product` method of each AnalysisContainer.
+            out: If ``True``, also return a copy of the result. Default ``False``.
+            **kwargs: Forwarded to each container's ``inner_product``.
 
         Returns:
-            If `out` is True, returns a double array of shape ``(num_data,)`` containing the :math:`\\langle d | d\\rangle` term for each container in the split. Otherwise, returns None and stores the result in `self.d_d`.
+            ``xp.ndarray`` or None: ``(num_data,)`` float64 copy of :attr:`d_d` when
+            ``out`` is ``True``, else ``None``.
 
-        Notes
-        -----
-        The result ``self.d_d`` has shape ``(num_data,)`` — one value per
-        container in the split, indexed by intra-split index.
+        Raises:
+            ValueError: If the split's containers are not set.
         """
         if self.split_acs is None:
             raise ValueError(
@@ -227,22 +280,22 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
             return self.d_d.copy()
 
     def compute_noise_term(self, out: bool = False, **kwargs):
-        """
-        Compute :math:`\\log{\\mathcal{L}}_n = -\\sum \\log{\\vec{S}_n}` term for the containers in this split only.
+        r"""Compute the noise term :math:`\log{\mathcal{L}}_n` for this split's containers only.
+
+        Calls ``ac.likelihood(source_only=False, noise_only=True, **kwargs)`` per
+        container and stores the result in ``self.noise_term``, shape
+        ``(num_data,)``, indexed by intra-split index.
 
         Args:
-            out : bool, optional
-                If True, return the computed noise likelihood term. Otherwise, store it in the instance variable `self.noise_term`. Default is False.
-            **kwargs
-                Additional keyword arguments to pass to the `inner_product` method of each AnalysisContainer.
+            out: If ``True``, also return a copy of the result. Default ``False``.
+            **kwargs: Forwarded to each container's ``likelihood``.
 
         Returns:
-            If `out` is True, returns a double array of shape ``(num_data,)`` containing the :math:`\\log{\\mathcal{L}}_n` term for each container in the split. Otherwise, returns None and stores the result in `self.noise_term`.
+            ``xp.ndarray`` or None: ``(num_data,)`` float64 copy when ``out`` is
+            ``True``, else ``None``.
 
-        Notes
-        -----
-        The result ``self.noise_term`` has shape ``(num_data,)`` — one value per
-        container in the split, indexed by intra-split index.
+        Raises:
+            ValueError: If the split's containers are not set.
         """
         if self.split_acs is None:
             raise ValueError(
@@ -266,11 +319,23 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         start_freqs: NDArrayLike,
         **kwargs,
     ) -> tuple[NDArrayLike, NDArrayLike]:
-        """
-        Compute the inner products :math:`\\langle d | h\\rangle` and :math:`\\langle h | h\\rangle` for the input set of binaries.
+        r"""Compute :math:`\langle d | h\rangle` and :math:`\langle h | h\rangle` for templates.
+
+        Implemented by the domain subclasses (their signatures add
+        ``start_times`` for STFT / WDM).
 
         Args:
-            *args: positional arguments
+            data_index: ``(num_binaries,)`` intra-split data slot of each template.
+            noise_index: ``(num_binaries,)`` intra-split noise slot of each template.
+            template_vals: Template coefficients (layout per subclass).
+            start_freqs: ``(num_binaries,)`` first frequency of each template sub-grid (Hz).
+            **kwargs: Subclass options (``run_async``).
+
+        Returns:
+            tuple: ``(d_h_out, h_h_out)``, each ``(num_binaries,)``.
+
+        Raises:
+            NotImplementedError: Always, on the base class.
         """
         raise NotImplementedError(
             "The `compute_signal_likelihood_terms` method must be implemented by subclasses"
@@ -285,21 +350,27 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         start_times: NDArrayLike = None,
         **kwargs,
     ) -> NDArrayLike:
-        """
-        Compute the log-likelihood for a batch of binaries.
+        """Compute the log-likelihood ``-0.5 * Re(d_d + h_h - 2 d_h)`` for a batch of templates.
+
+        ``d_d`` is the stored :attr:`d_d` of each template's ``data_index``.
 
         Args:
-            data_index : int array, shape ``(num_binaries,)``
-            noise_index : int array, shape ``(num_binaries,)``
-            template_vals : complex array
-                Shape ``(num_binaries, num_channels, n_t, n_f)`` for STFT or ``(num_binaries, num_channels, n_f)`` for FD.
-            start_freqs : double array, shape ``(num_binaries,)``
-            start_times : double array, shape ``(num_binaries,)``, optional
-                 Only used for STFT. If not provided, defaults to None.
-            **kwargs: additional keyword arguments to pass to the `compute_signal_likelihood_terms` method. Kept for future extensibility.
+            data_index: ``(num_binaries,)`` int intra-split data slots.
+            noise_index: ``(num_binaries,)`` int intra-split noise slots.
+            template_vals: ``(num_binaries, num_channels, n_t, n_f)`` complex for STFT,
+                ``(num_binaries, num_channels, n_f)`` complex for FD,
+                ``(num_binaries, num_channels, n_m, n_n)`` real for WDM.
+            start_freqs: ``(num_binaries,)`` first frequency of each sub-grid (Hz).
+            start_times: ``(num_binaries,)`` first time of each sub-grid (s); used by
+                STFT and required by WDM. Default ``None``.
+            **kwargs: Forwarded to :meth:`compute_signal_likelihood_terms`
+                (``run_async``).
 
         Returns:
-            like_out : double array, shape ``(num_binaries,)``
+            ``xp.ndarray``: ``(num_binaries,)`` float log-likelihoods.
+
+        Raises:
+            ValueError: If :meth:`compute_d_d_term` has not run.
         """
         if self.d_d is None:
             raise ValueError(
@@ -325,20 +396,42 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         *args,
         **kwargs,
     ) -> NDArrayLike:
-        """
-        Compute the log-likelihood for a batch of binaries using the data stored in this split.
-        Refer to the :meth:`compute_log_like` of lisatools.sensitivity.XYZSensitivityBackend.
-        Args:
-            data_index : int array, shape ``(num_binaries,)``
-            noise_index : int array, shape ``(num_binaries,)``. Unused but kept for consistency with the signal likelihood method signature.
+        """Score noise-model proposals against this split's data.
 
+        Calls ``self.sensitivity_backend.compute_log_like(self.data_arr, data_index,
+        *args, **kwargs)`` (see
+        :meth:`lisatools.sensitivity.XYZSensitivityBackend.compute_log_like`).
+
+        Args:
+            data_index: ``(num_binaries,)`` int intra-split data slots.
+            noise_index: Unused; kept for signature parity with
+                :meth:`compute_signal_likelihood`.
+            *args: Forwarded to ``compute_log_like`` (the noise parameters).
+            **kwargs: Forwarded to ``compute_log_like``.
+
+        Returns:
+            ``xp.ndarray``: Log-likelihood per proposal, as returned by the backend.
         """
 
         return self.sensitivity_backend.compute_log_like(self.data_arr, data_index, *args, **kwargs)
 
 
 class STFTComputationGroup(BaseDomainComputationGroup):
-    """Wraps C++ STFTDomainWrap for batched likelihood computation."""
+    """Wraps C++ STFTDomainWrap for batched likelihood computation.
+
+    Also builds an ``STFTFresnelWrap`` on the same grid (:attr:`cpp_fresnel`).
+
+    Args:
+        acs: AnalysisContainerArray whose ``settings`` is an
+            :class:`~lisatools.domains.STFTSettings`.
+        split_index: GPU split. Default ``0``.
+        tdi_type: TDI type key. Default ``"XYZ"``.
+        force_backend: Backend. Default ``"cpu"``.
+        window_alpha: Window parameter passed to ``STFTFresnelWrap``. Default ``0.0``.
+
+    Raises:
+        ValueError: If ``acs.settings`` is not an STFT domain.
+    """
 
     def __init__(
         self,
@@ -366,6 +459,7 @@ class STFTComputationGroup(BaseDomainComputationGroup):
 
     @property
     def domain_args(self):
+        """Positional ``STFTDomainWrap`` constructor arguments (grid, buffers, TDI flavor)."""
         return [
             self.settings.NT,
             self.settings.NF_active,
@@ -383,11 +477,13 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         ]
 
     def _create_cpp_domain(self):
+        """Create the ``STFTDomainWrap`` and the ``STFTFresnelWrap`` (first 8 domain args)."""
         self._cpp_domain = self.backend.STFTDomainWrap(*self.domain_args)
         self._cpp_fresnel = self.backend.STFTFresnelWrap(*self.domain_args[:8], window_alpha=self.window_alpha)
 
     @property
     def cpp_fresnel(self):
+        """The ``STFTFresnelWrap`` built with the domain (``ValueError`` before creation)."""
         if not hasattr(self, "_cpp_fresnel"):
             raise ValueError("C++ Fresnel object has not been created yet.")
         return self._cpp_fresnel
@@ -401,20 +497,18 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         start_times: NDArrayLike,
         **kwargs,
     ) -> tuple[NDArrayLike, NDArrayLike]:
-        """
-        Compute (d|h) and (h|h) for a batch of binaries.
+        """Compute (d|h) and (h|h) for a batch of templates on the STFT grid.
 
         Args:
-            template_vals : complex array
-                Shape ``(num_binaries, num_channels, n_t, n_f)``.
-            data_index : int array, shape ``(num_binaries,)``
-            noise_index : int array, shape ``(num_binaries,)``
-            start_freqs : double array, shape ``(num_binaries,)``
-            start_times : double array, shape ``(num_binaries,)``
+            data_index: ``(num_binaries,)`` int intra-split data slots.
+            noise_index: ``(num_binaries,)`` int intra-split noise slots.
+            template_vals: Complex ``(num_binaries, num_channels, n_t, n_f)`` sub-grids.
+            start_freqs: ``(num_binaries,)`` first frequency of each sub-grid (Hz).
+            start_times: ``(num_binaries,)`` first segment time of each sub-grid (s).
+            **kwargs: ``run_async`` (bool, default ``False``) is passed to the kernel.
 
         Returns:
-            d_h_out : complex array, shape ``(num_binaries,)``
-            h_h_out : complex array, shape ``(num_binaries,)``
+            tuple: ``(d_h_out, h_h_out)``, complex ``(num_binaries,)`` arrays.
         """
         num_binaries, _, num_times, num_freqs = template_vals.shape
 
@@ -444,8 +538,17 @@ class STFTComputationGroup(BaseDomainComputationGroup):
 
 
 class FDComputationGroup(BaseDomainComputationGroup):
-    """
-    Wraps C++ FDDomainWrap for batched likelihood computation.
+    """Wraps C++ FDDomainWrap for batched likelihood computation.
+
+    Args:
+        acs: AnalysisContainerArray whose ``settings`` is an
+            :class:`~lisatools.domains.FDSettings`.
+        split_index: GPU split. Default ``0``.
+        tdi_type: TDI type key. Default ``"XYZ"``.
+        force_backend: Backend. Default ``"cpu"``.
+
+    Raises:
+        ValueError: If ``acs.settings`` is not an FD domain.
     """
 
     def __init__(
@@ -466,6 +569,7 @@ class FDComputationGroup(BaseDomainComputationGroup):
 
     @property
     def domain_args(self):
+        """Positional ``FDDomainWrap`` constructor arguments (band, buffers, TDI flavor)."""
         return [
             self.settings.N_active,
             self.num_channels,
@@ -480,6 +584,7 @@ class FDComputationGroup(BaseDomainComputationGroup):
         ]
 
     def _create_cpp_domain(self):
+        """Create the ``FDDomainWrap``."""
         self._cpp_domain = self.backend.FDDomainWrap(*self.domain_args)
 
     def compute_signal_likelihood_terms(
@@ -490,19 +595,18 @@ class FDComputationGroup(BaseDomainComputationGroup):
         start_freqs: NDArrayLike,
         **kwargs,
     ) -> tuple[NDArrayLike, NDArrayLike]:
-        """
-        Compute (d|h) and (h|h) for a batch of binaries.
+        """Compute (d|h) and (h|h) for a batch of templates on the FD grid.
 
         Args:
-            template_vals : complex array
-                Shape ``(num_binaries, num_channels, n_f)``.
-            data_index : int array, shape ``(num_binaries,)``
-            noise_index : int array, shape ``(num_binaries,)``
-            start_freqs : double array, shape ``(num_binaries,)``
+            data_index: ``(num_binaries,)`` int intra-split data slots.
+            noise_index: ``(num_binaries,)`` int intra-split noise slots.
+            template_vals: Complex ``(num_binaries, num_channels, n_f)`` sub-bands.
+            start_freqs: ``(num_binaries,)`` first frequency of each sub-band (Hz).
+            **kwargs: ``run_async`` (bool, default ``False``) is passed to the kernel;
+                other keys (e.g. ``start_times``) are ignored.
 
         Returns:
-            d_h_out : complex array, shape ``(num_binaries,)``
-            h_h_out : complex array, shape ``(num_binaries,)``
+            tuple: ``(d_h_out, h_h_out)``, complex ``(num_binaries,)`` arrays.
         """
         num_binaries, _, num_freqs = template_vals.shape
 
@@ -544,6 +648,16 @@ class WDMComputationGroup(BaseDomainComputationGroup):
       into C++ (the CUDA kernel cannot throw).
     * ``tdi_type`` is passed per call to the C++ side (matching the other
       ``WDMDomain`` helpers) rather than stored on the C++ domain object.
+
+    Args:
+        acs: AnalysisContainerArray whose ``settings`` is a
+            :class:`~lisatools.domains.WDMSettings`.
+        split_index: GPU split. Default ``0``.
+        tdi_type: TDI type key. Default ``"XYZ"``.
+        force_backend: Backend. Default ``"cpu"``.
+
+    Raises:
+        ValueError: If ``acs.settings`` is not a WDM domain.
     """
 
     _likelihood_terms_dtype = float
@@ -571,6 +685,7 @@ class WDMComputationGroup(BaseDomainComputationGroup):
 
     @property
     def domain_args(self):
+        """Positional ``WDMDomainWrap`` constructor arguments (buffers, grid, active box)."""
         return [
             self.data_arr,
             self.invC_arr,
@@ -588,6 +703,7 @@ class WDMComputationGroup(BaseDomainComputationGroup):
         ]
 
     def _create_cpp_domain(self):
+        """Create the ``WDMDomainWrap``."""
         self._cpp_domain = self.backend.WDMDomainWrap(*self.domain_args)
 
     def compute_signal_likelihood_terms(
@@ -599,26 +715,26 @@ class WDMComputationGroup(BaseDomainComputationGroup):
         start_times: NDArrayLike,
         **kwargs,
     ) -> tuple[NDArrayLike, NDArrayLike]:
-        """
-        Compute (d|h) and (h|h) for a batch of binaries on the WDM grid.
+        """Compute (d|h) and (h|h) for a batch of templates on the WDM grid.
 
         Args:
-            template_vals : double array
-                Shape ``(num_binaries, num_channels, n_m, n_n)`` — real WDM
-                coefficients of each template sub-grid, frequency-layer (m)
-                axis before time-bin (n) axis, matching the data layout.
-            data_index : int array, shape ``(num_binaries,)``
-            noise_index : int array, shape ``(num_binaries,)``
-            start_freqs : double array, shape ``(num_binaries,)``
-                Physical frequency of each sub-grid's first layer
-                (``m * layer_df``).
-            start_times : double array, shape ``(num_binaries,)``
-                t0-relative time of each sub-grid's first bin
-                (``n * layer_dt``, same axis as ``settings.t_arr``).
+            data_index: ``(num_binaries,)`` int intra-split data slots.
+            noise_index: ``(num_binaries,)`` int intra-split noise slots.
+            template_vals: Real ``(num_binaries, num_channels, n_m, n_n)`` WDM
+                coefficients of each template sub-grid, frequency-layer (m) axis
+                before time-bin (n) axis, matching the data layout.
+            start_freqs: ``(num_binaries,)`` physical frequency of each sub-grid's
+                first layer (``m * layer_df``, rounded to the nearest layer).
+            start_times: ``(num_binaries,)`` grid-start-relative time of each
+                sub-grid's first bin (``n * layer_dt``, same axis as
+                ``settings.t_arr``, rounded to the nearest pixel). Required.
+            **kwargs: ``run_async`` (bool, default ``False``) is passed to the kernel.
 
         Returns:
-            d_h_out : double array, shape ``(num_binaries,)``
-            h_h_out : double array, shape ``(num_binaries,)``
+            tuple: ``(d_h_out, h_h_out)``, float64 ``(num_binaries,)`` arrays.
+
+        Raises:
+            ValueError: If ``start_times`` is ``None`` or a sub-grid leaves the active box.
         """
         if start_times is None:
             raise ValueError(
@@ -683,13 +799,41 @@ class WDMComputationGroup(BaseDomainComputationGroup):
 
 
 class DomainComputationGroupArray:
-    """Helper class to manage multiple DomainComputationGroup instances for different splits.
+    """Manage one domain computation group per GPU split of an AnalysisContainerArray.
 
-    It can perform computations across different GPU splits and aggregate results as needed.
+    Builds one group per split (class from :attr:`computation_group_class`)
+    inside that split's device context, computes every group's ``(d|d)``, and
+    precomputes the routing tables ``ac_to_split`` / ``ac_to_intra`` (global
+    container id -> owning split / intra-split index). The per-call pattern of the
+    moves is :meth:`unpack_indices` -> :meth:`unpack_coords` ->
+    :meth:`place_on_device` -> :meth:`compute_signal_likelihood` (or
+    :meth:`compute_psd_likelihood`), which scatters the per-split results back
+    into flat batch order.
+
+    In the global fit this object is built once per run by
+    :func:`lisatools.globalfit.recipe.get_shared_dcga` (multi-GPU runs with an
+    orbits-carrying sensitivity matrix only).
 
     Args:
-        acs : AnalysisContainerArray
-            The AnalysisContainerArray containing the data and noise arrays, as well as the GPU split information. This will be used to initialize the individual DomainComputationGroup instances for each split.
+        acs: The AnalysisContainerArray holding data, noise and the GPU split
+            information (``gpu_splits``, ``split_map``, ``gpus``).
+        domain_group_kwargs: Extra keyword arguments for every group constructor
+            (e.g. ``tdi_type``). Default ``None``.
+
+    Attributes:
+        computation_groups (list[BaseDomainComputationGroup]): One per split.
+        ac_to_split (np.ndarray): Split owning each global container id.
+        ac_to_intra (np.ndarray): Intra-split index of each global container id.
+
+    Example:
+        .. code-block:: python
+
+            dcga = DomainComputationGroupArray(acs)
+            pos, d_intra, n_intra = dcga.unpack_indices(data_index)
+            args = dcga.unpack_coords(pos, (templates, start_freqs, start_times),
+                                      keep_tuple=True)
+            d_intra, n_intra, args = dcga.place_on_device((d_intra, n_intra, args))
+            ll = dcga.compute_signal_likelihood(pos, d_intra, n_intra, args)
     """
 
     def __init__(self, acs: AnalysisContainerArray, domain_group_kwargs: dict[str, Any] = None):
@@ -716,7 +860,14 @@ class DomainComputationGroupArray:
             self._thread_pool.shutdown(wait=False, cancel_futures=True)
 
     def initialize_computation_groups(self, domain_group_kwargs: dict[str, Any] = None):
-        """Initializes a DomainComputationGroup instance for each GPU split in the AnalysisContainerArray."""
+        """Build one computation group per GPU split, then compute all ``(d|d)`` terms.
+
+        Each group is built inside its split's device context with
+        ``force_backend="cpu"`` when ``acs.gpus`` is ``None``, else ``"gpu"``.
+
+        Args:
+            domain_group_kwargs: Extra keyword arguments for every group constructor.
+        """
 
         force_backend = "cpu" if self.acs.gpus is None else "gpu"
         settings = self.acs.settings
@@ -753,6 +904,7 @@ class DomainComputationGroupArray:
 
     @property
     def num_splits(self):
+        """Number of GPU splits (``len(acs.gpu_splits)``)."""
         return len(self.acs.gpu_splits)
     
     @property
@@ -783,8 +935,12 @@ class DomainComputationGroupArray:
     def device_context(self, device: int = None):
         """Context manager to set the appropriate device for CPU or GPU backends.
 
+        With ``device=None`` (or a CPU run) it enters
+        ``jax.default_device(jax.devices("cpu")[0])`` and yields ``"cpu"``; otherwise
+        it enters ``xp.cuda.Device(device)`` and yields ``"gpu: <device>"``.
+
         Args:
-            device: GPU device ID to set the context to. If None, it will set the context to CPU if using a GPU backend, or do nothing if already using a CPU backend.
+            device: GPU device ID to set the context to, or ``None``.
         """
 
         if device is None or self.gpus is None:
@@ -801,10 +957,14 @@ class DomainComputationGroupArray:
                 yield f"gpu: {device}"
 
     def restore_main_device(self):
-        """Restores the main device context after GPU computations, and calls ``xp.get_default_memory_pool().free_all_blocks()`` to clear GPU memory.
+        """Free the current device's memory pool and make the main GPU current again.
 
-        Notes:
-            This method should be called after performing computations on multiple GPU devices to ensure that the main device context is restored.
+        Calls ``xp.get_default_memory_pool().free_all_blocks()``, sets the CUDA
+        device to :attr:`main_gpu` and points JAX's default device at it. No-op on
+        CPU.
+
+        Note:
+            Call after multi-device work so later code runs on the main device.
         """
         if self.main_gpu is not None:
             self.xp.get_default_memory_pool().free_all_blocks()
@@ -814,10 +974,11 @@ class DomainComputationGroupArray:
             )
 
     def synchronize(self):
-        """Synchronizes all GPU devices to ensure that all computations are complete before proceeding.
+        """Synchronize every GPU of the run (``deviceSynchronize`` per device); no-op on CPU.
 
-        Notes:
-            This method should be called after performing computations on multiple GPU devices to ensure that all devices have completed their tasks before moving on to the next steps in the workflow.
+        Note:
+            :meth:`compute_signal_likelihood` / :meth:`compute_psd_likelihood` call
+            this before gathering results.
         """
         if self.gpus is not None:
             for device in self.gpus:
@@ -825,11 +986,7 @@ class DomainComputationGroupArray:
                     self.xp.cuda.runtime.deviceSynchronize()
 
     def free_gpu_memory(self):
-        """Frees GPU memory on all devices by calling ``xp.get_default_memory_pool().free_all_blocks()`` for each device.
-
-        Notes:
-            This method should be called after performing computations on multiple GPU devices to ensure that GPU memory is freed and available for future computations.
-        """
+        """Free the CuPy default memory pool on every GPU of the run; no-op on CPU."""
         if self.gpus is not None:
             for device in self.gpus:
                 with self.device_context(device):
@@ -858,6 +1015,15 @@ class DomainComputationGroupArray:
         This is the single owner of the partition — downstream routines
         (waveform generation, likelihood scatter, residual dispatch) share
         its output instead of recomputing ``np.where(ac_to_split == s)``.
+
+        Args:
+            data_index: Flat ``(n,)`` global container ids (host or device).
+            noise_index: Flat ``(n,)`` global noise ids; ``None`` reuses ``data_index``.
+
+        Returns:
+            tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+            ``(positions_per_split, data_intra_per_split, noise_intra_per_split)``,
+            all host arrays.
         """
         data_index_cpu = self._to_host(data_index)
         noise_index_cpu = self._to_host(noise_index) if noise_index is not None else data_index_cpu
@@ -881,16 +1047,21 @@ class DomainComputationGroupArray:
         coords: NDArrayLike | tuple[NDArrayLike],
         keep_tuple: bool = False,
     ) -> list[tuple[np.ndarray] | np.ndarray]:
-        """
-        Unpack coordinates for each split based on the positions per split.
+        """Split coordinate arrays by the per-split positions of :meth:`unpack_indices`.
+
+        Each array is brought to the host and indexed with each split's positions
+        (rows taken as Fortran-ordered copies).
 
         Args:
-            positions_per_split: list of numpy arrays, where each array contains the positions for a specific split.
-            coords: A numpy or cupy array containing the coordinates to be unpacked, or a tuple of such arrays if there are multiple coordinate arrays (multiple branches).
-            keep_tuple: If True, ensure the returned coordinates per split are always in a tuple format. This applies only when there is a single coordinate array.
+            positions_per_split: One position array per split.
+            coords: An array (numpy or cupy) indexed along its first axis, or a tuple
+                of such arrays (e.g. one per branch).
+            keep_tuple: If ``True``, a single coordinate array is still returned
+                wrapped in a 1-tuple per split.
 
         Returns:
-            args_per_group: A list of coordinates for each split, where each element is either a single array (if there is only one coordinate array) or a tuple of arrays (if there are multiple coordinate arrays). The coordinates are indexed according to the positions for each split.
+            list: One entry per split: the array, or a tuple of arrays (multiple
+            inputs or ``keep_tuple``), or ``()`` for a split with no positions.
         """
 
         if not isinstance(coords, tuple):
@@ -912,13 +1083,19 @@ class DomainComputationGroupArray:
     def place_on_device(
         self, items: tuple[list[np.ndarray | tuple[np.ndarray]]]
     ) -> tuple[list[NDArrayLike | tuple[NDArrayLike]]]:
-        """Place lists of arrays on the appropriate devices for each split.
+        """Copy per-split host arrays onto each split's device.
 
         Args:
-            items: A tuple of lists of numpy arrays, where each entry in the tuple corresponds to a different type of array (e.g., data_index, noise_index, template_vals), and each list contains the arrays for each split.
+            items: A tuple of per-split lists (e.g. ``(data_intra_per_split,
+                coords_per_split)``); each list entry is a numpy array, a tuple of
+                numpy arrays, or ``()``.
 
         Returns:
-            A tuple of lists of arrays, where each array has been moved to the appropriate device for its split using ``self.xp.asarray``.
+            tuple: The same structure with every array copied by
+            ``xp.asarray(..., copy=True)`` inside its split's device context.
+
+        Raises:
+            ValueError: If an entry is neither a numpy array nor a tuple.
         """
         num_items = len(items)
 
@@ -953,14 +1130,26 @@ class DomainComputationGroupArray:
         """General loop to perform an operation across splits, with optional result aggregation.
 
         Args:
-            operation: A callable or a list of callables (one per split) to execute within each split's device context. Each callable should accept the corresponding args and kwargs for that split.
-            operation_args_per_split: Optional list of tuples, where each tuple contains the positional arguments to pass to the operation for the corresponding split. The caller is responsible for ensuring that the arguments are correctly placed on the appropriate device (e.g., via self.xp.asarray). If not provided, defaults to a list of empty tuples.
-            operation_kwargs: Optional dictionary or list of dictionaries of keyword arguments to pass to the operation for all splits.
-            aggregate_fn: Optional callable to aggregate the results from all splits after the loop. If not provided, the raw list of results from each split is returned.
-            positions_per_split: Optional list of numpy arrays containing the positions for each split, used to guard against empty splits.
-            run_threaded: If True, dispatch operations across splits using a ThreadPoolExecutor. Default is False.
+            operation: A callable or a list of callables (one per split), each run
+                inside its split's device context with that split's args / kwargs.
+            operation_args_per_split: Optional list (one per split) of positional-arg
+                tuples. The caller places the arguments on the right device (e.g. via
+                :meth:`place_on_device`). Default: empty tuples.
+            operation_kwargs: Optional dict (shared) or list of dicts (one per split)
+                of keyword arguments.
+            aggregate_fn: Optional callable applied to the list of per-split results.
+            positions_per_split: Optional per-split position arrays; a split with no
+                positions is skipped.
+            run_threaded: If True, dispatch operations across splits using the
+                ThreadPoolExecutor. Default is False.
+
         Returns:
-            A list of results from each split if aggregate_fn is not provided, or the aggregated result if aggregate_fn is provided.
+            A list of results from each split (``None`` for a skipped empty split) if
+            aggregate_fn is not provided, or the aggregated result if aggregate_fn is
+            provided.
+
+        Raises:
+            ValueError: If a per-split list does not have one entry per split.
         """
         if operation_args_per_split is None:
             operation_args_per_split = [()] * self.num_splits
@@ -1012,7 +1201,15 @@ class DomainComputationGroupArray:
         return outputs
 
     def compute_d_d_terms(self, out: bool = False, **kwargs):
-        """Compute (d|d) terms for all splits and store them in the respective computation groups."""
+        """Compute (d|d) terms for all splits and store them in the respective computation groups.
+
+        Args:
+            out: If ``True``, return the per-split arrays.
+            **kwargs: Forwarded to :meth:`BaseDomainComputationGroup.compute_d_d_term`.
+
+        Returns:
+            list or None: One ``(num_data,)`` array per split when ``out`` is ``True``.
+        """
 
         operations = [group.compute_d_d_term for group in self.computation_groups]
 
@@ -1023,7 +1220,15 @@ class DomainComputationGroupArray:
             return list_out
 
     def compute_noise_terms(self, out: bool = False, **kwargs):
-        """Compute noise likelihood terms for all splits and store them in the respective computation groups."""
+        """Compute noise likelihood terms for all splits and store them in each split's group.
+
+        Args:
+            out: If ``True``, return the per-split arrays.
+            **kwargs: Forwarded to :meth:`BaseDomainComputationGroup.compute_noise_term`.
+
+        Returns:
+            list or None: One ``(num_data,)`` array per split when ``out`` is ``True``.
+        """
 
         operations = [group.compute_noise_term for group in self.computation_groups]
 
@@ -1043,7 +1248,16 @@ class DomainComputationGroupArray:
         likelihood_kwargs: dict | list[dict] = None, 
         run_threaded: bool = False,
     ):
-        """Compute likelihood for each split using the provided likelihood functions and arguments, and aggregate the results into a single output array."""
+        """Run one likelihood op per split and scatter the results into flat batch order.
+
+        Each split's op is called as ``op(data_intra, noise_intra, *likelihood_args)``
+        (arrays already on the split's device), the devices are synchronized, and
+        split results land at their ``positions_per_split`` in a host float64 array
+        prefilled with ``-1e300`` (a warning is logged if any slot stays unfilled).
+
+        Returns:
+            np.ndarray: ``(n,)`` log-likelihoods in the order of the original batch.
+        """
         # todo I am assuming everything has been placed on the correct device. use self.place_on_device if not.
 
         operation_args_per_split = []
@@ -1082,7 +1296,22 @@ class DomainComputationGroupArray:
         likelihood_kwargs: dict | list[dict] = None,
         run_threaded: bool = False,
     ):
-        """Compute PSD likelihood for each split and aggregate results."""
+        """Compute PSD likelihood for each split and aggregate results.
+
+        Per split, calls :meth:`BaseDomainComputationGroup.compute_psd_likelihood`
+        (see :meth:`_compute_group_likelihood` for the scatter).
+
+        Args:
+            positions_per_split: Flat-batch positions per split (:meth:`unpack_indices`).
+            data_intra_per_split: Device-resident intra-split data ids per split.
+            noise_intra_per_split: Device-resident intra-split noise ids per split.
+            likelihood_args_per_split: Per-split tuple of extra positional args.
+            likelihood_kwargs: Keyword arguments (one dict, or one per split).
+            run_threaded: Dispatch splits on the thread pool. Default ``False``.
+
+        Returns:
+            np.ndarray: ``(n,)`` log-likelihoods in batch order.
+        """
         operations = [group.compute_psd_likelihood for group in self.computation_groups]
         return self._compute_group_likelihood(
             positions_per_split,
@@ -1103,7 +1332,23 @@ class DomainComputationGroupArray:
         likelihood_kwargs: dict | list[dict] = None,
         run_threaded: bool = False,
     ):
-        """Compute signal likelihood for each split and aggregate results."""
+        """Compute signal likelihood for each split and aggregate results.
+
+        Per split, calls :meth:`BaseDomainComputationGroup.compute_signal_likelihood`
+        with ``likelihood_args_per_split[s] = (template_vals, start_freqs[,
+        start_times])``.
+
+        Args:
+            positions_per_split: Flat-batch positions per split (:meth:`unpack_indices`).
+            data_intra_per_split: Device-resident intra-split data ids per split.
+            noise_intra_per_split: Device-resident intra-split noise ids per split.
+            likelihood_args_per_split: Per-split tuple of extra positional args.
+            likelihood_kwargs: Keyword arguments (one dict, or one per split).
+            run_threaded: Dispatch splits on the thread pool. Default ``False``.
+
+        Returns:
+            np.ndarray: ``(n,)`` log-likelihoods in batch order.
+        """
         operations = [group.compute_signal_likelihood for group in self.computation_groups]
         return self._compute_group_likelihood(
             positions_per_split,

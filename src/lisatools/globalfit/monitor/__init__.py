@@ -1,5 +1,43 @@
 """Installed monitor-page and snapshot production.
 
+The monitor turns a global-fit run directory (the ``*testing*.h5`` store,
+the logs, the run settings) into a self-contained HTML status page,
+``<RUN_DIR>_monitor.html``, and a snapshot tarball,
+``<RUN_DIR>_snapshot.tar.gz``. Both land BESIDE the run folder
+(:func:`default_out_path`).
+
+Where it runs:
+
+- In the 9mo/12mo jobs, on the dedicated monitor rank
+  (``GF_MONITOR_RANK=1``, :mod:`~lisatools.globalfit.monitor.rank`): every
+  ``GF_MONITOR_ITER`` (10) saves, with ``GF_MONITOR_AFTER_SAVE=1``, a
+  memory-guarded child process (:mod:`~lisatools.globalfit.monitor.buildguard`)
+  runs :func:`~lisatools.globalfit.monitor.hooks.build_products`, which calls
+  :func:`build_monitor` and then the snapshot builder
+  (:func:`~lisatools.globalfit.monitor.snapshot.build_snapshot`). Without a
+  monitor rank the saver rank's fallback hook
+  (:func:`~lisatools.globalfit.monitor.hooks.after_save`) does the same.
+- Offline, on a live run directory:
+  ``python -m lisatools.globalfit.monitor RUN_DIR`` (:mod:`.__main__`); on a
+  downloaded snapshot:
+  ``python -m lisatools.globalfit.monitor.from_tar SNAP.tar.gz``
+  (:mod:`~lisatools.globalfit.monitor.from_tar`).
+
+Entry points here: :func:`build_monitor` (the page),
+:func:`build_monitor_in_process`, :func:`build_short_monitor` (the short
+page, from :mod:`._short`), :func:`check_truth` / :func:`build_truth_set`
+(the detectability truth set, :data:`TRUTH_NAME`),
+:func:`resolve_mojito_path`, :func:`describe_run`, :func:`generator_path`,
+:func:`default_out_path`.
+
+Environment knobs read here: ``MOJITO_INFO_PATH`` (the mojito tree; legacy
+``MOJITO_CAT`` / ``MOJITO_DATA_PATH`` / ``MOJITO_CACHE_DIR`` still honoured),
+``GF_MONITOR_SUBPROCESS=1`` (render in a child interpreter) and
+``GF_MONITOR_ADD_INFO`` (added runs, :mod:`._add_info`). The in-run
+cadence and product knobs are documented in
+:mod:`~lisatools.globalfit.monitor.hooks` and
+:mod:`~lisatools.globalfit.monitor.rank`.
+
 WHAT THIS IS (user ruling 2026-09-26): "containerize the html production
 so it easily adjustable but build into the lisatools/globalfit package.
 It does not have to be clean, we will fix it up later, but make sure it
@@ -7,45 +45,50 @@ reproduces the html as is done now."
 
 **Reproduction is the hard requirement; tidiness is not.**
 ``_generator.py`` is ``scripts/diagnostics/gf_monitor_gen.py`` moved here
-byte-for-byte -- 5908 lines, 431 top-level statements, 217 module-level
-names, ``sys.argv`` read at import, ``raise SystemExit(0)`` if imported.
-Turning it into a library is a real refactor (its 23 top-level helpers
-close over those 217 globals) and is explicitly deferred.
+(then grown: over 10,000 lines today). It is a SCRIPT: it reads
+``sys.argv`` at import and raises ``SystemExit(0)`` when imported under any
+name other than ``__main__``, so it is executed, never imported
+(:func:`build_monitor_in_process`). Turning it into a library is a real
+refactor (its top-level helpers close over hundreds of module globals) and
+is explicitly deferred.
 
-What moving it buys, which is the part that was blocking: it SHIPS.
-``wheel.packages = ["src/lisatools"]`` covers this directory, so a wheel
-install has the generator and the saver rank no longer has to walk the
-filesystem hunting for a ``scripts/`` directory that exists only in a
-source checkout.
+What moving it buys: it SHIPS. ``wheel.packages = ["src/lisatools"]``
+covers this directory, so a wheel install has the generator and no rank
+has to hunt for a ``scripts/`` directory that exists only in a source
+checkout.
 
-WHY EVERY PATH HERE SPAWNS A FRESH INTERPRETER
-----------------------------------------------
-Not for isolation (though it gives that too) -- for CORRECTNESS. The
-generator sets its own dark-theme ``plt.rcParams`` near the top, and
-~700 lines later imports ``lisatools...erebor.noise``, whose chain
-reaches eryn, which calls ``plt.style.use(["science"])`` as an import
-side effect. So in the original invocation the science style lands AFTER
-the generator's block and wins.
-
-Import this package and that order inverts: ``import lisatools`` already
-pulls matplotlib, pyplot AND eryn (measured), so the style is applied
-BEFORE the generator's block and the generator's block wins instead.
-That is not hypothetical -- running it in-process changed the
-"instrument noise posteriors" panel (25722 vs 27586 base64 chars, 25806
-pixels across the whole plot area). Everything else on the page was
-identical, which is exactly how a defect like this survives review.
-
-A child interpreter running ``python <_generator.py> RUN_DIR OUT`` has
-imported nothing, so the original order is restored and the page is
-identical BY CONSTRUCTION rather than by inspection. The subprocess also
-returns the build's ~2.5 GB peak RSS to the OS and keeps a matplotlib
-segfault away from the caller -- on the saver rank, the run's only
-writer, that second property is not optional either.
+IN-PROCESS VERSUS CHILD RENDER. The generator sets its own dark-theme
+``plt.rcParams`` near the top and later imports ``lisatools...erebor.noise``,
+whose chain reaches eryn, which calls ``plt.style.use(["science"])`` as an
+import side effect. In a fresh interpreter the science style lands AFTER
+the generator's block; in a process that already imported ``lisatools`` it
+lands before. Measured 2026-09-26, that restyled exactly one panel (the
+"instrument noise posteriors"). The generator now pins ``font.size``
+(``_NOISE_PANEL_FONT``), the two renders are byte-identical, and
+:func:`build_monitor` renders in-process by default. The child render
+(``in_process=False`` / ``--subprocess`` / ``GF_MONITOR_SUBPROCESS=1``)
+remains to keep the build's ~2.5 GB peak RSS and any matplotlib fault out
+of the calling process.
 
 ``build_truth.py`` came along unchanged and NOT renamed: the generator
 locates it as a ``__file__`` sibling (``from build_truth import opt_snr``)
-for column 2 of the #detect table. Renaming it would drop that column
-behind a caught exception.
+for column 2 of the #detect table, and also imports
+``lisatools.globalfit.monitor.build_truth`` at module level for the L1-brick
+checks. Renaming it would drop that column behind a caught exception and
+break the module-level import.
+
+Example:
+    .. code-block:: bash
+
+        # page + snapshot for a live run directory, written beside it
+        python -m lisatools.globalfit.monitor /data/gf_prod_9mo_v9 --snapshot
+
+    .. code-block:: python
+
+        from lisatools.globalfit.monitor import build_monitor, check_truth
+
+        print(check_truth("/path/to/run")[1])
+        build_monitor("/path/to/run")   # -> /path/to/run_monitor.html
 """
 
 from __future__ import annotations
@@ -84,6 +127,7 @@ _MOJITO_CANDIDATES = (
 
 
 def _mojito_ok(p) -> bool:
+    """``True`` when ``p`` is a directory holding both :data:`MOJITO_SUBDIRS`."""
     return bool(p) and all(
         os.path.isdir(os.path.join(p, d)) for d in MOJITO_SUBDIRS)
 
@@ -141,7 +185,24 @@ def resolve_mojito_path(run_dir=None, explicit=None):
 
     Every candidate is validated for ``catalogues/`` and ``data/`` and
     gets one rescue attempt down the nested ``brickmarket`` layout, so
-    pointing one level too high still resolves.
+    pointing one level too high still resolves. ``MOJITO_CAT`` may name the
+    catalogue file itself; its tree is then two levels up.
+
+    Args:
+        run_dir (str, optional): Run directory whose
+            ``*_artifacts/run_settings.log`` (or ``run_settings.log``) is
+            searched for the recorded mojito path. Default ``None`` skips
+            that step.
+        explicit (str, optional): A path given on purpose (``--mojito``).
+
+    Returns:
+        tuple[str or None, str]: ``(path, source)`` where ``source`` names
+        the step that matched (``"--mojito"``, ``"MOJITO_INFO_PATH"``, ...),
+        or ``(None, reason)`` listing everything tried.
+
+    Example:
+        >>> from lisatools.globalfit.monitor import resolve_mojito_path
+        >>> path, where = resolve_mojito_path(explicit="/no/such/dir")
     """
     hit = _mojito_try(explicit)
     if hit:
@@ -179,6 +240,9 @@ def generator_path() -> str:
     Resolved from this package's own ``__file__`` rather than by
     importing the generator -- importing it raises the ``SystemExit(0)``
     its guard exists to raise.
+
+    Returns:
+        str: ``<this package>/_generator.py``.
     """
     return os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "_generator.py")
@@ -199,6 +263,17 @@ def default_out_path(run_dir: str) -> str:
     tar no longer CONTAINS the page. It used to, precisely because the
     page was written inside the directory being archived. Ship both files
     if the report needs to travel with the data.
+
+    Args:
+        run_dir: The run directory (a trailing ``/`` is ignored).
+
+    Returns:
+        str: Absolute ``<run_dir>_monitor.html``.
+
+    Example:
+        >>> from lisatools.globalfit.monitor import default_out_path
+        >>> default_out_path("/data/gf_prod_9mo_v9/")
+        '/data/gf_prod_9mo_v9_monitor.html'
     """
     return os.path.abspath(str(run_dir).rstrip("/")) + "_monitor.html"
 
@@ -218,6 +293,20 @@ def describe_run(run_dir: str) -> Optional[str]:
     rewound store's ``iteration`` attr is lower than its filled extent and
     the rows past it are a discarded trajectory. Never raises -- this is a
     convenience line, not a gate.
+
+    Reads the newest ``*testing*.h5`` in ``run_dir`` (backups and
+    ``CORRUPT`` copies excluded): the last usable row, whether the store was
+    rewound, the GB leaf count per walker at that row, and the cold-chain
+    max lnL and its walker spread.
+
+    Args:
+        run_dir: The run directory.
+
+    Returns:
+        str or None: One ``"; "``-joined line, e.g. ``"iteration 412 (413
+        stored); 61,234 GB leaves [...]; max lnL ... (walker spread ...)"``
+        (``"<store name>: no filled iterations yet"`` on an empty store), or
+        ``None`` when there is no store or anything fails.
     """
     import glob as _glob
 
@@ -263,12 +352,14 @@ def describe_run(run_dir: str) -> Optional[str]:
 #: The generator looks for this EXACT name, in the run directory then the
 #: CWD. The "3to21" is legacy -- the band is read from the file's own
 #: ``band`` stamp, not from its name -- so a 6-month or 1-year set still
-#: has to be called this or the page will not see it.
+#: has to be called this or the page will not see it. Built by
+#: :func:`build_truth_set` (``--build-truth``); the launchers do not build
+#: one, so without it the truth-gated panels degrade to notes.
 TRUTH_NAME = "gb_truth_3to21.npz"
 
 
 def _store_tobs(run_dir):
-    """Observation time of the run, or ``None``."""
+    """Observation time [s] of the run's newest ``*testing*.h5`` (Nt * Nf * dt), or ``None``."""
     import glob as _glob
 
     try:
@@ -305,6 +396,17 @@ def check_truth(run_dir):
 
     Also reports an ANALYTIC-ephemeris stamp, because that set is usable
     but wrong above ~5 mHz and the page will say so anyway.
+
+    Looks in ``run_dir`` first, then the current working directory; the
+    Tobs check allows 1 s of slack. Also called by the at-a-glance block of
+    every page (:mod:`._short`).
+
+    Args:
+        run_dir: The run directory.
+
+    Returns:
+        tuple[str or None, str]: ``(path, note)``; the note names the file
+        and its detectable count, or says why there is no usable set.
     """
     import numpy as np
 
@@ -342,6 +444,27 @@ def build_truth_set(run_dir, extra_argv=()):
     Tens of minutes, CPU-only (~9k waveforms). Defaults now do the right
     thing: the newest usable iteration for the noise, and the INJECTED
     mojito L1 orbits rather than the analytic ephemeris.
+
+    Builds against the newest ``*testing*.h5`` in ``run_dir`` (an
+    ``*_extract.h5`` when there is no full store) and sets
+    ``MOJITO_INFO_PATH`` from :func:`resolve_mojito_path` for the duration
+    of the call (restored afterwards). Reached from the CLIs'
+    ``--build-truth``; the in-run monitor never builds one.
+
+    Args:
+        run_dir: The run directory; the set is written there as
+            :data:`TRUTH_NAME`.
+        extra_argv (Sequence[str]): Extra
+            :mod:`~lisatools.globalfit.monitor.build_truth` CLI arguments
+            (``--catalogue``, ``--l1-brick``, ``--flo``, ...). Default ``()``.
+
+    Returns:
+        str: The path written.
+
+    Raises:
+        FileNotFoundError: When ``run_dir`` holds no store.
+        RuntimeError: When the build exits nonzero or raises
+            ``SystemExit`` (e.g. catalogue not found).
     """
     import glob as _glob
 
@@ -401,7 +524,8 @@ def _add_info_env(add_info):
     """``GF_MONITOR_ADD_INFO`` for an explicit ``add_info`` list, or ``None``
     when the caller did not give one (the build then inherits the
     environment's -- which is how the in-run monitor picks up the launcher's
-    export). See ``_add_info``."""
+    export). See ``_add_info``.
+    """
     if add_info is None:
         return None
     from ._add_info import add_info_env_value
@@ -414,28 +538,36 @@ def build_monitor_in_process(run_dir: str, out_path: str,
                              add_info: Optional[list] = None) -> str:
     """Render the page in THIS interpreter -- one python, no child.
 
-    ⚠ READ THIS BEFORE PREFERRING IT. The generator sets its own dark
-    theme in ``plt.rcParams`` near the top and ~700 lines later imports
-    ``...erebor.noise``, whose chain reaches eryn, which calls
-    ``plt.style.use(["science"])`` as an IMPORT SIDE EFFECT. Run as a
-    script, that side effect lands AFTER the generator's block and the
-    science style wins. In this process ``lisatools`` is already imported,
-    so the side effect has already happened and the generator's block wins
-    instead.
+    The default render of :func:`build_monitor`, hence of the in-run
+    monitor's guarded build child. Executes ``_generator.py`` as
+    ``__main__`` in a namespace owned here, with ``sys.argv``,
+    ``MOJITO_INFO_PATH`` (the resolved tree) and, for an explicit
+    ``add_info``, ``GF_MONITOR_ADD_INFO`` set for the build and restored
+    afterwards. Every h5py file, group or dataset left in the generator's
+    globals is closed and the namespace is collected, so the store is never
+    left open in this process.
 
-    Measured consequence (2026-09-26): the "instrument noise posteriors"
-    panel renders differently -- 25722 vs 27586 base64 chars, 25806 pixels
-    across the whole plot area -- with all 760 other lines of the page
-    identical. Nothing else changes.
+    Byte-identical to the child render since the generator pins
+    ``font.size`` (``_NOISE_PANEL_FONT``). Before that pin this render
+    restyled one panel (eryn's import-time ``plt.style.use`` landing before
+    the generator's rcParams, measured 2026-09-26). It does keep the build's
+    ~2.5 GB peak RSS and any matplotlib fault in this process;
+    ``build_monitor(..., in_process=False)`` avoids both.
 
-    So this is NOT byte-identical to :func:`build_monitor` and cannot be
-    made so without the generator taking control of its own style
-    ordering. It is offered because one process is sometimes worth more
-    than one panel, not because the difference is imaginary.
+    Args:
+        run_dir: The run directory.
+        out_path: The HTML file to write (written directly;
+            :func:`build_monitor` passes a temp path and renames it).
+        mojito: Explicit mojito tree for :func:`resolve_mojito_path`.
+        add_info: Added run directories (:mod:`._add_info`); ``None`` keeps
+            the environment's ``GF_MONITOR_ADD_INFO``, ``[]`` means none.
 
-    It also keeps the build's ~2.5 GB peak RSS in the caller's heap and
-    puts a matplotlib fault in the caller's process, which is why the
-    saver rank -- the run's only writer -- must not use it.
+    Returns:
+        str: ``out_path``.
+
+    Raises:
+        Exception: Whatever the generator raises (``SystemExit`` with code
+            0 or ``None`` is swallowed).
     """
     import gc
 
@@ -491,7 +623,7 @@ def build_monitor_in_process(run_dir: str, out_path: str,
         #
         # which broke `--snapshot` the moment the render stopped being a
         # subprocess -- the page was written and the tar silently was not.
-        # runpy hands back the module globals, so the handles are reachable
+        # The namespace is ours (see above), so the handles are reachable
         # without the generator having to grow a teardown.
         for _v in list((ns or {}).values()):
             try:
@@ -550,9 +682,45 @@ def build_monitor(run_dir: str, out_path: Optional[str] = None, *,
     Returns the path written, or ``None`` when ``check=False`` and the
     build failed.
 
-    Published atomically: the child writes a temp beside the target and
-    this renames it into place, so a browser refreshing the page never
-    catches half a document.
+    Published atomically: the render writes ``<out_path>.tmp`` beside the
+    target and this renames it into place, so a browser refreshing the page
+    never catches half a document. On failure the previous page is left
+    untouched, the temp is removed and a warning with the traceback (or the
+    child's stderr) is logged. A missing mojito tree is only warned: the
+    page then falls back to the analytic PSD injection and drops the
+    residual-spectrum and data / template / residual panels.
+
+    Args:
+        run_dir: The run directory (made absolute).
+        out_path: Output HTML. Default ``None`` is
+            :func:`default_out_path` (``<run_dir>_monitor.html``).
+        timeout: Seconds before the CHILD render is killed (child path
+            only). Default ``1800.0``; in-run ``GF_MONITOR_TIMEOUT``.
+        mojito: Explicit mojito tree (highest priority in
+            :func:`resolve_mojito_path`). Default ``None``.
+        in_process: Render in this interpreter
+            (:func:`build_monitor_in_process`). Default ``True``;
+            ``GF_MONITOR_SUBPROCESS=1`` forces the child render regardless.
+        check: Re-raise a failed build. Default ``True``; the in-run hook
+            passes ``False``.
+        add_info: Added run directories (see above). Default ``None``.
+
+    Returns:
+        str or None: ``out_path``, or ``None`` on failure with
+        ``check=False``.
+
+    Raises:
+        Exception: The render's exception, when ``check`` is true
+            (``subprocess.CalledProcessError`` / ``TimeoutExpired`` on the
+            child path).
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.monitor import build_monitor
+
+            build_monitor("/data/gf_prod_9mo_v9",
+                          add_info=["/data/gf_prod_6mo_v9_4gpu"])
     """
     run_dir = os.path.abspath(str(run_dir))
     out_path = out_path or default_out_path(run_dir)
@@ -578,9 +746,9 @@ def build_monitor(run_dir: str, out_path: Optional[str] = None, *,
             "injection and DROP the residual-spectrum and "
             "data/template/residual panels, with no error on the page "
             "itself.", _src)
-    # GF_MONITOR_IN_PROCESS=1 (or in_process=True) renders without a child
-    # interpreter -- one python, at the cost of one restyled panel. See
-    # build_monitor_in_process for the measurement.
+    # in_process=True (the default) renders without a child interpreter.
+    # There is no GF_MONITOR_IN_PROCESS knob; the one restyled panel this
+    # once cost is fixed (see build_monitor_in_process).
     # STRAIGHT PYTHON FLOW, no child interpreter (user ruling
     # 2026-09-26: "no subprocesses!"). Safe since the font.size pin made
     # the in-process render byte-identical to the child one.

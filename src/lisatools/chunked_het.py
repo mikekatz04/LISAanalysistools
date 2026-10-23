@@ -25,7 +25,22 @@ This file was extracted from ``gbgpu.gbcomps.GBWDMComputations`` at the
 2026-06-06 architectural cleanup that moved SOBBH out of GBGPU and into
 BBHx. See the ``GBWDMComputations`` and ``SOBBHWDMComputations`` thin
 sub-classes in their respective packages for the per-source-class
-constants.
+constants. ``_BACKEND_PREFIX`` is not defined on the base class: a subclass
+(or its parallel-module mixin) must provide it.
+
+Pipeline: in the stock WDM global fits the GB branch builds a
+``GBWDMComputations`` (``gb_info.gb_wdm_comp``, on the run's orbits with
+``t_obs_start = data_t0``); with sig-het in-model scoring on, the move receives a
+``GBSignalHetComputations`` wrapping it (``for_band_engine``) while RJ, fills and
+swaps keep this chunked-het path, as does the F-statistic
+(:meth:`WDMComputationsBase.get_fstat_ll_wdm`).
+
+Environment knobs read once at import: ``GB_INDEX_ASSERTS`` (``1`` enables
+per-call index-bound asserts, each a device sync; default off),
+``GB_FSTAT_FOLD`` (F-stat basis-filter fold, default ``1`` = on) and
+``GB_FSTAT_ORBIT_CACHE`` (F-stat orbit spline cache, default ``1`` = on). Read per
+call: ``SOBBH_GEOM_CACHE`` (``1`` default; anything else disables the per-device
+geometry cache of :meth:`WDMComputationsBase._geometry_kernel_args`).
 """
 import os
 import time
@@ -130,10 +145,76 @@ class WDMComputationsBase(LISAToolsParallelModule):
     per-source parameter count, and ``_F0_PARAM_INDEX`` to point the
     layer-grouping logic at the carrier-frequency column of
     ``params``.
+
+    Methods: :meth:`get_ll_wdm` (per-template log-likelihood),
+    :meth:`get_swap_ll_wdm` (add/remove pair), :meth:`fill_global_wdm` (scatter
+    templates into a buffer), :meth:`get_fstat_ll_wdm` (F-statistic basis
+    products), :meth:`information_matrix`, and the gradient hooks
+    :meth:`get_ll_grad_wdm` / :meth:`get_swap_ll_grad_wdm`. Every ``*_wdm``
+    method takes a single-shard holder (an AnalysisContainerArray with one
+    ``linear_data_arr`` entry, or one AnalysisContainer).
+
+    Args:
+        wdm_settings: :class:`lisatools.domains.WDMSettings` instance
+            exposing the WDM grid (``Nf``, ``Nt``, ``data_dt``,
+            ``Tobs``, ``t0``, ``layer_df``, ``layer_dt``) and the active box that
+            the global template buffer is built on.
+        t_ref: Source-phase reference time in seconds (PHYSICAL epoch
+            where ``f0``/``phi_c`` are defined). Forwarded to the
+            kernel as ``t_ref_full``.
+        Nt_sub: Per-chunk WDM time pixels (power of two). Default ``256``.
+        n_pad: WDM pixels discarded at each chunk edge during the stitch.
+            Default ``32``.
+        N_sparse: Heterodyne FFT length per chunk; must be a power of two
+            ``<= FAST_WDM_N_SPARSE_MAX`` in the C kernel. Default ``256``.
+        tukey_alpha: Tukey alpha, or the default ``USE_RECOMMENDED_TUKEY``
+            (auto-pick per :func:`~lisatools.wdm_het.recommended_tukey_alpha`,
+            "heterodyne" path).
+        use_tukey: Tukey master switch (``False`` -> alpha 0). Default ``True``.
+        N_cp_sig: Source-signal spline-cache density per chunk
+            (0 = direct path; >0 = cache). Default ``0``.
+        N_cp_orbit: Orbit spline-cache density per chunk
+            (0 = global-mem lookups; >0 = cache). Default ``0``.
+        orbits: :class:`~lisatools.detector.Orbits` instance or class (deep-copied;
+            configured on ``[t_obs_start, t_obs_start + Tobs]`` if not yet
+            configured). ``None`` falls back to
+            :class:`~lisatools.detector.EqualArmlengthOrbits`; the global-fit
+            builders pass the run's orbits.
+        tdi_config: :class:`~lisatools.response.tdiconfig.TDIConfig`, a TDI
+            generation string, or ``None`` (``"1st generation"``).
+        force_backend: Chooses the dispatch backend at construction;
+            all subsequent methods read ``self.backend`` /
+            ``self.backend.xp``. Per the sprint-wide rule, no
+            method on this class takes a backend kwarg.
+        d_d: Constant added to ``h_h - 2 d_h`` inside the returned
+            likelihood (default 0 = source-only return).
+        tdi_type: ``"XYZ"`` (default), ``"AET"`` or ``"AE"``.
+        t_obs_start: PHYSICAL start time of the first grid sample.
+            Defaults to ``wdm_settings.t0`` — override it when the
+            run's WDM settings carry an array-space ``t0`` (e.g. the
+            stock global-fit domains are 0-based) while the data
+            actually starts elsewhere, so source phase/orbits are
+            evaluated at true absolute times and ``t_ref`` keeps its
+            physical meaning.
+
+    Raises:
+        TypeError: If ``wdm_settings`` is not a :class:`~lisatools.domains.WDMSettings`.
+        ValueError: For an unknown ``tdi_type`` or ``tdi_config``.
+        AssertionError: If ``Nt_sub`` or ``N_sparse`` is not a power of two, or the
+            chunk step is not positive and even.
+
+    Attributes:
+        n_chunks (int): Number of stitched chunks.
+        chunk_t_starts (``xp.ndarray``): Physical start time of each chunk (s).
+        resolved_tukey_alpha (float): The alpha passed to the kernels.
+        cpp_orbits, cpp_tdi_config, cpp_wdm_settings: Backend wraps of the orbits,
+            TDI configuration and WDM grid.
+        d_h_out, h_h_out: Raw per-template inner products of the last
+            :meth:`get_ll_wdm` call.
     """
 
     #: Wall breakdown of the most recent :meth:`get_ll_wdm` call --
-    #: ``{stage, geom, wrap, launch, total, num_bin}`` in seconds (``None``
+    #: ``{stage, geom, wrap, launch, total, num_bin, n_groups}`` (times in s; ``None``
     #: before the first call). Read by scoring-cost telemetry; no method
     #: reads it back, so nothing depends on it being present.
     last_call_spans = None
@@ -161,10 +242,10 @@ class WDMComputationsBase(LISAToolsParallelModule):
     #: unreachable there). Appending unconditionally would be a TypeError in
     #: every downstream wheel that has not rebuilt.
     _FSTAT_FOLD_KERNELS = False
-    #: Basis-filter fold for :meth:`get_fstat_ll_wdm`: 0 = OFF (default -- the
-    #: unfolded 4-generation path, bit-for-bit the pre-fold kernel), 1 = ON
-    #: (2 generations + the exact phi0 rotation). Seeded from ``GB_FSTAT_FOLD``
-    #: at import; override per instance or per call.
+    #: Basis-filter fold for :meth:`get_fstat_ll_wdm`: 0 = OFF (the unfolded
+    #: 4-generation path, bit-for-bit the pre-fold kernel), 1 = ON (2 generations
+    #: + the exact phi0 rotation; the default since 2026-08-28). Seeded from
+    #: ``GB_FSTAT_FOLD`` (default "1") at import; override per instance or per call.
     fstat_fold = _GB_FSTAT_FOLD
     #: Whether this comp's C++ ``get_fstat_ll`` BINDING accepts the trailing
     #: ``N_cp_orbit`` argument (orbit spline cache). Same contract as
@@ -212,42 +293,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
                  N_cp_sig=0, N_cp_orbit=0,
                  orbits=None, tdi_config=None, force_backend=None,
                  d_d=0.0, tdi_type="XYZ", t_obs_start=None):
-        """Args:
-            wdm_settings: :class:`lisatools.domains.WDMSettings` instance
-                exposing the WDM grid (``Nf``, ``Nt``, ``data_dt``,
-                ``Tobs``, ``t0``, ``layer_df``, ``layer_dt``) that the
-                global template buffer is built on. ``fill_global_wdm`` /
-                ``get_ll_wdm`` operate over this domain.
-            t_ref: source-phase reference time in seconds (PHYSICAL epoch
-                where ``f0``/``phi_c`` are defined). Forwarded to the
-                kernel as ``t_ref_full``.
-            t_obs_start: PHYSICAL start time of the first grid sample.
-                Defaults to ``wdm_settings.t0`` — override it when the
-                run's WDM settings carry an array-space ``t0`` (e.g. the
-                stock global-fit domains are 0-based) while the data
-                actually starts elsewhere, so source phase/orbits are
-                evaluated at true absolute times and ``t_ref`` keeps its
-                physical meaning.
-            Nt_sub: per-chunk WDM time pixels.
-            n_pad: WDM pixels discarded at each chunk edge during the
-                stitch.
-            N_sparse: heterodyne FFT length per chunk; must be a power
-                of two <= ``FAST_WDM_N_SPARSE_MAX`` in the C kernel.
-            tukey_alpha, use_tukey: Tukey window selector. Default
-                ``USE_RECOMMENDED_TUKEY`` auto-picks per
-                ``recommended_tukey_alpha`` ("heterodyne" path).
-            N_cp_sig: source-signal spline-cache density per chunk
-                (0 = direct path; >0 = cache).
-            N_cp_orbit: orbit spline-cache density per chunk
-                (0 = global-mem lookups; >0 = cache).
-            orbits, tdi_config, tdi_type: as on the parent classes.
-            d_d: constant added to ``h_h - 2 d_h`` inside the returned
-                likelihood (default 0 = source-only return).
-            force_backend: chooses the dispatch backend at construction;
-                all subsequent methods read ``self.backend`` /
-                ``self.backend.xp``. Per the sprint-wide rule, no
-                method on this class takes a backend kwarg.
-        """
+        """Precompute chunk geometry, the chunk window and the backend wraps (see the class)."""
         super().__init__(force_backend=force_backend)
 
         # ---- multi-GPU replica metadata (see ``_device_local_gb_comp`` in
@@ -381,6 +427,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
 
     @property
     def tdi_config(self) -> TDIConfig:
+        """TDI configuration; setting it (str, :class:`TDIConfig`, ``None``) rebuilds the wrap."""
         return self._tdi_config
 
     @tdi_config.setter
@@ -397,6 +444,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
 
     @property
     def xp(self) -> object:
+        """Array module of the dispatch backend (numpy or cupy)."""
         return self.backend.xp
 
     @property
@@ -418,6 +466,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
 
     @property
     def orbits(self) -> object:
+        """Response orbits (a private deep copy); setting them rebuilds ``cpp_orbits``."""
         return self._orbits
 
     @orbits.setter
@@ -450,6 +499,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
 
     @classmethod
     def supported_backends(cls):
+        """``_BACKEND_PREFIX + "_" + name`` for each GPU-recommended backend, plus ``jax``."""
         # ``_BACKEND_PREFIX`` lets subclasses (e.g. ``SOBBHWDMComputations``)
         # re-route to their own backend family without overriding this method.
         # GPU_RECOMMENDED_WITH_JAX appends 'jax' so the JAX backend is also
@@ -474,6 +524,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
     def _swap_layer_groups(self, params_add_2d, params_remove_2d,
                             group_band_layers, margin_layers,
                             data_index=None, noise_index=None):
+        """Layer groups of an add/remove batch (``wdm_het.compute_swap_layer_groups``)."""
         # compute_swap_layer_groups is xp-agnostic (dispatches on the array
         # module of its inputs) -- keep params on this instance's backend
         # like _layer_groups does; np.asarray here raised CuPy's
@@ -622,7 +673,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
           parameter (``_FSTAT_FOLD_KERNELS`` False) -- appending there would
           be a TypeError in a downstream wheel that has not rebuilt.
         * ``(int(fold),)`` otherwise, resolving ``None`` to the instance's
-          :attr:`fstat_fold` (seeded from ``GB_FSTAT_FOLD``, default 0/OFF).
+          :attr:`fstat_fold` (seeded from ``GB_FSTAT_FOLD``, default 1/ON).
         """
         if not self._FSTAT_FOLD_KERNELS:
             return ()
@@ -743,6 +794,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
         )
 
     def _empty_swap_groups(self, num_bin):
+        """:meth:`_empty_groups` plus zero ``pair_m_lo_b`` / ``pair_m_hi_b``."""
         g = self._empty_groups(num_bin)
         g["pair_m_lo_b"] = np.zeros(num_bin, dtype=np.int32)
         g["pair_m_hi_b"] = np.zeros(num_bin, dtype=np.int32)
@@ -750,6 +802,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
 
     def _prep_indices(self, num_bin, num_data, num_noise,
                        data_index, noise_index):
+        """``int32`` device slot indices (``None`` -> zeros), checked under ``GB_INDEX_ASSERTS``."""
         if data_index is None:
             data_index = self.xp.zeros(num_bin, dtype=self.xp.int32)
         else:
@@ -856,38 +909,53 @@ class WDMComputationsBase(LISAToolsParallelModule):
 
         The raw per-binary inner products are stashed on
         ``self.d_h_out`` / ``self.h_h_out`` for callers that need them
-        (e.g. analytic phase maximisation).
+        (e.g. analytic phase maximisation), and the fused phase-max quadrature
+        of ``<d|h>`` on ``self.d_h_im_out`` (``None`` unless the subclass sets
+        ``_FUSED_QUAD_KERNELS`` and the backend is C++).
 
-        With ``use_layer_groups=True`` (default) binaries are clustered
-        by carrier WDM layer and each kernel launch reads
-        ``data`` / ``invC`` only over a narrow ``group_band_layers``-wide
-        m-band -- this is the canonical narrow-band GB inner product
-        (mm5 / mm2). The full-Nf path (``use_layer_groups=False``)
-        picks up spectral-tail contributions and is not the right
-        physical model for narrow-band GBs.
-
-        Args:
-            params: ``(num_bin, nparams)`` array (1D auto-promoted via
-                ``atleast_2d``). Last two columns are ``(lam, beta)`` in
-                the orbits frame (``convert_to_ra_dec=True`` is the
-                deprecated legacy ecliptic -> ICRS conversion).
-            wdm_holder: ``AnalysisContainerArray`` providing
-                ``linear_data_arr[0]`` (WDM data) and
-                ``linear_psd_arr[0]`` (invC) -- both flat.
-            data_index, noise_index: per-binary slab indices into
-                ``wdm_holder``. Default = all zeros.
-            grid_dim: CUDA launch grid size (use 0 for ``n_chunks``).
-            use_layer_groups, group_band_layers, margin_layers: narrow-band
-                grouping controls (see method docstring).
+        The narrow band: the get_ll kernel restricts each binary, per chunk, to
+        the layers ``m_floor +/- m_band_half_width`` around its carrier (the
+        narrow-band GB inner product validated by mm5 / mm2). The layer groups
+        (``use_layer_groups`` / ``group_band_layers`` / ``margin_layers``) are
+        still computed and passed, but this kernel ignores them (its grid is one
+        block per binary); their count is recorded in :attr:`last_call_spans`. Of
+        the other paths, the swap and gradient kernels receive group arrays;
+        :meth:`fill_global_wdm` and :meth:`get_fstat_ll_wdm` do not take them.
 
         Records a per-call wall breakdown on :attr:`last_call_spans`
         (``stage`` = param staging + indices + layer grouping, ``geom`` =
         the static-geometry re-assert, ``wrap`` = comp-group wrap
         construction, ``launch`` = the kernel invocation, ``total``,
-        ``num_bin``). Four ``perf_counter`` reads per call; the caller
+        ``num_bin``, ``n_groups``). Four ``perf_counter`` reads per call; the caller
         decides whether to sync the device around ``launch`` and what to do
         with the numbers (the SOBBH move accumulates them per leaf window
         and logs one [SOBBH_LL_TIMING] companion line).
+
+        Args:
+            params: ``(num_bin, nparams)`` array (1D auto-promoted via
+                ``atleast_2d``). Last two columns are the sky longitude / latitude
+                ``(lam, beta)`` in the orbits frame (ICRS on the stock runs;
+                ``convert_to_ra_dec=True`` is the deprecated legacy ecliptic ->
+                ICRS conversion).
+            wdm_holder: ``AnalysisContainerArray`` (single shard) or one
+                ``AnalysisContainer``, providing ``linear_data_arr[0]`` (WDM data)
+                and ``linear_psd_arr[0]`` (invC) -- both flat.
+            data_index, noise_index: per-binary slab indices into
+                ``wdm_holder``. Default = all zeros.
+            convert_to_ra_dec: Deprecated ecliptic -> ICRS conversion of the last
+                two columns. Default ``None`` (off).
+            grid_dim: CUDA launch grid size (use 0 for ``n_chunks``).
+            use_layer_groups, group_band_layers, margin_layers: layer-grouping
+                controls (see above). Defaults ``True``, ``5``, ``0``.
+            m_band_half_width: Layers on each side of the carrier. Default ``1``.
+
+        Returns:
+            ``xp.ndarray``: ``(num_bin,)`` values of ``-0.5 * (d_d + h_h - 2 d_h)``.
+
+        Raises:
+            NotImplementedError: For a multi-shard holder.
+            RuntimeError: For a shared-psd mirror holder on a class without the
+                mirror kernels.
         """
         _perf = time.perf_counter
         _t_entry = _perf()
@@ -998,8 +1066,8 @@ class WDMComputationsBase(LISAToolsParallelModule):
             # get_ll and it sent the 22x-per-row hunt down the wrong path.
             # The wall is one block's serial sweep over all n_chunks, so
             # rows are ~free until the device runs out of blocks.
-            # The OTHER kernel paths (fill_global / swap_ll / fstat) do
-            # consume these arrays.
+            # Of the OTHER kernel paths, swap_ll and the *_grad kernels are
+            # passed these arrays; fill_global and get_fstat_ll do not take them.
             "n_groups": int(groups["n_groups"]),
         }
 
@@ -1021,14 +1089,28 @@ class WDMComputationsBase(LISAToolsParallelModule):
 
         Mirrors :meth:`get_ll_wdm` but evaluates the five inner products
         ``<d|h_add>``, ``<d|h_remove>``, ``<h_add|h_add>``,
-        ``<h_remove|h_remove>``, ``<h_add|h_remove>`` per binary.
+        ``<h_remove|h_remove>``, ``<h_add|h_remove>`` per binary. The swap kernel
+        is passed the swap layer groups (driven by the add template, plus per-pair
+        remove-template bands). The raw products are also stashed on
+        ``self.d_h_add_out`` ... ``self.add_remove_out``.
 
-        Returns
-        -------
-        like_add, like_remove : ndarray
-            ``-0.5 * (d_d + <hh> - 2 <dh>)`` for add and remove.
-        d_h_add, d_h_remove, add_add, remove_remove, add_remove : ndarray
-            Raw inner products (e.g. for cross-term Hastings ratios).
+        Args:
+            params_add: ``(num_bin, nparams)`` add-template parameters.
+            params_remove: ``(num_bin, nparams)`` remove-template parameters (same
+                shape).
+            wdm_holder, data_index, noise_index, convert_to_ra_dec, grid_dim: See
+                :meth:`get_ll_wdm`.
+            use_layer_groups, group_band_layers, margin_layers, m_band_half_width: See
+                :meth:`get_ll_wdm`.
+
+        Returns:
+            tuple: ``(like_add, like_remove, d_h_add, d_h_remove, add_add,
+            remove_remove, add_remove)``, each ``(num_bin,)``: the two
+            ``-0.5 * (d_d + <hh> - 2 <dh>)`` values and the five raw inner products
+            (e.g. for cross-term Hastings ratios).
+
+        Raises:
+            AssertionError: If the two parameter arrays differ in shape.
         """
         params_add_tmp = self.xp.asarray(self.xp.atleast_2d(params_add)).copy()
         params_remove_tmp = self.xp.asarray(self.xp.atleast_2d(params_remove)).copy()
@@ -1151,7 +1233,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
                         margin_layers: int = 0):
         """Chain-rule gradient of :meth:`get_ll_wdm`.
 
-        Dispatches to ``gb_wdm_het_get_ll_grad`` on the backend with
+        Dispatches to ``<_METHOD_PREFIX>_get_ll_grad`` on the backend with
         the same C++-style argument list as :meth:`get_ll_wdm`. The JAX
         backend evaluates the gradient via autograd over the
         chunked-het kernel; the C++ backends raise until the matching
@@ -1160,12 +1242,11 @@ class WDMComputationsBase(LISAToolsParallelModule):
         Args:
             params: ``(num_bin, nparams)`` array.
             wdm_holder: ``AnalysisContainerArray``.
-            data_index, noise_index, convert_to_ra_dec, grid_dim,
-            use_layer_groups, group_band_layers, margin_layers: see
-                :meth:`get_ll_wdm`.
+            data_index, noise_index, convert_to_ra_dec, grid_dim: See :meth:`get_ll_wdm`.
+            use_layer_groups, group_band_layers, margin_layers: See :meth:`get_ll_wdm`.
 
         Returns:
-            ``(num_bin, nparams)`` array, ``grad[i, k] = dL/dtheta_k``.
+            ``xp.ndarray``: ``(num_bin, nparams)``, ``grad[i, k] = dL/dtheta_k``.
         """
         params_tmp = self.xp.asarray(self.xp.atleast_2d(params)).copy()
         num_bin = params_tmp.shape[0]
@@ -1225,6 +1306,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
 
         return self.xp.asarray(grad_out).reshape(num_bin, nparams)
 
+    # TODO check: keep/remove/document -- no run callers; only gb_lookup_table_test_script.py
     def get_swap_ll_grad_wdm(self, params_add, params_remove, wdm_holder,
                              data_index=None, noise_index=None,
                              convert_to_ra_dec: Optional[bool] = None,
@@ -1234,8 +1316,17 @@ class WDMComputationsBase(LISAToolsParallelModule):
                              margin_layers: int = 0):
         """Chain-rule gradient of :meth:`get_swap_ll_wdm`.
 
-        Dispatches to ``gb_wdm_het_swap_ll_grad`` on the backend.
-        Returns ``(grad_add, grad_remove)``, each ``(num_bin, nparams)``.
+        Dispatches to ``<_METHOD_PREFIX>_swap_ll_grad`` on the backend (JAX autograd;
+        the C++ backends raise until the kernel exists).
+
+        Args:
+            params_add, params_remove: ``(num_bin, nparams)`` arrays.
+            wdm_holder, data_index, noise_index, convert_to_ra_dec, grid_dim,
+            use_layer_groups, group_band_layers, margin_layers: See
+                :meth:`get_ll_wdm`.
+
+        Returns:
+            tuple: ``(grad_add, grad_remove)``, each ``(num_bin, nparams)``.
         """
         params_add_tmp = self.xp.asarray(self.xp.atleast_2d(params_add)).copy()
         params_remove_tmp = self.xp.asarray(self.xp.atleast_2d(params_remove)).copy()
@@ -1333,6 +1424,14 @@ class WDMComputationsBase(LISAToolsParallelModule):
         since JAX arrays are immutable -- the kernel writes back into
         the numpy buffer to honour the C++ in-place contract.
 
+        The buffer may also be an AnalysisContainerArray (single shard; writes
+        ``linear_data_arr[0]``), one AnalysisContainer, or a
+        :class:`~lisatools.domains.DomainBase` (its ``arr``). The layout is the full
+        grid ``(nchannels, Nf, Nt)`` (absolute ``(m, n)``) or, when the settings
+        carry a restricted band, the active box ``(nchannels, Nf_active,
+        Nt_active)``; it is picked from the buffer size. An empty ``params`` batch
+        returns immediately.
+
         Args:
             params: ``(num_bin, nparams)`` array (1D auto-promoted).
             templates: output buffer (see shapes above). Pre-zero
@@ -1346,6 +1445,17 @@ class WDMComputationsBase(LISAToolsParallelModule):
                 accumulation step. Default ``+1``; pass ``-1`` to remove.
             grid_dim: CUDA launch grid size (use 0 to default to
                 ``n_chunks``).
+            m_band_half_width: Layers written on each side of the carrier.
+                Default ``1``.
+            band_slab_Nf: Narrow per-band slab width in layers (C++ only); the
+                active layout then spans ``band_slab_Nf`` layers. Default ``None``.
+            slab_min_f: Per-slot first layer of the narrow slabs. Default ``None``.
+
+        Raises:
+            NotImplementedError: For a multi-shard holder.
+            AssertionError: For a buffer size matching neither layout, a wrong
+                parameter count, or a buffer on the wrong array module.
+            ValueError: For a buffer of unsupported dimensionality.
         """
         # Call-time holder acceptance (sprint rule, 2026-07): the fill
         # target may be an AnalysisContainerArray (incl. sub-band buffers),
@@ -1496,24 +1606,17 @@ class WDMComputationsBase(LISAToolsParallelModule):
         """Chunked-heterodyne F-stat over the WDM domain.
 
         Builds the 4 Cornish & Crowder '05 basis filters per binary at the
-        binary's (f0, fdot, lam, beta) with fixed
-        ``(A, iota, psi, phi0) = (2, pi/2, {0, pi/4, 0, pi/4},
-                                  {0, pi, 3*pi/2, pi/2})``.
-
-        Returns
-        -------
-        N_arr : ndarray, shape ``(num_bin, 4)``
-            Per-binary ``<d | A_i>`` for i in 0..3.
-        M_mat : ndarray, shape ``(num_bin, 10)``
-            Per-binary upper-triangle ``<A_i | A_j>`` for i <= j,
-            flattened in row-major order ``[M00, M01, M02, M03, M11,
-            M12, M13, M22, M23, M33]``.
+        binary's (f0, fdot, lam, beta) with fixed ``A = 2``, ``iota = pi/2``,
+        ``psi = {0, pi/4, 0, pi/4}`` and ``phi0 = {0, pi, 3*pi/2, pi/2}``.
+        The narrow band is ``m_floor +/- m_band_half_width`` per binary (no layer
+        groups).
 
         Compute ``F = N^T M^{-1} N / 2`` from these on the Python side
         (numpy.linalg.solve / inv).
 
         WDM coefficients are real -> N and M are real-valued; the imag
-        parts returned by the C++ kernel are always 0 and dropped here.
+        parts returned by the C++ kernel are always 0 and dropped here. Both are
+        also stored on ``self.N_arr`` / ``self.M_mat``.
 
         Args:
             params: ``(num_bin, nparams)`` array of GB parameters.
@@ -1522,18 +1625,28 @@ class WDMComputationsBase(LISAToolsParallelModule):
                 ``linear_psd_arr[0]`` (invC).
             data_index, noise_index: per-binary slab indices into
                 ``wdm_holder``.
+            convert_to_ra_dec: Deprecated ecliptic -> ICRS conversion of the last
+                two columns. Default ``None`` (off).
             grid_dim: CUDA launch grid size (0 -> use num_bin).
             m_band_half_width: layer-band half-width around f0
                 (m_floor +/- m_band_half_width, 2*m_band_half_width+1
                 layers total per binary). Default 1.
             fstat_fold: basis-filter fold. ``None`` (default) uses
                 :attr:`fstat_fold`, itself seeded from ``GB_FSTAT_FOLD``
-                (default 0 = OFF). 0 generates all 4 filters independently;
+                (default 1 = ON; set on the 9-month / 12-month runs). 0 generates
+                all 4 filters independently;
                 1 generates only the 2 psi stages and recovers the
                 quadrature partners by an exact constant rotation -- same
                 (N, M) to floating-point reassociation, half the waveform
                 work. Ignored unless ``_FSTAT_FOLD_KERNELS`` is set (i.e.
                 unless this source class's binding TU accepts the argument).
+
+        Returns:
+            tuple: ``(N_arr, M_mat)``: ``N_arr`` of shape ``(num_bin, 4)``, the
+            per-binary ``<d | A_i>`` for i in 0..3; ``M_mat`` of shape
+            ``(num_bin, 10)``, the per-binary upper-triangle ``<A_i | A_j>`` for
+            i <= j, flattened in row-major order ``[M00, M01, M02, M03, M11, M12,
+            M13, M22, M23, M33]``.
         """
         params_tmp = self.xp.asarray(self.xp.atleast_2d(params)).copy()
         num_bin = params_tmp.shape[0]
@@ -1615,6 +1728,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
     )
 
     def _info_matrix_param_eps(self, nparams, param_eps):
+        """Finite-difference steps: ``param_eps``, else the padded ``_DEFAULT_PARAM_EPS``."""
         if param_eps is not None:
             eps = self.xp.asarray(param_eps, dtype=self.xp.float64)
             assert eps.shape[0] == nparams, (
@@ -1639,7 +1753,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
         WDM inner-product normalization -- so the matrix matches the WDM
         likelihood convention exactly, with no factor re-derivation. With
         ``theta_i^+/- = theta +/- eps_i e_i`` and 2nd-order central
-        differences,
+        differences::
 
             Gamma_ij = [ar(i+,j+) - ar(i+,j-) - ar(i-,j+) + ar(i-,j-)]
                        / (4 eps_i eps_j).
@@ -1656,13 +1770,20 @@ class WDMComputationsBase(LISAToolsParallelModule):
             inds: parameter indices to include (default all ``nparams``).
             param_eps: per-parameter finite-difference step (default the
                 GB-oriented table; SOBBH callers should pass this).
-            noise_index: per-binary index into the invC slabs.
-            swap_kwargs: forwarded to :meth:`get_swap_ll_wdm`
+            noise_index: per-binary index into the invC slabs (also used as the
+                data index, which the layer grouping requires).
+            convert_to_ra_dec: Deprecated ecliptic -> ICRS conversion of the last
+                two columns. Default ``None`` (off).
+            **swap_kwargs: forwarded to :meth:`get_swap_ll_wdm`
                 (``grid_dim``/``use_layer_groups``/``group_band_layers``/
                 ``margin_layers``/``m_band_half_width``).
 
         Returns:
-            ``(num_bin, num_derivs, num_derivs)`` real information matrices.
+            ``xp.ndarray``: ``(num_bin, num_derivs, num_derivs)`` real float64
+            information matrices, ``num_derivs = len(inds)``.
+
+        Raises:
+            AssertionError: If ``params`` or ``param_eps`` has the wrong length.
         """
         p = self.xp.asarray(self.xp.atleast_2d(params)).copy()
         num_bin, nparams = p.shape[0], int(self._NPARAMS)

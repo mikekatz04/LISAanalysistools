@@ -1,8 +1,20 @@
 """Physical and LISA-specific numeric constants used throughout the package.
 
-Values are sourced from ``lisaconstants`` (>= 2.0.2) so every package in
-the sprint tree shares one set of definitions; the trailing comments show
-the legacy hard-coded values they replace.
+The physical constants (``MSUN_SI``, ``YRSID_SI``, ``AU_SI``, ``C_SI``, ``G_SI``, ``GMSUN``,
+``MTSUN_SI``, ``MRSUN_SI``, ``PC_SI``, ``EPS_RAD``) are sourced from ``lisaconstants``
+(pinned 2.0.2) so every package in the tree shares one set of definitions; the trailing
+comments show the lisaconstants 2.0.2 values. The C/C++/CUDA side reads the same numbers from
+the generated ``cutils/lisaconstants_values.h`` (:mod:`lisatools.utils.lisaconstants_header`).
+
+The rest are literals: mathematical constants (``PI``, ``SQRT2``, ...), legacy orbit
+parameters (``F0``, ``Omega0``, ``eorbit``, ``ConstOmega``), the nominal 2.5e9 m arm length
+(``L_SI`` / ``lisaL``, light time ``lisaLT``), the transfer frequency ``fstar`` and legacy
+optical-metrology noise levels. All values are SI unless noted.
+
+Example:
+    >>> from lisatools.utils.constants import YRSID_SI, C_SI
+    >>> C_SI
+    299792458.0
 """
 
 import lisaconstants as lc
@@ -34,8 +46,12 @@ SQRT6 = 2.449489742783178098197284074705891392
 INVSQRT2 = 0.707106781186547524400844362104849039
 INVSQRT3 = 0.577350269189625764509148780501957455
 INVSQRT6 = 0.408248290463863016366214012450981898
+# Legacy orbit literals: F0 ~ 1 / YRSID_SI [Hz]; Omega0 = 2 pi F0 [rad/s];
+# eorbit = L / (2 sqrt(3) AU), the orbital eccentricity of the nominal
+# 2.5e9 m constellation; ConstOmega = Omega0 rounded.
 F0 = 3.168753578687779e-08
 Omega0 = 1.9909865927683788e-07
+# Nominal arm length [m].
 L_SI = 2.5e9
 eorbit = 0.004824185218078991
 ConstOmega = 1.99098659277e-7
@@ -58,11 +74,12 @@ Soth = (2.0e-12) ** 2  # m^2/Hz
 # Mass of Jupiter
 Mjup = 1.898e27
 
+# Obliquity of the ecliptic in radians (lc.OBLIQUITY is in degrees, IAU 2006).
 EPS_RAD = PI / 180. * lc.OBLIQUITY
 
 #################
 # LISA constant #
 #################
 
-# Transfer frequency
+# Transfer frequency c / (2 pi L) [Hz]
 fstar = C_SI / (lisaL * 2 * PI)

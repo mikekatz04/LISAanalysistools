@@ -211,7 +211,7 @@ the next.
   a real source; that tail is where the stage's lnL climb comes from).
   Since 2026-10-16 the launchers give `gb_search_2` a shorter budget
   (`GB_SEARCH_2_NUM_REPEAT_PROPOSALS=15`, `_INMODEL_GROUP_ITERS=2`,
-  `_INMODEL_CONVERGE_ITERS=100`; navigation 2.9's knob table), expected
+  `_INMODEL_CONVERGE_ITERS=100`; navigation 2.8's knob table), expected
   ~26 % off the cycle; the first tar after it should show the `[GB_IMGROUP]`
   armed line at `window 2 pass(es) ... 15 repeats` and the `[GB_IMCONV]`
   armed line at `window 100` once the stage is entered, and `gb_search_1`
@@ -387,8 +387,15 @@ runs inside `rj_fstat_search`):
   planned; it digs the foreground out slowly; no gate change.** Do not
   re-propose re-baselining or a larger tolerance unless asked. The stage
   ends when the foreground has been dug out.
-- **Shut pairs never reopen within a stage.** 0 shut->open transitions in
-  every stored row pair is the expected reading.
+- **Reopening within a stage.** Since 2026-10-17 (the all-walker rule,
+  `GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS=1`, code default and launchers) a shut
+  band DOES reopen within a stage: on every walker, at the judge where any
+  walker holding a source in it stops being converged (`judge` clears `shut`
+  on those pairs). Read it from `[GB_GATE] ... all-walker rule on: held open N
+  reopened M`; shut->open transitions between stored rows are then expected.
+  Before that rule (or with the knob at 0, the per-walker valve) shut pairs
+  never reopened within a stage, and 0 shut->open transitions per stored row
+  pair was the expected reading.
 - The empty-band valve (`[GB_BAND_SHUTOFF status] 647 of 688 eligible bands
   off (f > 10 mHz) . next revive check in N`): bands above 10 mHz with zero
   cold occupancy. Its since-revive counter rolls 10 -> 0 WITHOUT reviving
@@ -633,6 +640,16 @@ runs inside `rj_fstat_search`):
 | `rank N failed op='propose' move='mbh_pe'` -> `jax.errors.JaxRuntimeError: INTERNAL: CpuCallback error` ending in `_EquinoxRuntimeError: The maximum number of steps was reached in the nonlinear solver` from `jit__compute_coeffs_22`, then `[MPI-ABORT]` (1yr flagship job 760, 4 iterations in, 2026-10-14) | ONE hot-rung row of a loosely constrained leaf (MBHB 10: merger 9.5 d past the data end, inspiral only; 60-80 % of its proposals `outside_data`) made phentax's t(f) bisection (`get_time_of_frequency`, `max_steps=1000`, tol 1e-12) fail; the solve's result is DISCARDED (lisatools gives `t_min` and `t_ref`) but phentax picks between given and solved with `lax.cond` under `vmap`, which runs both branches, so the whole vmapped chunk raised and the rank died. REPRODUCED (`scripts/mbh/phentax_tf_bisection_sliver.py`): the failure is a 0.12 % sliver in total mass where `2 pi M f_min` (f_min = 7e-5 Hz) falls inside the frequency jump of `time_of_freq` at `t = tEarly` (the `t - tt0` shift below the PN / pseudo-PN junction) -- M = 4.2224e6..4.2274e6 Msun for MBHB 10's q and spins (1.5x its truth); every leaf has its own sliver | fixed 2026-10-14 in the move: the chunk is re-generated row by row, the failing row scored at the floor (-1e300, rejected) with its waveform-basis parameters at WARNING, counted as `gen_failed=` in the `[MBH_BATCH]` line / `n_generate_failures`; upstream phentax fix (`throw=False` on the root-find, or a continuous `time_of_freq`) suggested, not done |
 | the sub-backend `d_h` / `h_h` of a source leaf flips from ~0 to a huge value on IDENTICAL coords (MBHB 10 on walker 2: `<h|h>` 0.000 -> 24,917 = SNR 158, gain +12,354) across a `[MBH_BATCH] leaf N window rebuilt: median merger moved -4051 h` line, with the walker's total lnL and its residual snapshot unchanged (1yr flagship job 769, row 40, 2026-10-16) | a PHANTOM: the batched MBH window scores only the locked kept box, so a row merging well outside it (`t_plunge` 195 d against a box pinned to the last 102 d of the data, the source merging after the data end) had a TRUNCATED template of ~0 power, was "free" at every rung, and was accepted into the cold chain; the residual never carried its template, and a resume (`setup_acs(rebuild_residuals=True)`, the stock full generator) would subtract the phantom for real (-12.5k nats on that walker, invisible to the move while the box is pinned elsewhere) | fixed 2026-10-16 in the move: rows whose in-data merger falls outside the kept box are scored at the floor (-1e300, rejected; `MBH_REJECT_OUTSIDE_BOX=0` restores the truncated scoring; the `[MBH_BATCH]` line says `outside_box=N (...: rejected at the floor)`), the current point of a rung outside the box too, so the next in-box proposal replaces it, no swap pulls it down and the lost-rung guard re-anchors it; an EXISTING phantom in a stopped store is removed with `copy_store_leaf.py --branch mbh --leaf N --src-walker S --dst-walker D` before the resume |
 | the cold lnL spread grows every row with no stuck source and equal noise (1yr job 780, rows 71-104: 324 -> 3,752 nats), ONE walker holds 100-170 fewer GB leaves, and its deficit sits in a frequency range where ITS `band_rj_shutoff_w` pairs are shut while the other walkers' are open and still adding (walker 0: 46 of 58 pairs at 1.5-2.5 mHz shut from row 71; `band_num_binaries[0]` per walker per band shows the gap; 378 consensus sources missing on it, 155 above SNR 10) | the per-walker valve judged that walker converged in those bands on its OWN lnL trajectory (3 flat judges at tol 20) while the others kept finding sources; a shut pair runs no RJ, so neither the F-stat grid nor the filtered self-refit could give it the sources back, and its foreground absorbed the missing power (self-shielding, ~2,000 of the 3,400 nats) | fixed 2026-10-17: the all-walker rule (`GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS=1`; navigation knob table): the criterion stays per walker but a sub-band shuts on every walker only when every walker holding a source in it is converged together, and reopens on all of them as soon as one is not -- the first judge after the relaunch reopens every partially-shut band. Read it with `[GB_GATE] ... all-walker rule on: held open N reopened M` |
+
+Found by reading the code in the 2026-10-22 docstring audit (nothing fixed;
+the first two are latent, not yet met as a failure in a run; the third is a
+log line the `gb_search_seed` entry prints):
+
+| symptom | cause | status |
+|---|---|---|
+| a fresh store's GB ladder is the stock `1/1.2^k` with the top rung pinned at beta 1e-4 (the 176x cliff) although the launchers export `GB_LADDER_HOT_RATIO=1.35`, `GB_LADDER_HOT_FROM=10`, `GB_LADDER_PIN_LAST=0` (ruling 2026-10-07) | the only reader of the two-slope knobs is the fallback in `GBSetup.init_sampling_info` (`stock/erebor/gb.py`), reached only when `betas` is unset; `gb_no_fg.prepare_gb_branch` (the production GB prep) always fills `betas` first. The launcher's LADDER PREFLIGHT compares the rung count only | open; the knobs are inert on the 9mo and 12mo stores. Not checked: whether band-temperature adaptation later moves the ladder |
+| a launch stalls at the GB move build (or dies with `BdbQuit`) right after `Found N coordinates with inf logpdf under GB priors` | a stray `breakpoint()` before the `Starting priors are inf` ValueError in `recipe.build_gb_moves`, on the path where the starting state's cold GB leaves on the rank's walker block include an out-of-prior one (a resumed store or an injected start) | open (marked with a NOTE comment); a clean run never reaches it |
+| `[V9-STAGE gb_search_seed] the peak floor MOVED but no F-stat grid move was found to refit` WARNING at the seed entry | the seed stage carries no `rj_fstat_search`, so `force_fstat_refit` finds no grid move; `gb_search_1` inherits floor 8 unchanged | expected log noise, not a defect |
 
 Still open at the time of writing (the user keeps the live TODO list; ask
 for it): neighbour-aware sub-band

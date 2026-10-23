@@ -1,4 +1,70 @@
-"""Move that swaps individual sources in/out of the residual data array."""
+"""The single-source add/remove move: per-leaf PE of the MBH, EMRI and SOBBH branches.
+
+:class:`ResidualAddOneRemoveOneMove` samples a fixed-leaf branch one leaf (one source) at a
+time against the residual of the run's
+:class:`~lisatools.analysiscontainer.AnalysisContainerArray`. Per alive leaf, in a random leaf
+order, :meth:`~ResidualAddOneRemoveOneMove.propose_local`:
+
+1. EXPOSES the leaf: adds the leaf's cold-chain template back into every walker's residual, so
+   each residual is the data minus every OTHER fitted source;
+2. refreshes the leaf's eigen proposal tables (first visit, then every
+   ``{BRANCH}_EIGEN_REFRESH`` visits);
+3. runs ``num_repeats`` in-model Metropolis repeats of the leaf on the leaf's own temperature
+   ladder (the branch sub-state's ``betas_all[leaf]``), each repeat followed by a temperature
+   swap;
+4. FOLDS the leaf back: subtracts the updated cold-chain template from the residual.
+
+The residual does not change inside the repeat loop, so every proposal of a visit is scored
+against the same exposed residual. The production moves are the fast-likelihood subclasses
+:class:`~lisatools.globalfit.moves.mbhbatchedmove.MBHBatchedLikeMove` (stock name ``mbh_pe``),
+:class:`~lisatools.globalfit.moves.emridirectmove.EMRIDirectLikeMove` (``emri_pe``) and
+:class:`~lisatools.globalfit.moves.sobbhspecialmove.SOBBHChunkedLikeMove` (``sobbh_pe``),
+built by the recipe's ``MBHBatchedMoveBuilder`` / ``EMRIDirectMoveBuilder`` /
+``SOBBHChunkedMoveBuilder`` (:mod:`lisatools.globalfit.recipe`, through
+``build_*_move_runtime`` in the stock source runtime). They override the scoring seam, the
+residual seam (MBH and SOBBH), the likelihood setup, the inner-product record and the Gram
+hooks; the leaf loop is this module's. The 9mo / 12mo driver stages them in ``source_search`` (inside its joint
+max-lnL search), in the GB search stages and in ``full_pe``.
+
+The inner-move stack is the eigen move with its jump mixture (``{BRANCH}_EIGEN_JUMP_MIX``) and
+the cross-walker difference jump (``{BRANCH}_DE_JUMP_MIX``), both from
+``make_default_inner_moves`` in ``stock/erebor/common.py``, plus, for MBH, the sky-mode hops
+that ``make_mbh_inner_moves`` in the stock source runtime adds (``MBH_SKY_MOVE_*``). Around
+it this module holds:
+
+* the eigen tables: one information matrix per leaf (``{BRANCH}_EIGEN_INFO``: ``"ll"``, the
+  likelihood second differences and the code default, or ``"gram"``, the Gram matrix of the
+  move's own templates and the launcher value), turned into ``(axes, sigmas)`` by
+  :mod:`~lisatools.globalfit.moves.eigen_refresh` and persisted in the run's sidecar
+  (:mod:`~lisatools.globalfit.moves.eigen_table_persist`);
+* the step-scale adaptation from the chain (``{BRANCH}_EIGEN_AXIS_ADAPT``, pooled over every
+  walker with ``{BRANCH}_EIGEN_ADAPT_POOL``, capped at ``{BRANCH}_EIGEN_ADAPT_MAX_FACTOR``), the
+  per-rung tempered step (``{BRANCH}_EIGEN_TEMPER_SIGMAS``) and the per-axis acceptance log and
+  controller (``{BRANCH}_EIGEN_AXIS_ACC_LOG`` / ``_TUNE``);
+* the cross-walker jump's partner pool and walker-group parity;
+* the proposal frame (``MBH_PROPOSAL_FRAME=lisa`` in both production launchers): the inner
+  moves propose in the LISA frame and the Metropolis factor carries the frame Jacobian;
+* the search-stage cold -> hot rotation (``{BRANCH}_COLD_TO_HOT_EVERY``), the lost-rung guard
+  (``{BRANCH}_LADDER_REANCHOR_NATS``) and the opt-in SNR-keyed per-leaf ladders
+  (``{BRANCH}_LADDER_TOP_SNR``, off in production);
+* the multi-rank hooks of :class:`~lisatools.globalfit.moves.walkerfanout.WalkerFanoutMixin`
+  (walker blocks, replica row scatter) and the optional DCGA per-device generator replicas;
+* the consistency checks (``{BRANCH}_CHECK_LL``, ``0`` in both launchers) and the debug
+  flip-book plots (``{BRANCH}_DEBUG``).
+
+``{BRANCH}`` is the capitalized branch name (``MBH``, ``EMRI``, ``SOBBH``). The feature knobs
+above (eigen, ladder, rotation, frame) are resolved at USE time: constructor argument (or an
+attribute set after construction, e.g. from the branch Settings) > environment variable >
+code default. The debug / check knobs are read once at construction
+(:meth:`~ResidualAddOneRemoveOneMove._setup_debug`), where ``{BRANCH}_PERMUTE_EVERY``, when
+set, overrides the constructor's ``permute_every``. The constructor documents each knob; the
+launcher values are listed there.
+
+The module-level helpers :func:`factor_capped_sigmas`, :func:`cold_to_hot_offset`,
+:func:`cold_to_hot_due`, :func:`rotate_cold_into_hot` and :func:`describe_inner_moves` are the
+testable pieces of these features. :class:`MoveSignalGen` adapts the move's own generator to the
+containers' ``signal_gen`` convention.
+"""
 
 from __future__ import annotations
 
@@ -79,6 +145,29 @@ def factor_capped_sigmas(sigmas_fisher, sigmas_adapted, max_factor):
     rung chains straddle DISCRETE degenerate solutions (sky-mode hops, phase
     degeneracies) inside the 50-visit window; ``draw_axis_step`` picks one axis
     per repeat, so such an axis wastes ~1/ndim of the proposals.
+
+    Called by :meth:`ResidualAddOneRemoveOneMove._eigen_adapt_table` at every
+    adapted refresh and by
+    :meth:`ResidualAddOneRemoveOneMove._adopt_persisted_eigen_table` on a
+    sidecar entry, with ``max_factor`` from ``{BRANCH}_EIGEN_ADAPT_MAX_FACTOR``
+    (default 100, the launcher value).
+
+    Args:
+        sigmas_fisher (array_like): Information-matrix sigmas (the floor), any
+            shape, e.g. ``(ndim,)`` or a per-walker stash ``(ntemps, nwalkers,
+            ndim)``.
+        sigmas_adapted (array_like): Adapted sigmas, same shape.
+        max_factor (float or None): The cap as a multiple of
+            ``sigmas_fisher``; ``None``, ``<= 0`` or non-finite means no cap.
+
+    Returns:
+        np.ndarray: The capped sigmas (float, the shape of the inputs), or
+        ``sigmas_adapted`` itself when there is no cap.
+
+    Example:
+        >>> from lisatools.globalfit.moves.addremovemove import factor_capped_sigmas
+        >>> factor_capped_sigmas([1.0, 1.0], [50.0, 500.0], 100).tolist()
+        [50.0, 100.0]
     """
     if max_factor is None:
         return sigmas_adapted
@@ -94,7 +183,21 @@ def cold_to_hot_offset(event: int, nwalkers: int) -> int:
 
     Never 0 (a walker never receives its own cold chain) and, over
     ``nwalkers - 1`` consecutive events, every other walker once. 0 when
-    there is no partner (fewer than two walkers).
+    there is no partner (fewer than two walkers). Used by
+    :meth:`ResidualAddOneRemoveOneMove._maybe_rotate_cold_into_hot`.
+
+    Args:
+        event: Zero-based index of the rotation event (the move's
+            ``n_cold_to_hot_events`` before the event).
+        nwalkers: Number of walkers of the full ensemble.
+
+    Returns:
+        int: The walker offset, in ``[1, nwalkers - 1]``, or 0.
+
+    Example:
+        >>> from lisatools.globalfit.moves.addremovemove import cold_to_hot_offset
+        >>> [cold_to_hot_offset(e, 4) for e in range(4)]
+        [1, 2, 3, 1]
     """
     nw = int(nwalkers)
     if nw < 2:
@@ -111,6 +214,23 @@ def cold_to_hot_due(clock: int, repeats: int, cadence: int):
     5, 10, 15, ... A cadence <= 0 disables the rotation (clock held at 0).
     A cadence shorter than one propose fires every propose and keeps the
     remainder.
+
+    Args:
+        clock: Proposals counted since the last event.
+        repeats: Proposals of this propose (the move's ``num_repeats``).
+        cadence: The rotation cadence in proposals
+            (``{BRANCH}_COLD_TO_HOT_EVERY``, default and launcher value 125).
+
+    Returns:
+        tuple[bool, int]: Whether the rotation fires on this propose, and the
+        clock to carry to the next one.
+
+    Example:
+        >>> from lisatools.globalfit.moves.addremovemove import cold_to_hot_due
+        >>> cold_to_hot_due(0, 25, 125)
+        (False, 25)
+        >>> cold_to_hot_due(100, 25, 125)
+        (True, 0)
     """
     cad = int(cadence)
     if cad <= 0:
@@ -135,6 +255,21 @@ def rotate_cold_into_hot(coords, inds, log_prior, *, hot: int, offset: int) -> i
     ``propose_local``), which is where the copied point gets its
     likelihood. Returns the number of (walker, leaf) copies; 0 when ``hot``
     is the cold rung, the offset is 0, or there is nothing alive.
+
+    Args:
+        coords (np.ndarray): Sub-state coordinates ``(ntemps, nwalkers,
+            nleaves, ndim)``; edited in place.
+        inds (np.ndarray): Sub-state leaf flags ``(ntemps, nwalkers,
+            nleaves)``, bool; edited in place.
+        log_prior (np.ndarray or None): Per-leaf log prior ``(nleaves,
+            ntemps, nwalkers)``, edited in place; ``None`` (or any other
+            shape) leaves the prior alone.
+        hot: Destination rung index, ``1 <= hot < ntemps``.
+        offset: Walker offset (:func:`cold_to_hot_offset`); walker ``w``'s
+            cold rung goes to walker ``(w + offset) % nwalkers``.
+
+    Returns:
+        int: Number of (walker, leaf) copies made.
     """
     hot = int(hot)
     offset = int(offset)
@@ -196,11 +331,24 @@ logger = logging.getLogger(__name__)
 
 
 def describe_inner_moves(moves, weights) -> str:
-    """One-line ``ClassName[(which, frame)] weight [(jump mix f x k)] | ...``
-    summary of an inner-move stack (``SkyMove`` carries its ``which`` /
-    ``coord_frame``; the eigen jump-mixture move its ``jump_mix`` /
-    ``jump_mix_factor``, e.g. ``EigenAxisJumpMixMove 1.000 (jump mix 0.10 x
-    3.0)`` -- the log proof that ``{BRANCH}_EIGEN_JUMP_MIX`` took effect)."""
+    """One-line summary of an inner-move stack, for the construction log.
+
+    Format ``ClassName[(which, frame)] weight [(jump mix f x k)] | ...``: a
+    ``SkyMove`` carries its ``which`` / ``coord_frame``; the eigen
+    jump-mixture move its ``jump_mix`` / ``jump_mix_factor``, e.g.
+    ``EigenAxisJumpMixMove 1.000 (jump mix 0.10 x 3.0)`` -- the log proof that
+    ``{BRANCH}_EIGEN_JUMP_MIX`` took effect; a
+    :class:`~lisatools.sampling.moves.walkerdiffjump.WalkerDifferenceJumpMove`
+    adds ``(cross-walker, mode frac 0.50)``. Logged once per move by the
+    constructor (``[<BRANCH>] inner-move stack: ...``).
+
+    Args:
+        moves (list): The inner moves.
+        weights (array_like): Their normalized draw weights, same length.
+
+    Returns:
+        str: The ``" | "``-joined summary.
+    """
     parts = []
     for move, weight in zip(moves, weights):
         label = type(move).__name__
@@ -219,6 +367,8 @@ def describe_inner_moves(moves, weights) -> str:
             part += f" (cross-walker, mode frac {float(move.mode_frac):.2f})"
         parts.append(part)
     return " | ".join(parts)
+# Hard-coded off (no knob): when True, the non-finite / suspicious-lnL warning
+# paths of this module drop into breakpoint().
 DEBUG_MODE = False
 
 if TYPE_CHECKING:
@@ -243,6 +393,26 @@ class MoveSignalGen:
     time so later reassignment (e.g. the multi-GPU subclass swapping
     ``waveform_gen`` after the base ``__init__``) stays honored; a specific
     ``waveform_gen`` override (heterodyne hook) can be pinned instead.
+
+    Built lazily per move (:attr:`ResidualAddOneRemoveOneMove.own_signal_gen`)
+    and, with a pinned generator, per call by
+    :meth:`ResidualAddOneRemoveOneMove.compute_acs_like` (``signal_gen=``).
+    On the production runs the containers carry the engine's own generators
+    for mbh / emri / sobbh, so this adapter is the fallback path only.
+
+    Args:
+        move: The owning move; ``move.transform_fn`` (a
+            :class:`~eryn.utils.TransformContainer`) and ``move.waveform_gen``
+            are read at call time.
+        waveform_gen: A generator to pin instead of ``move.waveform_gen``.
+            Default ``None`` follows the move's attribute.
+
+    Note:
+        Calling the adapter with ``apply_transform=True`` (the default)
+        applies ``move.transform_fn.both_transforms`` to the positional
+        parameters first (with ``leaf_inds`` for per-leaf fills); it then
+        calls the generator with the remaining keyword arguments and returns
+        its domain object.
     """
 
     def __init__(self, move: "ResidualAddOneRemoveOneMove", waveform_gen: Callable = None):
@@ -251,6 +421,7 @@ class MoveSignalGen:
 
     @property
     def waveform_gen(self) -> Callable:
+        """The pinned generator, else the owning move's ``waveform_gen``."""
         return self._waveform_gen if self._waveform_gen is not None else self.move.waveform_gen
 
     def __call__(self, *params, apply_transform: bool = True, leaf_inds=None, **kwargs):
@@ -262,130 +433,332 @@ class MoveSignalGen:
 
 
 class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove, Move):
-    """
-    Move that handles adding and removing sources to and from the residuals stored in the analysis container array.
-    This is done by first removing the contribution of the current sources in the cold chain from the residual,
-    then proposing new sources for this leaf, and then adding back in the contribution of the new sources to the residual.
-    This way we can make sure that the likelihoods are computed correctly for each proposed source and that the likelihoods are consistent with the current state of the residuals in the analysis container array.
+    """Per-leaf add/remove PE move for a fixed-leaf source branch (MBH, EMRI, SOBBH).
+
+    Samples each alive leaf of ``branch_name`` against the residual of the
+    analysis containers, one leaf at a time: the leaf's cold-chain template
+    is added back into every walker's residual (the leaf is EXPOSED), the
+    leaf's rungs take ``num_repeats`` in-model Metropolis steps drawn from
+    the inner-move stack, each followed by a temperature swap on the leaf's
+    own ladder, and the updated cold-chain template is subtracted again (the
+    leaf is FOLDED back). Because the residual is never changed inside the
+    repeat loop, every proposal of a visit is scored against the same
+    exposed residual and the likelihoods stay consistent with the
+    containers' residual state. See :meth:`propose_local` for the step
+    order.
+
+    This class is the base of the three production moves
+    (:class:`~lisatools.globalfit.moves.mbhbatchedmove.MBHBatchedLikeMove`,
+    :class:`~lisatools.globalfit.moves.emridirectmove.EMRIDirectLikeMove`,
+    :class:`~lisatools.globalfit.moves.sobbhspecialmove.SOBBHChunkedLikeMove`),
+    which override the scoring seam (:meth:`compute_like_local`), the
+    residual seam (:meth:`_apply_cold_chain_sources`, except EMRI), the
+    inner-product record and the Gram hooks (``_gram_templates`` /
+    :meth:`_gram_context`). The recipe's single-source builders construct
+    them, stamp ``fanout_branches``, ``snr_ladder_plan``,
+    ``eigen_table_builder`` (a Settings ``info_matrix_gen``, unset in
+    production) and ``eigen_store_path`` (the run's store), and bind the
+    multi-rank fan-out
+    (:meth:`~lisatools.globalfit.moves.walkerfanout.WalkerFanoutMixin.install_walker_fanout`);
+    the stock source runtime then stamps the branch Settings fields listed
+    in its ``SOURCE_MOVE_SETTINGS_ATTRS`` (where the move's value is still
+    ``None``).
+    The base class also serves custom single-source branches directly (it is
+    exported from :mod:`lisatools.globalfit.moves`).
+
+    The production values quoted below are those of the 9mo / 12mo
+    launchers (``scripts/fstat_proposal/submit_gf_9mo_v9.sh``,
+    ``scripts/flagship/submit_gf_12mo.sh``), identical for both.
 
     Args:
-        branch_name: name of the branch that this move will operate on.
-        coords_shape: shape of the coordinates of the sources in the branch that this move will operate on.
-        waveform_gen: function that generates the waveforms for the sources given their (waveform-basis) coordinates. All operations on the analysis container array run through the containers' ``signal_gen`` machinery (:meth:`AnalysisContainer.build_template` / :meth:`AnalysisContainer.calculate_signal_likelihood`) and default to the generator the engine already installed on each container under ``branch_name``; ``waveform_gen`` is the fallback, wrapped as a :class:`MoveSignalGen` and added to containers that do not carry the branch (see :meth:`_resolve_signal_gen_override`). Because the move transforms coordinates once up front, the containers' generators are always called with ``apply_transform=False`` — the transform is applied exactly once on every path.
-        waveform_gen_kwargs: keyword arguments for the waveform generator function.
-        waveform_like_kwargs: keyword arguments for the likelihood computation function.
-        acs: analysis container array that contains the residuals and other information needed for the likelihood computation.
-        num_repeats: number of times to repeat the proposal step for each leaf.
-        transform_fn: transform container that contains the transforms to be applied to the coordinates before generating waveforms and computing likelihoods.
-        priors: prior distribution container that contains the prior distributions for the sources in the branch.
-        inner_moves: list of moves and their corresponding weights to be used for proposing new sources for the leaf.
-        Tmax: maximum temperature for the temperature control.
-        betas_all: array of betas for all leaves and temperatures. Shape is (nleaves_max, ntemps). If None, betas will be initialized as in TemperatureControl.
-        permute_every: cadence (in proposes / engine iterations) for the walker-permuting (fancy) temperature swap: it fires at most once per leaf visit, on the final in-model repeat, on proposes ``permute_every, 2*permute_every, ...`` (1 = every propose; the first propose after a restart never fires for cadence > 1); <= 0 disables it entirely (``{BRANCH}_PERMUTE_EVERY`` env override).
-        pad_out_of_prior: whether to pad proposed sources that are out of the prior bounds to avoid JIT compilation issues. If True, proposed sources that are out of the prior bounds will be replaced with the first in-prior point.
-        eigen_refresh_every: leaf-visit cadence of the eigen inner-move table
+        branch_name: Name of the branch the move samples (``"mbh"``,
+            ``"emri"``, ``"sobbh"``, ...); its upper-case form is the
+            ``{BRANCH}`` prefix of every env knob below.
+        coords_shape: ``(ntemps, nwalkers, nleaves_max, ndim)`` of the
+            branch's tempered sub-state: the move's own ladder size, the
+            walker width of the state the body runs on (the rank's walker
+            block under the walker-block fan-out: 1 walker per rank at the
+            launchers' default layout; the full ensemble on the head for
+            ``GF_GPU_ROUTING`` replicas over several blocks), the leaf count
+            and the dimension.
+        waveform_gen: Generator of one source's template from its
+            WAVEFORM-basis coordinates. All operations on the analysis
+            container array run through the containers' ``signal_gen``
+            machinery (:meth:`AnalysisContainer.build_template` /
+            :meth:`AnalysisContainer.calculate_signal_likelihood`) and default
+            to the generator the engine already installed on each container
+            under ``branch_name``; ``waveform_gen`` is the fallback, wrapped as
+            a :class:`MoveSignalGen` and added to containers that do not carry
+            the branch (see :meth:`_resolve_signal_gen_override`), and the
+            generator of the ``{BRANCH}_CHECK_LL`` cross-check. Because the
+            move transforms coordinates once up front, the containers'
+            generators are always called with ``apply_transform=False``: the
+            transform is applied exactly once on every path. With ``dcga``
+            and ``waveform_gen_method`` it is the generator OBJECT instead
+            (its ``.kwargs`` seed the per-device replicas).
+        waveform_gen_kwargs: Keyword arguments of the generator, passed per
+            call as the branch's ``waveform_kwargs``.
+        waveform_like_kwargs: Keyword arguments of the likelihood: forwarded
+            to :meth:`compute_acs_like` by the container path, to the DCGA
+            likelihood operations, and (minus ``psd``, ``complex``,
+            ``include_psd_info``) to the Gram route's inner products.
+        acs: The run's containers (residuals, sensitivities, signal
+            generators), one container per walker this rank holds. ``None``
+            with a ``dcga`` takes ``dcga.acs``.
+        num_repeats: In-model repeats per leaf visit (production 25:
+            ``{BRANCH}_NUM_PROP_REPEATS=25`` at build, and every PE stage's
+            ``PE_INMODEL_REPEATS=25`` declaration, shipped to the compute
+            ranks as a live attribute).
+        transform_fn: The branch transform, sampling basis -> waveform basis
+            (:meth:`_to_phys`; per-leaf fills supported).
+        priors: Prior containers indexed by ``branch_name``
+            (``priors[branch_name]`` is the branch's
+            :class:`~eryn.prior.ProbDistContainer`; its box also whitens and
+            caps the eigen tables).
+        inner_moves: The inner-move stack: moves, or ``(move, weight)``
+            tuples (a bare move weighs 1.0); the weights are normalized. In
+            production the stock stack: the eigen jump mixture
+            (``{BRANCH}_EIGEN_JUMP_MIX=0.1``, ``_FACTOR=3.0``), the
+            cross-walker jump (``{BRANCH}_DE_JUMP_MIX``: EMRI 0.2, MBH 0.1,
+            SOBBH 0.2) and, for MBH, the sky-mode hops.
+        Tmax: Top temperature of the per-leaf
+            :class:`~eryn.moves.TemperatureControl` ladders when ``betas_all``
+            is ``None``. Default ``inf``.
+        betas_all: Initial per-leaf inverse-temperature ladders, shape
+            ``(nleaves_max, ntemps)`` (asserted). ``None`` lets each
+            :class:`~eryn.moves.TemperatureControl` build its own. Each leaf
+            visit reloads the leaf's ladder from the sub-state's
+            ``betas_all[leaf]`` anyway, and writes it back after the visit.
+        permute_every: Cadence (in proposes / engine iterations) of the
+            walker-permuting (fancy) temperature swap: it fires at most once
+            per leaf visit, on the final in-model repeat, on proposes
+            ``permute_every, 2*permute_every, ...`` (1 = every propose; the
+            first propose after a restart never fires for cadence > 1);
+            ``<= 0`` disables it entirely. ``{BRANCH}_PERMUTE_EVERY`` (or
+            ``ADDREMOVE_PERMUTE_EVERY``) overrides it at construction; the
+            launchers set 10, but with one walker per body (their default
+            layout) the swap never fires (:meth:`_fancy_swap_fires`).
+            Default 20.
+        pad_out_of_prior: Score out-of-prior proposals at the first in-prior
+            proposed point instead of dropping them from the batch (keeps the
+            batch shape fixed, e.g. for JIT-compiled scorers); their lnL is
+            still set to the -1e300 sentinel, so they are rejected. Default
+            ``False`` (also in production).
+        dcga: A :class:`~lisatools.domaincomputation.DomainComputationGroupArray`
+            to run generation and scoring on per-device generator replicas
+            (:meth:`create_waveform_gen_replicas`). Default ``None``: the
+            container path, itself shard-aware; the production builders
+            never pass one.
+        waveform_gen_method: With ``dcga``: the name of the generator
+            method that builds templates (``waveform_gen`` is then the object).
+        waveform_like_method: With ``dcga``: the name of the generator
+            method whose output is scored. Default: ``waveform_gen_method``.
+        run_async: With ``dcga``: score asynchronously (no device sync before
+            the likelihood). Default ``False``.
+        run_threaded: With ``dcga``: run the per-device operations in
+            threads. Default ``False``.
+        eigen_refresh_every: Leaf-visit cadence of the eigen inner-move table
             refresh (:meth:`refresh_inner_move_tables`). ``None`` reads
-            ``{BRANCH}_EIGEN_REFRESH``, then 10.
-        eigen_eps_rel: finite-difference step of the likelihood ("ll")
+            ``{BRANCH}_EIGEN_REFRESH``, then 10 (launchers: 10 for all three
+            branches).
+        eigen_eps_rel: Finite-difference step of the likelihood ("ll")
             information-matrix route, as a fraction of each prior-box width.
-            ``None`` reads ``{BRANCH}_EIGEN_EPS_REL``, then 1e-4.
+            ``None`` reads ``{BRANCH}_EIGEN_EPS_REL``, then 1e-4 (unset in
+            the launchers).
         eigen_table_scope: ``"walker_max"`` (one table at the max-lnL cold
             walker) or ``"per_walker"`` (one per (temperature, walker) point);
             ll route only. ``None`` reads ``{BRANCH}_EIGEN_SCOPE``, then
-            ``"walker_max"``. See :meth:`_eigen_scope`.
-        eigen_info: information-matrix route of the eigen tables: ``"ll"``
-            (likelihood second differences, the default) or ``"gram"`` (the
-            Gram matrix ``<dh_a|dh_b>`` of the move's own batched templates;
-            only on moves that implement ``_gram_templates``). ``None`` reads
-            ``{BRANCH}_EIGEN_INFO``, then ``"ll"``. See :meth:`_eigen_info` and
-            ``docs/eigen-info-routes.md``.
+            ``"walker_max"`` (launchers: ``walker_max``). See
+            :meth:`_eigen_scope`.
+        eigen_info: Information-matrix route of the eigen tables: ``"ll"``
+            (likelihood second differences, the code default) or ``"gram"``
+            (the Gram matrix ``<dh_a|dh_b>`` of the move's own batched
+            templates; only on moves that implement ``_gram_templates``, as
+            all three production moves do). ``None`` reads
+            ``{BRANCH}_EIGEN_INFO``, then ``"ll"`` (launchers: ``gram``). See
+            :meth:`_eigen_info` and ``docs/eigen-info-routes.md``.
         eigen_gram_target: Gram route only: the template change each
             column's step is tuned to, as a fraction of ``||h||``; ``0`` keeps
             the fixed starting steps. ``None`` reads
-            ``{BRANCH}_EIGEN_GRAM_TARGET``, then 1e-3. See :meth:`_gram_target`.
+            ``{BRANCH}_EIGEN_GRAM_TARGET``, then 1e-3 (unset in the
+            launchers). See :meth:`_gram_target`.
         eigen_gram_eps_rel: Gram route only: the starting step as a fraction
             of each prior-box width. ``None`` reads
             ``{BRANCH}_EIGEN_GRAM_EPS_REL``, then the ll route's
-            :meth:`_eigen_eps_rel`.
-        eigen_axis_adapt: widen each eigen table axis's step to the chain's
+            :meth:`_eigen_eps_rel` (unset in the launchers).
+        eigen_axis_adapt: Widen each eigen table axis's step to the chain's
             own robust width along it (directions kept; floor = the
             information-matrix sigma, cap = the table's own cap). ``None``
             reads ``{BRANCH}_EIGEN_AXIS_ADAPT``, then ``False`` (off: every
-            table bit-identical to the information-matrix one). See
-            :meth:`_eigen_adapt_table`.
-        eigen_adapt_visits: ring-buffer length K of the adaptation, in leaf
+            table bit-identical to the information-matrix one; launchers: on
+            for all three). See :meth:`_eigen_adapt_table`.
+        eigen_adapt_visits: Ring-buffer length K of the adaptation, in leaf
             visits (the end-of-visit rung ensemble of each). ``None`` reads
-            ``{BRANCH}_EIGEN_ADAPT_VISITS``, then 50.
-        eigen_adapt_min_visits: the buffer must hold this many visits before
+            ``{BRANCH}_EIGEN_ADAPT_VISITS``, then 50 (unset in the
+            launchers).
+        eigen_adapt_min_visits: The buffer must hold this many visits before
             a refresh adapts (until then the table is the information-matrix
-            one). ``None`` reads ``{BRANCH}_EIGEN_ADAPT_MIN_VISITS``, then 10.
-        eigen_adapt_pool: under the walker-block fan-out, adapt every rank's
+            one). ``None`` reads ``{BRANCH}_EIGEN_ADAPT_MIN_VISITS``, then 10
+            (unset in the launchers).
+        eigen_adapt_pool: Under the walker-block fan-out, adapt every rank's
             step scale from the UNION of all walkers' rung ensembles (the
             head ships the full ensemble's rung coordinates in every propose
             payload) instead of the rank's own walkers. Acts only with
             ``eigen_axis_adapt`` on. ``None`` reads
-            ``{BRANCH}_EIGEN_ADAPT_POOL``, then ``False``. See
+            ``{BRANCH}_EIGEN_ADAPT_POOL``, then ``False`` (launchers: on). See
             :meth:`_note_eigen_pool_sample`.
-        eigen_temper_sigmas: rung ``k`` of the eigen inner move steps with
+        eigen_temper_sigmas: Rung ``k`` of the eigen inner move steps with
             ``sigma / sqrt(beta_k)`` (capped at the table's own cap) instead
             of the cold sigma at every rung; the stored / persisted table
             stays the cold one. ``None`` reads
-            ``{BRANCH}_EIGEN_TEMPER_SIGMAS``, then ``False``. See
-            :meth:`_eigen_visit_rung_scale`.
-        eigen_adapt_max_factor: safety cap of the step-scale adaptation: an
+            ``{BRANCH}_EIGEN_TEMPER_SIGMAS``, then ``False`` (launchers: on).
+            See :meth:`_eigen_visit_rung_scale`.
+        eigen_adapt_max_factor: Safety cap of the step-scale adaptation: an
             adapted sigma never exceeds this multiple of the
             information-matrix sigma (:func:`factor_capped_sigmas`). ``None``
-            reads ``{BRANCH}_EIGEN_ADAPT_MAX_FACTOR``, then 100; ``<= 0`` or
-            ``inf`` = no cap. Inert unless ``eigen_axis_adapt`` is on.
-        eigen_axis_acc_log: tally the eigen inner move's proposals and
+            reads ``{BRANCH}_EIGEN_ADAPT_MAX_FACTOR``, then 100 (launchers:
+            100); ``<= 0`` or ``inf`` = no cap. Inert unless
+            ``eigen_axis_adapt`` is on.
+        eigen_axis_acc_log: Tally the eigen inner move's proposals and
             acceptances per table axis (cold rung vs hot rungs) and log them
             once per table refresh (telemetry only). ``None`` reads
-            ``{BRANCH}_EIGEN_AXIS_ACC_LOG``, then ``False``. See
-            :meth:`_note_inner_outcome`.
-        eigen_axis_acc_tune: the acceptance-driven per-axis step controller
+            ``{BRANCH}_EIGEN_AXIS_ACC_LOG``, then ``False`` (launchers: on
+            for all three). See :meth:`_note_inner_outcome`.
+        eigen_axis_acc_tune: The acceptance-driven per-axis step controller
             (implies the accounting): at each table refresh an axis whose
             cold acceptance over the window fell below ``eigen_axis_acc_min``
             has its step divided by ``eigen_axis_acc_factor`` (never below
             the information-matrix sigma), one above ``eigen_axis_acc_max``
             multiplied by it (never above the adapted width, or the box cap
             with the adaptation off). ``None`` reads
-            ``{BRANCH}_EIGEN_AXIS_ACC_TUNE``, then ``False``. See
-            :meth:`_eigen_axis_tune_table`.
-        eigen_axis_acc_min / eigen_axis_acc_max / eigen_axis_acc_factor:
-            the controller's band and step (``{BRANCH}_EIGEN_AXIS_ACC_MIN`` /
-            ``_MAX`` / ``_FACTOR``; 0.1 / 0.5 / 2).
-        ladder_reanchor_nats: the lost-rung guard's threshold in lnL nats
+            ``{BRANCH}_EIGEN_AXIS_ACC_TUNE``, then ``False`` (launchers: on
+            for all three). See :meth:`_eigen_axis_tune_table`.
+        eigen_axis_acc_min: The controller's lower acceptance bound
+            (``{BRANCH}_EIGEN_AXIS_ACC_MIN``, default 0.1; the launchers set
+            0.1 for EMRI).
+        eigen_axis_acc_max: The controller's upper acceptance bound
+            (``{BRANCH}_EIGEN_AXIS_ACC_MAX``, default 0.5; EMRI 0.5).
+        eigen_axis_acc_factor: The controller's step factor, ``> 1``
+            (``{BRANCH}_EIGEN_AXIS_ACC_FACTOR``, default 2; EMRI 2). An
+            inconsistent min / max / factor set falls back to the defaults
+            (:meth:`_eigen_axis_acc_bounds`).
+        ladder_reanchor_nats: The lost-rung guard's threshold in lnL nats
             (:meth:`_reanchor_lost_rungs`); ``0`` disables the guard.
-            ``None`` reads ``{BRANCH}_LADDER_REANCHOR_NATS``, then 200.
+            ``None`` reads ``{BRANCH}_LADDER_REANCHOR_NATS``, then 200
+            (launchers: EMRI 100, SOBBH 60, MBH 0 = off).
+        cold_to_hot_every: Cadence in proposals of the search-stage cold ->
+            hot rotation (:meth:`_maybe_rotate_cold_into_hot`); ``<= 0``
+            disables it. ``None`` reads ``{BRANCH}_COLD_TO_HOT_EVERY``, then
+            :data:`COLD_TO_HOT_EVERY_DEFAULT` (125; launchers: 125).
         ladder_top_snr: SNR-keyed per-leaf ladders (user ruling 2026-10-18,
             default off): ``> 0`` makes each leaf's ladder
             ``make_ladder(ndim, ntemps, Tmax=clip((SNR_leaf / top)^2,
             ladder_tmax_min, ladder_tmax))``. ``None`` reads
-            ``{BRANCH}_LADDER_TOP_SNR``, then 0 (off). See
-            :meth:`_maybe_update_snr_ladders` and
+            ``{BRANCH}_LADDER_TOP_SNR``, then 0 (off; unset in the
+            launchers). See :meth:`_maybe_update_snr_ladders` and
             :mod:`lisatools.sampling.snrladder`.
-        ladder_tmax / ladder_tmax_min: the clip's ceiling / floor (``None``
-            reads ``{BRANCH}_LADDER_TMAX`` / ``{BRANCH}_LADDER_TMAX_MIN``, then
-            the uncapped make_ladder top / 4). Inert with the knob off.
-        ladder_top_snr_refresh: every N proposes, rebuild the ladder of a leaf
+        ladder_tmax: The clip's ceiling. ``None`` reads
+            ``{BRANCH}_LADDER_TMAX``, then the uncapped make_ladder top.
+            Inert with ``ladder_top_snr`` off, as in production, where the
+            launchers' ``{BRANCH}_LADDER_TMAX`` exports only size the
+            configured ladders the stock Settings build.
+        ladder_tmax_min: The clip's floor. ``None`` reads
+            ``{BRANCH}_LADDER_TMAX_MIN``, then 4. Inert with
+            ``ladder_top_snr`` off.
+        ladder_top_snr_refresh: Every N proposes, rebuild the ladder of a leaf
             whose SNR moved more than 20 % since its ladder was built (0 =
             never; ``None`` reads ``{BRANCH}_LADDER_TOP_SNR_REFRESH``).
-        ladder_top_snr_refresh_pe: allow that refresh in PE stages too
+        ladder_top_snr_refresh_pe: Allow that refresh in PE stages too
             (``None`` reads ``{BRANCH}_LADDER_TOP_SNR_REFRESH_PE``, then off:
             search stages only).
-        proposal_frame: the coordinates the inner moves PROPOSE in (user
+        proposal_frame: The coordinates the inner moves PROPOSE in (user
             ruling 2026-10-19): ``"sampling"`` (the sampling basis, the
             default: bit-identical) or ``"lisa"`` (every inner move sees
             ``y = F(x)``, its proposal is mapped back with ``F^-1`` and the
             Metropolis factor gains ``ln|J_F(x)| - ln|J_F(x')|``; the tables,
             the adaptation, the controller and the cross-walker jump all work
-            in ``y``). ``None`` reads ``{BRANCH}_PROPOSAL_FRAME``, then
-            ``"sampling"``. See :meth:`_frame_proposal`.
-        proposal_frame_map: the frame map ``F`` of ``"lisa"`` (a
+            in ``y``; the sky-mode hops keep converting frames themselves).
+            ``None`` reads ``{BRANCH}_PROPOSAL_FRAME``, then ``"sampling"``.
+            Both launchers export ``MBH_PROPOSAL_FRAME=lisa`` (rollback:
+            ``MBH_PROPOSAL_FRAME=sampling`` on the launch line); EMRI and
+            SOBBH stay ``"sampling"``. See :meth:`_frame_proposal`.
+        proposal_frame_map: The frame map ``F`` of ``"lisa"`` (a
             :class:`~lisatools.sampling.moves.skymodehop.LISAFrameMap`; the
-            stock MBH build installs one). ``"lisa"`` without a map is
-            refused: the branch's basis has no frame columns.
-        **kwargs: additional keyword arguments for the Move class.
+            stock MBH build installs one, ``make_mbh_proposal_frame_map`` in
+            the stock source runtime). ``"lisa"`` without a map is refused
+            with a ``ValueError`` (:meth:`_frame_map`): the branch's basis has
+            no frame columns.
+        **kwargs: Forwarded to :class:`eryn.moves.StretchMove` and on to
+            eryn's red/blue and base ``Move`` constructors (``nsplits``,
+            ``randomize_split``, ``a``, ``use_gpu``, ...; extra keys such as
+            the builder's ``name`` are accepted and ignored there).
+
+    Attributes:
+        moves (list): The inner moves (tuples unpacked).
+        move_weights (np.ndarray): Their normalized draw weights.
+        temperature_controls (list): One
+            :class:`~eryn.moves.TemperatureControl` per leaf (``permute``
+            off; the fancy swap is driven by ``permute_every``).
+        num_repeats (int): In-model repeats per leaf visit (a fan-out live
+            attribute: the head's value is installed on every rank per
+            propose).
+        n_cold_to_hot_events (int): Cold -> hot rotations so far (this
+            process).
+        check_ll_mode (str): ``{BRANCH}_CHECK_LL`` (else
+            ``ADDREMOVE_CHECK_LL``, default ``"1"``): ``"0"`` off, ``"1"``
+            warn, ``"strict"`` raise. ``"0"`` in both launchers.
+        check_ll_every (int): ``{BRANCH}_CHECK_LL_EVERY``, else the class
+            default ``_check_ll_every_default``.
+        record_inner_products (bool): ``{BRANCH}_RECORD_DH``, else the class
+            default ``_record_dh_default`` (off here, on in the three fast
+            subclasses).
+        swap_debug (bool): ``{BRANCH}_SWAP_DEBUG`` (default off): the
+            ``[SWAP_DBG]`` / ``[STAGE]`` lines.
+        debug (bool): ``{BRANCH}_DEBUG`` (default off): the flip-book plots
+            (see :meth:`_setup_debug`).
+        eigen_store_path (str or None): The run's store path, stamped by the
+            builder; the eigen-table sidecar sits next to it.
+        eigen_store_readonly (bool): Set on non-head compute ranks under the
+            walker-block fan-out: they adopt the head's sidecar entries but
+            never write.
+        accepted (np.ndarray): Accumulated in-model acceptances, shape
+            ``(ntemps_module, nwalkers)`` after the first propose.
+
+    Note:
+        The propose contract:
+        :meth:`~lisatools.globalfit.moves.walkerfanout.WalkerFanoutMixin.propose`
+        owns ``propose(model, state)``. It calls :meth:`fanout_prepare_state`
+        on the full ensemble, then :meth:`propose_local` either on the full
+        state (single process, the flat replica body) or, under the
+        walker-block fan-out, on every rank's walker slice, merging the
+        slices back on the head (:meth:`fanout_merge_extra` pools the swap
+        tallies and adapts each visited ladder once). The body samples the
+        branch's TEMPERED sub-state (``state.sub_states[branch_name]``:
+        coords, inds, ``betas_all``, per-leaf ``log_like`` / ``log_prior``,
+        the in-model and swap counters, ``d_h`` / ``h_h``), sets every rung
+        of the main state's ``log_like`` to the containers' cold lnL, and
+        mirrors the sub-state's cold row into the main state
+        (:meth:`~lisatools.globalfit.moves.globalfitmove.GlobalFitMove._sync_cold_row`)
+        before returning.
+
+    Example:
+        A custom single-source branch (``acs``, ``wave_gen`` and
+        ``transform`` come from a built fit, ``priors`` maps ``"mybranch"``
+        to its :class:`~eryn.prior.ProbDistContainer`, and the sampled state
+        must carry the branch's tempered sub-state; the stock MBH / EMRI /
+        SOBBH moves are built by the recipe instead):
+
+        .. code-block:: python
+
+            from eryn.moves import EigenAxisMove
+            from lisatools.globalfit.moves import ResidualAddOneRemoveOneMove
+
+            move = ResidualAddOneRemoveOneMove(
+                "mybranch", (ntemps, nwalkers, nleaves_max, ndim),
+                wave_gen, {}, {}, acs, 25, transform, priors,
+                [EigenAxisMove(mode="axis")],
+                eigen_refresh_every=10,
+            )
     """
 
     def __init__(
@@ -950,11 +1323,18 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return max(1, int(val)) if val is not None else 10
 
     def _eigen_fisher_dict(self):
+        """``{leaf: information-matrix sigmas}``, the adaptation's floor (created on first use)."""
         if getattr(self, "_eigen_fisher_sigmas", None) is None:
             self._eigen_fisher_sigmas = {}
         return self._eigen_fisher_sigmas
 
     def _eigen_carried_dict(self):
+        """``{leaf: (axes, sigmas)}`` of an adapted scale adopted from the sidecar.
+
+        Filled by :meth:`_adopt_persisted_eigen_table` after a restart and
+        mapped onto the new axes by :meth:`_eigen_adapt_table` until the ring
+        buffer holds enough visits (created on first use).
+        """
         if getattr(self, "_eigen_carried", None) is None:
             self._eigen_carried = {}
         return self._eigen_carried
@@ -1300,11 +1680,14 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
     def refresh_inner_move_tables(self, leaf, work, betas=None):
         """Feed per-leaf ``(axes, sigmas)`` tables to eigen inner moves.
 
-        Called once per leaf visit in ``propose`` — after
+        Called once per leaf visit in :meth:`propose_local` — after
         ``setup_likelihood_here`` (the leaf is exposed, so ``compute_like``
         scores against the right residual) and after ``self._current_leaf``
         is set (per-leaf transform fills resolve). No-op unless one of
-        ``self.moves`` is an :class:`eryn.moves.EigenAxisMove`.
+        ``self.moves`` is an :class:`eryn.moves.EigenAxisMove` (or the
+        fallback of a cross-walker jump is one, :meth:`_eigen_inner_moves`).
+        It also clears the proposal frame's per-visit ``ln|det J|`` memo
+        (:meth:`_frame_log_det`) first, whatever the stack.
 
         One table product per leaf (:meth:`_build_eigen_table`: a shared
         table at the max-lnL cold walker, or per-(temperature, walker) tables
@@ -1347,6 +1730,15 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         after the adaptation, before the install) and the window's log
         lines; every visit then fixes the cross-walker jump's partner spec
         (:meth:`_de_leaf_spec`) when one is in the stack.
+
+        Args:
+            leaf (int): The leaf being visited.
+            work (eryn.state.Branch): The working branch of the visit (the
+                sub-state's tempered view, coords ``(ntemps, nwalkers,
+                nleaves_max, ndim)``); its cold rows seed the table builds.
+            betas (np.ndarray, optional): The visit's ladder ``(ntemps,)``
+                for the tempered step. Default ``None``: the leaf's
+                temperature control's ``betas``.
         """
         # the proposal frame's per-row ln|det J| memo is per leaf visit
         self._frame_ldj_cache = None
@@ -1603,6 +1995,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return arr
 
     def _eigen_axis_tune_dict(self):
+        """``{leaf: (ndim,) multiplier}`` of the acceptance controller (created on first use)."""
         if getattr(self, "_eigen_axis_tune", None) is None:
             self._eigen_axis_tune = {}
         return self._eigen_axis_tune
@@ -1730,6 +2123,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
 
     @staticmethod
     def _rates(prop, acc):
+        """``acc / prop`` elementwise, NaN where nothing was proposed."""
         prop = np.asarray(prop, dtype=float)
         with np.errstate(divide="ignore", invalid="ignore"):
             return np.where(prop > 0, np.asarray(acc, dtype=float) / np.where(prop > 0, prop, 1.0),
@@ -1737,6 +2131,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
 
     @staticmethod
     def _fmt_rates(r):
+        """Space-joined ``0.42`` rates for a log line (``-`` for a non-finite one)."""
         return " ".join("-" if not np.isfinite(v) else f"{v:.2f}" for v in np.ravel(r))
 
     def _widened_axis_acceptance_note(self, moved):
@@ -1919,6 +2314,12 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return int(self._de_iter_count) % 2
 
     def _set_de_pool(self, pool, parity):
+        """Install this propose's partner pool and parity; bumps the pool token.
+
+        ``pool`` is ``{leaf: (ntemps, nwalkers_global, ndim)}`` sampling-basis
+        rows (or ``None``), ``parity`` 0 / 1 (or ``None``). The token
+        invalidates :meth:`_de_leaf_spec`'s per-(leaf, pool) cache.
+        """
         self._de_pool = pool
         self._de_parity = None if parity is None else int(parity)
         self._de_pool_token = int(getattr(self, "_de_pool_token", 0)) + 1
@@ -2053,8 +2454,18 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         ``curr.general_info.main_file_path`` (``eigen_store_path``), with
         the armed mid-iteration-checkpoint singleton
         (:func:`~lisatools.globalfit.midit_checkpoint.main_store_path`) as
-        the fallback for moves built outside the recipe. Both are set on
-        the sampling rank only, which is what keeps the writer single.
+        the fallback for moves built outside the recipe (``None`` on the
+        9mo / 12mo runs, ``MIDIT_CHECKPOINT=0``). The builder stamps the
+        path on every rank; the fan-out keeps the writer single:
+        :meth:`~lisatools.globalfit.moves.walkerfanout.WalkerFanoutMixin.install_walker_fanout`
+        clears it on non-head ranks in replica mode and marks the non-head
+        ranks of the walker-block layout ``eigen_store_readonly`` (they read
+        the head's entries, :meth:`_persist_eigen_table` skips them).
+        ``EIGEN_TABLES_PERSIST=0`` turns persistence off (default on; unset
+        in the launchers).
+
+        Returns:
+            str or None: ``<store minus .h5>_eigen_tables.pkl``, or ``None``.
         """
         if not eigen_table_persist.persist_enabled():
             return None
@@ -2191,7 +2602,16 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return True
 
     def _persist_eigen_table(self, leaf):
-        """Write-through the table just built for ``leaf``."""
+        """Write-through the table just built for ``leaf`` to the run's sidecar.
+
+        The entry (:func:`~lisatools.globalfit.moves.eigen_table_persist.make_entry`)
+        carries the table, the visit counter, the expansion point, the
+        guards of :meth:`_eigen_persist_guards`, the information-matrix floor
+        while ``{BRANCH}_EIGEN_AXIS_ADAPT`` is on and the controller's
+        multiplier while ``{BRANCH}_EIGEN_AXIS_ACC_TUNE`` is on. A no-op on a
+        read-only rank or with persistence off; a failed write warns and the
+        run continues.
+        """
         if getattr(self, "eigen_store_readonly", False):
             return  # compute rank: the head is the sidecar's single writer
         path = self._eigen_sidecar_path()
@@ -2755,19 +3175,32 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
 
     @property
     def dcga(self) -> DomainComputationGroupArray:
+        """The per-device computation groups, or ``None`` (the container path)."""
         return self._dcga
 
     @property
     def run_async(self) -> bool:
+        """DCGA path: score without a device sync before the likelihood."""
         return self._run_async
 
     @property
     def run_threaded(self) -> bool:
+        """DCGA path: run the per-device operations in threads."""
         return self._run_threaded
 
     def create_waveform_gen_replicas(self):
         """One waveform generator per device, seeded from the generator
-        object's ``.kwargs`` with the split's device-local orbits."""
+        object's ``.kwargs`` with the split's device-local orbits.
+
+        Called by the constructor when ``dcga`` and ``waveform_gen_method``
+        are given; fills :attr:`waveform_generators` (one per DCGA split,
+        built inside that split's device context, its ``orbits`` kwarg
+        replaced by the split's own).
+
+        Raises:
+            ValueError: When the generator object has no ``kwargs``
+                attribute.
+        """
         gen_obj = self._waveform_gen_obj
         if not hasattr(gen_obj, "kwargs"):
             raise ValueError(
@@ -2793,15 +3226,35 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
 
     @property
     def waveform_generators(self) -> list:
+        """DCGA path: the per-split generator replicas (:meth:`create_waveform_gen_replicas`)."""
         return self._waveform_generators
 
     def make_args_tuple(self, coords) -> tuple:
         """Unpack coordinates into per-parameter arrays for the generator
-        (JAX needs the separate memory addresses)."""
+        (JAX needs the separate memory addresses).
+
+        Args:
+            coords (array_like): Waveform-basis rows ``(n, ndim)`` of one split.
+
+        Returns:
+            tuple: ``ndim`` arrays of length ``n`` (module ``xp``: cupy when
+            importable, else numpy).
+        """
         return tuple(xp.array(coords[:, i]) for i in range(coords.shape[1]))
 
     def prepare_inputs(self, coords, data_index):
-        """Partition coordinates/indices by split and place them on device."""
+        """Partition coordinates/indices by split and place them on device.
+
+        Args:
+            coords (array_like): Waveform-basis rows ``(n, ndim)``.
+            data_index (array_like): Walker index of each row ``(n,)``.
+
+        Returns:
+            tuple: ``(positions_per_split, data_intra_index_per_split,
+            waveform_args_per_split)``: each row's position per split, its
+            container index inside the split, and the split's generator
+            argument tuples (:meth:`make_args_tuple`).
+        """
         positions_per_split, data_intra_index_per_split, _ = (
             self.dcga.unpack_indices(data_index)
         )
@@ -2829,13 +3282,26 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         )
 
     def aggregate_waveforms(self, waveforms_per_split) -> list[DomainBase]:
-        """Flatten per-split waveform lists into one list."""
+        """Flatten per-split waveform lists into one list (split order).
+
+        Args:
+            waveforms_per_split (list[list]): One list of templates per split.
+
+        Returns:
+            list[DomainBase]: The concatenated templates.
+        """
         waveforms = []
         for waveforms_split in waveforms_per_split:
             waveforms.extend(waveforms_split)
         return waveforms
 
     def _get_waveform_here_dcga(self, coords: np.ndarray) -> list[DomainBase]:
+        """DCGA path of :meth:`get_waveform_here`: one template per row ``(n, ndim)``.
+
+        Rows are spread over the splits (``data_index`` = the row index),
+        built by each replica's ``waveform_gen_method`` and returned as one
+        flat list in split order after a device sync.
+        """
         self.free_gpu_memory()
 
         data_index = np.arange(coords.shape[0], dtype=np.int32)
@@ -2862,6 +3328,21 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
     def _compute_like_dcga(
         self, coords_in: np.ndarray, data_index: np.ndarray
     ) -> np.ndarray:
+        """DCGA scorer: lnL of waveform-basis rows against their walkers' data.
+
+        Each split's replica builds its rows' likelihood inputs with
+        ``waveform_like_method``; the DCGA scores them
+        (``compute_signal_likelihood``, data and noise both indexed by the
+        rows' ``data_index``). Non-finite values warn and are replaced by
+        -1e300.
+
+        Args:
+            coords_in: Waveform-basis rows ``(n, ndim)``.
+            data_index: Walker (container) index of each row ``(n,)``.
+
+        Returns:
+            np.ndarray: ``(n,)`` lnL values.
+        """
         (
             positions_per_split,
             data_intra_index_per_split,
@@ -2932,7 +3413,31 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
     #   {BRANCH}_DEBUG_EVERY       plot only every Nth propose step (1)
     # ------------------------------------------------------------------
     def _setup_debug(self) -> None:
-        """Read the per-branch ``{BRANCH}_DEBUG`` env options (called from __init__)."""
+        """Read the per-branch debug and check env options (called from ``__init__``).
+
+        Sets, from the environment at construction:
+
+        * ``debug`` (``{BRANCH}_DEBUG``, default ``"0"``) and the plot
+          options ``debug_plot_dir`` (``{BRANCH}_DEBUG_DIR``, default
+          ``./gf_output/{branch}_debug/``), ``debug_plot_walker``
+          (``{BRANCH}_DEBUG_PLOT_WALKER``, 0), ``debug_plot_leaf``
+          (``{BRANCH}_DEBUG_PLOT_LEAF``, unset = the first alive leaf),
+          ``debug_every`` (``{BRANCH}_DEBUG_EVERY``, 1) and ``debug_log``
+          (``{BRANCH}_DEBUG_LOG``, 1 = symmetric-log colour scale);
+        * ``check_ll_mode`` (``{BRANCH}_CHECK_LL``, else
+          ``ADDREMOVE_CHECK_LL``, default ``"1"``; ``"0"`` in both
+          launchers) and ``check_ll_every`` (``{BRANCH}_CHECK_LL_EVERY``,
+          else ``_check_ll_every_default``; SOBBH 30 in the launchers);
+        * ``record_inner_products`` (``{BRANCH}_RECORD_DH``, else
+          ``_record_dh_default``; unset in the launchers, so on for the three
+          fast subclasses);
+        * ``swap_debug`` (``{BRANCH}_SWAP_DEBUG``, default off);
+        * ``permute_every``, overridden by ``{BRANCH}_PERMUTE_EVERY`` (else
+          ``ADDREMOVE_PERMUTE_EVERY``) when set (10 in the launchers).
+
+        The boolean knobs are parsed with ``int``, so they take integer
+        strings only.
+        """
         p = str(self.branch_name).upper()
         self._dbg_prefix = p
         self.debug = bool(int(os.environ.get(f"{p}_DEBUG", "0")))
@@ -2997,6 +3502,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                 self.debug_plot_leaf, self.debug_every,
             )
 
+    # TODO check: keep/remove/document -- no callers anywhere (propose_local inlines the same test)
     def _dbg_trace_this_step(self) -> bool:
         """True when the current propose step should produce debug plots."""
         return self.debug and (self._dbg_step % self.debug_every == 0)
@@ -3230,6 +3736,15 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
                     tmp_move.periodic = periodic
 
     def free_gpu_memory(self):
+        """Return cached device memory: the DCGA's pools, else cupy's default pool.
+
+        The cupy branch acts only when the move's eryn ``xp`` is cupy
+        (eryn's ``use_gpu``); the production builders do not pass
+        ``use_gpu``, so there it is a no-op and the module-level pool release
+        (``_free_pool``) is what runs between leaf visits. Called at the end
+        of :meth:`propose_local`, before a DCGA template batch and after a
+        DCGA scoring batch.
+        """
         if self._dcga is not None:
             self._dcga.free_gpu_memory()
             return
@@ -3240,7 +3755,12 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         """Populate ``skip_swap_branches`` on each per-leaf temperature control.
 
         Branches other than :attr:`branch_name` are skipped during temperature
-        swapping so this move does not corrupt unrelated branches.
+        swapping so this move does not corrupt unrelated branches. Runs once
+        (the first propose); a no-op once the controls carry a list.
+
+        Args:
+            state (GFState): The state being proposed from (its branch names
+                are read).
         """
 
         if self.temperature_controls[0].skip_swap_branches is not None:
@@ -3360,17 +3880,34 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         )
 
     def add_back_in_cold_chain_sources(self, coords):
-        """Subtract current cold-chain sources from the residual (one walker at a time)."""
+        """Subtract current cold-chain sources from the residual (one walker at a time).
+
+        The FOLD: the sources go back INTO the fit (``r -> r - h``). The
+        name is from the model's point of view.
+
+        Args:
+            coords (array_like): Waveform-basis cold-chain rows, one per
+                walker, ``(nwalkers, ndim)``.
+        """
         self._apply_cold_chain_sources(coords, sign=-1)
 
     def remove_cold_chain_sources(self, coords):
-        """Add current cold-chain sources back into the residual (one walker at a time)."""
+        """Add current cold-chain sources back into the residual (one walker at a time).
+
+        The EXPOSE: the sources leave the fit (``r -> r + h``). The name is
+        from the model's point of view.
+
+        Args:
+            coords (array_like): Waveform-basis cold-chain rows, one per
+                walker, ``(nwalkers, ndim)``.
+        """
         self._apply_cold_chain_sources(coords, sign=+1)
 
         # ll_tmp3 = self.acs.likelihood(
         #     source_only=True
         # )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
 
+    # TODO check: keep/remove/document -- no callers in src/scripts/tests (only the dead MBHSpecialMove overrides it; the move builds templates through the containers' signal_gen)
     def get_waveform_here(self, coords: np.ndarray) -> DomainBaseArray | list[DomainBase]:
         """Get the waveforms for the given source coordinates.
 
@@ -3401,22 +3938,57 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
 
     def setup_likelihood_here(self, coords):
         """Set up state before computing the likelihood (DCGA path computes
-        the per-split <d|d> terms; the plain path needs nothing)."""
+        the per-split <d|d> terms; the plain path needs nothing).
+
+        Called through the ``"setup"`` cold-chain replay right after a leaf
+        is exposed; the fast subclasses override it (and call this).
+
+        Args:
+            coords (array_like): The exposed leaf's waveform-basis cold-chain
+                rows ``(nwalkers, ndim)`` (unused here).
+        """
         if self._dcga is not None:
             self._dcga.compute_d_d_terms()
 
     def compute_acs_like(self, coords_in, data_index, signal_gen=None, **kwargs):
-        """
-        Compute the likelihood for the given coordinates and data index using the analysis container array.
+        """Score waveform-basis rows through the containers' own likelihood path.
+
+        The container (ACA) scorer: every row is templated by its walker's
+        container ``signal_gen`` machinery and scored by
+        :meth:`AnalysisContainerArray.calculate_signal_likelihood` (which owns
+        the shard grouping, the per-split device contexts and the -1e300
+        out-of-domain sentinel). Rows are grouped by the generator override
+        each container resolves to, one vectorized call per group. On the
+        production runs this is only the failure fallback of the batched MBH
+        and direct EMRI scorers and the scorer of the ``{BRANCH}_CHECK_LL``
+        cross-check (off); the base move's :meth:`compute_like_local` uses it
+        for every row.
 
         Args:
-            coords_in: already-transformed (waveform-basis) coordinates of the sources for which we want to compute the likelihood. Shape is (n_sources, ndim). The containers' generators are called with ``apply_transform=False`` so the branch transform — applied once by this move's choreography — is never applied twice.
-            data_index: index of the data for which we want to compute the likelihood. Shape is (n_sources,).
-            signal_gen: optional waveform generator override. By default (``None``) each targeted container's own installed generator for this branch is used (falling back to this move's generator when the container doesn't carry it — see :meth:`_resolve_signal_gen_override`), so scoring and residual bookkeeping share one template-assembly path. Pass a waveform-basis callable to score with a different generator than the one used for proposing, for example when using heterodyned likelihoods; it is wrapped in :class:`MoveSignalGen` and swapped in per call.
-            kwargs: additional keyword arguments for the likelihood computation function.
+            coords_in (array_like): Already-transformed (waveform-basis)
+                rows, shape ``(n_sources, ndim)`` (a single 1-D row counts
+                as one source). The containers' generators are called with
+                ``apply_transform=False``, so the branch transform -- applied
+                once by this move's choreography -- is never applied twice.
+            data_index (array_like): Walker (container) index of each row,
+                shape ``(n_sources,)``.
+            signal_gen (callable, optional): Generator override. By default
+                (``None``) each targeted container's own installed generator
+                for this branch is used (falling back to this move's
+                generator when the container does not carry it -- see
+                :meth:`_resolve_signal_gen_override`), so scoring and
+                residual bookkeeping share one template-assembly path. Pass
+                a waveform-basis callable to score with a different
+                generator than the one used for proposing (e.g. a
+                heterodyned likelihood); it is wrapped in
+                :class:`MoveSignalGen` and swapped in per call.
+            **kwargs: Forwarded to ``calculate_signal_likelihood``;
+                ``source_only`` (default ``False``) is popped and passed
+                explicitly.
 
         Returns:
-            ll: likelihood for the given coordinates and data index. Shape is (n_sources,).
+            np.ndarray: ``(n_sources,)`` real lnL values (-1e300 for a row
+            outside the waveform's domain).
         """
         # TODO: we should probably move the prior in here even though
         # in general with current setup it should only be points in the prior
@@ -3498,7 +4070,18 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         rank-local scorer is :meth:`compute_like_local` (DCGA or container
         path) -- subclasses override THAT, never this. The gathered
         ``d_h``/``h_h`` side outputs land on ``self._last_d_h/_last_h_h``
-        (the chunked SOBBH scorer's convention).
+        (the chunked SOBBH scorer's convention). The rows scatter only in
+        replica mode with ``{BRANCH}_LIKELIHOOD_FANOUT`` on
+        (:meth:`~lisatools.globalfit.moves.walkerfanout.WalkerFanoutMixin.rows_active`;
+        replica mode is the one-walker layout or ``GF_GPU_ROUTING=1``; the
+        launchers' default walker-block layout scores every row locally).
+
+        Args:
+            coords_in (array_like): Waveform-basis rows ``(n, ndim)``.
+            data_index (array_like): Walker index of each row ``(n,)``.
+
+        Returns:
+            np.ndarray: ``(n,)`` lnL values.
         """
         if not self.rows_active():
             return self.compute_like_local(coords_in, data_index)
@@ -3519,7 +4102,19 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return out["ll"]
 
     def compute_like_local(self, coords_in, data_index):
-        """Rank-local scorer (the pre-replica ``compute_like`` body)."""
+        """Rank-local scorer (the pre-replica ``compute_like`` body).
+
+        The DCGA path (:meth:`_compute_like_dcga`) when the move has one, else
+        :meth:`compute_acs_like` with ``waveform_like_kwargs``. The production
+        subclasses override this with their batched kernels.
+
+        Args:
+            coords_in (array_like): Waveform-basis rows ``(n, ndim)``.
+            data_index (array_like): Walker index of each row ``(n,)``.
+
+        Returns:
+            np.ndarray: ``(n,)`` lnL values.
+        """
         if self._dcga is not None:
             return self._compute_like_dcga(coords_in, data_index)
         return self.compute_acs_like(
@@ -3545,6 +4140,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return {"ll": ll, "d_h": _side(self._last_d_h), "h_h": _side(self._last_h_h)}
 
     def serve_ll_rows(self, payload, clock, model):
+        """Fan-out command ``ll_rows`` (replica mode): score the shipped row chunk on this rank."""
         return self._score_rows_local(payload["rows"])
 
     def _check_like_local(self, coords_in, data_index):
@@ -3557,6 +4153,21 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         )
 
     def compute_check_like(self, coords_in, data_index):
+        """The ``{BRANCH}_CHECK_LL`` reference lnL of rows, scattered like :meth:`compute_like`.
+
+        :meth:`_check_like_local` (the container path with the move's own
+        ``waveform_gen``) on this rank, or over the replicas with the
+        ``ll_rows_check`` command when rows scatter. Called by the
+        ``_verify_prev_logl`` cross-checks of this class and the three fast
+        subclasses (off in production, ``{BRANCH}_CHECK_LL=0``).
+
+        Args:
+            coords_in (array_like): Waveform-basis rows ``(n, ndim)``.
+            data_index (array_like): Walker index of each row ``(n,)``.
+
+        Returns:
+            np.ndarray: ``(n,)`` lnL values.
+        """
         if not self.rows_active():
             return np.asarray(self._check_like_local(coords_in, data_index))
         coords_np = np.atleast_2d(np.asarray(asnumpy(coords_in), dtype=np.float64))
@@ -3568,6 +4179,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return out["ll"]
 
     def _check_rows_local(self, rows):
+        """Serve one check row chunk: ``{"ll"}`` in row order (empty-safe)."""
         n = int(np.shape(rows["coords"])[0])
         if n == 0:
             return {"ll": np.zeros(0)}
@@ -3575,6 +4187,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return {"ll": np.asarray(ll, dtype=float).reshape(n)}
 
     def serve_ll_rows_check(self, payload, clock, model):
+        """Fan-out command ``ll_rows_check`` (replica mode): the check scorer on this rank."""
         return self._check_rows_local(payload["rows"])
 
     def _replay_cold_chain(self, kind, coords_in, leaf):
@@ -3622,6 +4235,18 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return coords[int(w0):int(w1)]
 
     def _apply_cold_chain_replay(self, payload):
+        """Apply one replayed cold-chain step on this rank's containers.
+
+        ``payload`` is ``{"kind", "coords", "leaf"}``: ``"expose"``
+        (:meth:`remove_cold_chain_sources`), ``"setup"``
+        (:meth:`setup_likelihood_here`) or ``"fold"``
+        (:meth:`add_back_in_cold_chain_sources`) on the rank's own rows of
+        the batch (:meth:`_replay_block_rows`), with ``_current_leaf`` set
+        to the payload's leaf.
+
+        Raises:
+            ValueError: On an unknown ``kind``.
+        """
         kind = payload["kind"]
         self._current_leaf = int(payload["leaf"])
         coords = self._replay_block_rows(np.asarray(payload["coords"], dtype=np.float64))
@@ -3635,6 +4260,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             raise ValueError(f"unknown cold-chain replay kind {kind!r}")
 
     def serve_ar_replay(self, payload, clock, model):
+        """Fan-out command ``ar_replay`` (replica mode): replay a cold-chain step here."""
         self._apply_cold_chain_replay(payload)
         return None
 
@@ -4163,7 +4789,12 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return prev_logl, prev_logp, records
 
     def setup(self, model, state):
-        """Per-iteration setup hook (no-op by default)."""
+        """Per-iteration setup hook (no-op by default), called first by :meth:`propose_local`.
+
+        Args:
+            model (eryn.model.Model): The sampler's model tuple.
+            state (GFState): The state being proposed from.
+        """
         return
 
     def _verify_entry_vs_acs(self, prev_logl, cold_ref, leaf):
@@ -4304,19 +4935,29 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return self.transform_fn.both_transforms(coords)
 
     def log_like_for_fancy_swaping(self, x, supps=None, branch_supps=None, **kwargs):
-        """
-        Compute the log likelihood for the given coordinates and data index for use in fancy swapping.
-        This is needed because when permuting the coordinates during tempering, we need to recompute the likelihood against the new set of residuals and covariance matrix.
+        """Re-score a permuted single-leaf slice for the walker-permuting (fancy) swap.
+
+        Passed to every repeat's
+        :meth:`~eryn.moves.TemperatureControl.temperature_swaps` as
+        ``compute_log_like``: when the swap permutes walkers, a rung's point
+        lands on another walker's residual and noise, so its lnL must be
+        recomputed there. Row ``(t, w)`` is scored against walker ``w``'s
+        container through :meth:`compute_like`, with the transform of the
+        leaf being visited. With one walker per body (the launchers' default
+        walker-block layout) the swap never fires, so this is never invoked
+        there.
 
         Args:
-            x: Dictionary of coordinates of the sources for which we want to compute the likelihood.
-                The coordinates are expected to be in the shape (ntemps, nwalkers, nleaves_max, ndim).
-            supps: supplimental information for the likelihood computation. #todo add
-            branch_supps: Branch supplimental. #todo add
+            x (dict): ``{branch_name: coords}`` with coords of shape
+                ``(ntemps, nwalkers, 1, ndim)`` in the sampling basis (one
+                leaf; asserted).
+            supps (optional): Unused.
+            branch_supps (optional): Unused.
+            **kwargs: Unused.
 
         Returns:
-            ll: likelihood for the given coordinates and data index. Shape is (ntemps, nwalkers).
-            blobs: blobs for the given coordinates and data index. Default is None.
+            tuple[np.ndarray, None]: The ``(ntemps, nwalkers)`` real lnL and
+            ``None`` (no blobs).
         """
         assert x[self.branch_name].ndim == 4 and x[self.branch_name].shape[1] == self.nwalkers
         # Single-leaf slices only: rows are scored per walker, and with
@@ -4346,6 +4987,17 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return output, None  # AS: match psd? I'm not sure
 
     def get_split_inds(self):
+        """Red/blue split label of every ``(temp, walker)`` row, ``(ntemps, nwalkers)``.
+
+        Walker ``w`` gets ``w % nsplits`` on every rung; with
+        ``randomize_split`` each rung's labels are shuffled independently
+        (``np.random``). Used by :meth:`_repeat_split_masks` for a stretch
+        inner move or ``SOBBH_SINGLE_CALL=0`` only; subclasses may override
+        the shuffle.
+
+        Returns:
+            np.ndarray: Integer labels in ``[0, nsplits)``.
+        """
         all_inds = np.tile(np.arange(self.nwalkers), (self.ntemps, 1))
         inds = all_inds % self.nsplits
         if self.randomize_split:
@@ -4385,7 +5037,16 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         two-calls-per-repeat structure without a revert. It exists so the
         cluster can bisect batch-size effects (a full ensemble is ~120-129
         rows against the old ~60) against a suspected kernel-side fault.
-        Default ``1`` = the single full-ensemble call.
+        Default ``1`` = the single full-ensemble call (unset in the
+        launchers). Despite its name the knob is read by every branch of
+        this move family (MBH and EMRI too), not only SOBBH.
+
+        Args:
+            move_here (eryn.moves.Move): The inner move drawn for the repeat.
+
+        Returns:
+            list[np.ndarray]: Boolean ``(ntemps, nwalkers)`` row masks that
+            partition the ensemble.
         """
         if (isinstance(move_here, StretchMove)
                 or os.environ.get("SOBBH_SINGLE_CALL", "1").strip() != "1"):
@@ -4475,9 +5136,21 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             dst[leaf, :nt, :] = src[:nt, : dst.shape[-1]]
 
     def fanout_temperature_controls(self):
+        """The per-leaf temperature controls (frozen on the ranks, adapted by the head)."""
         return list(self.temperature_controls)
 
     def fanout_payload_extra(self):
+        """Head -> ranks, once per propose: the clocks and the shipped samples.
+
+        Always ``fancy_swap_clock`` and ``dbg_step``; plus ``eigen_pool``
+        (the pooled adaptation sample of :meth:`_note_eigen_pool_sample`)
+        and ``de_pool`` / ``de_parity`` (the cross-walker jump's partners,
+        :meth:`_note_de_partner_sample`) when this propose took them. Each
+        outgoing sample is consumed (cleared) here.
+
+        Returns:
+            dict: The extra payload (host numpy only).
+        """
         extra = {
             "fancy_swap_clock": int(getattr(self, "_fancy_swap_clock", 0)),
             "dbg_step": int(getattr(self, "_dbg_step", 0)),
@@ -4505,6 +5178,17 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         return extra
 
     def fanout_apply_extra(self, extra):
+        """Rank side, before the body: install the head's clocks and samples.
+
+        Sets the fancy-swap clock and the debug step, appends a shipped
+        ``eigen_pool`` to the rank's pooled ring buffer
+        (:meth:`_push_eigen_pool`) and installs a shipped ``de_pool`` /
+        ``de_parity`` (:meth:`_set_de_pool`). Runs on every rank, the head's
+        own body included.
+
+        Args:
+            extra (dict): :meth:`fanout_payload_extra`'s dict.
+        """
         if "fancy_swap_clock" in extra:
             self._fancy_swap_clock = int(extra["fancy_swap_clock"])
         if "dbg_step" in extra:
@@ -4517,6 +5201,15 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
             self._set_de_pool(extra["de_pool"], extra.get("de_parity"))
 
     def fanout_reply_extra(self, part):
+        """Rank -> head: this body's per-leaf swap tallies.
+
+        Args:
+            part (GFState): The rank's returned slice (unused).
+
+        Returns:
+            dict: ``{"swap_tally": {leaf: (accepted, proposed)}}``, each a
+            float array over the rung pairs, summed over the visit's repeats.
+        """
         return {
             "swap_tally": {
                 int(leaf): (np.asarray(a, dtype=float), np.asarray(p, dtype=float))
@@ -4531,6 +5224,14 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         (``betas_all[leaf]``, read at the top of the leaf loop, written back at
         its end); ``merge_walkers`` never touches ladders, so the head writes
         the adapted ladder there itself and mirrors it on its own control.
+        The head then offers a mid-iteration checkpoint
+        (:func:`~lisatools.globalfit.midit_checkpoint.maybe_write`, a no-op
+        with ``MIDIT_CHECKPOINT=0`` as in production).
+
+        Args:
+            replies (dict): ``{rank: extra}`` of :meth:`fanout_reply_extra`.
+            new_state (GFState): The merged state; its sub-state's
+                ``betas_all`` rows of the visited leaves are rewritten.
         """
         pooled = {}
         for extra in replies.values():
@@ -4558,19 +5259,65 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
     def propose_local(self, model, state):
         """Generate proposals by removing, updating, and re-adding each leaf.
 
-        Runs on the FULL state single-process and on this rank's walker slice
-        under several compute ranks (``WalkerFanoutMixin.propose`` dispatches).
+        Runs on the FULL state single-process (and in the flat replica body)
+        and on this rank's walker slice under several compute ranks
+        (``WalkerFanoutMixin.propose`` dispatches; see the class Note).
 
-        # TODO/DOCS: detailed acceptance/swap accounting; see code for the per-leaf
-        loop and the ``compute_like`` calls used to score proposals.
+        Set-up: the :meth:`setup` hook; the fancy-swap clock ticks; the
+        per-propose swap tally and lost-rung log reset; the cold-row
+        agreement of the main state and the sub-state is checked
+        (``GF_SUBSTATE_CHECK``, default on). With no alive leaf the input
+        state is returned with an all-False acceptance. Otherwise the state
+        is deep-copied, the sub-state's ``d_h`` / ``h_h`` reset to NaN, and
+        every alive leaf (alive on every rung and walker, asserted) is
+        visited once, in a random order (``np.random.permutation``):
+
+        1. the leaf's ladder is loaded from the sub-state's
+           ``betas_all[leaf]`` into its temperature control;
+        2. the leaf is exposed and the likelihood set up on every replica
+           (:meth:`_replay_cold_chain`), then its eigen tables are refreshed
+           (:meth:`refresh_inner_move_tables`);
+        3. every rung's current point is scored (``prev_logl``,
+           :meth:`compute_like`; the ``{BRANCH}_CHECK_LL`` cross-checks when
+           due), its prior taken, and lost hot rungs re-anchored
+           (:meth:`_reanchor_lost_rungs`);
+        4. ``num_repeats`` repeats: one inner move is drawn by weight
+           (``model.random``); per split mask (:meth:`_repeat_split_masks`)
+           the split's eigen / jump tables are installed, the move proposes
+           (conjugated by the proposal frame when on, :meth:`_frame_proposal`),
+           in-prior rows are scored, and a row is accepted when
+           ``factors + logP' - logP > ln u`` (``logP`` the tempered
+           posterior); the per-axis tallies are noted. After each repeat the
+           temperature swap runs (walker-permuting on the final repeat at
+           the ``permute_every`` cadence) and the ladder adapts (single
+           process; under the fan-out the ranks' controls are frozen and the
+           head adapts once per propose, :meth:`fanout_merge_extra`);
+        5. the end-of-visit rung ensemble feeds the adaptation buffer, the
+           cold-chain inner products are recorded, the updated cold-chain
+           source is folded back, the ladder is written back to
+           ``betas_all[leaf]``, the visit's counters and per-leaf lnL are
+           written (:meth:`_record_leaf_telemetry`), and the head offers a
+           mid-iteration checkpoint.
+
+        Finally every rung of the main state's ``log_like`` is set to the
+        containers' per-walker cold lnL (ensemble-wide), the main state's
+        ``log_prior`` is left as it was, and the sub-state's cold row is
+        mirrored into the main state.
 
         Args:
-            model: ``eryn`` model object containing ``analysis_container_arr``,
-                ``random``, etc.
-            state: Current sampler state.
+            model (eryn.model.Model): The sampler's model tuple; this body
+                reads only ``model.random`` (the inner-move draw and the
+                Metropolis uniforms), the :meth:`setup` hook gets the whole
+                object.
+            state (GFState): The current state, with the branch's
+                tempered sub-state.
 
         Returns:
-            Tuple ``(new_state, accepted)``.
+            tuple[GFState, np.ndarray]: The new state and a boolean
+            ``(engine_ntemps, nwalkers)`` acceptance mask, cut to the engine
+            ladder: the mask of the LAST repeat of the last leaf visited
+            (the accumulated tallies are ``self.accepted`` and the sub-state
+            counters).
         """
         self.setup(model, state)
         tic = time.time()
@@ -5210,6 +5957,7 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         self._sync_cold_row(new_state)
         return new_state, np.asarray(accepted)[:engine_ntemps]
 
+    # TODO check: keep/remove/document -- no callers in src/scripts/tests/LATW (propose_local folds each leaf itself)
     def replace_residuals(self, old_state, new_state):
         """Swap the cold-chain contribution from ``old_state`` to ``new_state``.
 
@@ -5219,8 +5967,9 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
         :class:`AnalysisContainerArray` dispatches the actual residual
         update by basis. The old FD-only implementation hand-assembled
         per-channel arrays from ``self.acs.fd``; that path is now
-        unnecessary because :meth:`add_signal_to_residual` /
-        :meth:`remove_signal_from_residual` work on any domain.
+        unnecessary because the ACA's ``apply_signal_from_params`` (behind
+        :meth:`_apply_cold_chain_sources`) works on any domain. Reads the
+        MAIN states' cold-chain coordinates (``state.branches``).
         """
         for leaf in range(old_state.branches[self.branch_name].shape[-2]):
             removal_coords = old_state.branches[self.branch_name].coords[0, :, leaf]
@@ -5239,11 +5988,14 @@ class ResidualAddOneRemoveOneMove(WalkerFanoutMixin, GlobalFitMove, StretchMove,
 # per-device waveform-generator replicas. Kept through the merge; its
 # interaction with the dev-side ACA sharding is reviewed in the dedicated
 # multi-GPU pass.
+# TODO check: keep/remove/document -- deprecated shim; only subclass is the dead TDMBHSpecialMove, otherwise tests/test_addremove_multi_shard.py only
 class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove):
     """Deprecated alias — :class:`ResidualAddOneRemoveOneMove` is ONE
     structure that takes ``dcga=`` directly (2026-07 multi-GPU pass). This
     shim maps the legacy ``MultiGPUResidualAddRemoveMove(dcga, waveform_gen,
-    ...)`` signature onto it.
+    ...)`` signature onto it: the arguments are those of the base class (in
+    the legacy order, ``dcga`` and ``waveform_gen`` first), ``acs`` is taken
+    from ``dcga.acs``, and construction emits a ``DeprecationWarning``.
     """
 
     def __init__(

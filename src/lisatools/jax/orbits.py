@@ -23,6 +23,11 @@ Convention reminders (from ``Detector.cu`` and ``configure()``):
   ``links`` array carries the actual order); LTTs and arm normals are
   shape ``(N, NLINKS)``, ``(N, NLINKS, 3)``. ``get_link_ind`` resolves
   a link-code to an index via the ``links`` array.
+
+:class:`OrbitsWrapJAX` is the ``OrbitsWrap`` / ``Orbits`` slot of the
+``lisatools_jax`` backend (:mod:`lisatools.jax.backend`) and the orbits
+object the GBGPU / BBHx JAX code reads. ``NLINKS`` / ``NSC`` are the link
+and spacecraft counts (6 and 3).
 """
 from __future__ import annotations
 
@@ -36,10 +41,16 @@ NSC = 3
 
 
 def _to_jnp(arr) -> jnp.ndarray:
-    """Convert numpy/cupy arrays to jnp.
+    """Convert numpy/cupy arrays to jnp (through the host).
 
     ``cupy`` arrays go through ``cp.asnumpy`` first so we don't
     force a JAX dependency on cupy.
+
+    Args:
+        arr (array-like): numpy, cupy or array-like input.
+
+    Returns:
+        jnp.ndarray: The data as a JAX array (on JAX's default device).
     """
     try:
         import cupy as cp
@@ -53,9 +64,46 @@ def _to_jnp(arr) -> jnp.ndarray:
 class OrbitsWrapJAX:
     """Pure-JAX analog of the C++ ``OrbitsWrap`` class.
 
-    Accepts the same 13-element tuple as ``OrbitsWrap(*pycppdetector_args)``:
-        (ltt_t0, ltt_dt, ltt_N, sc_t0, sc_dt, sc_N,
-         n_flat, ltt_flat, x_flat, links, sc_r, sc_e, armlength)
+    Takes 13 positional arguments in the order ``(ltt_t0, ltt_dt, ltt_N,
+    sc_t0, sc_dt, sc_N, n_flat, ltt_flat, x_flat, links, sc_r, sc_e,
+    armlength)``. The float tables become ``jnp`` arrays (``n``: ``(sc_N, 6,
+    3)``, ``ltt``: ``(ltt_N, 6)``, ``x``: ``(sc_N, 3, 3)``); the integer link
+    tables stay numpy. All lookups are linear interpolation on the uniform
+    grids (indices clipped to the grid).
+
+    Args:
+        ltt_t0: Start of the light-travel-time grid [s].
+        ltt_dt: Step of the light-travel-time grid [s].
+        ltt_N: Points of the light-travel-time grid.
+        sc_t0: Start of the spacecraft-position grid [s].
+        sc_dt: Step of the spacecraft-position grid [s].
+        sc_N: Points of the spacecraft-position grid.
+        n_flat (array-like): Flattened arm unit normals, ``sc_N * 6 * 3``.
+        ltt_flat (array-like): Flattened light travel times [s], ``ltt_N * 6``.
+        x_flat (array-like): Flattened spacecraft positions, ``sc_N * 3 * 3``.
+        links (array-like): The 6 link codes, in table order.
+        sc_r (array-like): Receiving spacecraft of each link.
+        sc_e (array-like): Emitting spacecraft of each link.
+        armlength: Nominal arm length [m].
+
+    Warning:
+        This order puts the light-travel-time grid FIRST, while the C++
+        ``OrbitsWrap`` and :attr:`lisatools.detector.Orbits.pycppdetector_args`
+        put the spacecraft grid first, so ``OrbitsWrapJAX(*orbits.pycppdetector_args)``
+        swaps the two grids. That is harmless when the grids coincide (the
+        base :class:`~lisatools.detector.Orbits` writes the same grid twice)
+        but not for orbits whose position and LTT grids differ. Also,
+        :meth:`get_n` interpolates the normals on the LTT grid, whereas the C++
+        ``Orbits::get_normal_unit_vec`` uses the spacecraft grid.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.jax.orbits import OrbitsWrapJAX
+
+            wrap = OrbitsWrapJAX(*orbits.pycppdetector_args)  # see the Warning
+            pos1 = wrap.get_pos(t, 1)                          # (len(t), 3)
+            ltt12 = wrap.get_light_travel_time(t, 12)          # (len(t),)
     """
 
     def __init__(
@@ -105,6 +153,7 @@ class OrbitsWrapJAX:
 
     # ---- index helpers ----
     def get_link_ind(self, link_code: int) -> int:
+        """Return the table index of ``link_code`` (e.g. ``12``); ``KeyError`` if unknown."""
         return self._link_to_ind[int(link_code)]
 
     # ---- interpolation primitives ----
@@ -116,10 +165,11 @@ class OrbitsWrapJAX:
         Matches the C++ ``Orbits::interpolate`` (linear in a uniform grid)
         rather than the cubic-spline base path. The C++ wrapper uses the
         same linear path when ``linear_interp_setup=True`` was passed to
-        ``configure()`` -- which is the only mode we accept.
+        ``configure()``; this class assumes that mode (nothing checks it).
 
         ``t`` is any shape ``S``; ``values`` is shape ``(N, ...)``. Returns
-        shape ``S + values.shape[1:]``.
+        shape ``S + values.shape[1:]``. Times outside the grid extrapolate
+        linearly from the first / last interval (the index is clipped).
         """
         x = (t - t0) / dt
         # Clip indices to valid range; out-of-bounds is the caller's
@@ -137,7 +187,13 @@ class OrbitsWrapJAX:
     def get_pos(self, t: jnp.ndarray, sc: int) -> jnp.ndarray:
         """Spacecraft position at time(s) ``t``. ``sc`` is 1-indexed.
 
-        Returns array of shape ``t.shape + (3,)``.
+        Args:
+            t: Times [s], any shape.
+            sc: Spacecraft 1, 2 or 3.
+
+        Returns:
+            jnp.ndarray: Positions, shape ``t.shape + (3,)``, in the units of
+            the input table.
         """
         sc_idx = int(sc) - 1
         return self._linear_interp_scalar(
@@ -145,14 +201,17 @@ class OrbitsWrapJAX:
         )
 
     def get_light_travel_time(self, t: jnp.ndarray, link_code: int) -> jnp.ndarray:
-        """Light travel time along ``link_code`` at time(s) ``t``."""
+        """Light travel time [s] along ``link_code`` at time(s) ``t``; shape ``t.shape``."""
         li = self.get_link_ind(link_code)
         return self._linear_interp_scalar(
             t, self.ltt_t0, self.ltt_dt, self.ltt_N, self.ltt[:, li]
         )
 
     def get_n(self, t: jnp.ndarray, link_code: int) -> jnp.ndarray:
-        """Arm normal vector (3,) at time(s) ``t`` for ``link_code``."""
+        """Arm unit normal of ``link_code`` at time(s) ``t``; shape ``t.shape + (3,)``.
+
+        Interpolated on the LTT grid (see the class Warning).
+        """
         li = self.get_link_ind(link_code)
         return self._linear_interp_scalar(
             t, self.ltt_t0, self.ltt_dt, self.ltt_N, self.n[:, li, :]

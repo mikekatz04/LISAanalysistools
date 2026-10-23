@@ -4,12 +4,12 @@
 The ``(axes, sigmas)`` tables that
 :meth:`~lisatools.globalfit.moves.addremovemove.ResidualAddOneRemoveOneMove.refresh_inner_move_tables`
 feeds to the eryn :class:`~eryn.moves.EigenAxisMove` inner moves are
-DERIVED products of an information matrix: minutes per leaf to build
-(EMRI/MBH one Gram-form matrix per leaf; SOBBH a whole
-``ntemps*nwalkers`` batch), kilobytes to store. Until this module they
-lived only on the move object, so every process restart — the campaign
-runs on a preemptible partition — repaid the full first-visit build for
-every leaf of every branch.
+DERIVED products of an information matrix: up to minutes per leaf to build
+(one Gram matrix per leaf on the production ``{BRANCH}_EIGEN_INFO=gram``
+route; a whole ``ntemps*nwalkers`` batch on the ``per_walker`` ll scope),
+kilobytes to store. Until this module they lived only on the move object,
+so every process restart — the campaign runs on a preemptible partition —
+repaid the full first-visit build for every leaf of every branch.
 
 This module writes the derived tables (plus the per-leaf visit counter
 that drives the refresh cadence) to ONE pickle sidecar next to the run's
@@ -17,8 +17,16 @@ store, ``<store minus .h5>_eigen_tables.pkl``, in the spirit of the
 mid-iteration checkpoint that sits in the same directory. Writes are
 atomic (tmp + :func:`os.replace`) and a resume adopts an entry only when
 the guards that would make the table the WRONG SHAPE or the wrong physics
-agree: ``ndim``, ``ntemps``, ``nwalkers``, scope and — when both sides
-know it — the data identity.
+agree (:func:`_guards_ok`): the array shapes, ``ndim``, scope, the proposal
+frame (``{BRANCH}_PROPOSAL_FRAME``; an entry without one is
+``"sampling"``), ``ntemps`` / ``nwalkers`` for a per-(temperature, walker)
+stash only, and — when both sides know it — the data identity.
+
+Callers: :class:`~lisatools.globalfit.moves.addremovemove.ResidualAddOneRemoveOneMove`
+(``_adopt_persisted_eigen_table`` on a leaf's first visit, every rank;
+``_persist_eigen_table`` after every build, the head only). On the
+9mo / 12mo runs persistence is on (``EIGEN_TABLES_PERSIST`` unset) and the
+store path comes from the builder.
 
 Staleness is deliberately tolerated. The expansion point an entry was
 built at is recorded for diagnostics but is NOT a guard: the tables were
@@ -76,6 +84,7 @@ _WARNED = set()
 
 
 def _warn_once(path, reason, *args):
+    """``logger.warning(*args)`` once per ``(path, reason)``."""
     key = (str(path), reason)
     if key in _WARNED:
         return
@@ -84,7 +93,12 @@ def _warn_once(path, reason, *args):
 
 
 def persist_enabled():
-    """``EIGEN_TABLES_PERSIST`` env > on. Read at use, never at import."""
+    """``EIGEN_TABLES_PERSIST`` env > on. Read at use, never at import.
+
+    Returns:
+        bool: ``False`` for ``0`` / ``false`` / ``no`` / ``off``
+        (case-insensitive), else ``True`` (unset in the launchers: on).
+    """
     val = os.environ.get("EIGEN_TABLES_PERSIST", "1")
     return str(val).strip().lower() not in ("0", "false", "no", "off")
 
@@ -96,6 +110,18 @@ def sidecar_path(store_path):
     :func:`lisatools.globalfit.midit_checkpoint.checkpoint_path` (same
     ``splitext`` of the same ``general_info.main_file_path``), so the
     eigen sidecar lands beside the midit pkl and the store's own backup.
+
+    Args:
+        store_path (str or None): The run's HDF store path.
+
+    Returns:
+        str or None: The sidecar path, or ``None`` for an empty / ``None``
+        store path.
+
+    Example:
+        >>> from lisatools.globalfit.moves.eigen_table_persist import sidecar_path
+        >>> sidecar_path("/runs/gf_9mo.h5")
+        '/runs/gf_9mo_eigen_tables.pkl'
     """
     if not store_path:
         return None
@@ -104,7 +130,15 @@ def sidecar_path(store_path):
 
 
 def entry_key(branch, leaf):
-    """One entry per (branch, leaf) — the scope of a single table build."""
+    """One entry per (branch, leaf) — the scope of a single table build.
+
+    Args:
+        branch (str): Branch name.
+        leaf (int): Leaf index.
+
+    Returns:
+        str: ``"{branch}:{leaf}"``, e.g. ``"mbh:3"``.
+    """
     return f"{branch}:{int(leaf)}"
 
 
@@ -140,6 +174,25 @@ def make_entry(axes, sigmas, visits, *, scope, ndim, ntemps, nwalkers,
     the old one; an entry without the key reads as ``"sampling"``, and
     :func:`load_entry` discards an entry of another frame (a table built in
     one frame is never adopted in the other: the next refresh rebuilds).
+
+    Args:
+        axes (array_like): The table's axes as the move holds them.
+        sigmas (array_like): The table's sigmas (the step that ran).
+        visits (int): The leaf's visit counter.
+        scope (str): ``{BRANCH}_EIGEN_SCOPE`` of the writer.
+        ndim (int): Branch dimension.
+        ntemps (int): The move's ladder size.
+        nwalkers (int): The writer's walker width.
+        x0 (array_like, optional): The expansion point (diagnostics).
+        data_identity (float, optional): The data's ``df`` (guard).
+        store_iteration (int, optional): A stamp (the move passes its
+            propose counter).
+        sigmas_fisher (array_like, optional): See above.
+        axis_tune (array_like, optional): See above.
+        frame (str): See above. Default ``"sampling"``.
+
+    Returns:
+        dict: The entry (also stamped ``written_at``, wall time).
     """
     entry = {
         "axes": np.asarray(axes),
@@ -168,6 +221,7 @@ def make_entry(axes, sigmas, visits, *, scope, ndim, ntemps, nwalkers,
 
 
 def _empty_payload():
+    """A fresh ``{"format": FORMAT_VERSION, "entries": {}}`` payload."""
     return {"format": FORMAT_VERSION, "entries": {}}
 
 
@@ -175,8 +229,15 @@ def load_sidecar(path):
     """Read the whole sidecar; ANY problem yields an empty payload.
 
     Missing file is the normal cold-start case and is silent. Truncated,
-    corrupt, unpickleable or structurally wrong contents warn once and
-    are then treated as an empty cache (the next save overwrites them).
+    corrupt, unpickleable or structurally wrong contents (including a
+    ``format`` other than :data:`FORMAT_VERSION`) warn once and are then
+    treated as an empty cache (the next save overwrites them).
+
+    Args:
+        path (str or None): The sidecar path.
+
+    Returns:
+        dict: ``{"format": int, "entries": {key: entry}}``.
     """
     if not path or not os.path.exists(path):
         return _empty_payload()
@@ -310,6 +371,23 @@ def load_entry(path, branch, leaf, *, scope, ndim, ntemps, nwalkers,
     sigmas_fisher)``. ``return_tune=True`` appends the entry's
     ``axis_tune`` multiplier after that (``None`` when absent or not a
     finite positive ``(ndim,)`` vector).
+
+    Args:
+        path (str or None): The sidecar path.
+        branch (str): Branch name.
+        leaf (int): Leaf index.
+        scope (str): The reader's ``{BRANCH}_EIGEN_SCOPE``.
+        ndim (int): Branch dimension.
+        ntemps (int): The reader's ladder size.
+        nwalkers (int): The reader's walker width.
+        data_identity (float, optional): The reader's data ``df``.
+        return_fisher (bool): Append ``sigmas_fisher``. Default ``False``.
+        return_tune (bool): Append ``axis_tune``. Default ``False``.
+        frame (str): The reader's proposal frame. Default ``"sampling"``.
+
+    Returns:
+        tuple or None: ``(axes, sigmas, visits[, sigmas_fisher][,
+        axis_tune])``, or ``None``.
     """
     payload = load_sidecar(path)
     key = entry_key(branch, leaf)
@@ -341,7 +419,17 @@ def save_entry(path, branch, leaf, entry):
     entries): the other leaves/branches already in the file survive.
     The temp file is removed on any failure so a full disk cannot leave
     litter next to the store, and the previous sidecar stays intact —
-    the cache is never worth failing a run over.
+    the cache is never worth failing a run over. Not locked: the single
+    writer is the head rank (the move skips the write on read-only ranks).
+
+    Args:
+        path (str or None): The sidecar path; falsy writes nothing.
+        branch (str): Branch name.
+        leaf (int): Leaf index.
+        entry (dict): :func:`make_entry`'s entry.
+
+    Returns:
+        bool: ``True`` if the file was replaced.
     """
     if not path:
         return False

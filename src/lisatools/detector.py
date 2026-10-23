@@ -1,4 +1,35 @@
-"""LISA orbit/detector geometry and constellation noise models."""
+"""LISA orbit/detector geometry and constellation noise models.
+
+Orbits (spacecraft positions, velocities, link unit vectors and light travel times):
+
+- :class:`Orbits`: base class; reads a LISA Orbits-style HDF5 file, splines it onto a
+  configured grid (lazily, on first use) and wraps the backend ``OrbitsWrap`` that the
+  response / sensitivity kernels consume (:attr:`Orbits.pycppdetector`).
+- :class:`EqualArmlengthOrbits` / :class:`DefaultOrbits` and :class:`ESAOrbits`: the
+  packaged stock orbit files (SSB-ecliptic data, see the Warning in :class:`Orbits`).
+- :class:`L1Orbits`: orbits read from a Mojito L1 file (separate position and LTT grids).
+  This is the class the global-fit production runs load from the Mojito NOISE file, with
+  ``frame="icrs"`` (the stock fits' ``general.orbits_frame``,
+  ``EreborGeneralSettings.orbits_frame``).
+
+Noise models: :class:`LISAModel` (OMS + acceleration levels, the stock ``scirdv1``,
+``proposal``, ``mrdv1``, ``sangria``) and :class:`ExtendedLISAModel` (per-interferometer
+levels, ``sangria_v2``), resolved from strings by :func:`check_lisa_model`. ``LINKS`` /
+``SC`` fix the link and spacecraft order used throughout (link ``ij`` = light received at
+spacecraft ``i``, emitted by ``j``).
+
+Importing this module enables JAX 64-bit mode (``jax_enable_x64``) and sets
+``XLA_PYTHON_CLIENT_PREALLOCATE=false`` when JAX is importable.
+
+Example:
+    >>> import numpy as np
+    >>> from lisatools.detector import EqualArmlengthOrbits
+    >>> # a coarse 1-day grid keeps this cheap (the default 50 s grid spans the whole file)
+    >>> orbits = EqualArmlengthOrbits(force_backend="cpu", linear_interp_setup=False, dt=86400.0)
+    >>> ltt = orbits.get_light_travel_times(np.array([0.0, 1.0e6]), 12)
+    >>> ltt.shape
+    (2,)
+"""
 
 from __future__ import annotations
 
@@ -33,22 +64,27 @@ except (ModuleNotFoundError, ImportError):
 
 logger = getLogger(__name__)
 
+# Spacecraft order, and link order (link ij = received at S/C i, emitted by S/C j).
 SC = [1, 2, 3]
 LINKS = [12, 23, 31, 13, 32, 21]
 
+# Grid step [s] of Orbits' linear_interp_setup=True grid (L1Orbits uses linear_interp_dt).
 LINEAR_INTERP_TIMESTEP = 50.00  # 600.00  # sec (0.25 hr)
 
 
 def icrs_to_ecliptic(positions_icrs: np.ndarray) -> np.ndarray:
-    """
-    Convert cartesian positions from ICRS to ecliptic coordinates.
+    """Convert cartesian positions from ICRS to ecliptic coordinates.
+
+    Uses ``astropy`` (``SkyCoord(..., frame="icrs")`` transformed to
+    ``BarycentricMeanEcliptic``), one spacecraft at a time. Being a pure rotation about the
+    barycentre, it applies to velocities as well (:class:`L1Orbits` uses it for both).
 
     Args:
-        positions_icrs: Array of shape (n_times, 3, 3) representing positions
-                        in ICRS frame for 3 spacecraft over n_times.
+        positions_icrs: Array of shape ``(n_times, 3, 3)`` (time, spacecraft, xyz) of
+            cartesian vectors in the ICRS frame, in metres.
 
     Returns:
-        positions_ecliptic: Array of shape (n_times, 3, 3) in ecliptic frame.
+        np.ndarray: Array of shape ``(n_times, 3, 3)`` in the ecliptic frame, same units.
     """
 
     import astropy
@@ -74,20 +110,63 @@ def icrs_to_ecliptic(positions_icrs: np.ndarray) -> np.ndarray:
     return positions_ecliptic
 
 class Orbits(LISAToolsParallelModule, ABC):
-    """LISA Orbit Base Class
+    """LISA Orbit Base Class.
+
+    Holds the spacecraft positions ``x``, velocities ``v``, link unit vectors ``n`` and light
+    travel times ``ltt`` of one orbit file, and builds the backend ``OrbitsWrap`` (C++/CUDA)
+    that the response, TDI-on-the-fly and sensitivity kernels read through
+    :attr:`pycppdetector` / :attr:`pycppdetector_args`.
+
+    Construction only reads the file attributes (``*_base`` values such as ``size_base``,
+    ``dt_base``). The interpolation grid is built LAZILY by :meth:`_configure` on the first
+    access to a configured quantity (``t``, ``x``, ``n``, ``v``, ``ltt``, ``size``,
+    ``pycppdetector``, ...): each base table is cubic-splined onto the grid selected by
+    ``linear_interp_setup`` / ``t_arr`` / ``dt`` (in that order of precedence). Unconfigured
+    instances are cheap to hold and deepcopy.
 
     Args:
-        filename: File name. File should be in the style of LISAOrbits
-        armlength: Armlength of detector.
-        force_backend: If ``gpu`` or ``cuda``, use a gpu.
-        t0: Initial time.
-        frame: Sky/position reference frame of the orbit data, either
-            ``"ecliptic"`` (SSB ecliptic — the convention of the stock
-            ``equalarmlength`` / ``esa-trailing`` orbit files) or
-            ``"icrs"`` (equatorial RA/Dec). Sky coordinates fed to any
-            response built on these orbits must be expressed in the same
-            frame; consumers can check ``orbits.frame`` to enforce this.
+        filename: Orbit file in the LISA Orbits HDF5 layout (``tcb/x``, ``tcb/v``, ``tcb/n``,
+            ``tcb/ltt`` datasets plus ``size`` / ``dt`` attributes). A path that does not
+            exist is looked up in the packaged ``orbit_files/`` directory (and fetched from
+            GitHub when missing there).
+        armlength: Nominal armlength in metres; must be a ``float``. Default ``2.5e9``.
+        force_backend: Backend name (``"cpu"``, ``"cuda12x"``, ``"cuda"``, ``"gpu"``, ...),
+            see :class:`~lisatools.utils.parallelbase.LISAToolsParallelModule`. ``None``
+            picks the first available of ``cuda13x``, ``cuda12x``, ``cuda11x``, ``cpu``.
+        t0: Start time in seconds added to the file's sample times. Default ``0.0``.
+        frame: Reference frame of the orbit data, either ``"ecliptic"`` (SSB ecliptic) or
+            ``"icrs"`` (equatorial). Default ``"icrs"`` (the global-fit run frame). The base
+            class applies no conversion: ``frame`` labels the data, and sky coordinates fed
+            to any response built on these orbits must be expressed in the same frame;
+            consumers can check ``orbits.frame`` to enforce this. :class:`L1Orbits` does
+            convert: its Mojito data are ICRS and ``frame="ecliptic"`` rotates them at load.
+        t_arr: Explicit grid to configure onto, within the file's time span. Default
+            ``None``.
+        dt: Grid step in seconds over the file's span. Default ``None``.
+        linear_interp_setup: Build the dense constant-step grid
+            (``LINEAR_INTERP_TIMESTEP`` = 50 s) that the backend interpolates linearly.
+            Default ``True``; required for :attr:`pycppdetector`.
+        **kwargs: Accepted and ignored.
 
+    Raises:
+        ValueError: If ``frame`` is not ``"ecliptic"`` / ``"icrs"``, ``armlength`` is not a
+            ``float``, or a packaged file cannot be fetched.
+
+    Warning:
+        The packaged stock files (``equalarmlength-orbits.h5``, ``esa-trailing-orbits.h5``)
+        hold SSB-ecliptic positions (the constellation barycentre stays in the ``z = 0``
+        plane), but :class:`EqualArmlengthOrbits` / :class:`ESAOrbits` inherit the
+        ``frame="icrs"`` default, so their label does not match the data unless
+        ``frame="ecliptic"`` is passed. With the ``"icrs"`` label,
+        :meth:`get_constellation_angles` also rotates the (already ecliptic) positions.
+
+    Example:
+        >>> from lisatools.detector import EqualArmlengthOrbits
+        >>> orbits = EqualArmlengthOrbits(force_backend="cpu", frame="ecliptic")
+        >>> orbits.armlength
+        2500000000.0
+        >>> orbits.LINKS
+        [12, 23, 31, 13, 32, 21]
     """
 
     def __init__(
@@ -208,7 +287,14 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     @filename.setter
     def filename(self, filename: str) -> None:
-        """Set file name."""
+        """Set file name.
+
+        An existing path is used as is. Otherwise ``filename`` is resolved inside the packaged
+        ``orbit_files/`` directory (created if absent), downloading it from the
+        ``lisa-analysis-tools`` GitHub repository when not present there. The download URL
+        is a GitHub ``/blob/`` page, which serves HTML rather than the raw HDF5 file, so this
+        fallback does not produce a readable orbit file.
+        """
 
         assert isinstance(filename, str)
 
@@ -242,14 +328,10 @@ class Orbits(LISAToolsParallelModule, ABC):
             self._filename = path_to_this_file + filename
 
     def open(self) -> h5py.File:
-        """Opens the h5 file in the proper mode.
+        """Open the orbit file read-only.
 
         Returns:
-            H5 file object: Opened file.
-
-        Raises:
-            RuntimeError: If backend is opened for writing when it is read-only.
-
+            h5py.File: The opened file; use it as a context manager.
         """
         f = h5py.File(self.filename, "r")
         return f
@@ -313,51 +395,55 @@ class Orbits(LISAToolsParallelModule, ABC):
     
     @property
     def ltt(self) -> np.ndarray:
-        """Light travel time."""
+        """Light travel times [s] on the configured grid, shape ``(size, 6)`` in ``LINKS`` order."""
         self._check_configured()
         return self._ltt
 
     @ltt.setter
     def ltt(self, ltt: np.ndarray) -> np.ndarray:
-        """Set light travel time."""
+        """Check a light-travel-time array against the grid; does NOT store it.
+
+        Only asserts ``ltt.shape[0] == len(self.t)``. :meth:`_configure` writes ``_ltt``
+        directly.
+        """
         assert ltt.shape[0] == len(self.t)
 
     @property
     def n(self) -> np.ndarray:
-        """Normal vectors along links."""
+        """Link unit vectors on the configured grid, shape ``(size, 6, 3)`` in ``LINKS`` order."""
         self._check_configured()
         return self._n
 
     @n.setter
     def n(self, n: np.ndarray) -> np.ndarray:
-        """Set Normal vectors along links."""
+        """No-op setter: the value is discarded (:meth:`_configure` writes ``_n`` directly)."""
         return self._n
 
     @property
     def x(self) -> np.ndarray:
-        """Spacecraft positions."""
+        """Spacecraft positions [m] on the configured grid, shape ``(size, 3, 3)`` (S/C, xyz)."""
         self._check_configured()
         return self._x
 
     @x.setter
     def x(self, x: np.ndarray) -> np.ndarray:
-        """Set Spacecraft positions."""
+        """No-op setter: the value is discarded (:meth:`_configure` writes ``_x`` directly)."""
         return self._x
 
     @property
     def v(self) -> np.ndarray:
-        """Spacecraft velocities."""
+        """Spacecraft velocities [m/s] on the configured grid, shape ``(size, 3, 3)``."""
         self._check_configured()
         return self._v
 
     @v.setter
     def v(self, v: np.ndarray) -> np.ndarray:
-        """Set Spacecraft velocities."""
+        """No-op setter: the value is discarded (:meth:`_configure` writes ``_v`` directly)."""
         return self._v
 
     @property
     def average_ltt(self) -> float:
-        """Average light travel time."""
+        """Average light travel time [s] over all links and grid points."""
         return float(np.mean(self.ltt))
 
     def configure(
@@ -375,6 +461,17 @@ class Orbits(LISAToolsParallelModule, ABC):
         LTT arrays), but new code should construct with the desired
         ``t_arr`` / ``dt`` / ``linear_interp_setup`` (/ ``linear_interp_dt``
         for :class:`L1Orbits`) and let first use trigger the build.
+
+        Args:
+            t_arr: See :meth:`_configure`.
+            dt: See :meth:`_configure`.
+            linear_interp_setup: See :meth:`_configure`. Default ``False`` here (the
+                constructor default is ``True``).
+            **kwargs: Forwarded to :meth:`_configure` (``linear_interp_dt`` for
+                :class:`L1Orbits`).
+
+        Warning:
+            Emits a ``DeprecationWarning`` on every call.
         """
         warnings.warn(
             "Orbits.configure() is deprecated: pass the grid arguments to "
@@ -395,16 +492,22 @@ class Orbits(LISAToolsParallelModule, ABC):
         """Configure the orbits to match the signal response generator time basis.
 
         The base orbits will be scaled up or down as needed using Cubic Spline interpolation.
-        The higherarchy of consideration to each keyword argument if multiple are given:
+        The hierarchy of consideration to each keyword argument if multiple are given:
         ``linear_interp_setup``, ``t_arr``, ``dt``.
 
-        If nothing is provided, the base points are used.
+        If nothing is provided, the base points are used (and no backend arguments are built,
+        so :attr:`pycppdetector` is unavailable).
+
+        Sets ``t``, ``_ltt``, ``_x``, ``_n``, ``_v``, ``dt``, ``configured = True`` and
+        :attr:`pycppdetector_args`. The backend grid starts at the configured grid's first
+        node.
 
         Args:
-            t_arr: New time array.
+            t_arr: New time array; must lie inside the file's time span (asserted). Its step
+                is taken from the first two entries.
             dt: New time step. Will take the time duration to be that of the input data.
-            linear_interp_setup: If ``True``, it will create a dense grid designed for linear interpolation with a constant time step.
-
+            linear_interp_setup: If ``True``, it will create a dense grid designed for linear
+                interpolation with a constant time step (``LINEAR_INTERP_TIMESTEP``).
         """
 
         x_orig = self.t_base
@@ -494,7 +597,7 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     @property
     def dt(self) -> float:
-        """new time step if it exists"""
+        """Configured grid step [s]. Raises ``ValueError`` when the grid has no step."""
         if self._dt is None:
             raise ValueError("dt not available for t_arr only.")
         return self._dt
@@ -516,7 +619,16 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     @property
     def pycppdetector(self) -> object:
-        """C++ class"""
+        """Backend ``OrbitsWrap`` instance (C++ / CUDA) built from :attr:`pycppdetector_args`.
+
+        Configures the orbits first if needed. A NEW wrapper is constructed on every access
+        with this object's backend (and stored on ``_pycppdetector``); it points at the
+        arrays held in :attr:`pycppdetector_args`.
+
+        Raises:
+            ValueError: When the configured grid carries no backend arguments
+                (``linear_interp_setup=False`` with no ``t_arr`` / ``dt``).
+        """
         self._ensure_configured()
         if self._pycppdetector_args is None:
             raise ValueError(
@@ -528,7 +640,13 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     @property
     def pycppdetector_args(self) -> tuple:
-        """args for the c++ class."""
+        """Constructor arguments of the backend ``OrbitsWrap`` (configures first if needed).
+
+        A list ``[sc_t0, sc_dt, sc_N, ltt_t0, ltt_dt, ltt_N, n, ltt, x, links, sc_r, sc_e,
+        armlength]`` with the flattened arrays on this object's backend, or ``None`` when the
+        grid was configured without them. Downstream response classes build their own
+        wrappers from it.
+        """
         self._ensure_configured()
         return self._pycppdetector_args
 
@@ -539,7 +657,7 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     @property
     def size(self) -> int:
-        """Number of time points."""
+        """Number of points of the configured grid."""
         self._check_configured()
         return len(self.t)
 
@@ -563,15 +681,22 @@ class Orbits(LISAToolsParallelModule, ABC):
     ) -> float | np.ndarray:
         """Compute light travel time as a function of time.
 
-        Computes with the c++ backend.
+        Computes with the c++ backend (:attr:`pycppdetector`), linear interpolation on the
+        configured grid.
 
         Args:
-            t: Time array in seconds.
-            link: which link. Must be ``in self.LINKS``.
+            t: Time(s) in seconds: a Python ``float`` or an ``xp.ndarray`` on this object's
+                backend.
+            link: Link id(s), each in ``self.LINKS`` (e.g. ``12``): an ``int`` or an
+                ``xp.ndarray`` matching ``t``.
 
         Returns:
-            Light travel times.
+            float or xp.ndarray: Light travel time(s) in seconds; a scalar for
+            ``(float, int)`` input, otherwise an array shaped like ``t``.
 
+        Raises:
+            ValueError: For any other combination of input types (e.g. a numpy ``t`` on a GPU
+                backend, or a ``float`` ``t`` with an array ``link``).
         """
         # test and prepare inputs
         if isinstance(t, float) and isinstance(link, int):
@@ -606,17 +731,24 @@ class Orbits(LISAToolsParallelModule, ABC):
         return ltt_out
 
     def get_pos(self, t: float | np.ndarray, sc: int | np.ndarray) -> np.ndarray:
-        """Compute light travel time as a function of time.
+        """Compute spacecraft position as a function of time.
 
-        Computes with the c++ backend.
+        Computes with the c++ backend (:attr:`pycppdetector`), in the orbit data's
+        :attr:`frame`.
 
         Args:
-            t: Time array in seconds.
-            sc: which spacecraft. Must be ``in self.SC``.
+            t: Time(s) in seconds: a Python ``float`` or an ``xp.ndarray`` on this object's
+                backend.
+            sc: Spacecraft index(es), each in ``self.SC`` (1, 2, 3): an ``int`` or an
+                ``xp.ndarray`` matching ``t``.
 
         Returns:
-            Position of spacecraft.
+            xp.ndarray: Position(s) in metres, shape ``(len(t), 3)``; ``(3,)`` for
+            ``(float, int)`` input.
 
+        Raises:
+            ValueError: For any other combination of input types (including arrays from the
+                wrong backend).
         """
         # test and setup inputs accordingly
         if isinstance(t, float) and isinstance(sc, int):
@@ -656,15 +788,20 @@ class Orbits(LISAToolsParallelModule, ABC):
     def get_normal_unit_vec(self, t: float | np.ndarray, link: int | np.ndarray) -> np.ndarray:
         """Compute link normal vector as a function of time.
 
-        Computes with the c++ backend.
+        Computes with the c++ backend (:attr:`pycppdetector`).
 
         Args:
-            t: Time array in seconds.
-            link: which link. Must be ``in self.LINKS``.
+            t: Time(s) in seconds: a Python ``float`` or an ``xp.ndarray`` on this object's
+                backend.
+            link: Link id(s), each in ``self.LINKS``: an ``int`` or an ``xp.ndarray``
+                matching ``t``.
 
         Returns:
-            Link normal vectors.
+            xp.ndarray: Unit vector(s), shape ``(len(t), 3)``; ``(3,)`` for ``(float, int)``
+            input.
 
+        Raises:
+            ValueError: For any other combination of input types.
         """
         # test and prepare inputs
         if isinstance(t, float) and isinstance(link, int):
@@ -708,17 +845,26 @@ class Orbits(LISAToolsParallelModule, ABC):
         return output
     
     def get_constellation_angles(self, t: float | np.ndarray) -> tuple[float | np.ndarray, float | np.ndarray]:
-        """
-        Compute LISA orbital phase (:math:`\\alpha`) and constellation rotation (:math:`\\beta`) from spacecraft positions at given time(s).
-        Computes with the c++ backend.
+        r"""Compute LISA orbital phase (:math:`\alpha`) and constellation rotation (:math:`\beta`).
+
+        Derived from spacecraft positions at the given time(s), computed with the c++ backend
+        and rotated to the ecliptic first when :attr:`frame` is ``"icrs"``. :math:`\alpha` is
+        the ecliptic longitude of the constellation barycentre; :math:`\beta` is the angle of
+        arm ``SC3 - SC2`` in the ecliptic plane minus :math:`\alpha`, wrapped into
+        :math:`[-\pi, \pi]` with ``arctan2``. Used by the galactic-grid sensitivity setup.
         Adapted from @Federico Pozzoli.
 
         Args:
-            t: Time array in seconds.
-        
+            t: Time(s) in seconds: a Python ``float`` (clamped, with a warning, to the start of
+                the spacecraft grid when earlier) or an array (all entries must be on the
+                grid).
+
         Returns:
-            alpha: Orbital phase of the constellation in the ecliptic plane (radians).
-            beta: Constellation rotation angle (radians).
+            tuple: ``(alpha, beta)`` in radians, floats for a ``float`` input, otherwise
+            ``np.ndarray`` of shape ``(len(t),)``.
+
+        Raises:
+            ValueError: If an array ``t`` has entries before the start of the spacecraft grid.
         """
         squeeze = isinstance(t, float)
         if isinstance(t, float) and t < self.sc_t[0]:
@@ -792,24 +938,43 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     @property
     def ptr(self) -> int:
-        """pointer to c++ class"""
+        """Pointer to the C++ ``Orbits`` object of a freshly built :attr:`pycppdetector`."""
         return self.pycppdetector.ptr
 
     @classmethod
     def supported_backends(cls):
-        """Return the list of backend names this orbit class supports."""
+        """Return the backends this orbit class supports, in order of preference.
+
+        Returns:
+            list[str]: ``lisatools_cuda13x``, ``lisatools_cuda12x``, ``lisatools_cuda11x``,
+            ``lisatools_cpu``.
+        """
         return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
 
 class EqualArmlengthOrbits(Orbits):
-    """Equal Armlength Orbits
+    """Equal Armlength Orbits.
 
-    Orbit file: equalarmlength-orbits.h5
+    Orbit file: ``equalarmlength-orbits.h5`` (packaged under ``lisatools/orbit_files``).
+    Used for quick-start work and as the
+    :class:`DefaultOrbits` of the stock :class:`LISAModel` objects; production global fits
+    load :class:`L1Orbits` from the Mojito data instead. The file's positions are
+    SSB-ecliptic while the inherited default label is ``frame="icrs"`` (see the Warning in
+    :class:`Orbits`).
 
     Args:
-        *args: Arguments for :class:`Orbits`.
-        **kwargs: Kwargs for :class:`Orbits`.
+        *args: Positional arguments for :class:`Orbits` after ``filename`` (``armlength``,
+            ``force_backend``, ...).
+        **kwargs: Keyword arguments for :class:`Orbits` (``force_backend``, ``t0``,
+            ``frame``, ``t_arr``, ``dt``, ``linear_interp_setup``).
 
+    Example:
+        >>> from lisatools.detector import EqualArmlengthOrbits
+        >>> orbits = EqualArmlengthOrbits(
+        ...     force_backend="cpu", frame="ecliptic", linear_interp_setup=False, dt=86400.0
+        ... )
+        >>> orbits.ltt.shape[1]
+        6
     """
 
     def __init__(self, *args: Any, **kwargs: Any):
@@ -821,14 +986,20 @@ class EqualArmlengthOrbits(Orbits):
         return ()
 
 class ESAOrbits(Orbits):
-    """ESA Orbits
+    """ESA Orbits.
 
-    Orbit file: esa-trailing-orbits.h5
+    Orbit file: ``esa-trailing-orbits.h5`` (packaged under ``lisatools/orbit_files``). The
+    file's positions are SSB-ecliptic while the inherited default label is ``frame="icrs"``
+    (see the Warning in :class:`Orbits`).
 
     Args:
-        *args: Arguments for :class:`Orbits`.
-        **kwargs: Kwargs for :class:`Orbits`.
+        *args: Positional arguments for :class:`Orbits` after ``filename``.
+        **kwargs: Keyword arguments for :class:`Orbits` (``force_backend``, ``t0``,
+            ``frame``, ``t_arr``, ``dt``, ``linear_interp_setup``).
 
+    Example:
+        >>> from lisatools.detector import ESAOrbits
+        >>> orbits = ESAOrbits(force_backend="cpu")
     """
 
     def __init__(self, *args, **kwargs):
@@ -845,11 +1016,40 @@ class L1Orbits(Orbits):
     """Base class for LISA Orbits from Mojito L1 File structure.
 
     This class handles orbit data from MojitoL1File where:
+
     - Light travel times and positions have different time arrays
     - Both time arrays may start at t0 != 0
 
+    The global-fit production runs build it from the Mojito ``INSTRUMENT/L1`` NOISE file
+    (:mod:`lisatools.globalfit.preprocessing`) with ``frame="icrs"`` and configure it
+    eagerly at data load. Positions / velocities are cubic-splined onto a grid of step
+    ``min(file step, linear_interp_dt)``, link unit vectors are rebuilt from the splined
+    positions at emission and reception times, and the dense light travel times keep their
+    native grid; the backend ``OrbitsWrap`` receives both grids separately.
+
     Args:
-        armlength: Armlength of detector (default 2.5e9 m)
+        filename: Path to the Mojito L1 HDF5 file (read with ``mojito.MojitoL1File``).
+        armlength: Nominal armlength of detector in metres (default 2.5e9 m).
+        force_backend: Backend name, see :class:`Orbits`. Default ``None``.
+        frame: ``"icrs"`` (default) keeps the file's ICRS positions / velocities;
+            ``"ecliptic"`` rotates both to the ecliptic at load (:func:`icrs_to_ecliptic`).
+        linear_interp_dt: Cap in seconds on the position / unit-vector grid step used with
+            ``linear_interp_setup=True``; ``None`` keeps the file's native cadence. Default
+            ``500.0``. See :meth:`_configure`.
+        **kwargs: Forwarded to :class:`Orbits` (``t0``, ``t_arr``, ``dt``,
+            ``linear_interp_setup``; the latter defaults to ``True``).
+
+    Raises:
+        ImportError: When the ``mojito`` package is not installed.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.detector import L1Orbits
+
+            # noise_l1_path: a Mojito INSTRUMENT/L1 NOISE file
+            orbits = L1Orbits(noise_l1_path, force_backend="cuda13x", frame="icrs")
+            ltt_12 = orbits.get_light_travel_times(orbits.xp.asarray([1.0e7]), 12)
     """
 
     def __init__(
@@ -881,7 +1081,14 @@ class L1Orbits(Orbits):
         }
         
     def open(self):
-        """Override base class open method."""
+        """Open the Mojito L1 file.
+
+        Returns:
+            mojito.MojitoL1File: The opened file; use it as a context manager.
+
+        Raises:
+            ImportError: When ``mojito`` is not installed.
+        """
         try:
             from mojito import MojitoL1File
         except ImportError:
@@ -892,7 +1099,13 @@ class L1Orbits(Orbits):
         return f
 
     def _setup(self):
-        """Load orbit and LTT data from Mojito file."""
+        """Load orbit and LTT data from Mojito file.
+
+        Reads the LTTs ``(N_ltt, 6)`` and their times, the positions and velocities
+        ``(N_pos, 3, 3)`` (rotated to the ecliptic when ``frame == "ecliptic"``) and their
+        times, and the per-grid steps and start times (``ltt_dt``, ``sc_dt``, ``dt_base``,
+        ``ltt_t0``, ``sc_t0``).
+        """
 
         with self.open() as f:
             # Load light travel times and their time array
@@ -979,7 +1192,11 @@ class L1Orbits(Orbits):
     
     @property
     def sc_dt_base(self):    
-        """Time step of spacecraft position data."""
+        """Time step of spacecraft position data.
+
+        Never assigned (:meth:`_setup` stores ``dt_base`` / ``sc_dt``), so reading it raises
+        ``AttributeError``.
+        """
         return self._sc_dt_base
     
     @sc_dt_base.setter
@@ -1069,11 +1286,25 @@ class L1Orbits(Orbits):
 
         Handles different time arrays for LTTs and positions in Mojito files.
 
+        Positions and velocities are cubic-splined onto the target grid; each link unit
+        vector is ``(x_rec(t) - x_emit(t - ltt(t))) / |...|`` with the LTT linearly
+        interpolated from its dense native grid. Stores ``sc_t``, ``x``, ``v``, ``n`` (as
+        backend arrays) and ``sc_dt``, marks the object configured and, unless the file's own
+        position grid is used, fills :attr:`pycppdetector_args` with the position grid AND
+        the native LTT grid.
+
         Args:
-            t_arr: Target time array (if None, will be constructed)
-            dt: Target time step
-            linear_interp_setup: If True, create dense grid for fast linear interpolation
-            linear_interp_dt: Cap (sec) on the position/unit-vector grid step
+            t_arr (np.ndarray, optional): Target time array (if None, will be constructed).
+                The backend arguments still start the position grid at the file's
+                ``sc_t0`` with step ``sc_dt = dt`` (``None`` unless ``dt`` is also given), so
+                an explicit ``t_arr`` must start at ``sc_t0`` with a constant step ``dt``.
+            dt (float, optional): Target time step. Only read when ``linear_interp_setup`` is
+                ``False`` and ``t_arr`` is ``None``; that branch reads ``self.t0_pos`` /
+                ``self._pos_times``, attributes this class never sets, so it raises
+                ``AttributeError``.
+            linear_interp_setup (bool, optional): If True, create dense grid for fast linear
+                interpolation. Default ``False`` here; the constructor stores ``True``.
+            linear_interp_dt (float, optional): Cap (sec) on the position/unit-vector grid step
                 used when ``linear_interp_setup`` is True. The C++ kernel
                 interpolates spacecraft positions LINEARLY between grid nodes,
                 so the grid must be fine enough that the linear-interp sag of
@@ -1086,7 +1317,7 @@ class L1Orbits(Orbits):
                 the sag is ~6e-7 light-sec (phase error < 1e-7 rad at 20 mHz;
                 mm far below double precision) and the full-mission grid is
                 still tiny (~1.3e5 points, built once). Pass ``None`` to use
-                the file's native cadence unmodified (old behavior).
+                the file's native cadence unmodified (old behavior). Default ``500.0``.
         """
 
         # Determine target time array
@@ -1236,6 +1467,7 @@ class L1Orbits(Orbits):
     #     pass
     
 if jax_here:
+    # TODO check: keep/remove/document -- only caller is JAXL1Orbits.get_pos, and JAXL1Orbits has no callers
     @jax.jit
     def interpolate_pos(query_t, sc_idx, t_grid, pos_grid):
         """
@@ -1275,6 +1507,7 @@ if jax_here:
             query_t, sc_idx
         )
 
+    # TODO check: keep/remove/document -- only caller is JAXL1Orbits.get_light_travel_times, and JAXL1Orbits has no callers
     @jax.jit
     def interpolate_ltt(query_t, link_idx, t_grid, ltt_grid):
         """
@@ -1295,6 +1528,7 @@ if jax_here:
             query_t, link_idx
         )
 
+    # TODO check: keep/remove/document -- only caller is JAXL1Orbits.get_normal_unit_vec, and JAXL1Orbits has no callers
     @jax.jit
     def interpolate_n(query_t, link_idx, t_grid, n_grid):
         """
@@ -1321,6 +1555,7 @@ if jax_here:
             query_t, link_idx
         )
 
+    # TODO check: keep/remove/document -- no callers in lisatools/tests/LATW (only a copy in mojito_detector.py); not reached by the 9mo/12mo runs
     @jax.tree_util.register_pytree_node_class
     class JAXL1Orbits(L1Orbits):
         """LISA Orbits from Mojito L1 File structure with JAX support.
@@ -1538,12 +1773,19 @@ if jax_here:
 
 else:
 
+    # TODO check: keep/remove/document -- placeholder raising ImportError when JAX is absent; JAXL1Orbits has no callers
     class JAXL1Orbits(L1Orbits):
+        """Placeholder for the JAX orbits when JAX is not installed: construction raises."""
+
         def __init__(self, *args, **kwargs):
             raise ImportError("JAX is not available. Install JAX to use JAXL1Orbits.")
 
 class DefaultOrbits(EqualArmlengthOrbits):
-    """Set default orbit class to Equal Armlength orbits for now."""
+    """Set default orbit class to Equal Armlength orbits for now.
+
+    Same arguments as :class:`EqualArmlengthOrbits`. The stock :class:`LISAModel` objects
+    (``scirdv1``, ``sangria``, ...) carry a ``DefaultOrbits()`` built at import.
+    """
 
     pass
 
@@ -1552,6 +1794,10 @@ class DefaultOrbits(EqualArmlengthOrbits):
 class CurrentNoises:
     """Noise values at a given frequency.
 
+    Returned by :meth:`LISAModel.lisanoises` / :meth:`ExtendedLISAModel.lisanoises` and
+    consumed by the TDI sensitivity classes of :mod:`lisatools.sensitivity`. Each field is a
+    PSD (scalar or array matching the input frequencies) in ``units``.
+
     Args:
         isi_oms_noise: Interspacecraft OMS noise value.
         rfi_oms_noise: Reference interferometer OMS noise value.
@@ -1559,8 +1805,8 @@ class CurrentNoises:
         tm_noise: Test-mass acceleration noise value.
         rfi_backlink_noise: Reference interferometer backlink noise value.
         tmi_backlink_noise: Test-mass interferometer backlink noise value.
-        units: Either ``"relative_frequency"`` (AKA fractional frequency deviation [ffd]) or ``"displacement"``.
-
+        units: Either ``"relative_frequency"`` (AKA fractional frequency deviation [ffd]) or
+            ``"displacement"``.
     """
 
     isi_oms_noise: float
@@ -1574,14 +1820,13 @@ class CurrentNoises:
 
 @dataclass
 class LISAModelSettings:
-    """Required LISA model settings:
+    """Required LISA model settings.
 
     Args:
-        Soms_d: OMS displacement noise.
-        Sa_a: Acceleration noise.
+        Soms_d: OMS displacement noise level, SQUARED (m^2/Hz), e.g. ``(15e-12) ** 2``.
+        Sa_a: Acceleration noise level, SQUARED (m^2 s^-4 / Hz), e.g. ``(3e-15) ** 2``.
         orbits: Orbital information.
         name: Name of model.
-
     """
 
     Soms_d: float
@@ -1591,15 +1836,30 @@ class LISAModelSettings:
 
 
 class LISAModel(LISAModelSettings, ABC):
-    """Model for the LISA Constellation
+    """Model for the LISA Constellation.
 
     This includes sensitivity information computed in
     :py:mod:`lisatools.sensitivity` and orbital information
     contained in an :class:`Orbits` class object.
 
     This class is used to house high-level methods useful
-    to various needed computations.
+    to various needed computations. The two levels feed the OMS and test-mass terms of the
+    TDI noise PSDs (:meth:`lisanoises`) and of the unequal-arm instrument noise, whose two
+    levels the global fit's PSD branch samples. Stock instances: ``scirdv1``,
+    ``proposal``, ``mrdv1``, ``sangria`` (pass the name as a string wherever a ``model`` is
+    accepted, see :func:`check_lisa_model`).
 
+    Args:
+        Soms_d (float): OMS displacement noise level, squared (m^2/Hz).
+        Sa_a (float): Acceleration noise level, squared (m^2 s^-4 / Hz).
+        orbits (Orbits): Orbital information.
+        name (str): Name of model.
+
+    Example:
+        >>> from lisatools.detector import LISAModel, DefaultOrbits
+        >>> model = LISAModel((15.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "mine")
+        >>> model.name
+        'mine'
     """
 
     def __str__(self) -> str:
@@ -1613,13 +1873,28 @@ class LISAModel(LISAModelSettings, ABC):
         f: float | np.ndarray,
         unit: Optional[str] = "relative_frequency",
     ) -> CurrentNoises:
-        """Calculate both LISA noise terms based on input model.
-        Args:
-            f: Frequency array.
-            unit: Either ``"relative_frequency"`` or ``"displacement"``.
-        Returns:
-            Current noise values at ``f``.
+        r"""Calculate both LISA noise terms based on input model.
 
+        .. math::
+
+            S_{a} = S_{a,a} \left[1 + (0.4\,\mathrm{mHz}/f)^2\right]
+            \left[1 + (f/8\,\mathrm{mHz})^4\right] (2 \pi f)^{-4},
+            \qquad
+            S_{oms} = S_{oms,d} \left[1 + (2\,\mathrm{mHz}/f)^4\right]
+
+        (both in displacement), each multiplied by :math:`(2 \pi f / c)^2` for relative
+        frequency.
+
+        Args:
+            f: Frequency array (Hz).
+            unit: Either ``"relative_frequency"`` (default) or ``"displacement"``.
+
+        Returns:
+            CurrentNoises: ``isi_oms_noise`` = OMS term, ``tm_noise`` = acceleration term;
+            the reference / test-mass interferometer and backlink fields are ``0.0``.
+
+        Raises:
+            UnboundLocalError: For any other ``unit`` (no explicit check).
         """
 
         # TODO: fix this up
@@ -1669,7 +1944,8 @@ class LISAModel(LISAModelSettings, ABC):
         )
 
 
-# defaults
+# defaults: stock LISAModel instances (squared OMS / acceleration levels).
+# scirdv1 is assigned twice (identical values).
 scirdv1 = LISAModel((15.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "scirdv1")
 proposal = LISAModel((10.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "proposal")
 mrdv1 = LISAModel((10.0e-12) ** 2, (2.4e-15) ** 2, DefaultOrbits(), "mrdv1")
@@ -1679,18 +1955,20 @@ scirdv1 = LISAModel((15.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "scirdv1")
 
 @dataclass
 class ExtendedLISAModelSettings:
-    """Required Extended LISA model settings:
+    """Required Extended LISA model settings.
+
+    Levels are amplitude (ASD-like) values; :meth:`ExtendedLISAModel.lisanoises` squares
+    them.
 
     Args:
-        isi_oms_noise: Interspacecraft OMS noise level.
-        rfi_oms_noise: Reference interferometer OMS noise level.
-        tmi_oms_noise: Test-mass interferometer OMS noise level.
-        tm_noise: Test-mass acceleration noise level.
-        rfi_backlink_noise: Reference interferometer backlink noise level.
-        tmi_backlink_noise: Test-mass interferometer backlink noise level.
+        isi_oms_level: Interspacecraft OMS noise level (m/sqrt(Hz)).
+        rfi_oms_level: Reference interferometer OMS noise level.
+        tmi_oms_level: Test-mass interferometer OMS noise level.
+        tm_noise_level: Test-mass acceleration noise level (formerly acceleration noise).
+        rfi_backlink_noise_level: Reference interferometer backlink noise level.
+        tmi_backlink_noise_level: Test-mass interferometer backlink noise level.
         orbits: Orbital information.
         name: Name of model.
-
     """
 
     isi_oms_level: float
@@ -1710,15 +1988,26 @@ nu0 = C_SI / lamb
 
 
 class ExtendedLISAModel(ExtendedLISAModelSettings, ABC):
-    """Model for the LISA Constellation
+    """Model for the LISA Constellation with per-interferometer noise levels.
 
     This includes sensitivity information computed in
     :py:mod:`lisatools.sensitivity` and orbital information
     contained in an :class:`Orbits` class object.
 
     This class is used to house high-level methods useful
-    to various needed computations.
+    to various needed computations. Only part of :mod:`lisatools.sensitivity` supports it
+    (several TDI classes raise for an ``ExtendedLISAModel``). Stock instance:
+    ``sangria_v2``.
 
+    Args:
+        isi_oms_level (float): Interspacecraft OMS noise level.
+        rfi_oms_level (float): Reference interferometer OMS noise level.
+        tmi_oms_level (float): Test-mass interferometer OMS noise level.
+        tm_noise_level (float): Test-mass acceleration noise level.
+        rfi_backlink_noise_level (float): Reference interferometer backlink noise level.
+        tmi_backlink_noise_level (float): Test-mass interferometer backlink noise level.
+        orbits (Orbits): Orbital information.
+        name (str): Name of model.
     """
 
     def __str__(self) -> str:
@@ -1728,9 +2017,15 @@ class ExtendedLISAModel(ExtendedLISAModelSettings, ABC):
         return out
 
     def disp_2_ffd(self, f: float | np.ndarray) -> float | np.ndarray:
+        """Return the displacement-to-relative-frequency PSD factor ``(2 pi f / (lamb nu0))^2``.
+
+        ``lamb`` = 1064.5 nm laser wavelength, ``nu0 = c / lamb``, so the factor equals
+        ``(2 pi f / c)^2``.
+        """
         return (2 * np.pi * f / lamb / nu0) ** 2
 
     def acc_2_ffd(self, f: float | np.ndarray) -> float | np.ndarray:
+        """Return the acceleration-to-relative-frequency PSD factor ``(1 / (2 pi f c))^2``."""
         return (1 / (lamb * 2 * np.pi * f) / nu0) ** 2
 
     def lisanoises(
@@ -1739,12 +2034,25 @@ class ExtendedLISAModel(ExtendedLISAModelSettings, ABC):
         unit: Optional[str] = "relative_frequency",
         method: Optional[str] = "modern",
     ) -> CurrentNoises:
-        """Calculate both LISA noise terms based on input model.
+        """Calculate the per-interferometer LISA noise terms based on input model.
+
+        Each level is squared; the test-mass term carries ``1 + (0.4 mHz / f)^2`` and the two
+        backlink terms ``1 + (2 mHz / f)^4``. The ``"modern"`` and ``"old"`` methods are
+        currently identical.
+
         Args:
-            f: Frequency array.
-            unit: Either ``"relative_frequency"`` or ``"displacement"``.
+            f: Frequency array (Hz).
+            unit: Either ``"relative_frequency"`` (default; displacement terms times
+                :meth:`disp_2_ffd`, test-mass term times :meth:`acc_2_ffd`) or
+                ``"displacement"``.
+            method: ``"modern"`` (default) or ``"old"``.
+
         Returns:
-            Tuple with acceleration term as first value and oms term as second value.
+            CurrentNoises: All six noise terms at ``f``.
+
+        Raises:
+            ValueError: For an unknown ``unit``.
+            UnboundLocalError: For an unknown ``method`` (no explicit check).
         """
 
         # BASED on code from Olaf Hartwig
@@ -1812,11 +2120,16 @@ __stock_list_models_name__ = [tmp.name for tmp in __stock_list_models__]
 
 
 def get_available_default_lisa_models() -> List[LISAModel]:
-    """Get list of default LISA models
+    """Get list of default LISA models.
 
     Returns:
-        List of LISA models.
+        list: The stock models ``[scirdv1, proposal, mrdv1, sangria, sangria_v2]``
+        (:class:`LISAModel`, plus the :class:`ExtendedLISAModel` ``sangria_v2``).
 
+    Example:
+        >>> from lisatools.detector import get_available_default_lisa_models
+        >>> [m.name for m in get_available_default_lisa_models()]
+        ['scirdv1', 'proposal', 'mrdv1', 'sangria', 'sangria_v2']
     """
     return __stock_list_models__
 
@@ -1825,11 +2138,20 @@ def get_default_lisa_model_from_str(model: str) -> LISAModel:
     """Return a LISA model from a ``str`` input.
 
     Args:
-        model: Model indicated with a ``str``.
+        model: Model indicated with a ``str``: one of ``"scirdv1"``, ``"proposal"``,
+            ``"mrdv1"``, ``"sangria"``, ``"sangria_v2"``.
 
     Returns:
-        LISA model associated to that ``str``.
+        LISAModel: LISA model associated to that ``str`` (an :class:`ExtendedLISAModel` for
+        ``"sangria_v2"``).
 
+    Raises:
+        ValueError: If ``model`` is not a stock model name.
+
+    Example:
+        >>> from lisatools.detector import get_default_lisa_model_from_str
+        >>> get_default_lisa_model_from_str("sangria").name
+        'sangria'
     """
     if model not in __stock_list_models_name__:
         raise ValueError(
@@ -1842,11 +2164,19 @@ def check_lisa_model(model: Any) -> LISAModel:
     """Check input LISA model.
 
     Args:
-        model: LISA model to check.
+        model: LISA model to check: a :class:`LISAModel`, an :class:`ExtendedLISAModel`, or
+            a stock model name (see :func:`get_default_lisa_model_from_str`).
 
     Returns:
-        LISA Model checked. Adjusted from ``str`` if ``str`` input.
+        LISAModel: LISA Model checked. Adjusted from ``str`` if ``str`` input.
 
+    Raises:
+        ValueError: If ``model`` is an unknown name or not a model object.
+
+    Example:
+        >>> from lisatools.detector import check_lisa_model
+        >>> check_lisa_model("scirdv1").Soms_d == (15.0e-12) ** 2
+        True
     """
     if isinstance(model, str):
         model = get_default_lisa_model_from_str(model)

@@ -2,8 +2,20 @@
 
 The small, deduplicated versions of the blocks every settings file used to
 copy-paste: compute-backend detection, WDM-grid derivation, and TDI-channel
-bookkeeping. All pure functions over plain values — nothing here touches
-data files or GPUs beyond an import probe.
+bookkeeping, plus the default per-leaf tempering ladder and inner-move stack
+of the single-source (MBH / EMRI / SOBBH) branches. All pure functions over
+plain values — nothing here touches data files or GPUs beyond an import
+probe.
+
+Pipeline position: :meth:`EreborFit.make_general_settings
+<lisatools.globalfit.stock.erebor.fit.EreborFit.make_general_settings>` calls
+:func:`resolve_compute`, :func:`derive_wdm_grid` and
+:func:`default_edge_crop_wavelets` at build; the MBH / EMRI / SOBBH Setups
+and branch preps call :func:`default_source_ladder` and
+:func:`resolve_inner_moves`. Knobs: ``USE_GPU``, ``GPU_BACKEND``,
+``TOBS_TARGET``, ``EDGE_CROP_WAVELETS`` and the per-branch
+``{BRANCH}_NTEMPS`` / ``{BRANCH}_LADDER_TMAX`` / ``{BRANCH}_INNER_MOVE_KIND``
+/ ``{BRANCH}_EIGEN_JUMP_MIX`` / ``{BRANCH}_DE_JUMP_MIX`` fields.
 """
 
 from __future__ import annotations
@@ -16,7 +28,11 @@ from lisatools.sensitivity import tdi_generation_from_channel
 
 
 def cupy_available() -> bool:
-    """True when cupy imports — the same probe the settings files used."""
+    """True when cupy imports — the same probe the settings files used.
+
+    Used for ``use_gpu=None`` (auto) in :func:`resolve_compute`; the launchers
+    set ``USE_GPU=1``, so it is not consulted in production.
+    """
     try:
         import cupy  # noqa: F401
 
@@ -45,6 +61,15 @@ def resolve_gpu_backend(gpu_backend: typing.Optional[str]) -> str:
     ``"gpu"``) trigger detection: the CUDA wheel whose major version matches
     the running cupy runtime, confirmed present via an ``importlib`` spec
     probe (no CUDA context is created here — the device is pinned later).
+    The probe order is the cupy-matching wheel, then ``cuda12x``,
+    ``cuda11x``, ``cuda13x``; without any installed plugin wheel it defers
+    to ``lisatools.get_backend("cuda")`` and finally returns ``"cuda12x"``.
+
+    Args:
+        gpu_backend: The request (``GPU_BACKEND`` / ``general.gpu_backend``).
+
+    Returns:
+        str: A backend name such as ``"cuda13x"``.
     """
     if gpu_backend not in _AUTO_BACKEND_SENTINELS:
         return gpu_backend
@@ -93,6 +118,16 @@ def resolve_compute(
     unset) is resolved to the CUDA wheel matching this machine — so a
     non-propagated ``GPU_BACKEND`` env var can no longer silently select
     the wrong plugin wheel.
+
+    Args:
+        use_gpu: ``True`` / ``False``, or ``None`` = auto-detect
+            (``USE_GPU``; launchers 1).
+        gpu_backend: Backend request (``GPU_BACKEND``; launchers ``cuda13x``).
+        gpus: Device indices (``GPUS``); ``None`` -> ``[0]`` on the GPU path.
+
+    Returns:
+        tuple[list[int] | None, str]: ``(gpus, gpu_backend)``; ``(None, "cpu")``
+        on the CPU path.
     """
     if use_gpu is None:
         use_gpu = cupy_available()
@@ -107,7 +142,18 @@ def derive_wdm_grid(
     dt: float,
     wavelet_duration_bounds: typing.Tuple[float, float],
 ) -> typing.Tuple[int, int, float, float]:
-    """``(Nf, Nt, wavelet_duration, Tobs)`` via ``WDMSettings.adjust_to_even_bins``."""
+    """``(Nf, Nt, wavelet_duration, Tobs)`` via ``WDMSettings.adjust_to_even_bins``.
+
+    Args:
+        tobs_target: Target span (s); ``TOBS_TARGET``.
+        dt: Sample spacing (s).
+        wavelet_duration_bounds: ``(t_min, t_max)`` (s) allowed for the
+            wavelet duration ``Nf * dt``.
+
+    Returns:
+        tuple[int, int, float, float]: ``Nf`` (layers), ``Nt`` (time columns),
+        the wavelet duration (s) and the exact ``Tobs = Nf * Nt * dt`` (s).
+    """
     Nf, Nt, wavelet_duration = WDMSettings.adjust_to_even_bins(
         t_min=wavelet_duration_bounds[0],
         t_max=wavelet_duration_bounds[1],
@@ -121,12 +167,37 @@ def default_edge_crop_wavelets(window_tukey_alpha: float, Nt: int) -> int:
     """WDM time-edge crop covering boundary wavelets AND the Tukey taper.
 
     The chunked-het Tukey/edge-leak rule: edge-cut >= alpha*Nt/2 (+ margin).
+    Used only when ``edge_crop_wavelets`` is ``None`` (the launchers pin
+    ``EDGE_CROP_WAVELETS=60``).
+
+    Args:
+        window_tukey_alpha: Data-window Tukey alpha (fraction of ``Tobs``).
+        Nt: WDM time columns.
+
+    Returns:
+        int: ``max(20, ceil(alpha * Nt / 2) + 4)`` columns per side.
+
+    Example:
+        >>> from lisatools.globalfit.stock.erebor.common import default_edge_crop_wavelets
+        >>> default_edge_crop_wavelets(0.05, 2160)
+        58
+        >>> default_edge_crop_wavelets(0.0, 2160)
+        20
     """
     return max(20, int(math.ceil(window_tukey_alpha * Nt / 2)) + 4)
 
 
 def tdi_generation_info(tdi_chan: str) -> typing.Tuple[int, str]:
-    """``(tdi_gen, tdi_gen_str)`` derived from the TDI channel string."""
+    """``(tdi_gen, tdi_gen_str)`` derived from the TDI channel string.
+
+    Args:
+        tdi_chan: Channel string (``"XYZ"``, ...), parsed by
+            :func:`~lisatools.sensitivity.tdi_generation_from_channel`.
+
+    Returns:
+        tuple[int, str]: e.g. ``(2, "2nd generation")``; generation 1 gives
+        ``"1st generation"``.
+    """
     tdi_gen = tdi_generation_from_channel(tdi_chan)
     return tdi_gen, f"{tdi_gen}{'nd' if tdi_gen == 2 else 'st'} generation"
 
@@ -161,6 +232,23 @@ def default_source_ladder(ndim, input_basis, ntemps, tmax=None):
     known: each leaf gets ``make_ladder(ndim, ntemps, Tmax=clip((SNR /
     top)^2, {BRANCH}_LADDER_TMAX_MIN, tmax))``, ``tmax`` its CEILING
     (``recipe.resolve_snr_keyed_ladders``, :mod:`lisatools.sampling.snrladder`).
+
+    Production launchers: ``MBH_NTEMPS=8`` / ``MBH_LADDER_TMAX=10``,
+    ``EMRI_NTEMPS=12`` / ``EMRI_LADDER_TMAX=625``, ``SOBBH_NTEMPS=8`` /
+    ``SOBBH_LADDER_TMAX=6``; ``*_LADDER_TOP_SNR`` unset (off).
+
+    Args:
+        ndim (int | None): Sampling dimension; ``None`` -> ``len(input_basis)``.
+        input_basis (sequence): The branch's sampling-basis names.
+        ntemps (int): Number of rungs.
+        tmax (float, optional): Top temperature (must be > 1). Default
+            ``None`` = eryn's uncapped ~25 % spacing.
+
+    Returns:
+        np.ndarray: ``(ntemps,)`` inverse temperatures ``betas``, ``betas[0] == 1``.
+
+    Raises:
+        ValueError: When ``tmax`` is set and not > 1.
     """
     from eryn.moves.tempering import make_ladder
 
@@ -205,6 +293,25 @@ def make_default_inner_moves(
     ``de_jump_mode_frac`` (env ``{BRANCH}_INNER_MOVE_KIND``,
     ``{BRANCH}_EIGEN_JUMP_MIX``, ``{BRANCH}_EIGEN_JUMP_FACTOR``,
     ``{BRANCH}_DE_JUMP_MIX``, ``{BRANCH}_DE_JUMP_MODE_FRAC``).
+
+    Production launchers: ``*_INNER_MOVE_KIND=eigen``,
+    ``*_EIGEN_JUMP_MIX=0.1`` / ``*_EIGEN_JUMP_FACTOR=3.0``, and
+    ``EMRI_DE_JUMP_MIX=0.2`` (``EMRI_DE_JUMP_MODE_FRAC=0.5``),
+    ``MBH_DE_JUMP_MIX=0.1``, ``SOBBH_DE_JUMP_MIX=0.2``.
+
+    Args:
+        kind: ``"eigen"`` or ``"stretch"`` (case-insensitive).
+        jump_mix: Fraction of eigen draws taken at ``jump_factor`` x the step.
+        jump_factor: Step multiplier of those draws.
+        de_jump_mix: Stack weight of the cross-walker difference jump, in
+            ``[0, 1)``.
+        de_jump_mode_frac: Share of ``gamma = 1`` mode jumps in that move.
+
+    Returns:
+        list: ``[(move, weight), ...]`` eryn inner-move stack.
+
+    Raises:
+        ValueError: Unknown ``kind``, or ``de_jump_mix`` outside ``[0, 1)``.
     """
     kind_in = kind
     kind = str(kind).strip().lower()
@@ -241,7 +348,16 @@ def make_default_inner_moves(
 
 
 def inner_move_kwargs(settings) -> dict:
-    """The :func:`make_default_inner_moves` arguments a branch block carries."""
+    """The :func:`make_default_inner_moves` arguments a branch block carries.
+
+    Args:
+        settings (Settings): A branch Settings / Setup; missing fields fall back to
+            ``"eigen"``, 0.0, 3.0, 0.0, 0.5.
+
+    Returns:
+        dict: ``kind``, ``jump_mix``, ``jump_factor``, ``de_jump_mix``,
+        ``de_jump_mode_frac``.
+    """
     return dict(
         kind=getattr(settings, "inner_move_kind", "eigen"),
         jump_mix=float(getattr(settings, "eigen_jump_mix", 0.0) or 0.0),
@@ -257,6 +373,13 @@ def resolve_inner_moves(settings) -> list:
     An explicitly provided ``inner_moves`` list always wins; a missing
     ``inner_move_kind`` attribute defaults to ``"eigen"``, missing
     ``eigen_jump_mix`` / ``eigen_jump_factor`` to 0 / 3.
+
+    Args:
+        settings (Settings): Branch Settings / Setup with an ``inner_moves`` attribute
+            (mutated in place).
+
+    Returns:
+        list: ``settings.inner_moves``.
     """
     if settings.inner_moves is None:
         settings.inner_moves = make_default_inner_moves(**inner_move_kwargs(settings))

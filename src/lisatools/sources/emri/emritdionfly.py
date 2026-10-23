@@ -4,26 +4,27 @@ The EMRI analogue of :class:`bbhx.sobbhtdionfly.SOBBHTDIonFly` /
 :class:`bbhx.mbhtdionfly.MBHTDIonFly`: take a FEW sparse-mode holder, reconstruct
 per-``(l, m, k, n)``-mode amplitude/phase, and feed each mode (plus its ``-m``
 partner) to the generic :class:`~lisatools.response.tdionfly.TDTDIonTheFly`
-response.
+response. On the run path :class:`~lisatools.sources.emri.wdm_direct.EMRIDirectWDM` builds an
+:class:`EMRITDIonFly` with ``frame="icrs_special"`` and uses its sky conversion
+(:meth:`EMRITDIonFly.sky`), its ``AMP_FACTOR`` and :func:`host_holder`; with the production
+``response="dense"`` the response itself is
+:class:`~lisatools.response.tdionfly.TDDenseTDIonTheFly`, not :meth:`EMRITDIonFly.run_response`.
 
-Frame convention
-----------------
-FEW takes its sky/spin angles ``(qS, phiS, qK, phiK)`` as **ecliptic** polar
-angles, so the viewing angle, polarization and sky position are all produced in
-the **ecliptic** frame and handed to the response in that frame -- meaning the
-``orbits`` MUST be loaded with ``frame="ecliptic"``.  This mirrors the way
-``SOBBHTDIonFly`` / ``MBHTDIonFly`` consume ``(ra, dec)`` with ``frame="icrs"``:
-the sky/polarization frame and the orbits frame must agree.  (The previous
-version converted only the sky to ICRS while leaving ``psi`` ecliptic, a mixed
-frame that did not match the orbits.)
+**Frame convention.** FEW takes its sky/spin angles ``(qS, phiS, qK, phiK)`` as **ecliptic**
+polar angles, so the viewing angle and polarization are produced in the **ecliptic** frame.
+With ``frame="ecliptic"`` (the class default) the sky is handed to the response in that frame
+too, so the ``orbits`` MUST be loaded with ``frame="ecliptic"`` (the sky/polarization frame and
+the orbits frame must agree; the previous version converted only the sky to ICRS while leaving
+``psi`` ecliptic, a mixed frame that did not match the orbits). With
+``frame="icrs_special"`` (the validated mojito recipe, used by the direct-to-WDM template) the
+sky is converted ecliptic -> ICRS for ``frame="icrs"`` orbits while ``psi`` stays the FEW one,
+matching the production ``ResponseWrapper`` path.
 
-Per-mode inclination
---------------------
-Each mode is fed with ``inc = 0``; the response kernel's ``(1 + cos^2 i)`` /
-``2 cos i`` inclination factors then reduce to ``2``, which ``AMP_FACTOR = 1/2``
-cancels.  The viewing-angle dependence is already baked into the FEW
-spin-weighted harmonics ``Y_{lm}(theta)``, which differ for ``+m`` vs ``-m`` --
-hence the two are fed as separate subs.
+**Per-mode inclination.** Each mode is fed with ``inc = 0``; the response kernel's
+``(1 + cos^2 i)`` / ``2 cos i`` inclination factors then reduce to ``2``, which
+``AMP_FACTOR = 1/2`` cancels. The viewing-angle dependence is already baked into the FEW
+spin-weighted harmonics ``Y_{lm}(theta)``, which differ for ``+m`` vs ``-m`` -- hence the two
+are fed as separate subs.
 """
 from typing import Optional
 
@@ -48,6 +49,14 @@ def host_holder(H):
     On a GPU FEW generator the holder's arrays are cupy; the TOF feed, the harmonic tracks
     and the mode bookkeeping are small host-side computations (the response itself runs on
     the TOF backend), so everything downstream reads this copy.
+
+    Args:
+        H: FEW ``SparseInfoHolder`` (``return_sparse_holder=True`` output).
+
+    Returns:
+        types.SimpleNamespace: ``t_arr``, ``teuk_modes``, ``phases``, ``freqs``, ``ylms``,
+        ``ls``, ``ms``, ``ks``, ``ns`` as numpy arrays (``phases`` / ``freqs`` ``None`` when
+        absent) and ``integrate_backwards`` as a bool.
     """
     import types
 
@@ -68,8 +77,9 @@ class EMRITDIonFly:
         wave_gen: a FEW waveform generator returning a sparse-mode holder when
             called with ``return_sparse_holder=True`` (e.g.
             :class:`few.waveform.FastKerrEccentricEquatorialFlux`).
-        orbits: LISA orbits **loaded with** ``frame="ecliptic"`` (see the frame
-            convention in the module docstring).
+        orbits: LISA orbits whose frame matches ``frame``: **loaded with**
+            ``frame="ecliptic"`` for ``"ecliptic"``, ``frame="icrs"`` for ``"icrs_special"``
+            (see the frame convention in the module docstring).
         tdi_config: a :class:`~lisatools.response.tdiconfig.TDIConfig`.
         dt: sampling cadence [s].
         Tobs: observation time [s] (converted to years for FEW, whose ``T`` is in years).
@@ -87,16 +97,40 @@ class EMRITDIonFly:
             response converted ecliptic -> ICRS, orbits loaded with
             ``frame="icrs"``). mojito's polarization basis is ICRS, so only
             ``icrs_special`` matches it; ``ecliptic`` differs by the
-            parallactic angle (~8%% mismatch, LAT 3057a3e4).
+            parallactic angle (~8% mismatch, LAT 3057a3e4).
         n_fine: when set, feed the response ``n_fine`` trajectory points
             evaluated from the integrator's dense (8th-order) output via FEW's
             ``upsample``/``new_t`` path instead of the sparse adaptive knots
             (tens of points over the inspiral, which a cubic amp/phase spline
-            cannot hold). ``None`` keeps the sparse feed.
+            cannot hold). ``None`` keeps the sparse feed. Must be ``>= 16``.
         t_fine_window: optional absolute ``(t_lo, t_hi)`` [s]: place the fine
             points over this window only (padded outward by ``delay_margin``
             plus two point spacings, so the delay trim still covers it).
             Default: the whole ``[t0, t0 + Tobs]``.
+        t_fine: optional explicit fine times [s] relative to ``t0`` (FEW clock), possibly
+            non-uniform; sorted and de-duplicated, at least 16 points. Overrides ``n_fine``
+            (set to its size) and ``t_fine_window``.
+
+    Attributes:
+        AMP_FACTOR (float): ``1/2``, cancels the ``inc = 0`` kernel factor ``1 + cos^2 0``.
+        FRAMES (tuple): The accepted ``frame`` values.
+        last_holder (types.SimpleNamespace): Host holder of the last :meth:`prepare_feed`.
+        tdi_gen (TDTDIonTheFly): Response object of the last :meth:`run_response`.
+
+    Raises:
+        ValueError: For an unknown ``frame``, ``n_fine < 16`` or fewer than 16 ``t_fine``
+            points.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.response.tdiconfig import TDIConfig
+            from lisatools.sources.emri import EMRITDIonFly
+
+            fly = EMRITDIonFly(few_gen, icrs_orbits, TDIConfig("2nd generation"), dt, Tobs,
+                               t0=ref_epoch, frame="icrs_special", n_fine=4096)
+            out = fly(*few_params)        # TDTDIOutput, one row per (l, m, k, n) sub
+            xyz = out.eval_tdi(t_eval)    # per-sub channels; sum over subs for the template
     """
 
     FRAMES = ("ecliptic", "icrs_special")
@@ -134,7 +168,17 @@ class EMRITDIonFly:
         """Per-sub (amplitude, phase) with h = sum_sub amp * exp(-1j * phase).
 
         Rows: the holder's m >= 0 modes, then (if ``include_minus_mkn``) the
-        -m partners of the m != 0 modes. Shapes (num_sub, n_times).
+        -m partners of the m != 0 modes. The phase is ``m Phi_phi + k Phi_theta + n Phi_r``
+        minus the phases of ``Y_lm`` and of the unwrapped Teukolsky amplitude (the -m rows use
+        FEW's ``(-1)^l Y_{l,-m} conj(A) e^{+i Phi}`` term).
+
+        Args:
+            K: Host FEW holder (:func:`host_holder`), with ``phases`` at its times.
+            include_minus_mkn (bool, optional): Append the -m partners. Default ``True``.
+            amp_factor (float, optional): Multiplies every amplitude. Default ``1.0``.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: ``(amp, phase)``, each ``(num_sub, n_times)``.
         """
         mode_amp_phase = np.unwrap(np.angle(K.teuk_modes), axis=0)
         mode_amp_amp = np.abs(K.teuk_modes)
@@ -209,6 +253,40 @@ class EMRITDIonFly:
         holder=None,
         **kwargs: Optional[dict],
     ):
+        """Run FEW (or take ``holder``) and return the TDI-on-the-fly response of its modes.
+
+        Args:
+            m1: Primary (MBH) mass [Msun].
+            m2: Secondary (compact object) mass [Msun].
+            a: Dimensionless spin.
+            p0: Initial semi-latus rectum.
+            e0: Initial eccentricity.
+            x0: Inclination cosine (``+1`` / ``-1``).
+            dist: Luminosity distance [Gpc].
+            qS: Sky polar angle, ecliptic [rad].
+            phiS: Sky azimuth, ecliptic [rad].
+            qK: Spin polar angle [rad].
+            phiK: Spin azimuth [rad].
+            Phi_phi0: Initial azimuthal phase [rad].
+            Phi_theta0: Initial polar phase [rad].
+            Phi_r0: Initial radial phase [rad].
+            *add_args: Ignored.
+            include_minus_mkn: Feed the -m partners as separate subs. Default ``True``.
+            holder (optional): A precomputed FEW sparse holder on this instance's fine grid
+                (needs ``n_fine`` / ``t_fine``); skips the FEW call. Default ``None``.
+            **kwargs: Forwarded to the FEW generator (``inspiral_kwargs`` is owned by this
+                class when ``n_fine`` is set). The generator's own ``inspiral_kwargs`` are
+                restored afterwards.
+
+        Returns:
+            TDTDIOutput: The response output with splines (``return_spline=True``), one row
+            per sub.
+
+        Raises:
+            WaveformDomainError: When FEW refuses the parameters.
+            ValueError: If ``inspiral_kwargs`` is passed with ``n_fine`` set, ``holder`` is
+                given without a fine grid, or the delay trim leaves fewer than 4 points.
+        """
         # (qS, phiS, qK, phiK) are ECLIPTIC polar angles -> the FEW viewing
         # angle and psi always come from them. frame="ecliptic": the sky also
         # stays ecliptic (matching ecliptic orbits). frame="icrs_special": the
@@ -280,7 +358,20 @@ class EMRITDIonFly:
         return self.run_response([(t_arr_in, mode_amp, mode_phase, t_arr_tdi, psi, lam, beta)])
 
     def sky(self, qS, phiS, qK, phiK):
-        """(theta, phi) for FEW and (psi, lam, beta) for the response, in this instance's frame."""
+        """Viewing angles for FEW and the response's sky / polarization, in this instance's frame.
+
+        Args:
+            qS (float): Sky polar angle, ecliptic [rad].
+            phiS (float): Sky azimuth, ecliptic [rad].
+            qK (float): Spin polar angle [rad].
+            phiK (float): Spin azimuth [rad].
+
+        Returns:
+            tuple: ``(theta, phi, psi, lam, beta)``: FEW's viewing angles and polarization
+            (from FEW ``get_viewing_angles`` / ``get_polarization_angle``), and the sky
+            longitude / latitude: ecliptic ``(phiS, pi/2 - qS)`` for ``frame="ecliptic"``,
+            converted to ICRS (RA, Dec) for ``frame="icrs_special"``.
+        """
         theta, phi = get_viewing_angles(qS, phiS, qK, phiK)
         psi = get_polarization_angle(qS, phiS, qK, phiK)
         if self.frame == "icrs_special":
@@ -290,7 +381,19 @@ class EMRITDIonFly:
         return theta, phi, psi, lam, beta
 
     def prepare_feed(self, Kerr_wave, include_minus_mkn=True):
-        """Host holder -> (t_arr_in, mode_amp, mode_phase, t_arr_tdi) for the response."""
+        """FEW holder -> ``(t_arr_in, mode_amp, mode_phase, t_arr_tdi)`` for the response.
+
+        Copies the holder to host (stored as :attr:`last_holder`), builds the per-sub
+        amplitude / phase (:meth:`mode_amp_phase` with :attr:`AMP_FACTOR`) and hands them to
+        :meth:`prepare_feed_arrays`.
+
+        Args:
+            Kerr_wave: FEW sparse holder (host or device).
+            include_minus_mkn (bool, optional): Include the -m partners. Default ``True``.
+
+        Returns:
+            tuple: See :meth:`prepare_feed_arrays`.
+        """
         Kerr_wave = host_holder(Kerr_wave)   # GPU generator: cupy holder -> host copy
         self.last_holder = Kerr_wave   # consumers (EMRIDirectWDM) need the same trajectory's modes
         mode_amp, mode_phase = self.mode_amp_phase(
@@ -299,8 +402,26 @@ class EMRITDIonFly:
         return self.prepare_feed_arrays(np.asarray(Kerr_wave.t_arr, dtype=float), mode_amp, mode_phase)
 
     def prepare_feed_arrays(self, t_src, mode_amp, mode_phase):
-        """(t_src [FEW clock], amp (S, n), phase (S, n)) -> (t_arr_in, mode_amp, mode_phase, t_arr_tdi):
-        zero-amplitude continuation past an in-window stop and the delay-margin trim."""
+        """Response feed arrays from per-sub amplitude / phase on the source times.
+
+        With a fine grid, a trajectory that stops before the requested end is continued past
+        the stop with ZERO amplitude and linearly continued phase (two delay margins plus two
+        steps). The TDI evaluation grid is then trimmed by ``delay_margin`` at each end (by
+        sample count on a uniform feed, by time on a non-uniform one).
+
+        Args:
+            t_src (np.ndarray): Source times [s], FEW clock (relative to ``t0``), ``(n,)``.
+            mode_amp (np.ndarray): Per-sub amplitudes, ``(S, n)``.
+            mode_phase (np.ndarray): Per-sub phases, ``(S, n)``.
+
+        Returns:
+            tuple: ``(t_arr_in, mode_amp, mode_phase, t_arr_tdi)``: absolute input times
+            ``(S, n')``, the (possibly extended) amplitude and phase, and the trimmed absolute
+            evaluation times ``(S, n_tdi)``.
+
+        Raises:
+            ValueError: If the trim leaves fewer than 4 evaluation times.
+        """
         t_src = np.asarray(t_src, dtype=float)
         if self.n_fine is not None and t_src.size > 2:
             # A plunge inside the requested window: FEW's fix_t cut the fine grid at the
@@ -342,10 +463,21 @@ class EMRITDIonFly:
     def run_response(self, feeds):
         """ONE TDI-on-the-fly response for every sub of every feed.
 
-        ``feeds``: list of ``(t_arr_in, mode_amp, mode_phase, t_arr_tdi, psi, lam, beta)`` (one per
-        template, e.g. from :meth:`prepare_feed`); all must share the fine-grid lengths. The
-        output's sub axis is the concatenation in feed order. Many templates in one call fill
-        the GPU (the kernel launches one block per sub)."""
+        Builds one :class:`~lisatools.response.tdionfly.TDTDIonTheFly` (stored as
+        :attr:`tdi_gen`) with ``inc = 0`` for every sub and the feed's ``psi`` / ``lam`` /
+        ``beta`` repeated over its subs. Many templates in one call fill the GPU (the kernel
+        launches one block per sub). The response object is built without ``force_backend``
+        (its default backend resolution applies).
+
+        Args:
+            feeds (list): ``(t_arr_in, mode_amp, mode_phase, t_arr_tdi, psi, lam, beta)`` per
+                template (e.g. :meth:`prepare_feed` plus :meth:`sky`); all must share the
+                fine-grid lengths.
+
+        Returns:
+            TDTDIOutput: The response with splines; its sub axis is the concatenation of the
+            feeds' subs in feed order.
+        """
         t_in = np.concatenate([f[0] for f in feeds], axis=0)
         amp = np.concatenate([f[1] for f in feeds], axis=0)
         ph = np.concatenate([f[2] for f in feeds], axis=0)

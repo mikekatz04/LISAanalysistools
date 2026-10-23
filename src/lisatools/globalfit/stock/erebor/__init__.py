@@ -12,8 +12,50 @@ Primary interface::
     fit = erebor.get_stock("gb_no_fg", nwalkers=16)
     fit = erebor.gb_no_fg(nwalkers=16)  # same thing via the module attribute
 
-Everything importable from the old ``stock/erebor.py`` module remains
-importable from here.
+The two spellings differ in one respect: ``get_stock`` constructs a new
+instance from the class (env-backed field defaults are read at that call),
+while ``erebor.<name>(**overrides)`` clones the module-level default
+instance built at import (its env-resolved values were read at import, and
+any session edit made to ``erebor.<name>`` itself is inherited).
+
+Registered variants (``option_name``; each in ``variants/``): ``blank``
+(zero-branch canvas for the simple API), ``gb_no_fg`` (GB-only, fixed PSD),
+``vgb`` (verification binaries), ``all_sources`` (THE production variant:
+gb + vgb + mbh + emri + sobbh + psd + galfor, optional sgwb),
+``full_year_combined``, ``noise_only``, ``noise_sgwb``, ``noise_mojito``,
+``noise_galfor_mojito``, and the laptop-smoke twins ``gb_no_fg_lite``,
+``vgb_lite``, ``all_sources_lite``, ``full_year_combined_lite``,
+``noise_only_lite``, ``noise_sgwb_lite`` (``erebor.<name>(lite=True)`` is
+the same preset). The 9mo / 12mo production launchers
+(``scripts/fstat_proposal/submit_gf_9mo_v9.sh``,
+``scripts/flagship/submit_gf_12mo.sh``) run
+``scripts/fstat_proposal/run_combined_staged.py``, which clones
+``erebor.all_sources(nwalkers=4)`` and composes its own staged recipe.
+
+Building blocks re-exported here: the general block
+(:class:`~.fit.EreborGeneralSettings`, :class:`~.fit.EreborFit`), the branch
+blocks (:mod:`.gb`, :mod:`.vgb`, :mod:`.mbh`, :mod:`.emri`, :mod:`.sobbh`,
+:mod:`.noise`, :mod:`.stochastic`) and the transform atoms
+(:mod:`.transforms`). Everything importable from the old
+``stock/erebor.py`` module remains importable from here.
+
+Note:
+    ``erebor.vgb`` is the default VGB *fit instance*, not the branch module:
+    the attribute is rebound after import. Import the module as
+    ``lisatools.globalfit.stock.erebor.vgb`` (``from ...erebor.vgb import
+    VGBSettings``) or use the re-exports ``erebor.VGBSettings`` /
+    ``erebor.VGBSetup``.
+
+Example:
+    .. code-block:: python
+
+        from lisatools.globalfit.stock import erebor
+
+        fit = erebor.all_sources(nwalkers=4)     # production variant (clone)
+        fit.general.num_iterations = 50
+        fit.emri.ntemps = 12                     # per-branch knob (env EMRI_NTEMPS)
+        fit.build()
+        fit.run()
 """
 
 from __future__ import annotations

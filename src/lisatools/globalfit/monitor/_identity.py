@@ -18,6 +18,12 @@ tags must not move), plus ONE generic rule for anything else that carries a
 ``gf_prod_1yr_v9`` -> ``("1-Year v9", "1yr_v9")``. The plain ``3mo`` / ``v2``
 fall-through remains only for a name with no version token at all (the
 original 3-month v2 run).
+
+Used by the full-page generator (banner and arm cache) and by
+:func:`lisatools.globalfit.monitor._add_info.run_label` (added-run legend
+labels). The live runs resolve as ``gf_prod_9mo_v9`` -> ``("9-Month v9",
+"9mo_v9")`` and ``gf_prod_12mo_flagship`` -> ``("12-Month flagship",
+"12mo_flagship")``.
 """
 from __future__ import annotations
 
@@ -45,6 +51,7 @@ _LEGACY_ARM_TAGS = {"3mo_v3": "v3", "3mo_v4": "v4", "3mo": "v2"}
 
 
 def _generic(m: "re.Match[str]") -> tuple[str, str]:
+    """``("<N>-Month v<K>", "<N>mo_v<K>")`` (or ``Year`` / ``yr``) from a :data:`_VARIANT` match."""
     n, unit, v = m.group(1), m.group(2), m.group(3)
     return f"{n}-{'Month' if unit == 'mo' else 'Year'} v{v}", f"{n}{unit}_v{v}"
 
@@ -57,6 +64,20 @@ def run_identity(base: str) -> tuple[str, str]:
     name before the plain-3-month fall-through. A ``1yr_v<K>`` name other
     than v8 takes the generic rule too (the bare ``1yr`` branch is the v5
     1-year run, whose store carries no version token).
+
+    Args:
+        base: The run directory's basename.
+
+    Returns:
+        tuple[str, str]: ``(RUN_LABEL, RUN_KIND)``: the banner label and the
+        run kind (input of :func:`arm_tag`).
+
+    Example:
+        >>> from lisatools.globalfit.monitor._identity import run_identity
+        >>> run_identity("gf_prod_9mo_v9")
+        ('9-Month v9', '9mo_v9')
+        >>> run_identity("gf_prod_12mo_flagship")
+        ('12-Month flagship', '12mo_flagship')
     """
     base = str(base)
     m = _SERIES.search(base)
@@ -117,6 +138,18 @@ def arm_tag(run_kind: str, override: str | None = None) -> str:
     map sent v5, v6 and the 1-yr run all to ``gf_arm_v2.npz``, silently
     clobbering the shared v2 arm. The three legacy kinds keep their historical
     file names.
+
+    Args:
+        run_kind: The ``RUN_KIND`` from :func:`run_identity`.
+        override: A tag that wins when non-empty. Default ``None``.
+
+    Returns:
+        str: The arm tag.
+
+    Example:
+        >>> from lisatools.globalfit.monitor._identity import arm_tag
+        >>> arm_tag("9mo_v9"), arm_tag("3mo")
+        ('9mo_v9', 'v2')
     """
     if override:
         return str(override)

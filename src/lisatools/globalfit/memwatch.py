@@ -22,10 +22,13 @@ node avail Z.Z of T.T GB``
 whenever its own RSS or its children's (the EMRI trajectory-pool workers)
 moved by more than ``GF_MEMWATCH_DELTA_GB`` (2) since its last line, the
 node's available memory moved by more than twice that, or
-``GF_MEMWATCH_HEARTBEAT_S`` (600) elapsed. One process per node (the lowest
-local rank) logs the node's largest processes of the run's user, with the
-node's anonymous / shmem / page-cache / unreclaimable-slab totals, every
-``GF_MEMWATCH_TOP_S`` (600).
+``GF_MEMWATCH_HEARTBEAT_S`` (600) elapsed. One process per node (local rank
+0, read from ``MPI_LOCALRANKID`` / ``PMI_LOCAL_RANK`` /
+``OMPI_COMM_WORLD_LOCAL_RANK`` / ``MV2_COMM_WORLD_LOCAL_RANK`` /
+``SLURM_LOCALID``; every process when none is set) logs the node's largest
+processes of the run's user, with the node's anonymous / shmem /
+page-cache / unreclaimable-slab / dirty totals, every ``GF_MEMWATCH_TOP_S``
+(600).
 
 Below ``GF_MEMWATCH_LOW_FRAC`` (0.15) of the node available ("LOW MEMORY"):
 every process logs its own line and the node table is logged every
@@ -43,6 +46,25 @@ The thread only reads ``/proc`` and touches small files in the registry
 (no MPI, no GPU, no numpy) and never raises. Off Linux (no
 ``/proc/meminfo``) :func:`start` is a no-op. ``GF_MEMWATCH=0`` turns it off;
 ``GF_MEMWATCH_DUMP=0`` keeps the lines but sends no signal.
+
+Where it runs: the production driver (``scripts/fstat_proposal/run_combined_staged.py``,
+``main()``) calls ``start`` with the tag ``w`` + the MPI world rank on every process,
+before the monitor-rank split, so the 9mo / 12mo runs have it on every
+rank; neither launcher sets a ``GF_MEMWATCH*`` knob, so the defaults above
+apply. The lines go through this module's :mod:`logging` logger
+(``lisatools.globalfit.memwatch``, INFO). The registry
+(:func:`default_registry_dir`, ``/tmp/gf_memwatch_{SLURM_JOB_ID}``) holds one
+``pid_{pid}`` file per registered process (its tag) and the ``table_*`` /
+``dump_*`` claim files of the LOW MEMORY path; nothing removes them.
+
+Knobs (read once, by :func:`start`): ``GF_MEMWATCH`` (default 1),
+``GF_MEMWATCH_DUMP`` (1), ``GF_MEMWATCH_PERIOD`` (30 s),
+``GF_MEMWATCH_FAST_PERIOD`` (5 s), ``GF_MEMWATCH_PRESS_FRAC`` (0.30),
+``GF_MEMWATCH_DELTA_GB`` (2), ``GF_MEMWATCH_HEARTBEAT_S`` (600),
+``GF_MEMWATCH_TOP_S`` (600), ``GF_MEMWATCH_LOW_FRAC`` (0.15),
+``GF_MEMWATCH_LOW_S`` (15), ``GF_MEMWATCH_DUMP_GAP_S`` (120). An unreadable
+numeric value falls back to its default. Sizes are GiB (``2**30`` bytes,
+:data:`GB`).
 """
 
 from __future__ import annotations
@@ -71,6 +93,7 @@ _STARTED: Optional["MemWatch"] = None
 
 
 def _env_float(name: str, default: float) -> float:
+    """``float(os.environ[name])``, or ``default`` when unset or unreadable."""
     try:
         return float(os.environ.get(name, default))
     except (TypeError, ValueError):
@@ -78,7 +101,18 @@ def _env_float(name: str, default: float) -> float:
 
 
 def read_meminfo_fields(root: str = "/proc") -> Optional[Dict[str, float]]:
-    """Every ``/proc/meminfo`` field in bytes, or ``None`` when unreadable."""
+    """Every ``/proc/meminfo`` field in bytes, or ``None`` when unreadable.
+
+    A value with a unit (``kB``) is multiplied by 1024; a bare count (the
+    ``HugePages_*`` lines) is kept as is.
+
+    Args:
+        root: The ``/proc`` mount (tests point it at a fake tree).
+
+    Returns:
+        dict[str, float] or None: ``{field: value}``; ``None`` when the file
+        cannot be read or lacks ``MemTotal`` / ``MemAvailable``.
+    """
     vals: Dict[str, float] = {}
     try:
         with open(os.path.join(root, "meminfo")) as fh:
@@ -98,7 +132,14 @@ def read_meminfo_fields(root: str = "/proc") -> Optional[Dict[str, float]]:
 
 
 def read_meminfo(root: str = "/proc") -> Optional[Tuple[float, float]]:
-    """``(MemTotal, MemAvailable)`` in bytes, or ``None`` when unreadable."""
+    """``(MemTotal, MemAvailable)`` in bytes, or ``None`` when unreadable.
+
+    Args:
+        root: The ``/proc`` mount.
+
+    Returns:
+        tuple[float, float] or None: Total and available memory, bytes.
+    """
     vals = read_meminfo_fields(root)
     if vals is None:
         return None
@@ -123,6 +164,10 @@ def _read_status(root: str, pid: str) -> Optional[Tuple[float, int, int]]:
 
 
 def _cmdline(root: str, pid: str, width: int = 90) -> str:
+    """``pid``'s command line for the node table, cut to ``width`` characters.
+
+    A leading ``python*`` interpreter path is dropped; ``"?"`` when unreadable or empty.
+    """
     try:
         with open(os.path.join(root, pid, "cmdline"), "rb") as fh:
             raw = fh.read(4096)
@@ -136,7 +181,16 @@ def _cmdline(root: str, pid: str, width: int = 90) -> str:
 
 
 def proc_table(root: str = "/proc", uid: Optional[int] = None) -> List[Tuple[int, int, float]]:
-    """``[(pid, ppid, rss_bytes), ...]`` of every readable process (of ``uid`` if given)."""
+    """``[(pid, ppid, rss_bytes), ...]`` of every readable process (of ``uid`` if given).
+
+    Args:
+        root: The ``/proc`` mount.
+        uid: Keep only processes of this real uid. Default ``None``: all.
+
+    Returns:
+        list[tuple[int, int, float]]: One row per process whose ``status``
+        could be read (empty when ``root`` cannot be listed).
+    """
     out = []
     try:
         names = os.listdir(root)
@@ -173,6 +227,7 @@ def _descendants_rss(table, pid: int) -> Tuple[float, int]:
 
 
 def _local_rank() -> Optional[int]:
+    """The node-local rank from the first set integer of ``_LOCAL_RANK_ENVS``, else ``None``."""
     for k in _LOCAL_RANK_ENVS:
         v = os.environ.get(k)
         if v is not None and str(v).strip().lstrip("-").isdigit():
@@ -181,13 +236,64 @@ def _local_rank() -> Optional[int]:
 
 
 def default_registry_dir() -> str:
-    """The per-job pid registry / lock directory (node-local ``/tmp``)."""
+    """The per-job pid registry / lock directory (node-local ``/tmp``).
+
+    Returns:
+        str: ``/tmp/gf_memwatch_{SLURM_JOB_ID}`` (``local`` when the job id
+        is unset).
+    """
     job = os.environ.get("SLURM_JOB_ID") or "local"
     return os.path.join("/tmp", f"gf_memwatch_{job}")
 
 
 class MemWatch(threading.Thread):
-    """The sampling thread (see the module docstring). ``sample_once`` is the testable step."""
+    """The sampling thread (see the module docstring). ``sample_once`` is the testable step.
+
+    A daemon :class:`threading.Thread` named ``gf-memwatch``. :func:`start`
+    builds one per process from the ``GF_MEMWATCH_*`` knobs; tests build it
+    directly on a fake ``/proc`` tree with fake clocks and a fake ``kill``.
+
+    Args:
+        tag: The process label in every line (``w5`` = world rank 5).
+        root: The ``/proc`` mount. Default ``"/proc"``.
+        period: Seconds between samples. Default 30.
+        fast_period: Seconds between samples under pressure. Default 5.
+        press_frac: Available / total below which the fast period applies.
+            Default 0.30.
+        delta_gb: Change in own / children RSS (GiB) that triggers a line;
+            twice it for the node's available memory. Default 2.
+        heartbeat_s: Seconds after which a line is logged anyway. Default 600.
+        top_s: Seconds between the node-reporter's tables. Default 600.
+        low_frac: Available / total below which LOW MEMORY applies.
+            Default 0.15.
+        low_s: LOW MEMORY cadence (own lines, node table bucket), seconds.
+            Default 15.
+        dump_gap_s: Wall-clock bucket of the stack-dump signal per target,
+            seconds. Default 120.
+        node_reporter: Whether this process logs the periodic node table.
+            Default ``True``.
+        top_n: Processes listed in a node table. Default 10.
+        registry_dir: The pid registry / lock directory; ``None`` disables
+            the registry (then the node reporter claims every table and no
+            stack-dump signal has a target).
+        dump_signal (signal.Signals or None): Signal sent for a stack dump.
+            Default ``SIGWINCH`` (``None`` where the platform lacks it);
+            ``None`` sends nothing.
+        kill (callable): ``kill(pid, sig)``. Default :func:`os.kill`.
+        clock (callable): Monotonic clock for the cadences. Default
+            :func:`time.monotonic`.
+        wall (callable): Wall clock for the cross-process buckets. Default
+            :func:`time.time`.
+        log (callable, optional): Line sink. Default the module logger's
+            ``info``.
+
+    Attributes:
+        pid (int): This process's pid.
+        uid (int or None): Its real uid (the node table's filter).
+        host (str): The host name.
+        pressure (bool): Whether the last sample was below ``press_frac``
+            (selects the fast period).
+    """
 
     def __init__(self, tag: str, *, root: str = "/proc", period: float = 30.0,
                  fast_period: float = 5.0, press_frac: float = 0.30,
@@ -238,6 +344,7 @@ class MemWatch(threading.Thread):
             pass
 
     def _registered(self) -> Dict[int, str]:
+        """``{pid: tag}`` of every process in the registry (empty without one)."""
         out: Dict[int, str] = {}
         if not self.registry_dir:
             return out
@@ -255,7 +362,11 @@ class MemWatch(threading.Thread):
         return out
 
     def _claim(self, name: str) -> bool:
-        """``True`` for the first process of the node to claim ``name`` (an O_EXCL file)."""
+        """``True`` for the first process of the node to claim ``name`` (an O_EXCL file).
+
+        Without a registry, or when the file cannot be created for another
+        reason, the answer is ``node_reporter``.
+        """
         if not self.registry_dir:
             return self.node_reporter
         try:
@@ -269,9 +380,15 @@ class MemWatch(threading.Thread):
 
     # -- one step --------------------------------------------------------------
     def _node_breakdown(self, fields: Dict[str, float]) -> str:
+        """``anon X, shmem Y, page cache Z, ...`` (GiB) from the ``_NODE_FIELDS`` present."""
         return ", ".join(f"{label} {fields[k] / GB:.1f}" for k, label in _NODE_FIELDS if k in fields)
 
     def _table_line(self, table, fields, total, avail, low, registered) -> str:
+        """The node table line: availability, totals and the ``top_n`` largest processes.
+
+        Each process is tagged with its registry tag, or ``child of`` its
+        registered parent's tag; ``low`` prefixes ``LOW MEMORY``.
+        """
         top = sorted(table, key=lambda r: -r[2])[: self.top_n]
         parts = []
         for p, pp, r in top:
@@ -299,7 +416,21 @@ class MemWatch(threading.Thread):
         return targets
 
     def sample_once(self) -> List[str]:
-        """Read ``/proc`` once; return (and log) the lines this sample warrants."""
+        """Read ``/proc`` once; return (and log) the lines this sample warrants.
+
+        In order: this process's ``[GF_MEM]`` line when due (first sample,
+        heartbeat or ``low_s`` elapsed, or an RSS / availability change past
+        the thresholds); the node table (LOW MEMORY: whoever claims the
+        ``low_s`` wall bucket first; otherwise the node reporter every
+        ``top_s``); under LOW MEMORY with a dump signal, one
+        ``asking pid ... for its Python stacks`` line and signal per
+        :meth:`_dump_targets` entry not yet claimed in this ``dump_gap_s``
+        bucket. Also updates :attr:`pressure`.
+
+        Returns:
+            list[str]: The lines logged (empty when ``/proc/meminfo`` is
+            unreadable).
+        """
         lines: List[str] = []
         fields = read_meminfo_fields(self.root)
         if fields is None:
@@ -352,6 +483,10 @@ class MemWatch(threading.Thread):
 
     # -- the thread -------------------------------------------------------------
     def run(self):  # pragma: no cover - timing loop; sample_once is tested
+        """Sample until :meth:`stop`, every ``fast_period`` under pressure, else ``period``.
+
+        A failing sample is swallowed (telemetry must never take the rank down).
+        """
         while not self._halt.is_set():
             try:
                 self.sample_once()
@@ -360,6 +495,7 @@ class MemWatch(threading.Thread):
             self._halt.wait(self.fast_period if self.pressure else self.period)
 
     def stop(self):
+        """Ask the loop to exit at its next wake-up (the production run never calls it)."""
         self._halt.set()
 
 
@@ -371,12 +507,34 @@ def start(tag: Optional[str] = None, *, root: str = "/proc",
     and this pid in the per-job registry, so a LOW MEMORY sample on the node
     can ask this process for its Python stacks.
 
+    The thread's cadences and thresholds come from the ``GF_MEMWATCH_*``
+    knobs (module docstring); the node reporter is the process whose local
+    rank is 0 (or every process when no local-rank variable is set). Called
+    once per process by the production driver's ``main()``.
+
     Args:
         tag: Label of the process in the lines, e.g. ``"w5"`` (world rank 5).
-            Default: ``w`` + the MPI rank from the environment, else ``pid``.
+            Default: ``w`` + the MPI rank from the environment
+            (``PMI_RANK`` / ``OMPI_COMM_WORLD_RANK`` / ``PMIX_RANK``), else
+            ``pid`` + the pid.
         root: The ``/proc`` mount (tests point it at a fake tree).
         registry_dir: The pid registry / lock directory. Default
-            :func:`default_registry_dir` (``/tmp/gf_memwatch_<SLURM_JOB_ID>``).
+            :func:`default_registry_dir` (``/tmp/gf_memwatch_{SLURM_JOB_ID}``).
+
+    Returns:
+        MemWatch or None: The running thread (the same one on a repeat
+        call), or ``None`` with ``GF_MEMWATCH=0`` / ``false`` / ``no`` /
+        ``off``, without a readable ``/proc/meminfo``, or when the thread
+        cannot start. With ``GF_MEMWATCH_DUMP`` off, or when
+        :mod:`faulthandler` cannot register, no dump signal is sent.
+
+    Example:
+        .. code-block:: python
+
+            from mpi4py import MPI
+            from lisatools.globalfit import memwatch
+
+            memwatch.start(f"w{MPI.COMM_WORLD.Get_rank()}")
     """
     global _STARTED
     if _STARTED is not None:

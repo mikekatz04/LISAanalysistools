@@ -3,8 +3,20 @@
 Angles are ecliptic radians and distance is heliocentric kpc.  The underlying
 Galactocentric density is the four-component Milky Way mixture -- thin disk,
 thick disk, flattened Gaussian bulge, cut-off power-law halo -- fitted to the
-WDWD catalog by ``plot_galaxy_density.py --plot fitmulti``.  The best-fit
-values are copied in below so this module needs nothing but numpy and eryn.
+WDWD catalog by ``plot_galaxy_density.py --plot fitmulti`` (that fitting
+script is not part of this repository).  The best-fit values are copied in
+below (:data:`DEFAULT_PARAMS`) so this module needs nothing but numpy and eryn.
+
+Pipeline position: production uses :class:`GalaxyPrior3D` only through
+:class:`~lisatools.globalfit.priors.galaxy_sky_dist.GalaxySkyDistPrior`, which
+calls :meth:`GalaxyPrior3D.density` (in its ``pdf``) and
+:meth:`GalaxyPrior3D.rvs` (in its ``rvs`` and ``norm``) for the GB
+``(dist, alpha, sin_delta)`` prior (``GB_USE_GALAXY_PRIOR=1``). The ecliptic
+:meth:`GalaxyPrior3D.pdf` is used by ``scripts/gb/check_galaxy_sky_dist.py``
+(check 2); :meth:`GalaxyPrior3D.logpdf` completes the eryn prior surface.
+
+Importing the module builds the module-level :data:`prior` container (no
+random draws; the generator is created from OS entropy).
 """
 
 import math
@@ -94,21 +106,62 @@ def _halo_pdf(x, y, z, n, rc, norm):
 
 
 class GalaxyPrior3D:
-    """Joint PDF in ecliptic ``(lambda, beta, distance)`` coordinates.
+    r"""Joint PDF in ecliptic ``(lambda, beta, distance)`` coordinates.
 
-    Parameters (indices 0, 1, 2):
-      0: lambda -- ecliptic longitude [rad], in [0, 2*pi)
-      1: beta   -- ecliptic latitude  [rad], in [-pi/2, +pi/2]
-      2: dist   -- distance from the Sun [kpc], >= 0
+    Columns (indices 0, 1, 2):
 
-    The galactocentric mixture is a proper PDF in kpc^3 (each component is
-    separately normalized), so the spherical volume element is the only
-    Jacobian needed:
+    * 0 ``lambda`` -- ecliptic longitude [rad], in [0, 2*pi)
+    * 1 ``beta``   -- ecliptic latitude  [rad], in [-pi/2, +pi/2]
+    * 2 ``dist``   -- distance from the Sun [kpc], >= 0
 
-        p(lambda, beta, d) = rho(x, y, z) * d^2 * cos(beta)
+    The galactocentric mixture is a proper PDF in kpc^-3 (each component is
+    separately normalized, so the mixture integrates to 1 over all space),
+    and the spherical volume element is the only Jacobian needed:
 
-    Keyword arguments override individual entries of ``DEFAULT_PARAMS``; the
-    mixture fractions are renormalized to sum to 1.
+    .. math::
+
+        p(\lambda, \beta, d) = \rho(x, y, z)\, d^2 \cos\beta,
+        \qquad
+        \rho = f_{\rm thin}\rho_{\rm disk}(R_{\rm thin}, h_{\rm thin})
+        + f_{\rm thick}\rho_{\rm disk}(R_{\rm thick}, h_{\rm thick})
+        + f_{\rm bulge}\rho_{\rm bulge} + f_{\rm halo}\rho_{\rm halo},
+
+    with the Sun at galactocentric ``(-R_GC, 0, 0)`` (:data:`R_GC` kpc) and
+    the ecliptic-to-galactic rotation :data:`ECLIPTIC_TO_GALACTIC`.
+
+    Args:
+        rng (int, numpy.random.Generator or None): Seed or generator for
+            :meth:`rvs`, through ``numpy.random.default_rng``. ``None``
+            (default) uses OS entropy.
+        **params: Overrides of individual :data:`DEFAULT_PARAMS` entries
+            (``f_thin``, ``f_thick``, ``f_bulge``, ``f_halo``, ``Rd_thin``,
+            ``hz_thin``, ``Rd_thick``, ``hz_thick``, ``Rb_bulge``,
+            ``q_bulge``, ``n_halo``, ``rc_halo``; lengths in kpc). The mixture
+            fractions are renormalized to sum to 1.
+
+    Raises:
+        ValueError: An unknown parameter name, a negative fraction (or a
+            non-positive fraction sum), a non-positive scale length, height,
+            ``q_bulge`` or ``rc_halo``, or ``n_halo >= 3`` (the halo would
+            not normalize).
+
+    Attributes:
+        params (dict): The resolved parameters.
+        fractions (np.ndarray): ``(4,)`` normalized mixture fractions
+            (thin, thick, bulge, halo).
+        halo_norm (float): Halo normalization
+            ``4 pi rc^(3 - n) Gamma(3 - n)``.
+        rng (numpy.random.Generator): Generator of :meth:`rvs`.
+        use_cupy (bool): Written by the eryn container; not read here
+            (:meth:`pdf` / :meth:`logpdf` / :meth:`rvs` always return NumPy).
+        return_gpu (bool): Written by the eryn container; not read here.
+
+    Example:
+        >>> from lisatools.globalfit.priors.galaxy_prior_3d import GalaxyPrior3D
+        >>> galaxy = GalaxyPrior3D(rng=0)
+        >>> x = galaxy.rvs(4)
+        >>> x.shape, galaxy.logpdf(x).shape
+        ((4, 3), (4,))
     """
 
     def __init__(self, rng=None, **params):
@@ -139,7 +192,17 @@ class GalaxyPrior3D:
         self.return_gpu = False
 
     def density(self, x, y, z):
-        """Galactocentric mixture density [kpc^-3]; integrates to 1 over all space."""
+        """Galactocentric mixture density [kpc^-3]; integrates to 1 over all space.
+
+        Args:
+            x (np.ndarray): Galactocentric x [kpc] (the Sun is at
+                ``x = -R_GC``); any shape broadcastable with ``y`` and ``z``.
+            y (np.ndarray): Galactocentric y [kpc].
+            z (np.ndarray): Galactocentric z [kpc] (height above the plane).
+
+        Returns:
+            np.ndarray: Density at each point, broadcast shape of the inputs.
+        """
         p = self.params
         f_thin, f_thick, f_bulge, f_halo = self.fractions
         return (
@@ -150,6 +213,19 @@ class GalaxyPrior3D:
         )
 
     def pdf(self, coordinates):
+        """Density ``rho * d^2 * cos(beta)`` in ecliptic ``(lambda, beta, dist)``.
+
+        Args:
+            coordinates (array-like): ``(N, 3)`` (or one ``(3,)`` row) of
+                ``(lambda [rad], beta [rad], dist [kpc])``; NumPy only.
+
+        Returns:
+            np.ndarray: ``(N,)`` density in ``kpc^-1 rad^-2``; zero outside
+            ``[0, 2 pi) x [-pi/2, pi/2] x [0, inf)``.
+
+        Raises:
+            ValueError: ``coordinates`` does not have 3 columns.
+        """
         values = np.atleast_2d(np.asarray(coordinates, dtype=float))
         if values.shape[1] != 3:
             raise ValueError("coordinates must have shape (N, 3)")
@@ -176,6 +252,15 @@ class GalaxyPrior3D:
         return np.where(valid, result, 0.0)
 
     def logpdf(self, coordinates):
+        """Log of :meth:`pdf` (``-inf`` outside the support).
+
+        Args:
+            coordinates (array-like): ``(N, 3)`` ecliptic
+                ``(lambda, beta, dist)``; NumPy only.
+
+        Returns:
+            np.ndarray: ``(N,)`` log-density.
+        """
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
             return np.log(self.pdf(coordinates))
 
@@ -185,7 +270,23 @@ class GalaxyPrior3D:
         Disks: R ~ Gamma(2, Rd) (i.e. exp(-R/Rd) R dR), phi uniform, and z by
         inverse-CDF of the sech^2 profile -- CDF(z) = (1 + tanh(z/hz))/2, so
         z = hz artanh(2U - 1).  Bulge: isotropic Gaussian of sigma = Rb/sqrt(2)
-        with z squashed by qb.  Halo: r ~ Gamma(3-n, rc) with isotropic angles."""
+        with z squashed by qb.  Halo: r ~ Gamma(3-n, rc) with isotropic angles.
+        Component counts are multinomial in :attr:`fractions`; the rows are
+        shuffled, shifted to heliocentric and rotated to the ecliptic frame.
+        All draws use :attr:`rng`.
+
+        Args:
+            size (int or tuple[int, ...]): Leading output shape. A Python
+                ``int`` or a ``tuple`` only (a NumPy integer is rejected).
+                Default ``1``.
+
+        Returns:
+            np.ndarray: ``size + (3,)`` rows of
+            ``(lambda [rad], beta [rad], dist [kpc])``.
+
+        Raises:
+            ValueError: ``size`` is neither an ``int`` nor a ``tuple``.
+        """
         if isinstance(size, int):
             size = (size,)
         elif not isinstance(size, tuple):
@@ -246,9 +347,12 @@ class GalaxyPrior3D:
         return np.column_stack([lam, beta, distance]).reshape(size + (3,))
 
 
+# TODO check: keep/remove/document -- only caller: the module-level prior below (never imported)
 def build_prior(**kwargs):
     """Return the Eryn container over parameter indices lambda=0, beta=1, d=2."""
     return ProbDistContainer({(0, 1, 2): GalaxyPrior3D(**kwargs)})
 
 
+# Module-level ecliptic container, built at import (no draws, OS-entropy
+# generator). Nothing imports it.
 prior = build_prior()

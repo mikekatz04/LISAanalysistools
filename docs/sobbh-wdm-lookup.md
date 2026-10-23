@@ -1,6 +1,9 @@
 # SOBBH direct-to-WDM lookup scorer: status and measurements
 
-Branch `sobbh-wdm-lookup` (LAT). Spec `docs/superpowers/specs/2026-09-30-sobbh-wdm-lookup-design.md`,
+Developed on branch `sobbh-wdm-lookup` (LAT), now on `dev`: `SOBBH_LIKELIHOOD=lookup` with the
+fused kernel (`SOBBH_LOOKUP_KERNEL=kernel`, `SOBBH_LOOKUP_EVAL_DT=43200`,
+`SOBBH_LOOKUP_ROW_BATCH=32`) is the production SOBBH scorer of the 9mo / 12mo runs; the
+sections below are dated status notes. Spec `docs/superpowers/specs/2026-09-30-sobbh-wdm-lookup-design.md`,
 plan `docs/superpowers/plans/2026-09-30-sobbh-wdm-lookup.md`. The SOBBH twin of the EMRI
 direct-to-WDM template (`docs/emri-direct-wdm.md`), vectorized over proposal rows and slotted into
 `SOBBHChunkedLikeMove` as a comp.
@@ -209,7 +212,10 @@ toy table, not a smaller- or larger-scale version of the gate's own 42.7 d / 6-m
 
 ## Known limits
 
-- Python, `xp`-vectorized (numpy / cupy); no C++/CUDA kernel yet (see follow-ups).
+- Python, `xp`-vectorized (numpy / cupy) as first written; since 2026-10-02 the fused C++/CUDA
+  kernel `sobbh_lookup` (`cutils/sobbh_lookup_kernel.{hpp,cu}`, `SOBBH_LOOKUP_KERNEL`, "Fused
+  lookup kernel" below) does the inner products and the fill, and this Python path is its
+  reference.
 - A source merging inside the window keeps evaluating up to `tc` with the shared node grid
   (production `SOBBHTDIonFly` zeros the last `buffer_time` before merger instead); its pixels past
   the table's fdot axis are dropped (counted in `last_stats["dropped_pixels"]`, one warning per
@@ -222,6 +228,9 @@ toy table, not a smaller- or larger-scale version of the gate's own 42.7 d / 6-m
 - cubic interpolation is Keys cubic convolution, not scipy's global cubic spline.
 
 ## Follow-ups
+
+(Items 1 and 3 are done: the fused `sobbh_lookup` kernel, 2026-10-02, and `SOBBHLookupRouter`,
+2026-10-03; see the dated sections below.)
 
 1. **CUDA/C++ kernel** in the chunked-het family: per-pixel `SOBBHTDIonTheFly::get_tdi` amplitude /
    phase at the pixel centres, the table resident on the device, the same quarter-turn rule and
@@ -608,11 +617,12 @@ e.g. `wdm_lookup_emri_cx_NF180_DT20_TL32_fd8x0p01_nld2.h5`).
   other ranks `"waited"`), so a restart never rebuilds. Neither a path nor a run folder raises.
 
 The 6-month launcher (`scripts/fstat_proposal/submit_gf_6mo_v9_4gpu.sh`) grew the matching
-block after the EMRI one: `SOBBH_LIKELIHOOD` (default `chunked`), `SOBBH_LOOKUP_TABLE_PATH`
+block after the EMRI one (the 9mo v9 and flagship launchers carry it too): `SOBBH_LIKELIHOOD`
+(default `chunked` on 10-02; `lookup` since 10-03, see above), `SOBBH_LOOKUP_TABLE_PATH`
 (default unset = the run folder's canonical file), `SOBBH_LOOKUP_EVAL_DT` (43200),
 `SOBBH_LOOKUP_ROW_BATCH` (32), and a SOBBH PREFLIGHT that resolves the knobs through
 `SourceSOBBHSettings` (an unknown env var is silently ignored), refuses a lisatools without
-the lookup comp, refuses `GPUS_PER_RANK > 1`, and finds -- or builds and saves -- the table on
+the lookup comp, refused `GPUS_PER_RANK > 1` (dropped on 10-03 with the router), and finds -- or builds and saves -- the table on
 the submitting node's GPU before `mpiexec`, checking its layer duration. Launch:
 
     SOBBH_LIKELIHOOD=lookup NGPUS=4 ./scripts/fstat_proposal/submit_gf_6mo_v9_4gpu.sh

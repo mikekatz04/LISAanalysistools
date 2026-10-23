@@ -1,4 +1,11 @@
-"""Base class for LISA Analysis Tools modules that dispatch to a backend."""
+"""Base class for LISA Analysis Tools modules that dispatch to a backend.
+
+:class:`LISAToolsParallelModule` is the parent of every backend-dispatching class in the
+package (:class:`~lisatools.detector.Orbits`, the domain settings, the sensitivity backends,
+the WDM / chunked-het computation classes, the response classes). Backend choice is made once,
+at construction, through ``force_backend=``; methods then dispatch through ``self.backend`` /
+``self.xp``.
+"""
 
 import types
 from typing import Optional, Sequence, TypeVar, Union
@@ -10,19 +17,27 @@ class LISAToolsParallelModule(ParallelModuleBase):
     """Project-specific :class:`ParallelModuleBase` that scopes backend lookup to ``lisatools``.
 
     Subclasses inherit the standard ``gpubackendtools`` backend-dispatch
-    machinery (``xp``, ``backend``, ``has_backend``) but resolve string
-    ``force_backend`` values against the LISA Analysis Tools backend registry
-    (``"cpu"``, ``"cuda11x"``, ``"cuda12x"``, ``"cuda13x"``, ``"cuda"``,
-    ``"gpu"``).
+    machinery (``xp``, ``backend``, ``backend_name``, ``build_with_same_backend``) but
+    resolve string ``force_backend`` values against the LISA Analysis Tools backend
+    registry (``"cpu"``, ``"cuda11x"``, ``"cuda12x"``, ``"cuda13x"``, ``"cuda"``,
+    ``"gpu"``, and ``"jax"`` when JAX is importable).
 
     Args:
-        *args: Forwarded to :class:`gpubackendtools.ParallelModuleBase`.
-        force_backend: Either a backend name (``str``) or a ``(package, name)``
-            tuple. A bare string is rewritten to ``("lisatools", force_backend)``
-            so the lookup is restricted to LISA Analysis Tools' registered
-            backends. ``None`` (default) lets the framework pick the preferred
-            available backend.
-        **kwargs: Forwarded to :class:`gpubackendtools.ParallelModuleBase`.
+        *args: Accepted and ignored (not forwarded to
+            :class:`gpubackendtools.ParallelModuleBase`).
+        force_backend (str, tuple, list, Backend, optional): A backend name, a
+            ``(package, name)`` pair, or a ``Backend`` instance. A bare string not already
+            starting with ``"lisatools_"`` is rewritten to ``("lisatools", force_backend)``
+            so the lookup is restricted to LISA Analysis Tools' registered backends.
+            ``None`` (default) picks the first loadable entry of the subclass's
+            ``supported_backends()``.
+        **kwargs: Accepted and ignored (not forwarded).
+
+    Example:
+        >>> from lisatools.detector import EqualArmlengthOrbits
+        >>> orbits = EqualArmlengthOrbits(force_backend="cpu")
+        >>> orbits.backend.name
+        'lisatools_cpu'
     """
 
     _BACKEND_PREFIX = "lisatools"

@@ -1,4 +1,21 @@
-"""Post-processing helpers that group GB chain samples into individual sources."""
+"""Post-processing helpers that group GB chain samples into individual sources.
+
+:func:`gather_gb_samples` is the maintained entry point: it clusters
+trans-dimensional GB samples (many walkers / steps, each with
+``nleaves_max`` leaf slots) into per-source groups by phase-maximized
+waveform overlap. Its callers are
+:meth:`~lisatools.globalfit.postprocessing.SubmissionWriter._prepare_gb_samples`
+(end-of-run submission) and
+:class:`~lisatools.globalfit.moves.gbspecialstretch.GBSpecialRJRefitMove`
+(``rj_refit``); neither runs in the 9mo/12mo production runs (the module is
+only imported there). It needs CuPy and a :class:`gbgpu.gbgpu.GBGPU`
+frequency-domain generator.
+
+:class:`GBGrouping`, :func:`gather_gb_samples_cat` and :func:`para_func` are
+the older catalogue chain used only by
+:mod:`lisatools.globalfit.buildcatalog` (never imported); they rely on the
+retired ``current_info.get_data_psd`` / ``gb_info`` API.
+"""
 
 import multiprocessing as mp
 import os
@@ -33,12 +50,14 @@ DEBUG_MODE = False
 logger = logging.getLogger(__name__)
 
 
+# TODO check: keep/remove/document -- goes with GBGrouping (needed by its __add__ annotation)
 class GBGrouping:
     """Forward declaration placeholder for the real :class:`GBGrouping` below."""
 
     pass
 
 
+# TODO check: keep/remove/document -- only gather_gb_samples_cat uses it (buildcatalog, unimported)
 class GBGrouping:
     """Group MCMC samples that correspond to the same physical galactic binary.
 
@@ -1049,6 +1068,7 @@ class GBGrouping:
         self.sample = self.sample[keep]
 
 
+# TODO check: keep/remove/document -- only GBGrouping.perform_grouping uses it (legacy chain)
 def para_func(i, assigned_groups, bg, cg):
     """Worker helper: copy ``cg`` group assignments into ``bg`` for index ``i``."""
     inds_tmp = np.where(assigned_groups == cg)[0]
@@ -1058,6 +1078,7 @@ def para_func(i, assigned_groups, bg, cg):
     return [inds_tmp, base_out]
 
 
+# TODO check: keep/remove/document -- only caller buildcatalog (never imported); retired APIs
 def gather_gb_samples_cat(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin_by=1):
     """Gather GB chain samples and group them into per-source detections.
 
@@ -1477,24 +1498,65 @@ def gather_gb_samples(
 ):
     """Gather GB chain samples (band-aware) into per-source groups.
 
-    # TODO/DOCS: precise definitions of the SNR / overlap thresholds and
-    their interaction; the implementation is the canonical reference.
+    The samples are ``n_rows`` posterior rows (walkers x steps flattened),
+    each with ``nleaves_max`` leaf slots, in the GB SAMPLING basis (column 1
+    must be ``f0`` in mHz, as in the stock GB bases). Steps:
+
+    1. Optimal SNR ``sqrt(<h|h>)`` of every active leaf (one
+       ``gb.get_ll`` against zero data with ``sens_mat.invC``).
+    2. Seeding: rows are visited in a random order (global NumPy RNG); for
+       each of the first ``num_compare_samples`` seed rows, every seed leaf
+       with SNR >= ``snr_lim_first_cut`` is compared with the still
+       unclaimed active leaves of the rows not yet used as seeds that lie
+       within 1e-4 in column 1 (1e-7 Hz), have SNR >= ``snr_lim_second_cut`` and differ in
+       SNR by less than ``snr_diff_lim``. The match is the phase-maximized
+       normalized overlap ``<a|b> / sqrt(<a|a><b|b>)``
+       (``gb.swap_likelihood_difference(phase_maximize=True)`` with the
+       band's ``N``). In each row the best-matching leaf joins the seed's
+       group when ``|1 - overlap| < |1 - overlap_lim|``, and is then claimed.
+    3. Consolidation, repeated until the group count is stable: each group
+       is compared with its nearest group in frequency (all member pairs, or
+       one representative each with ``use_representative``); pairs with
+       overlap > ``overlap_lim`` and SNR difference < ``snr_diff_lim`` merge
+       the groups.
+
+    Only waveform-domain inner products of the FD
+    :class:`~gbgpu.gbgpu.GBGPU` generator are used, so ``fd`` /
+    ``sens_mat`` must be an FD grid and its inverse covariance
+    (:class:`~lisatools.globalfit.moves.gbspecialstretch.GBSpecialRJRefitMove`
+    refuses non-FD runs for this reason).
 
     Args:
-        fd: Frequency array.
-        transform_fn: :class:`TransformContainer` for GB parameters.
+        fd: Frequency array (only its length is used: the zero-data buffer
+            is ``(n_channels, len(fd))``).
+        transform_fn: :class:`TransformContainer` for GB parameters
+            (sampling -> waveform basis, ``both_transforms``).
         gb: :class:`gbgpu.GBGPU` instance.
-        waveform_kwargs: Kwargs forwarded to ``gb.run_wave``.
-        band_edges: Band edge frequencies.
-        band_N_vals: Per-band waveform sample counts.
-        reader: HDF backend reader for the GB chain.
-        sens_mat: Sensitivity matrix used to weight inner products.
+        waveform_kwargs: Kwargs forwarded to ``gb.get_ll`` /
+            ``gb.swap_likelihood_difference``. Must hold
+            ``"tdi_channel_setup"`` (its length is the channel count) and
+            ``"start_freq_ind"``; ``"N"`` is popped and then set per batch
+            from ``band_N_vals``, so the dict is MODIFIED (pass a copy).
+        band_edges: Band edge frequencies [Hz] (NumPy or CuPy).
+        band_N_vals: Per-band waveform sample counts (``np.ndarray``).
+        reader: HDF backend reader for the GB chain; read only when
+            ``gb_samples`` or ``gb_inds`` is ``None``: the cold chain of
+            branch ``"gb"`` over the last ``samples_keep`` iterations,
+            thinned by ``thin_by``.
+        sens_mat: Sensitivity matrix used to weight inner products (its
+            ``invC`` is used).
         gpu: GPU device index.
+        gb_samples (np.ndarray, optional): ``(..., nleaves_max, ndim)``
+            samples to group instead of reading ``reader``.
+        gb_inds (np.ndarray, optional): ``(..., nleaves_max)`` active-leaf
+            mask matching ``gb_samples``.
         num_compare_samples: Number of reference samples used for matching.
         samples_keep: Number of latest samples to retain per walker.
         thin_by: Chain thinning factor.
-        snr_lim_first_cut: Initial SNR cut applied to candidates.
-        snr_lim_second_cut: Secondary SNR cut after grouping.
+        snr_lim_first_cut: Minimum SNR of a SEED leaf (step 2). Default
+            ``6.0``.
+        snr_lim_second_cut: Minimum SNR of a candidate leaf compared with a
+            seed (step 2). Default ``5.0``.
         overlap_lim: Overlap threshold above which samples are grouped.
         snr_diff_lim: Maximum SNR difference within a group.
         use_representative: Group-consolidation comparison mode. ``False``
@@ -1507,6 +1569,27 @@ def gather_gb_samples(
             threshold it can UNDER-merge and leave one source split across
             two groups. Validate against the exact path before trusting it
             at large ``samples_keep``.
+
+    Returns:
+        list[np.ndarray] | None: One ``(n_members, ndim)`` array of
+        sampling-basis leaves per group (the seed leaf first), or ``None``
+        (with a warning) when CuPy is not available.
+
+    Raises:
+        AssertionError: ``waveform_kwargs`` has no ``"start_freq_ind"``.
+        ValueError: A seed row has no leaf above ``snr_lim_first_cut``
+            (empty concatenation).
+
+    Example:
+        .. code-block:: python
+
+            groups = gather_gb_samples(
+                fd, gb_transform, gbgpu_gen, waveform_kwargs.copy(),
+                band_edges, band_N_vals, reader, sens_mat, gpu=0,
+                gb_samples=samples, gb_inds=inds,
+                num_compare_samples=200, samples_keep=5, overlap_lim=0.7,
+            )
+            sizes = [len(g) for g in groups]
     """
     if not GPU_AVAILABLE:
         logger.warning("GPU not available, cannot gather GB samples.")

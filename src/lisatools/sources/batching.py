@@ -1,5 +1,13 @@
 """Adapters that let a time-domain waveform generator drive a batched likelihood.
 
+:class:`BatchedDomainSignalGen` turns a
+:class:`~lisatools.sources.waveformbase.TDWaveformBase` into an
+:class:`~lisatools.analysiscontainer.AnalysisContainer` ``signal_gen`` that returns one domain
+object with a leading source axis. :class:`MBHWindowedWDMSignalGen` is the production MBH
+variant (``MBH_LIKELIHOOD=batched``): a per-leaf segment WDM transform around the merger,
+built by ``globalfit.stock.erebor.source_runtime.get_mbh_windowed_gen`` and driven by
+:class:`~lisatools.globalfit.moves.mbhbatchedmove.MBHBatchedLikeMove`.
+
 WHY AN ADAPTER IS NEEDED
     :meth:`~lisatools.sources.waveformbase.TDWaveformBase.__call__` returns a
     ``(signal, start_freqs)`` tuple -- the raw transform output -- which
@@ -53,11 +61,17 @@ class BatchedDomainSignalGen:
             (or anything exposing ``compute_tdi_channels`` and
             ``_td_to_output_domain``).
 
-    Attributes:
-        supports_batch: Mirrors the wrapped generator's own declaration --
-            NEVER hardcoded True. Wrapping something that cannot guarantee a
-            shared sub-sample alignment must not manufacture the capability;
-            the wrapper only forwards a promise the generator already made.
+    Example:
+        .. code-block:: python
+
+            from lisatools.analysiscontainer import AnalysisContainer
+            from lisatools.sources.batching import BatchedDomainSignalGen
+            from lisatools.sources.bbh import GridAlignedPhenomTHMTDIWaveform
+
+            gen = BatchedDomainSignalGen(GridAlignedPhenomTHMTDIWaveform(**run_kwargs))
+            ac = AnalysisContainer(data, sens, signal_gen=gen)
+            # 1-D parameter arrays -> one DomainBase with a leading source axis
+            batch_signal = gen(*rows.T)
     """
 
     def __init__(self, wave_gen: Any):
@@ -65,13 +79,37 @@ class BatchedDomainSignalGen:
 
     @property
     def supports_batch(self) -> bool:
-        """Forward the wrapped generator's declaration, defaulting to False."""
+        """Forward the wrapped generator's declaration, defaulting to False.
+
+        Mirrors the wrapped generator's own declaration -- NEVER hardcoded
+        True. Wrapping something that cannot guarantee a shared sub-sample
+        alignment must not manufacture the capability; the wrapper only
+        forwards a promise the generator already made.
+        """
         return bool(getattr(self.wave_gen, "supports_batch", False))
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.wave_gen!r})"
 
     def __call__(self, *params: Any, **kwargs: Any) -> DomainBase:
+        """Generate the template(s) in the generator's analysis domain.
+
+        One ``compute_tdi_channels`` call for the whole batch, then
+        ``wave_gen._td_to_output_domain`` per source and :meth:`_stack`.
+
+        Args:
+            *params: Waveform parameters, scalars (one source) or 1-D arrays (a batch).
+            **kwargs: Forwarded to ``wave_gen.compute_tdi_channels``.
+
+        Returns:
+            DomainBase: Unbatched for 1-D ``times``; otherwise one domain object whose array
+            has a leading source axis (also for a one-row batch).
+
+        Raises:
+            BatchNotLaunchable: Propagated from the generator when the batch cannot share one
+                response call.
+            ValueError: If the per-source signals land on different bases.
+        """
         times, channels = self.wave_gen.compute_tdi_channels(*params, **kwargs)
 
         if getattr(times, "ndim", 1) == 1:
@@ -155,15 +193,16 @@ class MBHWindowedWDMSignalGen(BatchedDomainSignalGen):
     8 pad layers, 9e-7 at 16 (tests/test_mbh_windowed_signal_gen.py).
 
     Args:
-        wave_gen: generator exposing ``compute_tdi_channels`` (times on the
-            data lattice, ABSOLUTE seconds). If it also exposes
-            ``set_window(t_seg_abs, n_seg)`` it is told the segment.
-        wdm_settings: the run's :class:`WDMSettings` (device-local). Only its
-            GRID is used (``Nf``, ``Nt``, ``dt``, active box, window); its
-            ``t0`` is not trusted as a time.
-        nchannels: TDI channels the data carries (leading channels kept).
+        wave_gen (WindowedGridAlignedMBHWaveform): generator exposing
+            ``compute_tdi_channels`` (times on the data lattice, ABSOLUTE seconds). If it also
+            exposes ``set_window(t_seg_abs, n_seg)`` it is told the segment (production:
+            :class:`~lisatools.sources.bbh.gridaligned.WindowedGridAlignedMBHWaveform`).
+        wdm_settings (WDMSettings): the run's :class:`~lisatools.domains.WDMSettings`
+            (device-local). Only its GRID is used (``Nf``, ``Nt``, ``dt``, active box,
+            window); its ``t0`` is not trusted as a time.
+        nchannels: TDI channels the data carries (leading channels kept). Default ``3``.
         tukey_alpha: the run's full-length data window alpha; the matching
-            slice of that window multiplies the segment (0 -> none).
+            slice of that window multiplies the segment (0 -> none). Default ``0.0``.
         t0_abs: ABSOLUTE time of layer 0 of the grid (the data start,
             ``general_info.data_t0``); the segment starts at ``t0_abs + s0 *
             layer_dt``. Defaults to ``wdm_settings.t0`` (read at
@@ -179,7 +218,28 @@ class MBHWindowedWDMSignalGen(BatchedDomainSignalGen):
             The generator must then produce its channels at ``decimate * dt`` too
             (it is told ``Nf / decimate * Nt_seg`` samples). ``Nf`` must be
             divisible by ``decimate``
-            and the coarse grid must still hold the run's active band.
+            and the coarse grid must still hold the run's active band. Default ``1``.
+
+    Attributes:
+        geometry (dict | None): The last :meth:`set_window` layout (``n_start``, ``Nt_keep``,
+            ``n_pad``, ``n_pad_lo``, ``n_pad_hi``, ``n_pad_hi_req``, ``s0``, ``Nt_seg``,
+            ``t_seg``, ``decimate``); ``None`` before the first call.
+        waveform_t0 (float): Set by the stock getter after construction (the snapped epoch).
+        t_plunge_snap (float): Set by the stock getter (the epoch snap, subtracted from the
+            rows' ``t_plunge`` by the move).
+
+    Raises:
+        ValueError: If ``decimate`` is not a positive divisor of ``wdm_settings.Nf``.
+
+    Example:
+        .. code-block:: python
+
+            adapter = MBHWindowedWDMSignalGen(
+                windowed_gen, wdm_settings, nchannels=3, tukey_alpha=window_alpha,
+                t0_abs=data_t0, decimate=2,
+            )
+            adapter.set_window(n_start, Nt_keep, n_pad)
+            wdm_batch = adapter(*rows.T)   # WDMSignal, leading source axis, kept box only
     """
 
     def __init__(
@@ -218,10 +278,30 @@ class MBHWindowedWDMSignalGen(BatchedDomainSignalGen):
     def set_window(
         self, n_start: int, Nt_keep: int, n_pad: int, n_pad_hi: int | None = None
     ) -> None:
-        """Kept layers ``[n_start, n_start + Nt_keep)``; segment pads ``n_pad``
-        below and ``n_pad_hi`` (default ``n_pad``) above. An edge-clamped
+        """Set the kept box and the padded segment; tells ``wave_gen`` the segment.
+
+        Kept layers ``[n_start, n_start + Nt_keep)`` (absolute WDM time-layer indices); segment
+        pads ``n_pad`` below and ``n_pad_hi`` (default ``n_pad``) above. An edge-clamped
         window (:func:`~lisatools.globalfit.moves.mbhbatchedmove.mbh_window_layers`)
-        passes a 0 pad on the side where the segment meets the grid edge."""
+        passes a 0 pad on the side where the segment meets the grid edge. The low pad grows by
+        one layer when needed to start the segment on an even absolute layer (the real WDM
+        basis alternates with the parity of ``n + m``), and the high pad by one to make the
+        segment's layer count even. Builds the segment ``TDSettings`` / ``WDMSettings`` (at
+        ``decimate * dt``, ``Nf / decimate`` layers), the kept box (``wdm.get_slice``), the
+        matching slice of the full-length Tukey window, and :attr:`geometry`.
+
+        Args:
+            n_start: First kept time layer (absolute index on the run grid).
+            Nt_keep: Number of kept layers (``>= 1``).
+            n_pad: Pad layers below the kept box (``>= 0``).
+            n_pad_hi: Pad layers above; ``None`` means ``n_pad``.
+
+        Raises:
+            ValueError: For invalid counts, a segment outside ``[0, Nt)``, or kept layers
+                outside the data's active time box.
+            RuntimeError: If the segment settings do not reproduce the run's active frequency
+                layers (e.g. ``Nf / decimate`` cannot hold the band).
+        """
         n_start, Nt_keep, n_pad = int(n_start), int(Nt_keep), int(n_pad)
         n_pad_hi_req = n_pad if n_pad_hi is None else int(n_pad_hi)
         if Nt_keep < 1 or n_pad < 0 or n_pad_hi_req < 0:
@@ -291,6 +371,9 @@ class MBHWindowedWDMSignalGen(BatchedDomainSignalGen):
             self.wave_gen.set_window(t_seg, Nf_seg * Nt_seg)
 
     def _to_domain(self, times, channels):
+        """One row: place the leading ``nchannels`` on the segment lattice, segment WDM
+        transform (window slice), keep layers ``[n_pad_lo, n_pad_lo + Nt_keep)``; returns a
+        :class:`~lisatools.domains.WDMSignal` on the kept box."""
         # No guard here: this is an internal helper, only ever reached via
         # __call__, which checks self.geometry before touching wave_gen at
         # all -- a second check here would just be dead code (see the
@@ -306,6 +389,20 @@ class MBHWindowedWDMSignalGen(BatchedDomainSignalGen):
         return WDMSignal(kept, self._box)
 
     def __call__(self, *params, **kwargs):
+        """Generate the windowed WDM template(s) of one source or a batch.
+
+        Args:
+            *params: Waveform-basis parameters (scalars or 1-D arrays), forwarded to
+                ``wave_gen.compute_tdi_channels``.
+            **kwargs: Forwarded to ``wave_gen.compute_tdi_channels``.
+
+        Returns:
+            WDMSignal: On the kept box ``(nch, Nf_active, Nt_keep)``; a batch has a leading
+            source axis.
+
+        Raises:
+            RuntimeError: If :meth:`set_window` was never called.
+        """
         if self.geometry is None:
             raise RuntimeError(
                 "MBHWindowedWDMSignalGen: call set_window() before generating"

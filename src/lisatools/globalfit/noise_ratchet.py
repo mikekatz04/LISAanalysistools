@@ -1,5 +1,17 @@
 """The galfor RATCHET: nudge the foreground down, hold, release, repeat.
 
+STATUS: dropped from production 2026-10-03 (``docs/global-fit-navigation.md``).
+``GALFOR_RATCHET`` defaults to ``0`` and the 9mo/12mo launchers export
+``GALFOR_RATCHET=0``, so :func:`ratchet_from_env` returns ``None`` and no
+:class:`NoiseRatchetGate` is composed. What the runs still touch:
+:func:`ratchet_from_env` (called by the driver
+``scripts/fstat_proposal/run_combined_staged.py``) and :data:`STOP_RULES`
+(validated by ``recipe.SearchStageProfileStep`` for every GB search stage).
+:func:`galfor_curves` / :func:`galfor_curve_ratio` stay useful as the
+foreground readout (``docs/global-fit-deep-dives.md``). The rest of the
+module is kept for the 6mo store, whose ``gb_search_3`` still carries the
+gate.
+
 WHY (user design 2026-09-30). In the 6-month v9 run the fitted foreground at
 3-5 mHz sits 2-5x above the add-back estimate in TOTAL noise, because the
 psd/galfor maximizer absorbs the unresolved-but-resolvable GBs and then hides
@@ -30,15 +42,20 @@ interleaved ``noise_joint_search_*`` slots. The recipe step
 (``SearchStageProfileStep``) drives the gate's mode from the STAGE-LOCAL
 iteration, so a resume lands in the right phase instead of re-nudging.
 
-Knobs (all read at composition / stage time, default = ratchet OFF):
+Knobs (all read at composition / stage time, default = ratchet OFF)::
 
-  GALFOR_RATCHET=1              arm
+  GALFOR_RATCHET=1              arm (default 0)
   GALFOR_RATCHET_HOLD=3         iterations held per cycle, INCLUDING the nudge one
   GALFOR_RATCHET_RELEASE=2      iterations of free noise search per cycle
   GALFOR_RATCHET_CYCLES=2       number of nudges; afterwards permanent release
+  GALFOR_RATCHET_RELEASE_FIRST=0    1 = start with a release before the first nudge
   GALFOR_RATCHET_DLOG10_AMP=-0.05   nudge, sampled (log10) basis
   GALFOR_RATCHET_DLOG10_FK=-0.10
   GALFOR_RATCHET_DLOG10_F2=-0.15
+  GALFOR_RATCHET_STOP_RULE=galfor   early stop: galfor | gain | off
+  GALFOR_RATCHET_MIN_GAIN=0         'gain' rule threshold, nats (0 = off)
+  GALFOR_RATCHET_MIN_DROP=0.01      'galfor' rule threshold, fraction
+  GALFOR_RATCHET_DROP_BAND=3e-3,5e-3    'galfor' rule band, Hz
 
 STEP SIZE (user instruction 2026-09-30: "make sure your step size in the
 forcing downward is sufficient"). Sized against the 6mo row-47 fit and the
@@ -95,6 +112,7 @@ _ACTIONS = ("nudge", "hold", "release")
 _TRUE = ("1", "true", "True", "yes", "on")
 
 
+# TODO check: keep/remove/document -- galfor ratchet dropped 2026-10-03; only built under GALFOR_RATCHET=1, which the 9mo/12mo launchers set to 0
 @dataclass(frozen=True)
 class RatchetSchedule:
     """Stage-local iteration ``k`` -> ``"nudge" | "hold" | "release"``.
@@ -158,6 +176,7 @@ class RatchetSchedule:
 
 
 def _env_int(name: str, default: int) -> int:
+    """Env var ``name`` as an int; unset or blank -> ``default``; malformed raises ValueError."""
     raw = os.environ.get(name, "").strip()
     if raw == "":
         return int(default)
@@ -168,6 +187,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _env_float(name: str, default: float) -> float:
+    """Env var ``name`` as a float; unset or blank -> ``default``; malformed raises ValueError."""
     raw = os.environ.get(name, "").strip()
     if raw == "":
         return float(default)
@@ -180,8 +200,26 @@ def _env_float(name: str, default: float) -> float:
 def ratchet_from_env():
     """``RatchetSchedule`` when ``GALFOR_RATCHET`` arms it, else ``None``.
 
+    Called by the driver (``scripts/fstat_proposal/run_combined_staged.py``)
+    when it composes a GB search stage: as a guard on the cycle-end noise
+    mode (production ``gb_search_2``, where an armed ratchet raises) and to
+    build the gate in the interleaved noise mode. Reads
+    ``GALFOR_RATCHET`` (armed by ``1`` / ``true`` / ``True`` / ``yes`` /
+    ``on``; default ``0``), then ``GALFOR_RATCHET_HOLD`` (default 3),
+    ``GALFOR_RATCHET_RELEASE`` (2), ``GALFOR_RATCHET_CYCLES`` (2) and
+    ``GALFOR_RATCHET_RELEASE_FIRST`` (0). The 9mo/12mo launchers export
+    ``GALFOR_RATCHET=0``, so production gets ``None``.
+
     A malformed knob RAISES rather than quietly running unratcheted: the
     silent knob-reaches-nothing failure is the documented one in this tree.
+
+    Returns:
+        RatchetSchedule | None: The schedule, or ``None`` when the ratchet is
+        off.
+
+    Raises:
+        ValueError: A ratchet knob is not an integer, or a count is < 1
+            (from :class:`RatchetSchedule`).
     """
     if os.environ.get("GALFOR_RATCHET", "0").strip() not in _TRUE:
         return None
@@ -198,6 +236,7 @@ def ratchet_from_env():
     )
 
 
+# TODO check: keep/remove/document -- galfor ratchet dropped 2026-10-03; the driver calls it only when ratchet_from_env() is not None (GALFOR_RATCHET=0 in 9mo/12mo)
 def min_gain_from_env() -> float:
     """``GALFOR_RATCHET_MIN_GAIN``: the data-driven stop of the ratchet.
 
@@ -238,7 +277,9 @@ def min_gain_from_env() -> float:
 STOP_RULES = ("galfor", "gain", "off")
 
 
+# TODO check: keep/remove/document -- galfor ratchet dropped 2026-10-03; the driver calls it only when ratchet_from_env() is not None (GALFOR_RATCHET=0 in 9mo/12mo)
 def stop_rule_from_env() -> str:
+    """``GALFOR_RATCHET_STOP_RULE`` lower-cased, default ``"galfor"``; must be in STOP_RULES."""
     raw = (os.environ.get("GALFOR_RATCHET_STOP_RULE", "galfor").strip().lower() or "galfor")
     if raw not in STOP_RULES:
         raise ValueError(
@@ -246,6 +287,7 @@ def stop_rule_from_env() -> str:
     return raw
 
 
+# TODO check: keep/remove/document -- galfor ratchet dropped 2026-10-03; the driver calls it only when ratchet_from_env() is not None (GALFOR_RATCHET=0 in 9mo/12mo)
 def min_drop_from_env() -> float:
     """``GALFOR_RATCHET_MIN_DROP``: the 'galfor' rule's threshold, a fraction.
 
@@ -260,6 +302,7 @@ def min_drop_from_env() -> float:
     return v
 
 
+# TODO check: keep/remove/document -- galfor ratchet dropped 2026-10-03; the driver calls it only when ratchet_from_env() is not None (GALFOR_RATCHET=0 in 9mo/12mo)
 def drop_band_from_env() -> tuple:
     """``GALFOR_RATCHET_DROP_BAND``: ``f_lo,f_hi`` in Hz for the 'galfor' rule (3e-3,5e-3)."""
     raw = os.environ.get("GALFOR_RATCHET_DROP_BAND", "").strip()
@@ -277,6 +320,7 @@ def drop_band_from_env() -> tuple:
     return (lo, hi)
 
 
+# TODO check: keep/remove/document -- galfor ratchet 'galfor' stop rule; only caller recipe.SearchStageProfileStep ratchet path (GALFOR_RATCHET=0 in 9mo/12mo)
 def galfor_band_drop(coords_new, coords_prev, f_lo, f_hi, n_grid: int = 9) -> dict:
     """The 'galfor' stop rule's statistic between two releases.
 
@@ -300,8 +344,14 @@ def galfor_band_drop(coords_new, coords_prev, f_lo, f_hi, n_grid: int = 9) -> di
                 f_lo=float(f_lo), f_hi=float(f_hi))
 
 
+# TODO check: keep/remove/document -- galfor ratchet dropped 2026-10-03; the driver calls it only when ratchet_from_env() is not None (GALFOR_RATCHET=0 in 9mo/12mo)
 def nudge_delta_from_env() -> np.ndarray:
-    """The per-nudge shift of the galfor coordinates, sampled (log10) basis."""
+    """The per-nudge shift of the galfor coordinates, sampled (log10) basis.
+
+    :data:`GALFOR_RATCHET_DEFAULT_DELTA` with columns 0 / 1 / 4 overridden by
+    ``GALFOR_RATCHET_DLOG10_AMP`` / ``_FK`` / ``_F2``; ``alpha`` and ``f_1``
+    are never shifted. Shape ``(5,)``.
+    """
     d = np.array(GALFOR_RATCHET_DEFAULT_DELTA, copy=True)
     d[0] = _env_float("GALFOR_RATCHET_DLOG10_AMP", d[0])
     d[1] = _env_float("GALFOR_RATCHET_DLOG10_FK", d[1])
@@ -310,6 +360,10 @@ def nudge_delta_from_env() -> np.ndarray:
 
 
 def _to_physical(v) -> tuple:
+    """Sampled-basis galfor 5-vector -> physical ``(amp, fk, alpha, f_1, f_2)`` tuple.
+
+    ``10**`` is applied to the :data:`GALFOR_LOG10_COLUMNS`; ``alpha`` stays linear.
+    """
     v = np.asarray(v, dtype=float)
     out = list(v)
     for c in GALFOR_LOG10_COLUMNS:
@@ -321,7 +375,23 @@ def galfor_curve_ratio(v_new, v_old, f_hz) -> np.ndarray:
     """``S_gal(f; v_new) / S_gal(f; v_old)`` for two sampled-basis vectors.
 
     The readout for the [GALFOR_RATCHET] log lines: normalization-free, so it
-    reads the same whatever the instrument PSD does.
+    reads the same whatever the instrument PSD does. The curve is
+    :meth:`~lisatools.stochastic.HyperbolicTangentGalacticForeground.specific_Sh_function`.
+
+    Args:
+        v_new (array-like): ``(5,)`` galfor vector in the sampled basis
+            ``[log10 amp, log10 fk, alpha, log10 f_1, log10 f_2]`` (the
+            ``GALFOR_LOG_SAMPLING=1`` basis; see :data:`GALFOR_LOG10_COLUMNS`).
+        v_old (array-like): ``(5,)`` reference vector, same basis.
+        f_hz (array-like): Frequencies in Hz.
+
+    Returns:
+        np.ndarray: The ratio on ``f_hz``, same shape as ``f_hz``.
+
+    Note:
+        The curve of the walkers' MEAN parameters is not the mean of their
+        curves (see :func:`galfor_curves`); pass one walker's vector, or use
+        :func:`galfor_curves` for an ensemble.
     """
     from lisatools.stochastic import HyperbolicTangentGalacticForeground as HT
 
@@ -337,7 +407,25 @@ def galfor_curves(v_rows, f_hz) -> np.ndarray:
     is not the mean of their curves once ``alpha``/``f1`` split across
     walkers (6mo job 695, row 81: alpha 2.3/3.0/8.6/9.8 -- the curve of the
     mean read +2..5 % at 3.5-5 mHz where the mean of the curves read -6..7 %),
-    so the log compares mean-of-curves to mean-of-curves.
+    so the log compares mean-of-curves to mean-of-curves. The deep-dive guide
+    (``docs/global-fit-deep-dives.md``) uses the same convention to judge a
+    run's foreground.
+
+    Args:
+        v_rows (array-like): ``(n_rows, 5)`` (or one ``(5,)``) galfor vectors in
+            the sampled basis ``[log10 amp, log10 fk, alpha, log10 f_1,
+            log10 f_2]``, e.g. the cold walkers' ``galfor`` coords.
+        f_hz (array-like): ``(n_f,)`` frequencies in Hz.
+
+    Returns:
+        np.ndarray: ``(n_rows, n_f)`` foreground PSD values, one row per vector.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.globalfit.noise_ratchet import galfor_curves
+        >>> v = np.array([[-43.5, -2.6, 2.0, -3.0, -3.2]])
+        >>> galfor_curves(v, np.array([1e-3, 3e-3])).shape
+        (1, 2)
     """
     from lisatools.stochastic import HyperbolicTangentGalacticForeground as HT
 
@@ -346,10 +434,13 @@ def galfor_curves(v_rows, f_hz) -> np.ndarray:
     return np.asarray([HT.specific_Sh_function(f, *_to_physical(v)) for v in rows])
 
 
+# TODO check: keep/remove/document -- galfor ratchet dropped 2026-10-03; only caller SearchStageProfileStep._ratchet_gate on the ratchet path (GALFOR_RATCHET=0 in 9mo/12mo)
 def is_noise_ratchet_gate(obj) -> bool:
+    """Whether ``obj`` is a :class:`NoiseRatchetGate` (duck-typed on its class flag)."""
     return bool(getattr(obj, "is_noise_ratchet_gate", False))
 
 
+# TODO check: keep/remove/document -- only caller NoiseRatchetGate (GALFOR_RATCHET=0 in 9mo/12mo); moves/globalfitmove.py carries its own equivalent
 def reset_maxlogl_search(move) -> bool:
     """Forget a :class:`MaxLogLCombineMove`'s plateau bookkeeping.
 
@@ -379,6 +470,7 @@ def reset_maxlogl_search(move) -> bool:
     return had
 
 
+# TODO check: keep/remove/document -- galfor ratchet dropped 2026-10-03; built only by the driver's GatedNoiseSearch under GALFOR_RATCHET=1 (9mo/12mo export 0)
 class NoiseRatchetGate(GFCombineMove):
     """The one noise proposal of a ratcheted search stage.
 
@@ -422,6 +514,7 @@ class NoiseRatchetGate(GFCombineMove):
         self.releases = 0
 
     def set_mode(self, mode: str) -> None:
+        """Set the next propose's action: ``"nudge"``, ``"hold"`` or ``"release"``."""
         if mode not in _ACTIONS:
             raise ValueError(f"ratchet mode {mode!r} not in {_ACTIONS}")
         self.mode = mode

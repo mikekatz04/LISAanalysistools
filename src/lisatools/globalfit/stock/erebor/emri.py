@@ -1,4 +1,15 @@
-"""EMRI (extreme-mass-ratio inspiral) branch blocks for the Erebor recipe."""
+"""EMRI (extreme-mass-ratio inspiral) branch blocks for the Erebor recipe.
+
+:class:`EMRISettings` is the EMRI knob block (``fit.emri``) and
+:class:`EMRISetup` turns it into the built branch (transform, prior, per-leaf
+ladder, inner-move stack). The production ``all_sources`` variant uses the
+subclass :class:`~lisatools.globalfit.stock.erebor.source_runtime.SourceEMRISettings`
+(likelihood path, batching, warm start), filled by
+:func:`~lisatools.globalfit.stock.erebor.source_runtime.prepare_emri_branch`
+from the mojito EMRI catalogue (``EMRI_IDS``); the ``emri_pe`` move is the
+direct-to-WDM ``EMRIDirectLikeMove`` (``EMRI_LIKELIHOOD=direct``) on the
+add-one/remove-one machinery.
+"""
 
 from __future__ import annotations
 
@@ -30,8 +41,136 @@ class EMRISettings(Settings):
     secondary mass, spin, semi-latus rectum, eccentricity), the waveform
     configuration, and search/sampling helpers consumed by :class:`EMRISetup`.
 
-    # TODO/DOCS: confirm the role of ``info_matrix_gen`` and ``fill_values``
-    # in coordinating EMRI starts with the information matrix / search pipeline.
+    Fixed-dimensional branch: one leaf per catalogue source
+    (``nleaves_min == nleaves_max``, set by ``prepare_emri_branch``), each
+    leaf with its own tempering ladder (``ntemps`` rungs; the engine runs
+    cold-chain only). Sampling basis (12): ``logm1, m2, a, p0, e0, dist
+    [Gpc], cosqS, phiS, cosqK, phiK, Phi_phi0, Phi_r0`` (see
+    :func:`~lisatools.globalfit.stock.erebor.transforms.make_emri_transform_container`).
+    Env knobs are ``EMRI_<FIELD>``; the launcher values below are those of
+    ``submit_gf_9mo_v9.sh`` / ``submit_gf_12mo.sh``. Other launcher EMRI
+    knobs (``EMRI_PERMUTE_EVERY``, ``EMRI_COLD_TO_HOT_EVERY``,
+    ``EMRI_EIGEN_INFO``, ``EMRI_START_FACTOR``, ``EMRI_CHECK_LL``,
+    ``EMRI_IDS``) are read by the move / recipe / driver, and the
+    ``EMRI_LIKELIHOOD`` / ``EMRI_DIRECT_*`` / ``EMRI_NUM_PROP_REPEATS`` /
+    warm-start knobs are fields of ``SourceEMRISettings``.
+
+    Attributes:
+        logm1_lims: ``[lo, hi]`` of the ``ln(m1 / Msol)`` uniform prior; empty
+            or ``None`` keeps the wide default ``[ln 3e5, ln 1.5e7]``
+            (``prepare_emri_branch`` turns an empty list into ``None``; a
+            direct :class:`EMRISetup` needs ``None`` or a 2-list).
+        m2_lims: Secondary-mass box (Msol); default ``[1, 200]``.
+        ntemps: Per-leaf ladder rungs. Env ``EMRI_NTEMPS``. Default 24;
+            launchers 12.
+        a_lims: Spin box; default ``[0.01, 0.999]``.
+        p0_lims: Initial semi-latus rectum box; default ``[2, 100]``.
+        e0_lims: Initial eccentricity box; default ``[0.001, 0.8]``. A joint
+            FEW domain-of-validity cut on ``(a, p0, e0)``
+            (:class:`~lisatools.sampling.prior.EMRIKerrDomainPrior`) applies on
+            top of the boxes.
+        waveform_kwargs: Waveform kwargs that double as the EMRI move's
+            likelihood kwargs; ``None`` -> ``{}`` at branch prep.
+        eps: FEW mode-selection threshold (``mode_selection_threshold``),
+            delivered per call through the wave wrap's ``runtime_kwargs``.
+            ``None`` keeps FEW's own default (1e-5). Env ``EMRI_EPS``;
+            launchers 1e-3.
+        injection: ``(nleaves, 12)`` sampling-basis start/truth rows; filled
+            from the catalogue by ``prepare_emri_branch``.
+        info_matrix_gen: Optional external eigen-table builder for the eigen
+            inner move, ``builder(move, leaf, widths) -> (axes, sigmas)``
+            (installed as the move's ``eigen_table_builder``); ``None`` keeps
+            the move's own information-matrix route (``EMRI_EIGEN_INFO``,
+            launchers ``gram``).
+        fill_values: Transform fills ``[xI0, Phi_theta0]`` — one pair for every
+            leaf or an ``(nleaves, 2)`` per-leaf table (``xI0`` is the
+            prograde / retrograde flag). ``None`` -> resolved per leaf from the
+            catalogue, with a ``[1.0, 0.0]`` (prograde) fallback.
+        betas: Explicit per-leaf ladder (wins over ``ntemps`` /
+            ``ladder_tmax``); ``None`` ->
+            :func:`~lisatools.globalfit.stock.erebor.common.default_source_ladder`.
+        inner_moves: Explicit eryn inner-move stack ``[(move, weight), ...]``;
+            ``None`` -> built from ``inner_move_kind`` and the jump knobs
+            (:func:`~lisatools.globalfit.stock.erebor.common.make_default_inner_moves`).
+        inner_move_kind: ``"eigen"`` (information-matrix eigen-axis jump) or
+            ``"stretch"``. Env ``EMRI_INNER_MOVE_KIND``. Default ``"eigen"``.
+        eigen_refresh_every: Leaf visits between eigen-table rebuilds. Env
+            ``EMRI_EIGEN_REFRESH``. Default 100; launchers 10.
+        eigen_table_scope: Where tables are built: ``"walker_max"`` (one table
+            at the max-lnL cold walker) or ``"per_walker"`` (one per
+            (temperature, walker) point). Env ``EMRI_EIGEN_SCOPE``. Default
+            ``"walker_max"``; launchers ``walker_max``.
+        num_prop_repeats: Inner-move repeats per leaf visit. Plain default 10
+            here; ``SourceEMRISettings`` makes it env-backed
+            (``EMRI_NUM_PROP_REPEATS``, default 2; launchers 25).
+        emri_search_file_key: Legacy search temp-file key; no reader.
+        ladder_reset_on_resume: On resume, replace every stored per-leaf ladder
+            with the configured one (logged per leaf). Env
+            ``EMRI_LADDER_RESET_ON_RESUME``. Default ``False``.
+        ladder_reanchor_nats: Lost-rung guard: a rung more than this many nats
+            below its leaf's cold rung (beyond the expected tempering drop) is
+            re-anchored to the cold state; 0 disables. Env
+            ``EMRI_LADDER_REANCHOR_NATS``. Default 200.0; launchers 100.
+        ladder_tmax: Top temperature of the default ladder (``None`` =
+            uncapped ~25 % spacing). Env ``EMRI_LADDER_TMAX``; launchers 625.
+        ladder_top_snr: SNR-keyed per-leaf ladders: ``> 0`` gives leaf ``j``
+            ``Tmax = clip((SNR_j / ladder_top_snr)^2, ladder_tmax_min,
+            ladder_tmax)``; 0 = off; on/true/yes = 2.0. Env
+            ``EMRI_LADDER_TOP_SNR``. Default 0.0 (launchers unset).
+        ladder_tmax_min: Floor of the SNR-keyed top temperature. Env
+            ``EMRI_LADDER_TMAX_MIN``. Default 4.0.
+        ladder_top_snr_refresh: Proposes between SNR-keyed ladder rebuilds of
+            leaves whose SNR moved > 20 %; 0 = never. Env
+            ``EMRI_LADDER_TOP_SNR_REFRESH``. Default 0.
+        ladder_top_snr_refresh_pe: Allow those rebuilds in PE stages too
+            (adaptive, not detailed-balance exact). Env
+            ``EMRI_LADDER_TOP_SNR_REFRESH_PE``. Default ``False``.
+        eigen_jump_mix: Fraction of eigen draws taken at ``eigen_jump_factor``
+            x the table step (0 = plain ``EigenAxisMove``). Env
+            ``EMRI_EIGEN_JUMP_MIX``. Default 0.0; launchers 0.1.
+        eigen_jump_factor: Step multiplier of those draws. Env
+            ``EMRI_EIGEN_JUMP_FACTOR``. Default 3.0; launchers 3.0.
+        eigen_axis_adapt: Adapt each table axis's step scale to the chain's
+            robust width along it (floor = the matrix sigma). Env
+            ``EMRI_EIGEN_AXIS_ADAPT``. Default ``False``; launchers 1.
+        eigen_adapt_pool: Adapt from the union of all walkers' rung ensembles
+            (walker-block fan-out) instead of the rank's own walker; needs
+            ``eigen_axis_adapt``. Env ``EMRI_EIGEN_ADAPT_POOL``. Default
+            ``False``; launchers 1.
+        eigen_temper_sigmas: Rung ``k`` steps with ``sigma / sqrt(beta_k)``
+            (capped) instead of the cold sigma. Env
+            ``EMRI_EIGEN_TEMPER_SIGMAS``. Default ``False``; launchers 1.
+        eigen_adapt_max_factor: Cap of an adapted sigma, as a multiple of the
+            information-matrix sigma (``<= 0`` or ``inf`` = no cap). Env
+            ``EMRI_EIGEN_ADAPT_MAX_FACTOR``. Default 100.0; launchers 100.
+        eigen_axis_acc_log: Per-axis cold / hot acceptance log, once per table
+            refresh (telemetry only). Env ``EMRI_EIGEN_AXIS_ACC_LOG``. Default
+            ``False``; launchers 1.
+        eigen_axis_acc_tune: Acceptance-driven per-axis step controller (an
+            axis below ``eigen_axis_acc_min`` cold acceptance has its step
+            divided by ``eigen_axis_acc_factor``, above ``eigen_axis_acc_max``
+            multiplied; fixed between refreshes). Env
+            ``EMRI_EIGEN_AXIS_ACC_TUNE``. Default ``False``; launchers 1.
+        eigen_axis_acc_min: Controller lower acceptance target. Env
+            ``EMRI_EIGEN_AXIS_ACC_MIN``. Default 0.1; launchers 0.1.
+        eigen_axis_acc_max: Controller upper acceptance target. Env
+            ``EMRI_EIGEN_AXIS_ACC_MAX``. Default 0.5; launchers 0.5.
+        eigen_axis_acc_factor: Controller step factor. Env
+            ``EMRI_EIGEN_AXIS_ACC_FACTOR``. Default 2.0; launchers 2.
+        de_jump_mix: Stack weight of the cross-walker difference jump
+            (:class:`~lisatools.sampling.moves.walkerdiffjump.WalkerDifferenceJumpMove`);
+            0 = not in the stack. Env ``EMRI_DE_JUMP_MIX``. Default 0.0;
+            launchers 0.2.
+        de_jump_mode_frac: Share of ``gamma = 1`` mode jumps in that move.
+            Env ``EMRI_DE_JUMP_MODE_FRAC``. Default 0.5; launchers 0.5.
+
+    Example:
+        .. code-block:: python
+
+            fit = erebor.all_sources(nwalkers=4)
+            fit.emri.ntemps = 12            # or env EMRI_NTEMPS=12
+            fit.emri.ladder_tmax = 625.0
+            fit.emri.eps = 1e-3
     """
 
     logm1_lims: typing.List[float] = dataclasses.field(default_factory=list)
@@ -85,6 +224,7 @@ class EMRISettings(Settings):
         default_factory=env_default("EMRI_EIGEN_SCOPE", "walker_max", str)
     )
     num_prop_repeats: Optional[int] = 10
+    # TODO check: keep/remove/document -- field has no reader anywhere (legacy search temp-file key)
     emri_search_file_key: Optional[str] = "_emri_search_tmp_file"
     # ---- per-leaf ladder + eigen-step knobs (user rulings 2026-10-13) -------
     # RESUME: the store's per-leaf ladders (betas_all) are kept; True replaces
@@ -221,6 +361,10 @@ class EMRISettings(Settings):
 class EMRISetup(Setup):
     """:class:`Setup` for extreme mass-ratio inspirals in the Erebor recipe.
 
+    Construction copies the settings, opens the ``emri_setup.log`` logger
+    (under ``log_dir``) and runs :meth:`init_setup`. Built once per branch by
+    :meth:`StockGlobalFit.build <lisatools.globalfit.stock.base.StockGlobalFit.build>`.
+
     Args:
         emri_settings: Settings dataclass with EMRI parameter ranges,
             waveform configuration, and search helpers.
@@ -238,7 +382,20 @@ class EMRISetup(Setup):
         self.init_setup()
 
     def init_sampling_info(self):
-        """Build the EMRI :class:`TransformContainer`, prior, periodicity, and tempering ladder."""
+        """Build the EMRI :class:`TransformContainer`, prior, periodicity, and tempering ladder.
+
+        Fills (only when unset): ``fill_values`` (``[1.0, 0.0]``), ``transform``
+        (:func:`~lisatools.globalfit.stock.erebor.transforms.make_emri_transform_container`),
+        ``periodic`` (``phiS``, ``phiK``, ``Phi_phi0``, ``Phi_r0`` with period
+        ``2 pi``), ``priors`` (:meth:`setup_priors` runs unconditionally, so
+        an explicit ``priors`` value is overwritten), ``betas``
+        (:func:`~lisatools.globalfit.stock.erebor.common.default_source_ladder`),
+        ``other_tempering_kwargs`` (``permute=False``), ``initialize_kwargs``
+        and ``inner_moves``.
+
+        Raises:
+            AssertionError: When ``other_tempering_kwargs["permute"]`` is true.
+        """
         input_basis = [
             "logm1",
             "m2",
@@ -310,9 +467,15 @@ class EMRISetup(Setup):
         ``p0``, ``e0``) with the corresponding ``*_lims`` attributes when
         those have been set.
 
+        The result, ``self.priors = {"emri": EMRIKerrDomainPrior(...)}``, also
+        cuts the joint ``(a, p0, e0)`` FEW domain of validity; with leaves of
+        mixed prograde / retrograde ``xI0`` the cut uses the prograde grid
+        (logged) and per-leaf validity falls to the likelihood's FEW
+        domain-error sentinel.
+
         Args:
-            input_basis: Ordered list of EMRI parameter names matching the
-                sampler's input basis.
+            input_basis (list[str]): Ordered list of EMRI parameter names
+                matching the sampler's input basis.
         """
 
         # The logm1 / m2 / p0 boxes must contain every mojito_light catalogue
@@ -380,7 +543,11 @@ class EMRISetup(Setup):
         self.init_state_backend_info()
 
     def init_state_backend_info(self):
-        """Default the EMRI state and backend to :class:`EMRIState` / :class:`EMRIHDFBackend`."""
+        """Default the EMRI state / backend to :class:`EMRIState` / :class:`EMRIHDFBackend`.
+
+        Both are per-leaf-ladder module sub-state / sub-backend classes (the
+        branch's tempered ensemble lives in its own HDF group).
+        """
         if self.branch_state is None:
             self.branch_state = EMRIState
 

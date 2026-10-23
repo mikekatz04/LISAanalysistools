@@ -1,4 +1,22 @@
-"""Calculation-controller helpers for SNR and information-matrix computations across source classes."""
+"""Sky-frame conversions and calculation controllers for the LISA source classes.
+
+Two groups of helpers live here:
+
+- Frame conversions between ICRS and the ecliptic (LISA-DDPC-SEG-TN-007 sec. 5.4.2, fixed
+  obliquity ``EPS_RAD``): :func:`icrs_to_ecliptic` and :func:`ecliptic_to_icrs`. These are on the
+  global-fit run path: the run frame is ICRS, and the recipe, the EMRI catalogue glue
+  (:func:`~lisatools.sources.emri.waveform.emri_catalogue_to_waveform_basis`) and the MBH
+  LISA-frame proposal map (``sampling.moves.skymodehop.LISAFrameMap``) call them.
+- Calculation controllers for quick SNR / covariance studies:
+  :class:`CalculationController` and its :class:`BBHCalculationController`,
+  :class:`GBCalculationController` and :class:`EMRICalculationController` subclasses (re-exported
+  by :mod:`lisatools.sources`). They predate the domain-based
+  :func:`~lisatools.diagnostic.inner_product` API; see the Warning on
+  :class:`CalculationController`.
+
+Also: the BBH parameter helpers (:func:`mT_q_to_m1_m2`, :func:`dist_convert`,
+:func:`time_convert`) and a few unused helpers.
+"""
 
 from __future__ import annotations
 
@@ -27,18 +45,33 @@ class CalculationController:
 
     Provides a common interface for computing SNRs (and, in subclasses, information /
     covariance matrices) for a particular source class given a template waveform
-    generator and a LISA noise model.
+    generator and a LISA noise model. The constructor only stores its arguments.
 
     Args:
-        aet_template_gen: Template waveform generator that returns AET TDI channels.
-        model: LISA noise model passed to the sensitivity function.
-        psd_kwargs: Keyword arguments forwarded to :func:`lisatools.sensitivity.get_sensitivity`.
-        Tobs: Observation time in **years**.
+        aet_template_gen: Template waveform generator. Called as
+            ``aet_template_gen(*params, **kwargs)`` and expected to return three channels; the
+            first two are scored (treated as A and E), the third is ignored. Its ``dt``,
+            ``f_arr`` and ``df`` attributes are forwarded to the SNR call.
+        model: LISA noise model, added as ``model`` to ``psd_kwargs`` for the sensitivity.
+        psd_kwargs: Keyword arguments for the sensitivity evaluation.
+        Tobs: Observation time in **years** (:class:`GBCalculationController` converts it to
+            seconds in place).
         dt: Timestep in seconds.
-        psd: Sensitivity curve type to use. Default is :class:`A1TDISens`
-            because we ignore ``T`` in these simplified calculations and
-            the ``A`` and ``E`` sensitivities are equivalent.
+        psd: Sensitivity curve type to use. Default is
+            :class:`~lisatools.sensitivity.A1TDISens` because these simplified calculations
+            ignore ``T`` and the ``A`` and ``E`` sensitivities are equivalent.
 
+    Attributes:
+        f_arr (np.ndarray): Frequency array of the last :meth:`get_snr` call.
+        last_output (tuple): ``(a_chan, e_chan)`` of the last :meth:`get_snr` call.
+
+    Warning:
+        :meth:`get_snr` (and the subclasses' ``get_cov``) pass ``dt=``, ``f_arr=`` and ``df=``
+        through :func:`~lisatools.diagnostic.snr` / :func:`~lisatools.diagnostic.covariance`
+        to :func:`~lisatools.diagnostic.inner_product`, whose current signature
+        (``basis_settings``, ``psd``, ``psd_args``, ``psd_kwargs``, ``normalize``,
+        ``complex``) does not accept them. With the current diagnostic API these calls raise
+        ``TypeError``; the controllers are kept for reference until they are ported.
     """
 
     def __init__(
@@ -61,25 +94,34 @@ class CalculationController:
 
     @property
     def parameter_transforms(self) -> TransformContainer:
-        """Transform parameters from sampling basis to waveform basis."""
+        """:class:`~eryn.utils.TransformContainer` from the sampling basis to the waveform basis.
+
+        Not set by the constructor (reading it before the setter raises ``AttributeError``);
+        the subclasses keep their container in ``transform_fn`` instead.
+        """
         return self._parameter_transforms
 
     @parameter_transforms.setter
     def parameter_transforms(self, parameter_transforms: TransformContainer) -> None:
-        """Set the parameter transform container."""
+        """Set the parameter transform container (must be a ``TransformContainer``)."""
         assert isinstance(parameter_transforms, TransformContainer)
         self._parameter_transforms = parameter_transforms
 
     def get_snr(self, *params: Any, **kwargs: Any) -> float:
-        """Compute the SNR.
+        """Compute the optimal SNR of the first two template channels.
+
+        Generates ``(a, e, t) = aet_template_gen(*params, **kwargs)`` and evaluates
+        :func:`~lisatools.diagnostic.snr` on ``[a, e]`` with ``psd``, ``psd_kwargs`` (plus
+        ``model``) and the generator's ``dt`` / ``f_arr`` / ``df``. Stores :attr:`f_arr` and
+        :attr:`last_output` as side effects. See the class Warning on the current
+        ``inner_product`` signature.
 
         Args:
             *params: Parameters to go into waveform generator.
             **kwargs: Kwargs for waveform generator.
 
         Returns:
-            SNR.
-
+            float: Optimal SNR.
         """
         # generate waveform
         a_chan, e_chan, t_chan = self.aet_template_gen(*params, **kwargs)
@@ -103,35 +145,49 @@ class CalculationController:
 
 
 def mT_q_to_m1_m2(mT: float, q: float) -> Tuple[float, float]:
-    """Convert total mass and mass ratio to component masses.
+    r"""Convert total mass and mass ratio to component masses.
+
+    Computes :math:`m_1 = M / (1 + q)` and :math:`m_2 = q M / (1 + q)`, so ``q`` is the mass
+    ratio :math:`m_2 / m_1`. :class:`BBHCalculationController` feeds it
+    :math:`q = m_2 / m_1 \le 1` (``m1`` the heavier). This is the inverse of the stock MBH
+    global-fit convention :math:`Q = m_1 / m_2 \ge 1`
+    (:func:`~lisatools.globalfit.stock.erebor.transforms.make_mbh_transform_container`).
 
     Args:
         mT: Total mass :math:`M = m_1 + m_2`.
-        q: Mass ratio :math:`q = m_2 / m_1 \\le 1`.
+        q: Mass ratio :math:`q = m_2 / m_1` (``<= 1`` for ``m1 >= m2``).
 
     Returns:
-        ``(m1, m2)`` component masses in the same units as ``mT``.
+        tuple[float, float]: ``(m1, m2)`` component masses in the same units as ``mT``.
     """
     return (mT / (1 + q), (q * mT) / (1 + q))
 
 
 def dist_convert(x: float) -> float:
-    """Convert a distance from Gpc to meters."""
+    """Convert a distance from Gpc to meters (``x * 1e9 * PC_SI``)."""
     return x * 1e9 * PC_SI
 
 
 def time_convert(x: float) -> float:
-    """Convert a time from years (sidereal) to seconds."""
+    """Convert a time from years to seconds (``x * YRSID_SI``, the sidereal year)."""
     return x * YRSID_SI
 
 
 class BBHCalculationController(CalculationController):
     """Calculation controller for BBHs.
 
+    Meant for a :class:`~lisatools.sources.bbh.waveform.BBHSNRWaveform` template generator
+    (bbhx ``BBHWaveformFD``), whose 12-parameter waveform basis is ``(m1, m2, chi1z, chi2z,
+    distance [m], phi_ref, f_ref, inc, lam, beta, psi, t_ref [s])``. The information matrix is
+    computed in the basis ``(ln mT, q = m2/m1, chi1z, chi2z, dist [Gpc], phi_ref, f_ref,
+    cos inc, lam, sin beta, psi, t_ref [yr])``; ``transform_fn`` maps it back.
+
     Args:
         *args: Args for :class:`CalculationController`.
-        *kwargs: Kwargs for :class:`CalculationController`.
+        **kwargs: Kwargs for :class:`CalculationController`.
 
+    Attributes:
+        transform_fn (TransformContainer): Information-matrix basis -> waveform basis.
     """
 
     def __init__(self, *args: Any, **kwargs: Any):
@@ -160,13 +216,15 @@ class BBHCalculationController(CalculationController):
     def get_snr(self, *args: Any, **kwargs: Any) -> float:
         """Compute the SNR.
 
+        Unless ``t_obs_start`` is given, sets ``shift_t_limits=True``, ``t_obs_start=0.0`` and
+        ``t_obs_end=Tobs`` (years) before calling :meth:`CalculationController.get_snr`.
+
         Args:
-            *params: Parameters to go into waveform generator.
+            *args: Parameters to go into waveform generator (the 12-parameter waveform basis).
             **kwargs: Kwargs for waveform generator.
 
         Returns:
-            SNR.
-
+            float: Optimal SNR.
         """
         # adjust kwargs to simplify calculation
         if "t_obs_start" not in kwargs:
@@ -187,19 +245,31 @@ class BBHCalculationController(CalculationController):
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get covariance matrix.
 
+        The 12 waveform-basis parameters are converted to the information-matrix basis (masses
+        are swapped first if ``m2 > m1``, so ``q = m2 / m1 <= 1``), ``return_array=True`` and
+        (unless ``t_obs_start`` is given) the observation limits are added to the waveform
+        kwargs, and :func:`~lisatools.diagnostic.covariance` is evaluated. See the Warning on
+        :class:`CalculationController`.
+
         Args:
-            *params: Parameters for BBH. Must include ``f_ref``.
-            more_accurate: If ``True``, run a more accurate derivate requiring 2x more waveform generations.
+            *params: The 12 BBH waveform-basis parameters (including ``f_ref`` at index 6).
+            more_accurate: If ``True``, run a more accurate derivative requiring 2x more
+                waveform generations.
             eps: Absolute **derivative** step size. See :func:`lisatools.diagnostic.info_matrix`.
-            deriv_inds: Subset of parameters of interest for which to calculate the information matrix, by index.
-                If ``None``, it will be ``np.arange(len(params))``.
-            precision: If ``True``, uses 500-dps precision to compute the information matrix inverse (requires `mpmath <https://mpmath.org>`_).
-                This is typically a good idea as the information matrix can be highly ill-conditioned.
+            deriv_inds: Subset of parameters of interest for which to calculate the
+                information matrix, by index. If ``None``, every index except 6 (``f_ref``);
+                index 6 is always removed.
+            precision: If ``True``, uses 500-dps precision to compute the information matrix
+                inverse (requires `mpmath <https://mpmath.org>`_). This is typically a good idea
+                as the information matrix can be highly ill-conditioned.
             **kwargs: Kwargs for waveform generation.
 
         Returns:
-            Parameters and covariance matrix.
+            tuple[np.ndarray, np.ndarray]: The parameters in the information-matrix basis at
+            ``deriv_inds`` and their covariance matrix.
 
+        Raises:
+            AssertionError: If ``len(params) != 12``.
         """
 
         # setup all bbh specific quantities.
@@ -271,10 +341,19 @@ class BBHCalculationController(CalculationController):
 class GBCalculationController(CalculationController):
     """Calculation controller for GBs.
 
+    Meant for a :class:`~lisatools.sources.gb.waveform.GBAETWaveform` template generator
+    (``GBGPU.run_wave``) with the 9-parameter waveform basis ``(A, f0 [Hz], fdot [Hz/s], fddot,
+    phi0, iota, psi, lam, beta)``. The information matrix is computed in the scaled basis
+    ``(A / 1e-23, f0 [mHz], fdot / 1e-18, fddot, phi0, cos iota, psi, lam, sin beta)``;
+    ``transform_fn`` maps it back. ``Tobs`` (years at construction) is converted to seconds
+    in place.
+
     Args:
         *args: Args for :class:`CalculationController`.
-        *kwargs: Kwargs for :class:`CalculationController`.
+        **kwargs: Kwargs for :class:`CalculationController`.
 
+    Attributes:
+        transform_fn (TransformContainer): Information-matrix basis -> waveform basis.
     """
 
     def __init__(self, *args: Any, **kwargs: Any):
@@ -313,19 +392,32 @@ class GBCalculationController(CalculationController):
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get covariance matrix.
 
+        Converts the 9 waveform-basis parameters to the scaled information-matrix basis, adds
+        ``return_array=True``, ``dt`` and ``T`` (seconds) to the waveform kwargs and evaluates
+        :func:`~lisatools.diagnostic.covariance`. See the Warning on
+        :class:`CalculationController`.
+
         Args:
-            *params: Parameters for GB. Must include ``fddot``.
-            more_accurate: If ``True``, run a more accurate derivate requiring 2x more waveform generations.
+            *params: The 9 GB waveform-basis parameters (including ``fddot`` at index 3, which
+                must be 0).
+            more_accurate: If ``True``, run a more accurate derivative requiring 2x more
+                waveform generations.
             eps: Absolute **derivative** step size. See :func:`lisatools.diagnostic.info_matrix`.
-            deriv_inds: Subset of parameters of interest for which to calculate the information matrix, by index.
-                If ``None``, it will be ``np.arange(len(params))``.
-            precision: If ``True``, uses 500-dps precision to compute the information matrix inverse (requires `mpmath <https://mpmath.org>`_).
-                This is typically a good idea as the information matrix can be highly ill-conditioned.
+            deriv_inds: Subset of parameters of interest for which to calculate the
+                information matrix, by index. If ``None``, every index except 3 (``fddot``);
+                index 3 is always removed.
+            precision: If ``True``, uses 500-dps precision to compute the information matrix
+                inverse (requires `mpmath <https://mpmath.org>`_). This is typically a good idea
+                as the information matrix can be highly ill-conditioned.
             **kwargs: Kwargs for waveform generation.
 
         Returns:
-            Parameters and covariance matrix.
+            tuple[np.ndarray, np.ndarray]: The parameters in the information-matrix basis at
+            ``deriv_inds`` and their covariance matrix.
 
+        Raises:
+            AssertionError: If ``len(params) != 9``.
+            NotImplementedError: If ``fddot != 0``.
         """
         assert len(params) == 9
 
@@ -380,13 +472,15 @@ class GBCalculationController(CalculationController):
     def get_snr(self, *args: Any, **kwargs: Any) -> float:
         """Compute the SNR.
 
+        Sets ``tdi2=True`` (unless given), ``dt`` and ``T`` (seconds) in the waveform kwargs
+        before calling :meth:`CalculationController.get_snr`.
+
         Args:
-            *params: Parameters to go into waveform generator.
+            *args: Parameters to go into waveform generator (the 9-parameter GB basis).
             **kwargs: Kwargs for waveform generator.
 
         Returns:
-            SNR.
-
+            float: Optimal SNR.
         """
         # make sure it is TDI 2
         if "tdi2" not in kwargs:
@@ -402,10 +496,17 @@ class GBCalculationController(CalculationController):
 class EMRICalculationController(CalculationController):
     """Calculation controller for EMRIs.
 
+    Meant for an :class:`~lisatools.sources.emri.waveform.EMRITDIWaveform` template generator
+    with the 14-parameter FEW basis ``(M, mu, a, p0, e0, xI0, dist [Gpc], qS, phiS, qK, phiK,
+    Phi_phi0, Phi_theta0, Phi_r0)``. The information matrix is computed with ``ln M`` and
+    ``cos`` of ``xI0``, ``qS`` and ``qK`` (indices 0, 5, 7, 9); ``transform_fn`` maps it back.
+
     Args:
         *args: Args for :class:`CalculationController`.
-        *kwargs: Kwargs for :class:`CalculationController`.
+        **kwargs: Kwargs for :class:`CalculationController`.
 
+    Attributes:
+        transform_fn (TransformContainer): Information-matrix basis -> waveform basis.
     """
 
     def __init__(self, *args: Any, **kwargs: Any):
@@ -441,19 +542,34 @@ class EMRICalculationController(CalculationController):
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get covariance matrix.
 
+        Converts the 14 waveform-basis parameters to the information-matrix basis, adds
+        ``return_array=True`` to the waveform kwargs and evaluates
+        :func:`~lisatools.diagnostic.covariance`. See the Warning on
+        :class:`CalculationController`.
+
         Args:
-            *params: Parameters for EMRIs.
-            more_accurate: If ``True``, run a more accurate derivate requiring 2x more waveform generations.
+            *params: The 14 EMRI waveform-basis parameters.
+            more_accurate: If ``True``, run a more accurate derivative requiring 2x more
+                waveform generations.
             eps: Absolute **derivative** step size. See :func:`lisatools.diagnostic.info_matrix`.
-            deriv_inds: Subset of parameters of interest for which to calculate the information matrix, by index.
-                If ``None``, it will be ``np.arange(len(params))``.
-            precision: If ``True``, uses 500-dps precision to compute the information matrix inverse (requires `mpmath <https://mpmath.org>`_).
-                This is typically a good idea as the information matrix can be highly ill-conditioned.
+            deriv_inds: Subset of parameters of interest for which to calculate the
+                information matrix, by index. If ``None``, ``np.arange(len(params))`` (inside
+                :func:`~lisatools.diagnostic.info_matrix`).
+            precision: If ``True``, uses 500-dps precision to compute the information matrix
+                inverse (requires `mpmath <https://mpmath.org>`_). This is typically a good idea
+                as the information matrix can be highly ill-conditioned.
             **kwargs: Kwargs for waveform generation.
 
         Returns:
-            Parameters and covariance matrix.
+            tuple[np.ndarray, np.ndarray]: The parameters in the information-matrix basis at
+            ``deriv_inds`` and their covariance matrix.
 
+        Raises:
+            AssertionError: If ``len(params) != 14``, or if the generator's ``response.dt`` is
+                not ``dt``.
+            AttributeError: The next check reads ``aet_template_gen.response.T``, which the
+                current :class:`~lisatools.response.directresponse.ResponseWrapper` does not
+                define (it stores ``Tobs``).
         """
         assert len(params) == 14
 
@@ -494,12 +610,12 @@ class EMRICalculationController(CalculationController):
 
 
 def return_input(x: Any) -> Any:
-    """Return the input."""
+    """Return the input unchanged (the array-output path of the frame conversions)."""
     return x
 
 
 def return_float(x: np.ndarray | float) -> float:
-    """Return the input as a float."""
+    """Return the input as a Python ``float`` (the scalar-output path of the frame conversions)."""
     return float(x)
 
 
@@ -509,34 +625,52 @@ def icrs_to_ecliptic(
     Tuple[float | np.ndarray | cp.ndarray, float | np.ndarray | cp.ndarray]
     | Tuple[float | np.ndarray | cp.ndarray, float | np.ndarray | cp.ndarray, float | np.ndarray | cp.ndarray]
 ):
-    """
-    Convert ICRS angles (ra, dec, optional psi) to ecliptic coordinates
-    (lambda, beta, optional psi_ecliptic).
+    r"""Convert ICRS angles (ra, dec, optional psi) to ecliptic (lambda, beta, optional psi).
 
-    The sky angles are converted according to the convention document LISA-DDPC-SEG-TN-007, sec 5.4.2:
+    The sky angles are converted with the fixed-obliquity rotation of the convention document
+    LISA-DDPC-SEG-TN-007, sec. 5.4.2 (:math:`\epsilon` = ``EPS_RAD``):
+
     .. math::
 
-        \\sin(\\beta) = \\sin(\\delta) \\cos(\\epsilon) - \\cos(\\delta) \\sin(\\epsilon) \\sin(\\alpha)
-        \\cos(\\lambda) = \\cos(\\delta) \\cos(\\alpha) / \\cos(\\beta)
-        \\sin(\\lambda) = (\\sin(\\delta) \\sin(\\epsilon) + \\cos(\\delta) \\cos(\\epsilon) \\sin(\\alpha)) / \\cos(\\beta).
+        \sin\beta = \sin\delta \cos\epsilon - \cos\delta \sin\epsilon \sin\alpha,
 
-    The polarization angle is converted according to:
-    ..math::
-        \\psi_{\rm ecliptic} = \\psi - \\delta \\psi
-        \\cos(\\delta \\psi) = \\frac{1}{\\cos(\\beta)} (\\sin(\\epsilon) \\sin(\\delta) \\sin(\\alpha) + \\cos(\\epsilon) \\cos(\\delta))
-        \\sin(\\delta \\psi) = - \\frac{1}{\\cos(\\beta)} \\sin(\\epsilon) \\cos(\\alpha)
+        \cos\lambda = \cos\delta \cos\alpha / \cos\beta,
 
-    Inputs are broadcast following NumPy rules. If all inputs are scalar,
-    scalar outputs are returned.
+        \sin\lambda = (\sin\delta \sin\epsilon + \cos\delta \cos\epsilon \sin\alpha) / \cos\beta.
+
+    The polarization angle is converted with
+
+    .. math::
+
+        \psi_\mathrm{ecliptic} = \psi - \Delta\psi,
+
+        \cos\Delta\psi = (\sin\epsilon \sin\delta \sin\alpha + \cos\epsilon \cos\delta) / \cos\beta,
+
+        \sin\Delta\psi = -\sin\epsilon \cos\alpha / \cos\beta.
+
+    ``lambda`` is wrapped to :math:`[0, 2\pi)` and ``psi_ecliptic`` to :math:`[0, \pi)`;
+    :math:`\cos\beta` is floored at machine epsilon (keeping its sign) at the poles. This is the
+    mojito / global-fit convention (no astropy). Inputs are broadcast following NumPy rules.
 
     Args:
         ra: Right ascension in radians.
         dec: Declination in radians.
-        psi: Optional polarization angle in radians. If provided, the returned tuple will include the converted polarization angle in ecliptic coordinates.
+        psi: Optional ICRS polarization angle in radians. If given, the converted ecliptic
+            polarization angle is returned as a third element.
 
     Returns:
-        If `psi` is not provided, returns a tuple of (lambda, beta) in radians.
-        If `psi` is provided, returns a tuple of (lambda, beta, psi_ecliptic) in radians.
+        tuple: ``(lambda, beta)`` or, with ``psi``, ``(lambda, beta, psi_ecliptic)``, in
+        radians. When ``ra`` and ``dec`` (and ``psi``, if given) are ``float`` instances (Python
+        ``float`` or ``np.float64``) the entries are Python ``float``; otherwise (including
+        ints and 0-d arrays) they are ``xp.ndarray`` on the array module of ``ra`` (numpy or
+        cupy).
+
+    Example:
+        >>> from lisatools.sources.utils import ecliptic_to_icrs, icrs_to_ecliptic
+        >>> lam, beta = icrs_to_ecliptic(1.0, 0.3)
+        >>> ra, dec = ecliptic_to_icrs(lam, beta)
+        >>> round(ra, 12), round(dec, 12)
+        (1.0, 0.3)
     """
     scalar_output = (
         isinstance(ra, float) and isinstance(dec, float) and (psi is None or isinstance(psi, float))
@@ -593,34 +727,51 @@ def ecliptic_to_icrs(
     Tuple[float | np.ndarray |cp.ndarray, float | np.ndarray |cp.ndarray]
     | Tuple[float | np.ndarray |cp.ndarray, float | np.ndarray |cp.ndarray, float | np.ndarray |cp.ndarray]
 ):
-    """
-    Convert ecliptic coordinates (lambda, beta, optional psi_ecliptic) to ICRS angles
-    (ra, dec, optional psi).
+    r"""Convert ecliptic (lambda, beta, optional psi) to ICRS angles (ra, dec, optional psi).
 
-    The sky angles are converted according to the convention document LISA-DDPC-SEG-TN-007, sec 5.4.2:
-    ..math::
+    The inverse of :func:`icrs_to_ecliptic` (LISA-DDPC-SEG-TN-007, sec. 5.4.2, fixed obliquity
+    :math:`\epsilon` = ``EPS_RAD``):
 
-        \\sin(\\delta) = \\sin(\\beta) \\cos(\\epsilon) + \\cos(\\beta) \\sin(\\epsilon) \\sin(\\lambda)
-        \\cos(\\alpha) = \\cos(\\beta) \\cos(\\lambda) / \\cos(\\delta)
-        \\sin(\\alpha) = (-\\sin(\\beta) \\sin(\\epsilon) + \\cos(\\beta) \\cos(\\epsilon) \\sin(\\lambda)) / \\cos(\\delta).
+    .. math::
 
-    The polarization angle is converted according to:
-    ..math::
-        \\psi = \\psi_{\\rm ecliptic} + \\delta \\psi
-        \\cos(\\delta \\psi) = \\frac{1}{\\cos(\\beta)} (\\sin(\\epsilon) \\sin(\\delta) \\sin(\\alpha) + \\cos(\\epsilon) \\cos(\\delta))
-        \\sin(\\delta \\psi) = - \\frac{1}{\\cos(\\beta)} \\sin(\\epsilon) \\cos(\\alpha)
+        \sin\delta = \sin\beta \cos\epsilon + \cos\beta \sin\epsilon \sin\lambda,
 
-    Inputs are broadcast following NumPy rules. If all inputs are scalar,
-    scalar outputs are returned.
+        \cos\alpha = \cos\beta \cos\lambda / \cos\delta,
+
+        \sin\alpha = (-\sin\beta \sin\epsilon + \cos\beta \cos\epsilon \sin\lambda) / \cos\delta.
+
+    The polarization angle is converted with
+
+    .. math::
+
+        \psi = \psi_\mathrm{ecliptic} + \Delta\psi,
+
+        \cos\Delta\psi = (\sin\epsilon \sin\delta \sin\alpha + \cos\epsilon \cos\delta) / \cos\beta,
+
+        \sin\Delta\psi = -\sin\epsilon \cos\alpha / \cos\beta.
+
+    ``ra`` is wrapped to :math:`[0, 2\pi)` and ``psi`` to :math:`[0, \pi)`;
+    :math:`\cos\delta` and :math:`\cos\beta` are floored at machine epsilon (keeping their sign).
+    Inputs are broadcast following NumPy rules.
 
     Args:
         lambd: Ecliptic longitude in radians.
         beta: Ecliptic latitude in radians.
-        psi_ecliptic: Optional polarization angle in radians. If provided, the returned tuple will include the converted polarization angle in ICRS coordinates.
+        psi_ecliptic: Optional ecliptic polarization angle in radians. If given, the converted
+            ICRS polarization angle is returned as a third element.
 
     Returns:
-        If `psi_ecliptic` is not provided, returns a tuple of (ra, dec) in radians.
-        If `psi_ecliptic` is provided, returns a tuple of (ra, dec, psi) in radians.
+        tuple: ``(ra, dec)`` or, with ``psi_ecliptic``, ``(ra, dec, psi)``, in radians. When
+        ``lambd`` and ``beta`` (and ``psi_ecliptic``, if given) are ``float`` instances (Python
+        ``float`` or ``np.float64``) the entries are Python ``float``; otherwise (including
+        ints and 0-d arrays) they are ``xp.ndarray`` on the array module of ``lambd`` (numpy or
+        cupy).
+
+    Example:
+        >>> from lisatools.sources.utils import ecliptic_to_icrs
+        >>> ra, dec = ecliptic_to_icrs(0.0, 0.0)
+        >>> round(ra, 12), round(dec, 12)
+        (0.0, 0.0)
     """
     scalar_output = (
         isinstance(lambd, float)
@@ -677,6 +828,7 @@ def ecliptic_to_icrs(
     return out_fun(ra), out_fun(dec)
 
 
+# TODO check: keep/remove/document -- not reached by the 9mo/12mo runs; imported by gf.recipe but never called there; only caller is scripts/gb_chunked_het/gb_mojito_mcmc_three_ways.py
 def evolve_galactic_binary(
     t_start: float, 
     t_end: float, 
@@ -699,7 +851,10 @@ def evolve_galactic_binary(
         phi_start (float | np.ndarray): Start/initial phase of the binaries before evolving.
         fdot_start (float | np.ndarray): Start/initial frequency derivative of the binary before evolving. Only evolves when chirp mass Mc is provided or fddot is not zero.
         fddot (float | np.ndarray): Second order frequency derivative of the binary. Standard value is 0.0
-        phase_sign (int): Sign of the phase evolution.  JaxGB assumes -1, while the GBGPU implementation assumes +1. This enters as: :math:`\\phi(t) = \\text{sign} \\phi_0 + ...`
+        phase_sign (int): Sign of the phase evolution.  JaxGB assumes -1, while the GBGPU
+            implementation assumes +1. This enters as: :math:`\\phi(t) = \\phi_0 + \\text{sign}\\,
+            2\\pi (f_0 \\Delta t + \\dot f_0 \\Delta t^2 / 2 + \\ddot f \\Delta t^3 / 6)`, wrapped
+            to :math:`[0, 2\\pi)`.
         Mc (float | np.ndarray | None): The chrip mass of the binary to evolve the binary using gravitationally driven quadrupolar radiation. Standard is None.
         
     Returns:
@@ -720,6 +875,7 @@ def evolve_galactic_binary(
         raise NotImplementedError("Currently, the galactic binaries can only be evolved using the linear approximation")
 
 
+# TODO check: keep/remove/document -- no callers in src, scripts, tests or the sibling repos
 def psi_rotation_icrs_to_ecliptic(lam_ecl, beta_ecl):
     """Polarization-basis rotation ``chi`` such that ``psi_ecl = psi_icrs - chi``.
 
@@ -782,6 +938,7 @@ def psi_rotation_icrs_to_ecliptic(lam_ecl, beta_ecl):
     return out_fun(xp.arctan2(sindeltapsi, cosdeltapsi))
 
 
+# TODO check: keep/remove/document -- no callers; the stock erebor code keeps its own module-level _WAVE_WRAP_CACHE dict
 class WaveWrapCache:
     """Tiny keyed cache for expensive per-run wave-generator / wave-wrap objects.
 

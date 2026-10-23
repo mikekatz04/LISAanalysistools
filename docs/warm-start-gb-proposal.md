@@ -4,6 +4,17 @@ Design note for the next-big-run warm-start proposal (2026-08-14).
 Scope: GBs only — they are the RJ branch; MBH/SOBBH/EMRI/PSD/galfor/VGB
 warm-start from direct samples of the previous posterior.
 
+_Status (2026-10-22): built. The pipeline below is
+`lisatools/globalfit/warmstart/fit_from_store.py` (stages 0-3, plus a
+satellite merge and a ward re-split of wide blends); the match statistic
+deferred below became the referee (`match_referee.py` -> `referee_apply.py`);
+`proposal.py` is the birth container of `rj_warm_search` / `rj_warm_pe`
+(`GB_WARM_START_COMPONENTS`), built in-job by `build.py` and refitted from the
+run's own rows by `self_refit.py` (`GB_WARM_SELF`). The as-built basis is in
+`docs/superpowers/specs/2026-09-18-warmstart-observable-basis-design.md`;
+`docs/global-fit-navigation.md` section 2.8 has the production wiring. The
+text below is the original design note._
+
 ## Problem
 
 Turn a finished run's cold-chain leaf samples (iteration x walker x

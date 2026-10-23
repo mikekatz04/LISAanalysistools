@@ -1,6 +1,7 @@
-"""Build ``gb_truth_3to21.npz`` -- the frozen recovery denominator.
+r"""Build ``gb_truth_3to21.npz`` -- the frozen recovery denominator.
 
-The status page (``gf_monitor_gen.py``) quotes every completeness / purity /
+The status page (``monitor/_generator.py``, formerly
+``scripts/diagnostics/gf_monitor_gen.py``) quotes every completeness / purity /
 per-source recovery number against ONE frozen set: the catalogue galactic
 binaries detectable (optimal SNR > 7) over the analysed GB band under the
 run's own fitted noise at a chosen iteration. The original build script lived
@@ -41,17 +42,27 @@ monitor refuses a truth set whose stamped ``tobs`` does not match the run.
 
 Nothing here is re-derived: the noise, waveform and SNR route are copied from
 the monitor's own recovery section (GBGPU ``run_wave`` on CPU, lisatools
-``A2TDISens``/``E2TDISens`` fed the run's sampled instrument + foreground) --
-the same path the run's likelihood uses.
+``A2TDISens``/``E2TDISens`` fed the run's sampled instrument + foreground).
+That is a frequency-domain A/E optimal SNR on the EQUAL-ARM analytic TDI-2
+sensitivity (:func:`sens_grids`), not the production likelihood (WDM domain,
+unequal-arm noise model): ``snr`` is the monitor's detectability yardstick,
+not the run's own SNR.
 
-Shape of the output (the monitor's ``TRU`` contract):
+Shape of the output (the monitor's ``TRU`` contract)::
+
     f0    (N,)   Hz
     amp   (N,)   GW amplitude
     snr   (N,)   optimal SNR under the frozen noise
     det   (N,)   bool, snr > 7
     phys  (N,9)  GBGPU physical basis [amp, f0, fdot, fddot, phi0, iota,
                  psi, lam(icrs), beta(icrs)]
-plus provenance attrs (store path, iteration, band, psd/galfor params).
+
+plus provenance arrays (``store``, ``iteration``, ``psd_params``,
+``galfor_params``, ``band``, ``tobs``, ``nw`` and the ``orbits`` stamp,
+``"mojito_l1"`` or ``"analytic"``). The ``lam``/``beta`` columns are the
+catalogue's ICRS right ascension and declination. The ``phi0`` column is the
+SAMPLING-basis phase of :func:`~lisatools.globalfit.recipe.gb_catalogue_to_sampling_basis`
+(irrelevant for the optimal SNR).
 
 The amplitude PREFILTER: running waveforms for every one of the 15.5M
 catalogue rows is pointless when SNR/amp at fixed f is bounded. A unit-SNR
@@ -59,11 +70,15 @@ kappa curve (best-case orientation, coarse f grid, buffered 2x) cuts the
 waveform set to the plausibly-detectable tail; the same curve is written to
 ``kappa_grid.npz`` for the monitor's population panels.
 
-Usage::
+Usage (the monitor CLIs' ``--build-truth`` call :func:`main` in-process via
+:func:`lisatools.globalfit.monitor.build_truth_set`, which writes into the run
+directory; ``scripts/diagnostics/build_truth.py`` is a shim of this module)::
 
-    OMP_NUM_THREADS=1 python scripts/diagnostics/build_truth.py \
+    OMP_NUM_THREADS=1 python -m lisatools.globalfit.monitor.build_truth \
         STORE.h5 [--iteration N] [--out gb_truth_3to21.npz] [--tobs SEC] \
         [--flo 0.8e-3] [--fhi 2.1944444e-2]
+
+    python -m lisatools.globalfit.monitor RUN_DIR --build-truth
 
 THE NOISE ITERATION DEFAULTS TO THE MOST RECENT SAMPLE (2026-09-26, user
 ruling). It was a hardcoded ``78`` -- an iteration of whichever 3-month
@@ -140,6 +155,20 @@ def resolve_catalogue(explicit=None):
     the packaged default. Raises with every path it tried rather than
     failing later inside h5py with a bare "unable to open file", which is
     what made this hard to diagnose the first time.
+
+    The full order is ``explicit``, ``MOJITO_INFO_PATH``, ``MOJITO_CAT``,
+    ``MOJITO_CACHE_DIR`` (its nested brickmarket layout),
+    :data:`MOJITO_CAT_DEFAULT`. A directory candidate is tried as
+    ``<dir>/<name>`` and ``<dir>/catalogues/<name>``.
+
+    Args:
+        explicit (str, optional): ``--catalogue`` (file or directory).
+
+    Returns:
+        str: Path of ``wdwd_cat_mojito_lite_processed.hdf5``.
+
+    Raises:
+        SystemExit: Listing every path tried, when none exists.
     """
     tried = []
     for cand in (
@@ -197,6 +226,14 @@ def store_tobs(store, fallback=TOBS_3MO):
     how ``gf_monitor_gen.py`` derives ``SCI_TOBS``, so a truth set built here
     and a page rendered there agree by construction. Falls back to the 3-month
     value when the store predates the group.
+
+    Args:
+        store (str): The HDF5 store.
+        fallback (float): Tobs [s] when the group is missing (warned).
+            Default :data:`TOBS_3MO`.
+
+    Returns:
+        float: Tobs [s].
     """
     try:
         with h5py.File(store, "r") as f:
@@ -218,6 +255,18 @@ def nw_for(tobs):
     scale up in powers of two from there -- 512 at one year. Over-sizing N is
     safe (the extra bins are ~zero and the slow part is merely sampled more
     finely); under-sizing truncates the waveform and silently loses SNR.
+
+    Args:
+        tobs (float): Observation time [s].
+
+    Returns:
+        int: ``128 * max(tobs / TOBS_3MO, 1)`` rounded up to a power of two,
+        capped at 2048.
+
+    Example:
+        >>> from lisatools.globalfit.monitor.build_truth import nw_for
+        >>> nw_for(7776000.0), nw_for(23328000.0), nw_for(31104000.0)
+        (128, 512, 512)
     """
     n = NW_3MO * max(float(tobs) / TOBS_3MO, 1.0)
     return int(min(2 ** int(np.ceil(np.log2(n))), 2048))
@@ -229,6 +278,12 @@ def galfor_log_sampling_of(store) -> bool:
     Read it off the store, never off the environment: the env var describes
     the current process, while the stored numbers were written in whatever
     basis that run used. A store predating the key is linear.
+
+    Args:
+        store (str): The HDF5 store.
+
+    Returns:
+        bool: Whether the store's galfor chain is in the log10 basis.
     """
     from lisatools.globalfit.stock.erebor.noise import read_noise_model_identity
 
@@ -266,6 +321,16 @@ def latest_iteration(store):
 
     Raises ``RuntimeError`` rather than returning a guess when no row
     qualifies: a truth set built on zero noise is worse than no truth set.
+
+    Args:
+        store (str): The HDF5 store.
+
+    Returns:
+        int: The iteration (row index) to build on.
+
+    Raises:
+        RuntimeError: When no row is filled or none carries written psd and
+            galfor chains.
     """
     with h5py.File(store, "r") as f:
         g = f["global_fit"]
@@ -305,6 +370,16 @@ def fitted_noise(store, it):
     matching what the sampler and the monitor page both do; for the log
     columns that is a geometric median-of-logs, which is the meaningful
     centre for a quantity spanning decades.
+
+    Args:
+        store (str): The HDF5 store.
+        it (int): The iteration (row) to read.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``(psd, galfor)``: the walker median
+        of the cold-chain psd parameters as sampled (:func:`sens_grids`
+        squares the two into the ``LISAModel`` levels) and the physical
+        galfor parameters.
     """
     from lisatools.globalfit.stock.erebor.noise import galfor_params_to_physical
 
@@ -318,6 +393,25 @@ def fitted_noise(store, it):
 
 
 def sens_grids(psd_p, gal_p, df):
+    """A / E noise PSDs (instrument + fitted foreground) on a uniform FD grid.
+
+    Builds a ``LISAModel`` with levels ``psd_p[0]**2`` / ``psd_p[1]**2`` on
+    :class:`~lisatools.detector.DefaultOrbits`, adds the
+    :class:`~lisatools.stochastic.HyperbolicTangentGalacticForeground` with
+    ``gal_p``, and evaluates :class:`~lisatools.sensitivity.A2TDISens` /
+    :class:`~lisatools.sensitivity.E2TDISens` (EQUAL-ARM analytic TDI-2) at
+    ``f = k * df`` for ``k = 0 .. int(2.35e-2 / df) + 1`` (``f = 0`` replaced
+    by ``df``). Also used by the at-a-glance overlap (:mod:`._short`).
+
+    Args:
+        psd_p (array-like): The two psd parameters as sampled.
+        gal_p (array-like): Physical galfor parameters.
+        df (float): Frequency spacing [Hz], ``1 / Tobs``.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``(sa, se)``, the A and E PSDs on that
+        grid (index ``k`` is frequency ``k * df``).
+    """
     from lisatools import detector as lisa_models
     from lisatools.sensitivity import get_sensitivity, A2TDISens, E2TDISens
     from lisatools.stochastic import (
@@ -395,6 +489,13 @@ def brick_loss_note(fp):
     * ``COMBINED`` -- the page sums the run's own per-type bricks instead
       (Notes line); with none of those readable either, the data / template /
       residual and whitened-residual panels are not drawn.
+
+    Args:
+        fp (str): The brick path (the type is the basename's prefix before
+            the first ``_``).
+
+    Returns:
+        str: One clause for the warning line.
     """
     base = os.path.basename(str(fp))
     kind = base.split("_", 1)[0].upper()
@@ -413,7 +514,17 @@ def brick_loss_note(fp):
 def report_skipped_bricks(skipped, used=None, out=print):
     """The one warning for unreadable L1 bricks, at most once per brick per
     process: a header, then ONE line per brick (path, error, what the page
-    loses), then what to do. Returns the lines printed."""
+    loses), then what to do. Returns the lines printed.
+
+    Args:
+        skipped (list[tuple[str, str]]): ``(path, reason)`` per unusable brick.
+        used (str, optional): The brick read instead, named in the header.
+        out (Callable[[str], None]): Printer. Default :func:`print`.
+
+    Returns:
+        list[str]: The lines printed (empty when every brick was already
+        reported).
+    """
     new = [(fp, why) for fp, why in skipped if fp not in _REPORTED_BAD_BRICKS]
     if not new:
         return []
@@ -452,6 +563,17 @@ def find_l1_brick(path=None):
     (directory, or the wdwd_cat file, in which case two levels up) >
     MOJITO_DATA_PATH > MOJITO_CACHE_DIR > the laptop default. Every entry
     is searched recursively for ``*_L1_*.h5``.
+
+    Bricks that do not open or lack the ``ltts`` / ``orbits`` groups
+    (:func:`_l1_usable`) are skipped and reported once
+    (:func:`report_skipped_bricks`). An explicit ``path`` is returned even
+    when unusable (with a warning), never replaced.
+
+    Args:
+        path (str, optional): An explicit brick (``--l1-brick``).
+
+    Returns:
+        str or None: The first usable brick in sorted order, or ``None``.
     """
     import glob
     if path:
@@ -510,7 +632,7 @@ def l1_orbits(stride=200, path=None, frame="icrs"):
 
     THIS IS NOT A REFINEMENT, IT IS THE DIFFERENCE BETWEEN RIGHT AND WRONG.
     Measured at 7.44-7.60 mHz on the 6mo store (2026-09-23), swapping the
-    analytic ``DefaultOrbits`` ephemeris for these:
+    analytic ``DefaultOrbits`` ephemeris for these::
 
         template-vs-injection overlap   0.052 -> 0.580,  0.368 -> 0.982,
                                         0.262 -> 0.962
@@ -530,6 +652,23 @@ def l1_orbits(stride=200, path=None, frame="icrs"):
     1.5 MB. That is what lets this run on a laptop.
 
     Returns ``(orbits, path)``, or ``(None, reason)`` when no brick is found.
+
+    The orbits are a CPU :class:`~lisatools.detector.L1Orbits` subclass
+    (positions and velocities read as stored; the ltt table and its time
+    sampling strided) with ``linear_interp_dt=500.0``, configured before
+    return.
+    The mojito L1 data are ICRS, so the default ``frame="icrs"`` matches the
+    ICRS sky the truth build and the overlap waveforms feed GBGPU.
+
+    Args:
+        stride (int): Keep every ``stride``-th light-travel-time sample.
+            Default ``200`` (500 s at the 2.5 s brick cadence).
+        path (str, optional): Explicit brick, see :func:`find_l1_brick`.
+        frame (str): Frame label passed to ``L1Orbits``. Default ``"icrs"``.
+
+    Returns:
+        tuple: ``(L1Orbits, str)`` with the brick path, or ``(None, str)``
+        with the reason.
     """
     from lisatools import detector as lisa_models
     fp = find_l1_brick(path)
@@ -565,11 +704,28 @@ def catalogue_phys(t_ref, flo=FLO, fhi=FHI, catalogue=None):
     """(N,9) GBGPU physical rows for every catalogue GB in [flo, fhi].
 
     Column conventions copied from the run's own catalogue path
-    (``gb_catalogue_to_sampling_basis`` handles the epoch shift and ICRS
-    frame; ``both_transforms`` of the 8-col basis is what the sampler feeds
+    (``gb_catalogue_to_sampling_basis`` takes the parameters at the catalogue
+    reference epoch, with no evolution, in the ICRS frame;
+    ``both_transforms`` of the 8-col basis is what the sampler feeds
     GBGPU) -- here we only need the physical 9-vector, which
     ``gb_catalogue_to_sampling_basis`` exposes directly through the run's
-    transform container."""
+    transform container.
+
+    The rows are built from the 8-column sampling rows as ``[exp(lnA),
+    f0 [Hz], fdot, 0, phi0 (sampling basis), arccos(cos_iota), psi,
+    alpha (ICRS RA), arcsin(sin_delta) (ICRS Dec)]``. The catalogue is read
+    with :func:`resolve_catalogue` and cut on ``GW22FrequencySSBFrame``.
+
+    Args:
+        t_ref (float): Accepted but not used (the catalogue parameters are
+            taken at their reference epoch).
+        flo (float): Band floor [Hz]. Default :data:`FLO`.
+        fhi (float): Band ceiling [Hz]. Default :data:`FHI`.
+        catalogue (str, optional): Forwarded to :func:`resolve_catalogue`.
+
+    Returns:
+        np.ndarray: Shape ``(N, 9)``.
+    """
     from lisatools.globalfit.recipe import gb_catalogue_to_sampling_basis
     cat = resolve_catalogue(catalogue)
     print(f"catalogue: {cat}")
@@ -600,6 +756,21 @@ def snr_progress_due(done, total, shown):
     (user request 2026-10-13: the monitor log carried 51 lines of
     ``snr: 20000/1008443`` ... ``snr: 1008443/1008443``). ``shown`` is the
     number of quarters already reported.
+
+    Args:
+        done (int): Rows finished.
+        total (int): Rows in all.
+        shown (int): Quarters already reported.
+
+    Returns:
+        tuple[bool, int]: Whether to print now, and the updated ``shown``.
+
+    Example:
+        >>> from lisatools.globalfit.monitor.build_truth import snr_progress_due
+        >>> snr_progress_due(250, 1000, 0), snr_progress_due(300, 1000, 1)
+        ((True, 1), (False, 1))
+        >>> snr_progress_due(1000, 1000, 1)
+        (True, 4)
     """
     total = max(int(total), 1)
     q = min(4, (4 * int(done)) // total)
@@ -611,7 +782,7 @@ def snr_progress_due(done, total, shown):
 
 
 def opt_snr(phys, sa, se, gbw, df, tobs, nw, batch=20000, progress=True):
-    """Optimal SNR of each row: 4 df sum(|A|^2/SA + |E|^2/SE), sqrt.
+    """Optimal SNR of each row: ``sqrt(4 df sum(|A|^2/SA + |E|^2/SE))``.
 
     ``tobs`` is the run's observation time -- it enters BOTH the waveform
     (``T=`` in ``run_wave``, which sets how long the source integrates) and
@@ -619,6 +790,24 @@ def opt_snr(phys, sa, se, gbw, df, tobs, nw, batch=20000, progress=True):
     sampled on that same ``df`` grid. ``progress=False`` prints nothing (the
     kappa prefilter's eight small calls); otherwise at most one ``snr:`` line
     per quarter of the rows, the last at completion.
+
+    Waveforms are GBGPU TDI-2 A/E at ``dt = DT`` (2.5 s); a row whose
+    waveform window falls outside the ``sa`` grid keeps SNR 0.
+
+    Args:
+        phys (np.ndarray): GBGPU physical rows, shape ``(N, 9)``
+            (:func:`catalogue_phys` order).
+        sa (np.ndarray): A-channel PSD on the ``k * df`` grid.
+        se (np.ndarray): E-channel PSD on the same grid.
+        gbw (gbgpu.gbgpu.GBGPU): A CPU instance with its orbits attached.
+        df (float): Frequency spacing [Hz].
+        tobs (float): Observation time [s].
+        nw (int): FD points per waveform (:func:`nw_for`).
+        batch (int): Rows per ``run_wave`` call. Default ``20000``.
+        progress (bool): Print ``snr:`` progress lines. Default ``True``.
+
+    Returns:
+        np.ndarray: Optimal SNR per row, shape ``(N,)``.
     """
     out = np.zeros(len(phys))
     _shown = 0
@@ -654,6 +843,14 @@ def make_parser():
     which is why this has to be a function rather than a module-level
     parser: a parser built at import would freeze whatever ``ITERATION``
     happened to be set to then.
+
+    Returns:
+        argparse.ArgumentParser: Positional ``store``; options
+        ``--iteration``, ``--out`` (default ``gb_truth_3to21.npz``),
+        ``--kappa-out`` (default ``kappa_grid.npz``), ``--tobs``, ``--nw``,
+        ``--flo`` / ``--fhi`` (defaults :data:`FLO` / :data:`FHI`),
+        ``--catalogue``, ``--l1-brick``, ``--analytic-orbits`` and
+        ``--batch`` (default 20000).
     """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("store")
@@ -699,6 +896,45 @@ def make_parser():
 
 
 def main(argv=None):
+    """Build the truth set and the kappa grid for one store (the CLI).
+
+    Steps: resolve Tobs, the FD points per waveform and the noise iteration
+    (:func:`latest_iteration` unless ``--iteration``); take the cold-chain
+    median noise there (:func:`fitted_noise`) and its A/E sensitivity
+    (:func:`sens_grids`); load the injected mojito L1 orbits
+    (:func:`l1_orbits`, analytic fallback below); read the catalogue GBs in
+    ``[--flo, --fhi]`` (:func:`catalogue_phys`); build the best-orientation
+    unit-SNR kappa curve on a log grid and write it to ``--kappa-out``; run
+    :func:`opt_snr` on the rows whose ``amp * kappa(f0)`` exceeds half the
+    detection threshold; write ``--out`` (``f0``, ``amp``, ``snr``, ``det``,
+    ``phys`` and the provenance stamps).
+
+    Args:
+        argv (list[str], optional): CLI arguments (:func:`make_parser`).
+            Default ``None`` reads :data:`sys.argv`.
+
+    Returns:
+        int: ``0``.
+
+    Raises:
+        SystemExit: On a usage error or when the catalogue is not found
+            (:func:`resolve_catalogue`).
+        RuntimeError: When the store has no usable noise row.
+
+    Warning:
+        The ANALYTIC-orbits path (no usable mojito L1 brick, or
+        ``--analytic-orbits``) builds :class:`~lisatools.detector.DefaultOrbits`
+        on CPU with the ``"icrs"`` frame label over the stock equal-arm orbit
+        file, whose positions are SSB ECLIPTIC (the label does not convert
+        them), and feeds GBGPU the catalogue's ICRS right ascension /
+        declination.
+        GBGPU reads the sky angles in the frame of the orbit positions, so on
+        that path every SNR (and ``det``) is computed for a sky rotated by the
+        obliquity (~23.4 deg), on top of the analytic-ephemeris error the
+        banner already warns about. Such a set is stamped
+        ``orbits="analytic"``. The default mojito L1 path (ICRS orbit data,
+        ``frame="icrs"``) is frame-consistent.
+    """
     ap = make_parser()
     a = ap.parse_args(argv)
 
@@ -775,6 +1011,10 @@ def main(argv=None):
                 "##                                                     \n"
                 "##  Pass --analytic-orbits to silence this and mean it.\n"
                 "########################################################\n")
+        # WARNING (frames): the stock DefaultOrbits file is SSB ecliptic despite
+        # the "icrs" label, while catalogue_phys hands GBGPU ICRS RA/Dec, so
+        # every SNR on this path is for a sky rotated by the obliquity. See the
+        # Warning in this function's docstring.
         orb = lisa_models.DefaultOrbits(force_backend="cpu", frame="icrs")
     else:
         print(f"orbits: mojito L1 {orb_src}")

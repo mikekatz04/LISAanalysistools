@@ -2,6 +2,13 @@
 
 This module wires together the per-source samplers, the recipe driver, the
 HDF backend, and MPI rank coordination into a runnable end-to-end global fit.
+It holds :class:`GlobalFitSetup` (the built configuration + run state; a
+stock fit IS one, see :mod:`lisatools.globalfit.stock`) and
+:class:`GlobalFit` (the runner). Entry points:
+:meth:`GlobalFit.run_global_fit` (MPI; what ``StockGlobalFit.run(comm)``
+calls, e.g. from the production driver
+``scripts/fstat_proposal/run_combined_staged.py``) and :meth:`GlobalFit.sample`
+(single-process generator, ``fit.sample()``).
 
 MPI rank roles (mirrors ``communication/ranks.py``'s docstring, which owns
 the resolution: ``resolve_roles``/``build_layout``): HEAD (the main rank --
@@ -14,9 +21,100 @@ full pipeline; only the walker-block size of its ``AnalysisContainerArray``
 differs. SPARE exists only under ``GF_LEGACY_RANK_LAYOUT=1``, which restores
 the pre-port roles (one compute rank owning the whole per-node GPU pool,
 every other non-saver rank built then stopped at startup without computing).
+The MONITOR rank (``GF_MONITOR_RANK=1``) is not a role here: the driver
+splits the highest world rank off (``monitor.rank.split_monitor_rank``)
+before the build and hands this module the remaining run communicator.
+9mo/12mo layout at the launcher defaults (``NGPUS=4``, 2 nodes x 2 GPUs,
+``NWALKERS=4``, ``GF_LEGACY_RANK_LAYOUT=0``): world ranks 0-5; run ranks 0
+(head, walker 0), 1-3 (compute, one walker and one GPU each), 4 (saver);
+world rank 5 monitor.
+
+Setup phase (:meth:`GlobalFit.prepare_main` on the head,
+:meth:`GlobalFit.prepare_compute` on the compute ranks, collective for
+collective): the head alone reads the store (:meth:`GlobalFit.load_info`:
+resume, mid-iteration checkpoint, or fresh start from priors / injections /
+noise pin / source warm start) and broadcasts ``(state, seed_base)``; every
+compute rank (the head included) builds its walker block's containers with
+:meth:`GlobalFit.setup_acs` (residuals rebuilt) and gathers the initial
+likelihood; the head alone then opens/resets the store
+(:meth:`GlobalFit._open_run_backend`, run between the two gathers); every
+compute rank materializes the recipe (the fit's ``setup_function``) and
+gathers the likelihood again. The head then builds the
+:class:`~lisatools.globalfit.engine.GlobalFitEngine` and enters the recipe's
+first step; the saver enters
+:func:`~lisatools.globalfit.hdfbackend.save_to_backend_asynchronously_and_plot`.
+
+Per iteration (head, inside eryn's ``run_mcmc``): the current stage's
+:class:`~lisatools.globalfit.moves.globalfitmove.GFCombineMove` proposes
+(each move fans its walker blocks out to the compute ranks and merges the
+results; sub-state cold rows are checked first), then
+``GFHDFBackend.save_step`` hands the row to the saver (blocking pickled
+send), then the recipe (eryn's ``stopping_fn``) forwards the iteration to
+the fan-out, writes the residual snapshot every ``GF_RESIDUAL_SNAPSHOT_EVERY``
+iterations (default 3, :mod:`lisatools.globalfit.residual_snapshot`) and advances
+the stage when its stopping rule fires. The run ends when the recipe
+finishes or after ``general.num_iterations``; the head then sends ``STOP`` to
+the compute ranks and the finish-run message to the saver.
+
+Residual-building convention: the containers are built from the data and
+the templates of every live leaf are subtracted under the hood by
+:meth:`GlobalFit.setup_acs` with ``rebuild_residuals`` on (the setting every
+rank uses), through each branch's
+registered ``signal_gen`` (``Settings.signal_gen``; in ``all_sources``, the
+9mo/12mo variant, mbh / emri / sobbh; ``gb_no_fg`` and the ``vgb`` variant
+also register GB-family generators for gb / vgb). Branches with neither a
+``signal_gen`` nor a legacy ``get_templates`` hook (gb / vgb in
+``all_sources``) are skipped with a warning and subtract their own leaves in
+their move builders (``recipe.build_gb_moves`` / ``build_vgb_moves``, which
+skip that subtraction when a ``signal_gen`` is registered). Recipes build
+moves only; they never write residuals directly.
+
+Environment knobs read in this module (stock-field knobs such as
+``MIDIT_CHECKPOINT``, ``BACKUP_ITER``, ``MAKE_DIAGNOSTIC_PLOTS``,
+``PLOT_ITERATIONS``, ``VERBOSE``, ``PROGRESS`` and ``COARSE_*`` arrive
+through ``general_info``; the layout knobs ``GF_LEGACY_RANK_LAYOUT`` /
+``GF_GPU_ROUTING`` are read by :mod:`lisatools.globalfit.communication.ranks`):
+
+* ``NULL_CHECK_ONLY`` (unset): measure the initial lnL, then shut down
+  (:func:`null_check_only`).
+* ``PSD_START_PARAMS`` / ``GALFOR_START_PARAMS`` (unset): fresh-start noise
+  pin, physical values (:meth:`GlobalFit._seed_noise_start_coords`); the
+  9mo/12mo launchers set both (``noise_pin`` CLI / hand-set).
+* ``MBH_START_FACTOR`` / ``EMRI_START_FACTOR`` / ``SOBBH_START_FACTOR``
+  (``1e-5``), ``GB_START_FACTOR`` (``1e-4``), ``<BRANCH>_START_FACTOR`` for
+  any other branch with an injection (``1e-5``): multiplicative fresh-start
+  scatter about the injection, ``x (1 + factor randn)``; the launchers set
+  MBH / EMRI / SOBBH / VGB to 0 (exact injection).
+* ``GB_PROPOSE_ORCHESTRATE`` (``"0"``): TEST-ONLY single-rank fan-out
+  (:meth:`GlobalFit._make_fanout`).
+* ``GB_LAYER_CHI2`` (unset): log the post-setup residual power per WDM
+  layer (diagnostic).
 
 The legacy multi-stage pipeline classes (``GlobalFitSegment``,
 ``MPIControlGlobalFit``) were removed 2026-07 (parallel-resources plan P0).
+
+Example:
+    .. code-block:: python
+
+        from mpi4py import MPI
+        from lisatools.globalfit.communication.ranks import prepare_rank
+        from lisatools.globalfit.run import GlobalFit
+        from lisatools.globalfit.stock import erebor
+
+        fit = erebor.all_sources(nwalkers=4)
+        prepare_rank(fit, MPI.COMM_WORLD)   # layout + device pin BEFORE the build
+        fit.build()
+        GlobalFit(fit, MPI.COMM_WORLD).run_global_fit()   # = fit.run(comm=...)
+
+    (With a monitor rank, the production driver passes the run communicator
+    left after the monitor split instead of ``MPI.COMM_WORLD``.) The
+    production launch goes through the launcher, which exports the run's
+    knobs, self-dispatches ``sbatch`` and starts the driver with
+    ``mpiexec -n $SLURM_NTASKS`` (6 tasks for ``NGPUS=4``):
+
+    .. code-block:: bash
+
+        NGPUS=4 ./scripts/fstat_proposal/submit_gf_9mo_v9.sh
 """
 
 import hashlib
@@ -110,14 +208,22 @@ def null_check_only() -> bool:
     sample. With this set, :meth:`GlobalFit.prepare_main` returns right after
     that print and :meth:`GlobalFit.run_global_fit` skips ``run_mcmc``.
 
-    NOT a ``sys.exit``: the production layout is ``mpiexec -n 3`` (main +
-    saver + spare), and the other two ranks sit in ``comm.recv``. The early
-    return goes through the ORDINARY shutdown -- the spares' ``"stop"`` and
-    the saver's ``{"finish_run": True}`` -- so every rank exits rc 0 in
-    seconds instead of blocking until walltime.
+    NOT a ``sys.exit``: the other ranks are waiting on the head -- the
+    compute ranks in ``ComputeService.serve()`` on the fan-out communicator,
+    the saver in its receive loop, and (legacy layout only) the spares in
+    ``comm.recv``. The early return goes through the ORDINARY shutdown -- the
+    fan-out STOP, the spares' ``"stop"`` and the saver's finish-run message
+    -- so every rank exits rc 0 in seconds instead of blocking until
+    walltime. The launch for this mode is
+    ``scripts/fstat_proposal/launch_null_per_source.sh``; the 9mo/12mo
+    launchers leave it unset.
 
     A present-but-empty value counts as unset (``stock.base._env_lookup``'s
     rule), so ``NULL_CHECK_ONLY= sbatch ...`` cannot silently skip a run.
+
+    Returns:
+        bool: True when ``NULL_CHECK_ONLY`` is ``1`` / ``true`` / ``yes`` /
+        ``on`` (case-insensitive, stripped).
     """
     return os.environ.get("NULL_CHECK_ONLY", "").strip().lower() in _NULL_CHECK_TRUE
 
@@ -200,6 +306,7 @@ def _leaf_moves(moves):
 
 
 def _move_label(move):
+    """A move's display name: ``gf_move_name``, else ``name``, else its class name."""
     return getattr(move, "gf_move_name", None) or getattr(move, "name", None) or type(move).__name__
 
 
@@ -377,15 +484,30 @@ def seed_injection_coords(
     the multiplicative ruling for exactly-zero truths (``factor = 0`` still
     reproduces the exact injection).
 
+    Used by :meth:`GlobalFit.load_info`'s generic seeding path for branches
+    without a hand-written arm (vgb in the stock fits; ``VGB_START_FACTOR=0``
+    in the 9mo/12mo launchers, i.e. the exact injection).
+
     Args:
-        inj: ``(nleaves, ndim)`` injection rows.
-        factor: The branch's ``<BRANCH>_START_FACTOR`` value.
-        ntemps: Leading temperature-axis size of the returned block.
-        nwalkers: Walker-axis size.
-        additive_start_widths: Optional ``{column: additive width}``.
+        inj (array-like): ``(nleaves, ndim)`` injection rows, sampling basis.
+        factor (float): The branch's ``<BRANCH>_START_FACTOR`` value.
+        ntemps (int): Leading temperature-axis size of the returned block.
+        nwalkers (int): Walker-axis size.
+        additive_start_widths (dict, optional): ``{column: additive width}``.
 
     Returns:
-        ``(ntemps, nwalkers, nleaves, ndim)`` start coordinates.
+        np.ndarray: ``(ntemps, nwalkers, nleaves, ndim)`` start coordinates
+        (drawn with the global ``np.random`` stream).
+
+    Example:
+        .. code-block:: python
+
+            import numpy as np
+            from lisatools.globalfit.run import seed_injection_coords
+
+            inj = np.array([[1.0, 2.0, 0.0]])
+            coords = seed_injection_coords(inj, 0.0, ntemps=2, nwalkers=4)
+            # coords.shape == (2, 4, 1, 3); factor 0 -> every row equals inj
     """
     inj = np.asarray(inj, dtype=float)
     nleaves, ndim = inj.shape
@@ -407,8 +529,9 @@ class GlobalFitSetup:
     Produced from a :class:`~lisatools.globalfit.engine.GlobalFitSettings` the
     same way each per-module ``*Setup`` is built from its ``*Settings``: the
     (heavy) ``__init__`` deepcopies the settings into ``current_info`` and
-    opens the HDF backend, then exposes convenient read-only views over the
-    configuration — source information, branch states/backends, rank and GPU
+    constructs a :class:`~lisatools.globalfit.hdfbackend.GFHDFBackend` reader
+    on the main store path, then exposes convenient read-only views over the
+    configuration — source information, branch states/backends, rank
     assignments, engine info. This is the object the :class:`GlobalFit` runner
     consumes; a ``GlobalFitSetup`` does not itself drive the sampler.
 
@@ -424,10 +547,24 @@ class GlobalFitSetup:
     Args:
         settings: GlobalFitSettings object containing all configuration parameters
             for the global fit run.
+
+    Attributes:
+        settings_dict (GlobalFitSettings): The settings as given.
+        current_info (GlobalFitSettings): The deep copy every view reads.
+        backend (GFHDFBackend): Reader on ``general_info.main_file_path``
+            (no sub-backends attached; the run opens its own).
+        fanout: This rank's ``WalkerFanout`` once the run built one (head and
+            compute ranks; ``None`` single-process).
+        rank (int): This process's rank in the run communicator, set by
+            ``prepare_rank`` / :class:`GlobalFit`.
+        rank_device_mode: Device-pinning mode recorded by ``prepare_rank``.
     """
 
-    #: multi-rank runtime (set by ``communication.ranks.prepare_rank`` before the
-    #: build and by ``GlobalFit`` at run time; ``None`` in single-process use)
+    #: multi-rank runtime: the walker-block layout
+    #: (:class:`~lisatools.globalfit.communication.ranks.WalkerBlockLayout`), set by
+    #: ``communication.ranks.prepare_rank`` before the build and by ``GlobalFit`` at
+    #: run time (also single-process, where it is the one-rank layout); ``None``
+    #: until one of them sets it
     rank_layout = None
     fanout = None
     rank = None
@@ -546,13 +683,19 @@ class GlobalFitSetup:
         """MPI rank assignment information."""
         return self.current_info.rank_info
 
+    # TODO check: keep/remove/document -- no caller; reads general_info.gpu_assignments, a field GeneralSetup does not define (AttributeError)
     @property
     def gpu_assignments(self):
-        """GPU assignment information."""
+        """GPU assignment information (broken: ``GeneralSetup`` has no ``gpu_assignments``)."""
         return self.current_info.general_info.gpu_assignments
 
     def get_truths_dict(self) -> dict:
-        """Collect injection truths from all source setups for PlotContainer."""
+        """Collect injection truths from all source setups for PlotContainer.
+
+        Returns:
+            dict: ``{branch: setup.injection}`` for every branch whose setup
+            has a non-``None`` ``injection`` (sampling basis).
+        """
         return {
             name: setup.injection
             for name, setup in self.source_info.items()
@@ -575,10 +718,22 @@ class GlobalFitSetup:
 
         Args:
             label: Optional heading, e.g. the stock option name.
-            temp: Temperature index to report (0 = the cold chain).
+            temp: Temperature index to report (0 = the cold chain; the main
+                store holds only the engine's ladder: 1 temperature in the
+                stock fits, ``erebor.blank`` aside).
 
         Returns:
-            The backend reader, for further ``get_chain``/``get_inds`` calls.
+            GFHDFBackend: The backend reader, for further
+            ``get_chain``/``get_inds`` calls.
+
+        Example:
+            .. code-block:: python
+
+                from lisatools.globalfit.stock import erebor
+
+                fit = erebor.gb_no_fg(nwalkers=4)
+                fit.run()
+                reader = fit.summarize_run("gb_no_fg")
         """
         reader = self.backend
         ll = reader.get_log_like()
@@ -631,15 +786,54 @@ class GlobalFit:
     """The global-fit RUNNER: builds and drives the MCMC sampling run.
 
     Where :class:`GlobalFitSetup` holds the built configuration + state, this
-    class executes it — coordinating MPI rank roles (see
-    :meth:`resolve_rank_roles`), GPU assignments, logging, and the MCMC
-    workflow that fits multiple gravitational-wave source classes jointly. It
-    is composition, not inheritance: a ``GlobalFit`` is constructed with a
-    ``GlobalFitSetup`` (``self.curr``) and reads all configuration through it.
+    class executes it — coordinating MPI rank roles (the walker-block layout
+    of :mod:`lisatools.globalfit.communication.ranks`), GPU assignments,
+    logging, and the MCMC workflow that fits multiple gravitational-wave
+    source classes jointly. It is composition, not inheritance: a
+    ``GlobalFit`` is constructed with a ``GlobalFitSetup`` (``self.curr``) and
+    reads all configuration through it. See the module docstring for the
+    rank roles, the setup phase and the per-iteration flow.
+
+    Construction is cheap (no data, no sampler): it resolves the layout (the
+    one ``prepare_rank`` left on ``curr``, else builds it late), this rank's
+    role, the fan-out communicators, the per-rank log files
+    (``globalfit_run[.rankN].log`` / ``global_fit[.rankN].log`` in the
+    artifacts directory) and, on the head, dumps ``run_settings.log``.
 
     Args:
         curr: GlobalFitSetup object containing all run configuration.
-        comm: MPI communicator for parallel processing.
+        comm: MPI communicator for parallel processing (the run communicator,
+            monitor rank already split off). ``None`` -> ``MPI.COMM_SELF``
+            (single process).
+
+    Attributes:
+        layout: The resolved walker-block layout.
+        role (RankRole): This rank's role (HEAD / COMPUTE / SAVER / SPARE).
+        main_rank (int): The head's rank.
+        results_rank (int): The saver's rank (the head itself below 3 ranks).
+        compute_ranks (tuple): Ranks that compute a walker block (head
+            included).
+        fanout_comm: Sub-communicator of the compute ranks (``None``
+            single-process; a null communicator on the saver).
+        verbose (bool): ``general.verbose``.
+        progress (bool): ``general.progress``, or ``verbose`` when ``None``.
+        sampler (GlobalFitEngine): Set by :meth:`prepare_main` /
+            :meth:`prepare_compute`; likewise ``state``, ``priors``, ``acs``.
+        recipe (Recipe): The materialized recipe.
+        run_backend (GFHDFBackend): The head's store (set by
+            :meth:`_open_run_backend`).
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.run import GlobalFit
+            from lisatools.globalfit.stock import erebor
+
+            fit = erebor.gb_no_fg(nwalkers=4)
+            fit.build()                         # a stock fit is a GlobalFitSetup
+            gf = GlobalFit(fit)                 # single process
+            for model, state in gf.sample(iterations=10):
+                print(state.log_like[0])
     """
 
     @classmethod
@@ -658,25 +852,25 @@ class GlobalFit:
         ``communication.ranks.prepare_rank`` + ``layout.role_of(rank) ==
         RankRole.SPARE`` instead of this method.
 
-        Exposed as a classmethod so launchers (``scripts/run_global.py``)
-        can decide which ranks need the heavy data build *before*
-        constructing :class:`GlobalFit`.
+        A classmethod so a caller can decide roles *before* constructing
+        :class:`GlobalFit`. Nothing in ``src/``, ``scripts/`` or ``tests/``
+        calls it any more: the launch scripts use
+        ``communication.ranks.prepare_rank`` (and
+        ``tests/test_driver_scripts_layout.py`` asserts that the drivers do not
+        name this method).
 
         Args:
             comm: MPI communicator.
             main_rank: Rank that drives the sampler. Default 0.
 
         Returns:
-            ``(main_rank, results_rank, [])``.
+            tuple: ``(main_rank, results_rank, [])``.
         """
         head, saver, _compute = resolve_roles(comm.Get_size(), main_rank)
         return head, saver, []
 
     def __init__(self, curr: GlobalFitSetup, comm: typing.Optional[MPI.Comm] = None):
-        """Main class for managing the global fit MCMC sampling run.
-
-        Coordinates MPI processes, GPU assignments, and the MCMC sampling workflow
-        for fitting multiple gravitational wave sources simultaneously.
+        """Resolve the layout, role, communicators and logs (see the class docstring).
 
         Args:
             curr: GlobalFitSetup object containing all run configuration.
@@ -724,8 +918,10 @@ class GlobalFit:
         self.fanout_comm = layout.make_fanout_comm(self.comm) if not layout.is_single() else None
         # THE symmetric site for the two sub-splits (2026-09-23). Every rank
         # reaches this line exactly once, which is what a collective needs;
-        # ``WalkerFanout`` is NOT such a site (the head builds one while the
-        # workers build a ``ComputeService`` instead), so the comms are built
+        # ``WalkerFanout`` is NOT such a site (``_make_fanout`` builds one on
+        # every compute rank, but from two different setup paths:
+        # ``prepare_main`` on the head, ``prepare_compute`` on the workers,
+        # which also build a ``ComputeService``), so the comms are built
         # here and passed in. ``group_comm`` carries work shared only by a
         # walker block's R replicas -- GB's per-unit delta ledger -- and
         # ``reps_comm`` carries anything per-WALKER rather than per-rank.
@@ -774,6 +970,7 @@ class GlobalFit:
 
     @property
     def _plot_iterations(self) -> int:
+        """``general.plot_iterations`` (env ``PLOT_ITERATIONS`` on the stock fits), default 100."""
         return int(getattr(self.curr.general_info, "plot_iterations", 100) or 100)
 
     def make_plot_container(self):
@@ -782,7 +979,15 @@ class GlobalFit:
         Used by whichever rank owns plotting: the main rank at np < 3, the
         dedicated results rank at np >= 3 (parallel-resources plan P2).
         Opt-out via ``make_diagnostic_plots`` (MAKE_DIAGNOSTIC_PLOTS env on the stock
-        classes); cadence via ``plot_iterations`` (PLOT_ITERATIONS env).
+        classes); cadence via ``plot_iterations`` (PLOT_ITERATIONS env). The
+        9mo/12mo runs leave both unset (plots on, every 100 saves, on the
+        saver). The ``gb`` branch is excluded from the plots and truths; the
+        tempering plot is added only when the engine has more than one
+        temperature.
+
+        Returns:
+            eryn.utils.plot.PlotContainer | None: Writing to
+            ``<artifacts>/diagnostics/``, or ``None`` when disabled.
         """
         if not getattr(self.curr.general_info, "make_diagnostic_plots", True):
             return None
@@ -816,6 +1021,9 @@ class GlobalFit:
         simply absent from the result; any failure returns what was read so
         far (this only feeds the mid-iteration checkpoint gate, which then
         falls back to the configured count). Never raises.
+
+        Returns:
+            dict: ``{branch: ntemps}`` from ``sub_backend/<branch>`` attrs.
         """
         out = {}
         try:
@@ -833,8 +1041,16 @@ class GlobalFit:
         """The branch's OWN tempering-ladder size (the engine is cold-chain only).
 
         An explicit per-branch ``betas`` ladder wins and defines its length;
-        otherwise the branch's ``ntemps`` setting. Branches with neither
-        (e.g. simple-API branches) run on the engine ladder.
+        otherwise the branch's ``ntemps`` setting (``<BRANCH>_NTEMPS`` on the
+        stock fits). Branches with neither (e.g. simple-API branches) run on
+        the engine ladder.
+
+        Args:
+            name: Branch name.
+
+        Returns:
+            int: The configured rung count (a resumed store's own ladder may
+            still win later, see ``recipe.resume_ladder_wins``).
         """
         info = self.curr.source_info.get(name)
         if info is None:
@@ -855,6 +1071,18 @@ class GlobalFit:
         crashing later at the first save into differently-shaped
         datasets (the 2026-08-27 6-temp-era-store vs 4-temp-relaunch
         landmine, but for the pickle sidecar).
+
+        The ``validate`` gate of
+        :func:`~lisatools.globalfit.midit_checkpoint.load_for_resume` and
+        :func:`~lisatools.globalfit.midit_checkpoint.self_test`. Not exercised
+        in the 9mo/12mo runs (``MIDIT_CHECKPOINT=0``, no sidecar), unless a
+        sidecar from an earlier armed job sits beside the store. Never raises.
+
+        Args:
+            state (GFState): The checkpointed state.
+
+        Returns:
+            tuple[bool, str]: ``(ok, reason)``; ``reason`` is empty when ok.
         """
         try:
             names = set(self.engine_info.branch_names)
@@ -938,6 +1166,14 @@ class GlobalFit:
         ``GALFOR_ALPHA_MAX`` and ``GALFOR_FREQ_PRIOR`` move the box exactly as
         ``galfor_prior_dict`` does (one resolver, ``galfor_prior_ranges``).
         Returns ``()`` for an unknown branch (no check).
+
+        Args:
+            branch (str): ``"psd"`` or ``"galfor"``.
+
+        Returns:
+            tuple: One ``(lo, hi)`` pair per column in PHYSICAL units (psd:
+            ``stock.erebor.noise.PSD_PRIOR_RANGE``; galfor: from
+            ``galfor_prior_ranges``), or ``()``.
         """
         from .stock.erebor.noise import PSD_PRIOR_RANGE, galfor_prior_ranges
 
@@ -961,6 +1197,27 @@ class GlobalFit:
         Raises on a wrong length or an out-of-window value rather than
         starting the fit somewhere absurd: this knob's whole failure mode is
         a basis mistake, which is silent and costs a whole allocation.
+
+        Fresh start only. The 9mo/12mo launchers export both knobs (from the
+        ``lisatools.globalfit.warmstart.noise_pin`` CLI on the seed store;
+        ``GALFOR_START_PARAMS`` also has a hand-set launcher default), which
+        is what lets the noise stages be skipped.
+
+        Args:
+            branch (str): ``"psd"`` (``[Soms_d, Sa_a]``, square-root levels) or
+                ``"galfor"`` (``(amp, fk, alpha, f_1, f_2)``).
+            raw (str): The env value, comma-separated physical values.
+            drawn (np.ndarray): The prior-drawn block whose shape the result
+                takes, ``(nt_draw, nwalkers, nleaves_max, ndim)``.
+
+        Returns:
+            np.ndarray: ``drawn``-shaped start coords in the branch's sampling
+            basis (psd ``ln`` of both columns, galfor ``log10`` of
+            ``GALFOR_LOG_PARAMS``, when the branch is log-sampled).
+
+        Raises:
+            ValueError: Not a comma list of floats, wrong length, or a value
+                outside the branch's prior support.
         """
         want = np.asarray(drawn).shape[-1]
         try:
@@ -1031,7 +1288,19 @@ class GlobalFit:
         positions; every other leaf keeps the ``*_START_FACTOR`` start already
         in ``coords``. Store unset -> ``coords`` is returned AS IS (same object,
         no file touched). Logs one ``[SOURCE-WARM]`` line per armed branch.
-        See :mod:`lisatools.globalfit.warmstart.sources`.
+        See :mod:`lisatools.globalfit.warmstart.sources`. The 9mo/12mo runs
+        arm it (``SOURCE_WARM_START_STORE`` = the seed store,
+        ``SOURCE_WARM_START_SNR_MIN=10``, per-branch id lists).
+
+        Args:
+            branch (str): ``"mbh"``, ``"emri"`` or ``"sobbh"``.
+            coords (np.ndarray): ``(nt_draw, nwalkers, nleaves, ndim)`` start
+                block (sampling basis), before the per-branch ladder slice.
+            prior: The branch's prior container (every warm start must lie
+                inside it).
+
+        Returns:
+            np.ndarray: The start block, warm-started leaves replaced.
         """
         info = self.curr.source_info.get(branch)
         store = getattr(info, "source_warm_start_store", None)
@@ -1055,18 +1324,58 @@ class GlobalFit:
         return out
 
     def load_info(self, priors: typing.Dict[str, typing.Any]) -> GFState:
-        """
-        Load or initialize the MCMC state from backend or priors.
+        """Load or initialize the MCMC state from backend or priors.
 
-        Attempts to load the state from the main backend file. If that doesn't exist,
-        tries to load from a past file if specified. Otherwise, initializes a new state
-        by drawing from the prior distributions.
+        HEAD-ONLY (the computation ranks receive the result by broadcast). In
+        order:
+
+        1. Self-heal a torn store (``promote_backup_if_store_unreadable``) and
+           refuse a per-branch ndim change against the store's ``ndims``
+           attrs (:func:`check_store_branch_ndims`).
+        2. A mid-iteration checkpoint sidecar that is not older than the store
+           wins (:func:`~lisatools.globalfit.midit_checkpoint.load_for_resume`,
+           gated by :meth:`_midit_checkpoint_validate`; none in the 9mo/12mo
+           runs).
+        3. RESUME: a store with at least one saved iteration is read with
+           ``get_last_sample`` after the format-version gate, then re-checked
+           on the loaded coords (ndim) and the gb / vgb band grids (a
+           mismatch raises and writes the config-built edges beside the store
+           for ``migrate_gb_band_edges.py``). The store row is kept as the
+           residual snapshot's row offset.
+        4. ``general.past_file_for_start``: direct restart from another store's
+           last sample (gb band info re-initialized).
+        5. FRESH START: prior draws at the widest ladder any branch needs;
+           fixed-leaf noise branches (psd / galfor / sgwb) all on, psd /
+           galfor optionally pinned (``PSD_START_PARAMS`` /
+           ``GALFOR_START_PARAMS``, :meth:`_seed_noise_start_coords`); mbh /
+           emri / sobbh / gb (gb only when its setup carries an injection)
+           start at their injections scattered by
+           ``<BRANCH>_START_FACTOR`` (defaults ``1e-5``, gb ``1e-4``; exact at
+           0); any other branch goes through the generic seeder
+           (:func:`seed_injection_coords`, fixed-leaf branches all on); then
+           the source warm start (:meth:`_source_warm_start`, mbh / emri /
+           sobbh), the main state keeps the first ``general.ntemps`` rungs
+           and every sub-state gets its own ladder
+           (:meth:`~lisatools.globalfit.state.ModuleSubState.initialize_tempered`),
+           and gb / vgb get their band info. ``log_like`` / ``log_prior`` are
+           zeros until the containers are built.
+
+        Finally a sub-state that arrived without a tempered block is filled
+        from the main state (:meth:`~lisatools.globalfit.state.ModuleSubState.pull_from_main`).
 
         Args:
-            priors: Dictionary of prior distributions for each branch.
+            priors: Dictionary of prior distributions for each branch
+                (``{branch: ProbDistContainer}``, sampling basis).
 
         Returns:
-            GFState object containing the initial or loaded MCMC state.
+            GFState: The initial or loaded state (main state: the engine's
+            cold chain; sub-states: each branch's full ladder).
+
+        Raises:
+            ValueError: A branch ndim or band grid differs from the store,
+                ``past_file_for_start`` does not exist, or a noise pin is
+                malformed / outside the prior. The store's format-version gate
+                (``check_format_version``) refuses pre-v2 stores.
         """
         self.logger.debug("need to adjust file path")
         # TODO: update to generalize
@@ -1640,7 +1949,43 @@ class GlobalFit:
         return state
 
     def _prepare_coarse_wdm_runtime(self, state: GFState):
-        """Finalize the CPU-only coarse WDM likelihood once state exists."""
+        """Finalize the CPU-only coarse WDM likelihood once state exists.
+
+        Called by :meth:`setup_acs`. ``general.coarse_Q <= 1`` (env
+        ``COARSE_Q``: stock default 1, but 8 in ``all_sources``; the 9mo/12mo
+        launchers export ``COARSE_Q=1``) returns ``None`` immediately, and so
+        does a run without a ``psd`` branch (with a warning); an already built
+        statistic is returned as is. Otherwise, with a ``psd`` branch on a real fine
+        :class:`~lisatools.domains.WDMSettings` grid and a
+        :class:`~lisatools.sensitivity.CompositeSensitivityBackend`:
+
+        * noise-only runs (only psd / galfor / sgwb) REPLACE the fine
+          sensitivity backend with a coarse one (CPU only) and return the
+          :class:`~lisatools.coarsewdm.CoarseWDMStatistic` every container
+          gets as ``coarse_stats``;
+        * all-source runs must set ``general.coarse_gpu_mode``
+          (``COARSE_GPU_MODE``: ``search_approx`` / ``delayed_acceptance``);
+          the fine backend stays and a ``CoarseWDMRuntime`` sidecar is put on
+          ``general_info.coarse_wdm_runtime`` (returns ``None``).
+
+        The fiducial is the injection or the frozen first-run medians
+        (``general.coarse_fiducial``, sidecar
+        ``coarse_wdm_initial_fiducial.npz``); ``general.coarse_use_ws``
+        selects WS vs Bartlett weights.
+
+        Args:
+            state: The start state (``initial`` fiducial medians are taken
+                from its cold walkers).
+
+        Returns:
+            CoarseWDMStatistic | None: The statistic for the noise-only path,
+            else ``None``.
+
+        Raises:
+            ValueError: An unsupported mode / backend / domain combination.
+            TypeError: A non-WDM (or already coarse) data domain, or a
+                non-composite sensitivity backend.
+        """
         general_info = self.curr.general_info
         Q = int(getattr(general_info, "coarse_Q", 1) or 1)
         if Q <= 1:
@@ -1976,8 +2321,35 @@ class GlobalFit:
         Creates analysis containers for each walker, initializing data
         residuals and sensitivity curves. Domain dispatch (FD / STFT / WDM)
         flows through ``general_info.input_data_residual_array`` and the
-        configured :class:`XYZSensitivityBackend`, so nothing in this
-        method is FD-specific.
+        configured sensitivity backend (default
+        :class:`~lisatools.sensitivity.CompositeSensitivityBackend`), so
+        nothing in this method is FD-specific.
+
+        Per walker ``w`` of the block, on the device that will own its shard:
+        a deep copy of the data, and a sensitivity matrix from the walker's
+        cold-chain noise parameters (psd / galfor / sgwb transformed to the
+        physical basis; without a galfor branch ``fixed_psd_kwargs``'s
+        ``galfor_params`` pins the foreground; without a psd branch
+        ``fixed_psd_kwargs`` is used whole). Every container gets the
+        branches' ``signal_gen`` dict, ``likelihood_source_only`` (forced off
+        when a psd branch is sampled) and the coarse statistic of
+        :meth:`_prepare_coarse_wdm_runtime`.
+
+        THE RESIDUAL-BUILDING CONVENTION (``rebuild_residuals``, which
+        :meth:`_build_acs_and_recipe` sets on every rank): for every branch
+        with a registered ``signal_gen`` the alive leaves of walker ``w``'s
+        cold row are turned into one template and subtracted in place
+        (branches whose transform has per-leaf fills, e.g. EMRI, are
+        transformed here with their leaf ids and built without a second
+        transform). Branches without one fall back to a legacy
+        ``get_templates`` entry of their source info, or are skipped with a
+        warning (gb / vgb in ``all_sources``, the 9mo/12mo variant, which
+        subtract their leaves in their move builders; ``gb_no_fg`` and the
+        ``vgb`` variant register GB-family generators, so the rebuild covers
+        them here). Recipes never write residuals directly.
+
+        Afterwards the data processor's transients are released and every
+        device's memory pool is swept once (the build -> sampling hand-over).
 
         Args:
             state: GFState object containing current parameter values. ALWAYS
@@ -1988,15 +2360,21 @@ class GlobalFit:
                 per local container.
             rebuild_residuals: If ``True``, subtract each non-PSD branch's
                 current templates from the freshly-built containers so the
-                stored arrays are residuals rather than raw data (stft_tof
-                restart/handover path; it was disabled there while the EMRI
-                branch was being debugged, so it stays opt-in here).
+                stored arrays are residuals rather than raw data. Default
+                ``False`` keeps the raw data; the run path always passes
+                ``True``.
             walker_block: ``(w0, w1)`` global walker range this rank owns;
                 ``None`` builds every walker (single-process behaviour).
 
         Returns:
             AnalysisContainerArray with one container per walker in
-            ``[w0, w1)`` (every walker when ``walker_block`` is ``None``).
+            ``[w0, w1)`` (every walker when ``walker_block`` is ``None``),
+            sharded over ``general.gpus`` (threaded when there are several),
+            with ``input_data_residual_array`` attached as a reference to the
+            data (the GB valve judges the band gain against it).
+
+        Raises:
+            ValueError: More devices than walker rows in the block.
         """
         general_info = self.curr.general_info
         w0, w1 = (
@@ -2306,7 +2684,15 @@ class GlobalFit:
         return acs
 
     def _global_likelihood(self, acs) -> np.ndarray:
-        """The (nwalkers,) likelihood vector: local rows, allgathered across compute ranks."""
+        """The (nwalkers,) likelihood vector: local rows, allgathered across compute ranks.
+
+        A COLLECTIVE under the multi-rank layout (every compute rank must
+        call it the same number of times; see :meth:`_build_acs_and_recipe`).
+
+        Returns:
+            np.ndarray: ``(nwalkers,)`` host array (this rank's rows alone in
+            single mode, which then are all walkers).
+        """
         local = np.asarray(asnumpy(acs.likelihood(complex=False)))
         fanout = getattr(self, "fanout", None)
         if fanout is None or self.layout.is_single():
@@ -2322,7 +2708,14 @@ class GlobalFit:
         """``(priors, periodic)`` gathered from every branch's ``source_info`` entry.
 
         Moved verbatim out of :meth:`prepare_main` so the computation ranks
-        build the identical dicts without repeating the loop.
+        build the identical dicts without repeating the loop. Accepts both
+        :class:`~lisatools.globalfit.engine.Setup` entries and legacy dict
+        entries; periodic parameter names are resolved to sampling-basis
+        indices (:func:`_periodic_names_to_indices`).
+
+        Returns:
+            tuple[dict, dict]: ``({branch: prior container}, {branch: {index:
+            period}})``.
         """
         priors = {}
         periodic = {}
@@ -2362,8 +2755,10 @@ class GlobalFit:
     def _attach_walker_supplemental(self, state):
         """Stamp the state's ``supplemental["walker_inds"]`` (moved verbatim).
 
-        The GLOBAL walker ids; a rank's walker slice remaps them to its own
-        ``0..B-1`` (``communication.walkerslice.slice_state``).
+        The GLOBAL walker ids, ``(ntemps, nwalkers)`` (each row
+        ``0..nwalkers-1``), as an eryn ``BranchSupplemental``; a rank's walker
+        slice remaps them to its own ``0..B-1``
+        (``communication.walkerslice.slice_state``).
         """
         supps_base_shape = (self.ntemps, self.nwalkers)
         walker_vals = np.tile(np.arange(self.nwalkers), (self.ntemps, 1))
@@ -2390,6 +2785,13 @@ class GlobalFit:
         False everywhere and every other family (addremove, PSD, the readiness
         guard, ``stop()``, ``_global_likelihood``) keeps its single-mode path.
         Never set this env var in production.
+
+        Args:
+            model (GlobalFitInfo, optional): Attached later in both setup paths.
+
+        Returns:
+            WalkerFanout | None: The fan-out (its clock seeded with the
+            resolved seed base), or ``None`` in single mode.
         """
         if self.layout.is_single() and os.environ.get(
             "GB_PROPOSE_ORCHESTRATE", "0"
@@ -2461,6 +2863,32 @@ class GlobalFit:
         block and the recipe's ``setup_function`` -- as the
         ``after_first_likelihood`` hook of :meth:`_build_acs_and_recipe`.
         Performs NO collective. Publishes and returns ``self.run_backend``.
+
+        Steps: build the :class:`~lisatools.globalfit.hdfbackend.GFHDFBackend`
+        (compression from ``general.hdf_compression`` /
+        ``hdf_compression_opts``; ``save_plot_rank`` = the saver); ``reset``
+        it when it is uninitialized OR initialized with zero saved iterations
+        (an empty store keeps no stale shapes), routing each sub-state's
+        ``reset_kwargs`` to its own sub-backend; on a store with no saved
+        iteration write the domain settings; write (fresh) or compare
+        (resume) the noise-model identity, extended with the coarse fiducial
+        digest and the psd / galfor ``log_sampling`` flags; arm the
+        mid-iteration checkpoint when ``general.midit_checkpoint`` (off in the
+        9mo/12mo runs).
+
+        Args:
+            state (GFState): The loaded state (its sub-states supply the
+                reset kwargs).
+            priors (dict): ``{branch: prior}``; their ``key_order`` is passed
+                to ``reset``.
+
+        Returns:
+            GFHDFBackend: The run's store.
+
+        Raises:
+            ValueError: Resuming a store whose recorded noise-model identity
+                differs from the configured one (or that predates the record
+                while the configuration asks for a non-default noise model).
         """
         backend_path = self.curr.general_info.main_file_path
         general_info = self.curr.general_info
@@ -2680,6 +3108,23 @@ class GlobalFit:
         after it -- in the same order on every compute rank, so the ranks
         never desynchronize during setup.
 
+        In order: :meth:`setup_acs` over this rank's walker block with the
+        residuals rebuilt (the residual-building convention, see the module
+        docstring); gather 1 into ``state.log_like`` (non-finite values are
+        localized per shard to residual vs inverse-PSD buffers); the
+        :class:`~lisatools.globalfit.utils.BasicResidualacsLikelihood` wrapper; the
+        head-only hook; the recipe (``source_metadata["recipe"]``, else an
+        empty one) gets its runtime, the fan-out and, for the residual
+        snapshot, a ``snapshot_context`` (containers, data, store path, resume
+        row); the fit's ``setup_function`` materializes the moves; gather 2
+        (recipe setup may change the residual) is logged as ``initial log
+        likelihood (after recipe setup)`` and kept for :meth:`prepare_main`.
+        ``NULL_CHECK_ONLY`` only RAISES a flag here (never returns early: both
+        callers need the pair and compute ranks must still reach their serve
+        loop). ``GB_LAYER_CHI2`` logs the residual power per WDM layer. Under
+        several compute ranks a readiness guard raises for any move that
+        cannot serve fan-out commands and warns about head-only moves.
+
         Args:
             state: the full (all-walker) state every rank starts from.
             priors: the prior dict from :meth:`_collect_priors_periodic`.
@@ -2691,6 +3136,10 @@ class GlobalFit:
 
         Returns:
             ``(acs, like_mix)`` for this rank's walker block.
+
+        Raises:
+            RuntimeError: Multi-rank run with a move that does not serve
+                fan-out commands.
         """
         # Single process: build EVERY walker exactly as before. ``None``
         # (rather than the equivalent ``(0, nwalkers)``) keeps setup_acs'
@@ -2896,6 +3345,25 @@ class GlobalFit:
         ``self.sampler`` / ``self.state`` / ``self.priors`` / ``self.acs`` /
         ``self.run_backend`` / ``self.live_ctx`` are set; ``run_global_fit``
         and :meth:`sample` both start from here.
+
+        Details of the head-only part, after the shared setup: with
+        ``NULL_CHECK_ONLY`` it releases the spares and the compute ranks and
+        returns (nothing else is built); else it builds the GB warm-start
+        SELF-refit head builder (``warmstart.self_refit.make_head_builder``,
+        ``GB_WARM_SELF`` / ``GB_WARM_SELF_AT_ENTRY``, on in the 9mo/12mo
+        runs), releases legacy spares, builds the plot container only when
+        the head is also the saver (otherwise the saver plots), wraps
+        ``periodic`` in an eryn ``PeriodicContainer``, and builds the engine
+        over the GLOBAL walker count (engine ladder ``general.ntemps``; a
+        placeholder eryn ``StretchMove`` that the recipe's steps replace; the
+        recipe as ``stopping_fn`` every iteration; groups and supplemental
+        provided to the moves). The recipe is stored in the backend
+        (``add_recipe``), ``state.log_like`` is set from the post-setup gather
+        (``log_prior`` zeros), the recipe's first step is entered, the rank
+        RNG streams are seeded, the fan-out gets the engine's model and pings
+        the compute ranks, the input data are saved for a submission when
+        ``general.submission_parent_folder`` is set, and the mid-iteration
+        checkpoint self-test runs when armed.
         """
         branch_names = self.engine_info.branch_names
         ndims = self.engine_info.ndims
@@ -3232,6 +3700,17 @@ class GlobalFit:
 
         Sets ``self.compute_service`` (plus ``self.sampler`` / ``self.state`` /
         ``self.priors`` / ``self.acs`` for symmetry with the head).
+
+        After the shared setup: every recipe step's ``setup_run`` stamps its
+        moves once against the shell engine (an ``AttributeError`` from a
+        legacy step is logged and tolerated); this rank's RNG stream is
+        seeded; the model is a :data:`~lisatools.globalfit.engine.GlobalFitInfo`
+        of this rank's containers, the builtin ``map`` and a ``RandomState``
+        seeded with that stream; the serve registry maps every ``(stage, move name)`` pair (plus
+        unambiguous bare names) to its move; and the ``ComputeService`` gets
+        three builtins besides the moves: the likelihood gather, the
+        residual-hash digest and the residual snapshot
+        (:func:`~lisatools.globalfit.residual_snapshot.walker_residual`).
         """
         priors, periodic = self._collect_priors_periodic()
 
@@ -3359,7 +3838,34 @@ class GlobalFit:
         self.acs = acs
 
     def run_global_fit(self):
-        """Execute the run for this rank's role (head / compute / saver / legacy spare)."""
+        """Execute the run for this rank's role (head / compute / saver / legacy spare).
+
+        * HEAD: :meth:`prepare_main`, then the engine's ``run_mcmc`` for
+          ``general.num_iterations`` iterations (store on, progress bar per
+          ``progress``; the recipe can end it earlier), then
+          :meth:`_write_submission`. The compute ranks are always released
+          with the fan-out STOP (also when ``run_mcmc`` raises), and the saver
+          gets its finish-run message. Under ``NULL_CHECK_ONLY`` sampling is
+          skipped.
+        * SAVER: its own :class:`~lisatools.globalfit.hdfbackend.GFHDFBackend`,
+          the plot container, a GPU-pool release, and the save loop
+          :func:`~lisatools.globalfit.hdfbackend.save_to_backend_asynchronously_and_plot`
+          (backup every ``general.backup_iter`` saves; the GB warm-start
+          SELF-refit hook from ``warmstart.self_refit.make_warm_self_hook``,
+          ``None`` when that refit is not built on the saver -- the 9mo/12mo
+          case, where ``GB_WARM_SELF_AT_ENTRY=1`` builds it on the head) until
+          the head's finish-run message.
+        * COMPUTE: :meth:`prepare_compute`, then ``ComputeService.serve()``
+          until STOP; the number of commands served is kept on
+          ``self.compute_service_served``.
+        * SPARE (legacy layout only): release the GPU pool and wait for the
+          head's ``"stop"``.
+
+        Example:
+            .. code-block:: python
+
+                GlobalFit(fit, comm).run_global_fit()   # every rank calls it
+        """
         backend_path = self.curr.general_info.main_file_path
         if self.role == RankRole.HEAD:
             self.prepare_main()
@@ -3441,6 +3947,10 @@ class GlobalFit:
         ``residual_0..residual_{B-1}`` under full-run names and
         ``_prepare_gb_samples`` would argmax over that block alone, so the
         dump has to be routed through the fan-out before it can run there.
+        Multi-rank (the 9mo/12mo runs) it only logs that the dump is skipped;
+        single-rank it writes a
+        :class:`~lisatools.globalfit.postprocessing.SubmissionWriter`
+        submission when ``general.submission_parent_folder`` is set.
         """
         if not self.layout.is_single():
             self.logger.warning(
@@ -3556,10 +4066,27 @@ class GlobalFit:
             progress: Show the engine's progress bar.
             store: Save steps to the HDF backend.
             sync_log_like: After each yield, re-sync ``state.log_like`` from
-                the residual (``acs.likelihood()``) so in-loop residual
+                the residual (the containers' likelihood) so in-loop residual
                 mutations flow into the tempering/persistence bookkeeping. If
                 you mutate ``coords`` in place, update ``state.log_prior``
                 yourself.
+
+        Yields:
+            tuple: ``(model, state)`` -- the engine's
+            :data:`~lisatools.globalfit.engine.GlobalFitInfo` and the
+            :class:`~lisatools.globalfit.state.GFState` after the iteration.
+
+        Raises:
+            RuntimeError: The communicator has more than one rank.
+
+        Example:
+            .. code-block:: python
+
+                from lisatools.globalfit.stock import erebor
+
+                fit = erebor.gb_no_fg(nwalkers=4)
+                for model, state in fit.sample(iterations=10):
+                    print(state.log_like[0])
         """
         if self.comm.Get_size() > 1:
             raise RuntimeError(

@@ -1,4 +1,14 @@
-"""Binary black hole (MBH) waveform generators."""
+"""Binary black hole (MBH) waveform generators.
+
+Re-exports :class:`~lisatools.sources.bbh.waveform.PhenomTHMTDIWaveform` (the stock global-fit
+MBH generator), :class:`~lisatools.sources.bbh.waveform.PhenomTHMTDIOnFlyWaveform`,
+:class:`~lisatools.sources.bbh.waveform.BBHSNRWaveform`, the ``MBH_PHENOM_DEFAULT_*``
+constants, and the grid-aligned batched generators
+:class:`~lisatools.sources.bbh.gridaligned.GridAlignedPhenomTHMTDIWaveform` /
+:class:`~lisatools.sources.bbh.gridaligned.WindowedGridAlignedMBHWaveform`
+(``MBH_LIKELIHOOD=batched``). Importable without jax / phentax (only
+:class:`~lisatools.sources.bbh.waveform.BBHSNRWaveform` then works).
+"""
 
 from .waveform import (  # noqa: F401
     MBH_PHENOM_DEFAULT_BUFFER_TIME,

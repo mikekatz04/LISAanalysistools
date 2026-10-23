@@ -55,7 +55,9 @@ Hard deps (from `pyproject.toml` `dependencies`) and runtime imports:
 ```
 
 - **Native C++ link edges (CMake):** GBGPU and BBHx `cutils/CMakeLists.txt`
-  resolve `${GBT_CUTILS}` (via `gpubackendtools.get_include()`) and
+  resolve `${GBT_CUTILS}` (a Python shell-out to the installed `gpubackendtools`
+  package directory + `cutils`, the directory `gpubackendtools.get_include()`
+  returns; LAT's CMake does the same), include its `cmake_functions.cmake`, and
   **copy-compile GBT's `Interpolate.cu`**; they also compile LAT-side
   TDIonTheFly `.cu` so the nanobind virtual-class typeinfo resolves. LAT ships
   `cutils/LISAanalysisToolsConfig.cmake` for downstreams.
@@ -70,15 +72,15 @@ Hard deps (from `pyproject.toml` `dependencies`) and runtime imports:
 |---|---|
 | **LISA response / projection** | Py: `lisatools.response.directresponse` (`pyResponseTDI`, `ResponseWrapper`), `lisatools.response.parallelbase`. JAX: `lisatools.jax.response`. C++: `lisatools/cutils/LISAResponse.{cu,hh}`, `Detector.{cu,hpp}` |
 | **TDI** | Py: `lisatools.response.tdiconfig` (`TDIConfig`). C++: `LISAResponse.cu` + `lat_tdi_on_the_fly.{cu,hh}` |
-| **WDM wavelet transforms** | Py: `lisatools.domains` (`WDMSettings`), `lisatools.wdm_het`. C++: `lisatools/cutils/wdm_settings.hh`, `wdm_domain.hh`, `lat_wdm_fft.hh`. JAX: `lisatools.jax.wdm` |
+| **WDM wavelet transforms** | Py: `lisatools.domains` (`WDMSettings`), `lisatools.wdm_het`. C++: `lisatools/cutils/domains.hpp` (the WDM / FD descriptors; `wdm_settings.hh` / `wdm_domain.hh` are deprecated include shims onto it), `lat_wdm_fft.hh`. JAX: `lisatools.jax.wdm` |
 | **TDI-on-the-fly (base)** | Py: `lisatools.response.tdionfly`. C++: `lisatools/cutils/lat_tdi_on_the_fly.{cu,hh}`, `lat_spline_tdi_waveform.{cu,hh}`, `lat_chunked_het_kernels.hh` |
 | **GB waveform** | `gbgpu.gbgpu.GBGPU` (+ `GBGPUBase`); C++ `gbgpu/cutils/gb_tdi_on_the_fly.{cu,hh}`, `SharedMemoryGBGPU.*`. Stock TDI wrapper: `lisatools.sources.gb.waveform.GBAETWaveform` |
-| **MBH waveform** | `bbhx` (`bbhx/cutils/PhenomHMWaveform.{cu,hh}`, `Response.*`, `WaveformBuild.*`), `bbhx.mbhtdionfly`, `bbhx.mbhphentax`. Stock wrapper: `lisatools.sources.bbh.waveform` |
-| **SOBBH waveform** | `bbhx.sobbhtdionfly`, `bbhx.sobbhcomps`; C++ `bbhx/cutils/sobbh_tdi_on_the_fly.{cu,hh}`. PN math + wrapper: `lisatools.sources.sobbh.waveform` |
-| **EMRI waveform** | `few.waveform.waveform.GenerateEMRIWaveform`; C++/Cython in `few/cutils/`. LISA-TDI wrappers: `lisatools.sources.emri.{waveform,emritdionfly,response}` |
+| **MBH waveform** | `bbhx` (`bbhx/cutils/PhenomHMWaveform.{cu,hh}`, `Response.*`, `WaveformBuild.*`), `bbhx.mbhtdionfly`, `bbhx.mbhphentax`. Stock wrapper: `lisatools.sources.bbh.waveform`; the production batched windowed scoring: `lisatools.sources.bbh.gridaligned` + `lisatools.sources.batching` (`MBH_LIKELIHOOD=batched`, `globalfit.moves.mbhbatchedmove`) |
+| **SOBBH waveform** | `bbhx.sobbhtdionfly`, `bbhx.sobbhcomps`; C++ `bbhx/cutils/sobbh_tdi_on_the_fly.{cu,hh}`. PN math + wrapper: `lisatools.sources.sobbh.waveform`; the production direct-to-WDM lookup scorer: `lisatools.sources.sobbh.wdm_direct` + C++ `lisatools/cutils/sobbh_lookup_kernel.{hpp,cu}` (`SOBBH_LIKELIHOOD=lookup`, [`docs/sobbh-wdm-lookup.md`](https://github.com/lisa-analysis-tools/lisa-analysis-tools/blob/dev/docs/sobbh-wdm-lookup.md)) |
+| **EMRI waveform** | `few.waveform.waveform.GenerateEMRIWaveform`; C++/Cython in `few/cutils/`. LISA-TDI wrappers: `lisatools.sources.emri.{waveform,emritdionfly,response}`; the production direct-to-WDM template: `lisatools.sources.emri.{wdm_direct,direct_signal_gen}` (`EMRI_LIKELIHOOD=direct`, [`docs/emri-direct-wdm.md`](https://github.com/lisa-analysis-tools/lisa-analysis-tools/blob/dev/docs/emri-direct-wdm.md)) |
 | **Samplers / MCMC** | `eryn.ensemble`, `eryn.paraensemble`, `eryn.moves.*` (stretch, nuts, rj, tempering, distgen, …), `eryn.backends.*`. Global-fit orchestration: `lisatools.globalfit.*` (`engine`, `run`, `recipe`, `moves/`, `stock/`) |
-| **Interpolation + compute backends** | `gpubackendtools.interpolate` (`CubicSplineInterpolant`); C++ `gpubackendtools/cutils/Interpolate.{cu,hh}` (SOLE `CubicSplineWrap` registrant). Backend machinery: `gpubackendtools.gpubackendtools` (`Backend`, `BackendsManager`, `CpuBackend`/`Cuda1{1,2,3}xBackend`) |
-| **Proposal information matrices** (eigen tables, GB in-model factors) | LAT: `lisatools.globalfit.moves.eigen_refresh` (tables), `addremovemove` (`{BRANCH}_EIGEN_INFO` ll / gram), `psdmove` (`{PSD,GALFOR}_EIGEN_INFO` ll / fisher), `gb_chol_cache` (`GB_CHOL_CACHE`), `lisatools.info_matrix_ll` (second differences). GBGPU: `gbgpu.gbsignalhetcomputations` / `gbgpu.gblookupcomputations` `information_matrix` (`SIGHET_INFOMAT`, `SIGHET_INFOMAT_ENGINE=lookup`). Eryn: `eryn.moves.EigenAxisMove`. Route map: [`docs/eigen-info-routes.md`](eigen-info-routes.md) |
+| **Interpolation + compute backends** | `gpubackendtools.interpolate` (`CubicSplineInterpolant`); C++ `gpubackendtools/cutils/Interpolate.{cu,hh}` (SOLE `CubicSplineWrap` registrant). Backend machinery: `gpubackendtools.gpubackendtools` (`Backend`, `BackendsManager`, `CpuBackend`/`Cuda1{1,2,3}xBackend`), `gpubackendtools.globals` (`Globals`, `get_backend`/`has_backend`/`get_first_backend`), `gpubackendtools.parallelbase` (`ParallelModuleBase`) |
+| **Proposal information matrices** (eigen tables, GB in-model factors) | LAT: `lisatools.globalfit.moves.eigen_refresh` (tables), `addremovemove` (`{BRANCH}_EIGEN_INFO` ll / gram), `psdmove` (`{PSD,GALFOR}_EIGEN_INFO` ll / fisher), `gb_chol_cache` (`GB_CHOL_CACHE`), `lisatools.info_matrix_ll` (second differences). GBGPU: `gbgpu.gbsignalhetcomputations` / `gbgpu.gblookupcomputations` `information_matrix` (`SIGHET_INFOMAT`, `SIGHET_INFOMAT_ENGINE=lookup`). Eryn: `eryn.moves.EigenAxisMove`. Route map: [`docs/eigen-info-routes.md`](https://github.com/lisa-analysis-tools/lisa-analysis-tools/blob/dev/docs/eigen-info-routes.md) |
 | **Signal-het / chunked-het likelihood** | Py base: `lisatools.signal_het`, `lisatools.chunked_het` (`WDMComputationsBase`). GB: `gbgpu.gbcomps` (`GBWDMComputations`, `GBFDComputations`), `gbgpu.gbsignalhetcomputations`; JAX kernels `gbgpu.jax.wdm.signal_het_kernels`. SOBBH: `bbhx.sobbhcomps` |
 
 ## 5. Backend-wheel model
@@ -93,18 +95,32 @@ each `lisatools/gbgpu/bbhx/few` `cutils/__init__.py`:
   nanobind module `.pycppdetector` (LAT) / `.cgbgpu` (GBGPU) / `.cbbhx` (BBHx) /
   Cython modules (FEW).
 - **Registry:** `gpubackendtools` owns a global `BackendsManager` (`_registry`
-  keyed by full name like `lisatools_backend_cuda12x`), reached via
-  `Globals().backends_manager`. Each package registers its flavors at import:
+  keyed by the registry name `<pkg>_<flavor>`, e.g. `lisatools_cuda12x`;
+  `lisatools_backend_cuda12x` is that backend's plugin MODULE, the class's
+  `_backend_name`), reached via `Globals().backends_manager`. Each package
+  registers its flavors at import:
   `Globals().backends_manager.add_backends({"few_cpu": FEWCpuBackend, ...})`.
+  Every `add_backends` call rebuilds the registry for all packages (backends
+  loaded earlier are rebuilt on their next lookup).
 - **Per-package facade:** `lisatools.get_backend("cpu")` →
-  `gpubackendtools.get_backend("lisatools_cpu")`; likewise `gbgpu_*`, `bbhx_*`,
-  `few_*`. `has_backend(...)` mirrors it.
+  `gpubackendtools.get_backend("lisatools_cpu")`; likewise `gbgpu_*`, `bbhx_*`
+  (FEW has no package-level facade; its `few_*` backends are reached through
+  `FewBackendConsumer` or GBT's functions). `get_backend` also resolves the `"cuda"` / `"gpu"` aliases (first
+  available of `cuda13x`, `cuda12x`, `cuda11x`). `has_backend(...)` adds the
+  same prefix but resolves no alias: `lisatools.has_backend("cuda")` raises
+  `ValueError`; probe the flavors (`"cuda13x"`, ...) instead.
 - **Selection at construction, never per-method** (LISA Analysis Tools–wide rule): pass
   `force_backend="cpu"|"cuda12x"|"jax"`; `ParallelModuleBase` (GBT) exposes
-  `self.backend` / `self.backend.xp` / `self.backend.name`.
+  `self.backend` / `self.xp` / `self.backend_name`. Bare flavors work because each
+  package base (`LISAToolsParallelModule`, `GBGPUParallelModule`,
+  `BBHxParallelModule`, `FewBackendConsumer`, GBT's `GBTParallelModuleBase`) adds
+  its prefix; GBT's plain `ParallelModuleBase` needs a full registry name, and a
+  bare flavor in `gpubackendtools.get_first_backend` matches the first registered
+  package (`gbt_*`), so `supported_backends()` must return prefixed names.
 - **CPU + CUDA co-load in one interpreter:** the CPU/GPU `#define FooWrap{CPU,GPU}`
   aliasing (CLAUDE.md rule) gives each backend distinct mangled C++ symbols, so
-  `has_backend("cpu")` and `has_backend("cuda12x")` can both be True at once.
+  `lisatools.has_backend("cpu")` and `lisatools.has_backend("cuda12x")` can both
+  be True at once.
 - `Backend.__reduce__` pickles by registry name (deepcopy/pickle-safe); array
   module `xp` is a property, never stored.
 
@@ -113,7 +129,9 @@ each `lisatools/gbgpu/bbhx/few` `cutils/__init__.py`:
 Bottom-up (each layer needs the previous compiled + installed):
 
 1. **GPUBackendTools** — provides `get_include()` cutils dir (`${GBT_CUTILS}`),
-   `Interpolate.cu`, `cuda_complex.hpp`, `gbt_global.h`, backend registry.
+   `Interpolate.cu`, `cuda_complex.hpp`, `gbt_global.h`, `cmake_functions.cmake`
+   (the `apply_{cpu,gpu}_backend_common_options` / LAPACKE helpers the LAT, GBGPU
+   and BBHx CMake include), backend registry.
 2. **LISAanalysistools** — needs GBT. Compiles LISA-response + TDIonTheFly base
    `.cu`; installs `LISAanalysisToolsConfig.cmake`. Binding layer is **nanobind**
    (Phase 3M).
@@ -135,10 +153,10 @@ before every `pip install` (nanobind/pybind11 pin). Single-registrant grep gate:
 Verified-against-source internal maps (this doc is the cross-repo architecture map):
 
 - ✅ [`LISAanalysistools/docs/codebase-map.md`](codebase-map.md)
-- ✅ [`GBGPU/docs/codebase-map.md`](../../GBGPU/docs/codebase-map.md)
-- ✅ [`BBHx/docs/codebase-map.md`](../../BBHx/docs/codebase-map.md)
-- ✅ [`GPUBackendTools/docs/codebase-map.md`](../../GPUBackendTools/docs/codebase-map.md)
-- ✅ [`Eryn/docs/codebase-map.md`](../../Eryn/docs/codebase-map.md)
+- ✅ [`GBGPU/docs/codebase-map.md`](https://github.com/lisa-analysis-tools/GBGPU/blob/dev/docs/codebase-map.md)
+- ✅ [`BBHx/docs/codebase-map.md`](https://github.com/lisa-analysis-tools/BBHx/blob/dev/docs/codebase-map.md)
+- ✅ [`GPUBackendTools/docs/codebase-map.md`](https://github.com/lisa-analysis-tools/GPUBackendTools/blob/spline/docs/codebase-map.md)
+- ✅ [`Eryn/docs/codebase-map.md`](https://github.com/lisa-analysis-tools/Eryn/blob/dev/docs/codebase-map.md)
 - `FastEMRIWaveforms` — active sibling repo (see §2); no map written yet.
 - `lisa-on-gpu` — husk; its `CLAUDE.md` deprecation notice suffices, no map needed.
 
@@ -147,6 +165,10 @@ rules relevant to it. Regenerate any map when its repo's structure changes —
 a stale map is worse than none.
 
 ## 8. Stale-doc warnings (code contradicts docs)
+
+_(As of 2026-10-22 all four are resolved: the umbrella root `CLAUDE.md` is now
+a short stub that points into LAT, and `docs/conventions.md` cites LAT's
+`cutils/LISAResponse.cu` for the host->device pattern. Kept as a record.)_
 
 1. **Root `CLAUDE.md` says the umbrella workspace root has `constraints/sprint.txt` + `tools/…`.**
    Neither exists at the umbrella workspace root. They live at

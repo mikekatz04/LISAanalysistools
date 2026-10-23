@@ -1,4 +1,11 @@
-"""Chebyshev-based EMRI single-harmonic waveform model and its TDI projection."""
+"""Chebyshev-based EMRI single-harmonic waveform model and its TDI projection.
+
+Development code: :class:`ChebyshevWave` (a Chebyshev expansion of the inspiral ``t(f)``),
+:class:`ChebyshevXYZ` (its FD TDI-on-the-fly projection) and vendored copies of SciPy's
+cumulative trapezoid / Simpson integrators. Not used by the global fit or exported by
+:mod:`lisatools.sources.emri`; the only callers are ``scripts/emri/emri_chebyshev_comparison.py``
+and ``scripts/emri/emri_snr_correlation_test.py``. Importing it imports matplotlib.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +28,7 @@ from scipy.interpolate import CubicSpline, interp1d, make_interp_spline
 # from emri_singleharmonic_funcs import *
 
 
+# TODO check: keep/remove/document -- dev-only module; only caller is this module's __main__ demo (ChebyshevWave reimplements it vectorised)
 def alpha_to_tf(alpha, npts, fmin, fmax):
     """Compute :math:`t(f)` from a Chebyshev expansion of the inspiral.
 
@@ -93,6 +101,7 @@ def alpha_to_tf(alpha, npts, fmin, fmax):
     return f, t
 
 
+# TODO check: keep/remove/document -- vendored scipy copy in a dev-only module; only caller is cumulative_simpson here
 def cumulative_trapezoid(y, x=None, dx=1.0, axis=-1, initial=None):
     """
     Cumulatively integrate y(x) using the composite trapezoidal rule.
@@ -183,6 +192,7 @@ def cumulative_trapezoid(y, x=None, dx=1.0, axis=-1, initial=None):
     return res
 
 
+# TODO check: keep/remove/document -- helper of the vendored integrators in a dev-only module
 def tupleset(t, i, value):
     """Return a copy of tuple ``t`` with element ``i`` replaced by ``value``."""
     l = list(t)
@@ -190,6 +200,7 @@ def tupleset(t, i, value):
     return tuple(l)
 
 
+# TODO check: keep/remove/document -- vendored scipy copy in a dev-only module; only caller is ChebyshevWave.__call__
 def cumulative_simpson(y, *, x=None, dx=1.0, axis=-1, initial=None):
     r"""
     Cumulatively integrate y(x) using the composite Simpson's 1/3 rule.
@@ -446,6 +457,7 @@ def _ensure_float_array(arr: npt.ArrayLike) -> np.ndarray:
     return arr
 
 
+# TODO check: keep/remove/document -- not reached by the 9mo/12mo runs; only callers are scripts/emri/emri_chebyshev_comparison.py and scripts/emri/emri_snr_correlation_test.py
 class ChebyshevWave:
     """Vectorised Chebyshev expansion of the inspiral :math:`t(f)` relation.
 
@@ -541,11 +553,12 @@ from lisatools.response.tdionfly import FDTDIonTheFly
 from gpubackendtools.interpolate import CubicSplineInterpolant
 
 
+# TODO check: keep/remove/document -- no callers in src, scripts or tests
 class ChebyshevXYZ(ChebyshevWave):
     """Project a :class:`ChebyshevWave` onto the LISA XYZ TDI channels on the fly.
 
     Combines the Chebyshev :math:`t(f)` model with
-    :class:`fastlisaresponse.tdionfly.FDTDIonTheFly` and
+    :class:`lisatools.response.tdionfly.FDTDIonTheFly` and
     :class:`gpubackendtools.interpolate.CubicSplineInterpolant` to produce TDI
     output for a batch of sources directly in the frequency domain.
 

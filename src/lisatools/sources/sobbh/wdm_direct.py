@@ -24,6 +24,16 @@ inc, psi, lam, beta)``; the response feed ``phase = gw_phase + pi`` with the int
 amplitude (``SOBBHTDIonFly``); pixel centres ``t_n = t_obs_start + n * layer_dt`` with ``n`` the
 absolute grid index; the inner products carry NO ``4 * differential_component`` factor (the
 kernel convention: ``-0.5 (h_h - 2 d_h)`` is the container's source term).
+
+The sky angles ``(lam, beta)`` and ``psi`` are read in the orbits' frame. The 9mo / 12mo runs
+(``SOBBH_LIKELIHOOD=lookup``, ``SOBBH_LOOKUP_KERNEL=kernel``) pass ICRS ``(RA, Dec, psi)`` with
+``frame="icrs"`` unequal-arm orbits and ``convert_to_ra_dec=False``; ``f_low`` / ``phi_c`` are
+defined at the catalogue reference epoch. Templates live on the run's ACTIVE band: layers
+``ind_min_f .. ind_max_f`` and time layers ``ind_min_t .. ind_max_t`` of the
+:class:`~lisatools.domains.WDMSettings`, slabs ``(nch, Nf_active, Nt_active)`` per walker.
+The stock getter (``globalfit.stock.erebor.source_runtime.get_sobbh_lookup_comp``) maps the
+``SOBBH_LOOKUP_*`` knobs (``EVAL_DT``, ``NUM_M_LAYERS``, ``INTERP``, ``ROW_BATCH``, ``KERNEL``,
+``TABLE_PATH``) onto the constructor arguments; this module reads no environment variables.
 """
 
 from __future__ import annotations
@@ -44,7 +54,14 @@ def concrete_backend_name(force_backend):
     """The concrete backend name (``"cpu"``, ``"cuda12x"``, ``"cuda13x"``, ...) of a name or a
     backend object. ``"cuda"`` / ``"gpu"`` are ``lisatools.get_backend`` ALIASES that the
     response, orbits and domain classes do not accept as ``force_backend`` ("'lisatools_cuda' not a
-    valid backend"); they resolve here, once, to the first available CUDA backend."""
+    valid backend"); they resolve here, once, to the first available CUDA backend.
+
+    Args:
+        force_backend (str | Backend): A backend name or a backend object (its ``name``).
+
+    Returns:
+        str: The concrete name; any other string is returned unchanged.
+    """
     if not isinstance(force_backend, str):
         return force_backend.name.split("_")[-1]
     if force_backend in ("cuda", "gpu"):
@@ -64,7 +81,21 @@ def sobbh_amp_phase_batch(params, times, reference_time, t_shift=0.0):
     / D`` (intrinsic, no inclination), ``gw_phase = 2 Phi`` anchored at the reference epoch,
     the same Newton-refined ``tc``. Samples at or past merger get ``amp = 0`` and the phase
     frozen at the last live sample. Rows whose merger time is not finite and positive return a
-    zero template. Returns ``amp (N, T)``, ``gw_phase (N, T)``, ``tc_abs (N,)``.
+    zero template. Host numpy only.
+
+    Args:
+        params (array-like): ``(N, >= 7)`` chunked-basis rows (extra columns ignored).
+        times (array-like): Absolute times [s], ``(T,)``.
+        reference_time (float): Epoch [s] of ``f_low`` / ``phi_c``.
+        t_shift (float, optional): Extra time offset [s]. Default ``0.0``.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray, np.ndarray]: ``amp (N, T)``, ``gw_phase (N, T)`` [rad]
+        and the absolute merger times ``tc_abs (N,)`` [s] (unchanged, possibly non-finite,
+        for the bad rows).
+
+    Raises:
+        ValueError: If ``params`` is not ``(N, >= 7)``.
     """
     from .waveform import MTsun, c, pc
     from .waveform import phase as _phase
@@ -163,7 +194,14 @@ class SOBBHBatchedTOF:
         eval_dt: response evaluation step [s] (default 43200 = 12 h; 600 reproduces
             ``SOBBHTDIonFly`` to ~1e-16 on the module test grid and 1800 .. 86400 reproduce the
             600-s gate to every printed digit at 6 months).
-        force_backend: backend name (``"cpu"``, ``"cuda12x"``, ...).
+        force_backend: backend name (``"cpu"``, ``"cuda12x"``, ...; ``"cuda"`` / ``"gpu"``
+            resolve through :func:`concrete_backend_name`).
+
+    Attributes:
+        last_spans (dict): ``pn`` and ``generator`` wall times [s] of the last :meth:`build`.
+
+    Raises:
+        ValueError: If ``n_grid < 16``, ``eval_dt <= 0`` or ``buffer_time < DELAY_MARGIN``.
     """
 
     #: TDI delay margin [s]: the response at ``t`` reads the source and the orbits up to this
@@ -226,7 +264,8 @@ class SOBBHBatchedTOF:
     def eval_grid(self, t_lo, t_hi):
         """The response evaluation times over ``[t_lo, t_hi]`` [absolute s]: uniform, at most
         ``eval_dt`` apart, at least 4 points, ending exactly at the window ends after clipping
-        them ``DELAY_MARGIN`` inside the orbit span."""
+        them ``DELAY_MARGIN`` inside the orbit span. Returns an ``np.ndarray``; raises
+        ``ValueError`` for an empty window or one outside the orbit tables."""
         t_lo, t_hi = float(t_lo), float(t_hi)
         if t_hi <= t_lo:
             raise ValueError(f"t_hi ({t_hi}) must be > t_lo ({t_lo})")
@@ -243,12 +282,14 @@ class SOBBHBatchedTOF:
 
     @property
     def backend(self):
+        """The lisatools backend object of ``force_backend``."""
         import lisatools
 
         return lisatools.get_backend(self.force_backend)
 
     @property
     def xp(self):
+        """Array module of the backend (numpy or cupy)."""
         return self.backend.xp
 
     def build(self, params, t_lo, t_hi):
@@ -258,6 +299,20 @@ class SOBBHBatchedTOF:
         from :func:`sobbh_amp_phase_batch`, which is numpy-only) regardless of ``force_backend``.
         ``params`` may be a cupy array (pulled to host via :func:`~lisatools.utils.utility.asnumpy`
         before the numpy-only PN math runs).
+
+        Args:
+            params (array-like): ``(N, 11)`` chunked-basis rows; ``inc``, ``psi``, ``lam``,
+                ``beta`` (columns 7-10) go to the response.
+            t_lo (float): Window start [s, absolute].
+            t_hi (float): Window end [s, absolute].
+
+        Returns:
+            TDTDIOutput: The response with splines (``num_bin = N``), plus the attributes
+            ``tc`` (host ``(N,)`` absolute merger times) and ``t_cover`` (the evaluation
+            window ``(lo, hi)`` inside the orbit tables).
+
+        Raises:
+            ValueError: If ``params`` has fewer than 11 columns or the window is invalid.
         """
         from ...response.tdionfly import TDTDIonTheFly
 
@@ -333,6 +388,18 @@ def sobbh_tracer(out, t_pixels, rows=None):
     ``rows = (lo, hi)`` evaluates only rows ``lo:hi`` of ``out`` (the splines' ``ind_interps``
     subset; the result equals the full tracer's ``[lo:hi]`` slice): one response serves a
     whole call while the tracer / lookup run in row blocks.
+
+    Args:
+        out (TDTDIOutput): Output of :meth:`SOBBHBatchedTOF.build`.
+        t_pixels (array-like): Pixel-centre times [s, absolute], ``(P,)``.
+        rows (tuple[int, int], optional): Row range ``(lo, hi)``; ``None`` = all rows.
+
+    Returns:
+        tuple: ``(amp, phase, f, fdot)``, each ``(k, nch, P)`` on ``out.xp`` with ``k`` the
+        number of rows.
+
+    Raises:
+        ValueError: If ``rows`` falls outside the output's rows.
     """
     xp = out.xp
     t = xp.asarray(t_pixels, dtype=float).reshape(-1)
@@ -351,9 +418,11 @@ def sobbh_tracer(out, t_pixels, rows=None):
         ind2 = xp.arange(lo, hi)
 
     def tdi(spl, **kw):
+        """Per-(row, channel) spline values at ``t`` (reshaped by the caller to ``(k, nch, P)``)."""
         return xp.asarray(spl(t3, **kw) if ind3 is None else spl(t3, ind_interps=ind3, **kw))
 
     def ref(spl, **kw):
+        """Per-row spline (``phase_ref``) values at ``t`` (reshaped by the caller to ``(k, P)``)."""
         return xp.asarray(spl(t2, **kw) if ind2 is None else spl(t2, ind_interps=ind2, **kw))
 
     amp = tdi(out.tdi_amp_spl).reshape(k, nch, t.size)
@@ -364,6 +433,7 @@ def sobbh_tracer(out, t_pixels, rows=None):
         amp = xp.where(t[None, None, :] >= tc[:, None, None], 0.0, amp)
 
     def total(**kw):
+        """Channel phase ``tdi_phase + phase_ref`` (or its derivative), ``(k, nch, P)``."""
         a = tdi(out.tdi_phase_spl, **kw).reshape(k, nch, t.size)
         return a + ref(out.phase_ref_spl, **kw).reshape(k, t.size)[:, None, :]
 
@@ -406,6 +476,16 @@ def as_single_shard_holder(holder):
     raises: route per shard), a lone :class:`AnalysisContainer` is wrapped in a 1-element ACA
     built from SHALLOW copies of its data / sens_mat holders (wrapping the container itself
     would rebind it away from its parent's buffers).
+
+    Args:
+        holder (AnalysisContainerArray | AnalysisContainer): The residual / PSD holder.
+
+    Returns:
+        AnalysisContainerArray: Single-shard (``gpus`` from the container's array device).
+
+    Raises:
+        NotImplementedError: For a multi-shard ACA.
+        TypeError: For any other type.
     """
     if hasattr(holder, "linear_data_arr"):
         if len(holder.linear_data_arr) != 1:
@@ -437,13 +517,30 @@ class SOBBHDirectWDM:
         wdm_settings: the run's :class:`~lisatools.domains.WDMSettings` (active band + grid).
         table: :class:`~lisatools.domains.WDMLookupTable` with the SAME layer duration
             (``Nf * dt``); any sampling with that layer duration works.
-        orbits, tdi_config, reference_time, n_grid, buffer_time, eval_dt, force_backend: see
-            :class:`SOBBHBatchedTOF`.
+        orbits: see :class:`SOBBHBatchedTOF`.
+        tdi_config: see :class:`SOBBHBatchedTOF` (its ``nchannels`` sets the channels).
+        reference_time: epoch [s] of ``f_low`` / ``phi_c``, see :class:`SOBBHBatchedTOF`.
         t_obs_start: absolute time [s] of grid pixel 0 (default ``wdm_settings.t0``; the stock
             domains carry an array-space ``t0 = 0`` while the data starts at ``data_t0``).
+        n_grid: see :class:`SOBBHBatchedTOF`. Default ``2048``.
+        buffer_time: see :class:`SOBBHBatchedTOF`. Default ``5000.0``.
+        eval_dt: see :class:`SOBBHBatchedTOF`. Default ``43200.0``.
+        force_backend: see :class:`SOBBHBatchedTOF`. Default ``"cpu"``.
         num_m_layers: layers each side of the carrier layer per pixel (5 layers for 2).
         interp: table interpolation (``"spline"``, default: the table's uniform cubic B-spline,
             the fused lookup kernels' semantics; ``"cubic"`` Keys; ``"linear"``).
+
+    Attributes:
+        ev (WDMLookupEvaluator): The table evaluator (``xp``, axes, kernel table arrays).
+        tof (SOBBHBatchedTOF): The batched response.
+        n_pixels (np.ndarray): Absolute time-layer indices ``ind_min_t .. ind_max_t``.
+        t_pixels (np.ndarray): Their centres ``t_obs_start + n * layer_dt`` [s].
+        last_stats (dict): Accounting of the last template / kernel call.
+        last_spans (dict): Wall times [s] of the last call's stages.
+
+    Raises:
+        ValueError: If the table's ``layer_dt`` differs from the grid's, or the settings'
+            ``Nt_active`` is inconsistent with ``ind_min_t`` / ``ind_max_t``.
     """
 
     def __init__(
@@ -495,7 +592,16 @@ class SOBBHDirectWDM:
 
     def response(self, params):
         """The batched response of ALL ``params`` rows over the pixel window (one build; its
-        spans land in ``last_spans``: ``response``, with its ``pn`` / ``generator`` parts)."""
+        spans land in ``last_spans``: ``response``, with its ``pn`` / ``generator`` parts).
+
+        The window is the pixel centres padded by ``2 * eval_dt`` on each side.
+
+        Args:
+            params (array-like): ``(N, 11)`` chunked-basis rows (host or device).
+
+        Returns:
+            TDTDIOutput: :meth:`SOBBHBatchedTOF.build` output (with ``tc`` and ``t_cover``).
+        """
         xp = self.ev.xp
         p = np.atleast_2d(np.asarray(asnumpy(params), dtype=float))
         pad = 2.0 * self.tof.eval_dt
@@ -547,7 +653,15 @@ class SOBBHDirectWDM:
     def sparse_from(self, out, rows=None, *, warn=True):
         """Lookup templates of rows ``rows = (lo, hi)`` (default all) of a :meth:`response`
         output -> :class:`SparseWDMTemplate` on the pixels the response covers
-        (:meth:`covered_pixels`); spans ``tracer`` / ``lookup`` in ``last_spans``."""
+        (:meth:`covered_pixels`); spans ``tracer`` / ``lookup`` in ``last_spans``.
+
+        Per row and pixel the carrier layer comes from the channel-mean ``f`` of the live
+        channels (``amp != 0``; the response amplitude is signed), and the evaluator returns
+        the ``2 num_m_layers + 1`` layer coefficients (``valid`` where the evaluator accepts
+        the point, the layer is in the active band and the channel is live); live pixels with
+        ``fdot`` beyond the table axis are counted as ``dropped_pixels``.
+        ``warn`` (default ``True``) logs a warning when pixels were dropped.
+        """
         xp = self.ev.xp
         ws = self.wdm
         N = int(out.num_bin) if rows is None else int(rows[1]) - int(rows[0])
@@ -688,6 +802,9 @@ class SOBBHDirectWDM:
         return spl, flat(tc), grid, table, int(amp.length)
 
     def _kernel_call(self, out, mode, *, d_h, h_h, buf, data, invC, full, di, ni, fac, n_d, n_c):
+        """Launch the backend's ``sobbh_lookup`` kernel: ``mode`` 0 accumulates ``d_h`` / ``h_h``
+        against the data / ``invC`` slabs, ``mode`` 1 adds ``fac * h`` into ``buf``. Sets and
+        returns :attr:`last_stats`; raises ``RuntimeError`` without the kernel."""
         xp = self.ev.xp
         fn = self.kernel_fn
         if fn is None:
@@ -735,7 +852,24 @@ class SOBBHDirectWDM:
         self, out, data_flat, invC_flat, data_index, noise_index, *, tdi_type="XYZ"
     ):
         """``(d_h, h_h, stats)`` of every row of a :meth:`response` output in ONE fused launch
-        (== :meth:`sparse_from` + :func:`sparse_inner_products`, the same slab layouts)."""
+        (== :meth:`sparse_from` + :func:`sparse_inner_products`, the same slab layouts).
+
+        Args:
+            out (TDTDIOutput): :meth:`response` output.
+            data_flat (xp.ndarray): Flat stack of ``(nch, Nf_active, Nt_active)`` data slabs.
+            invC_flat (xp.ndarray): Flat stack of ``(nch, nch, Nf_active, Nt_active)`` (XYZ) or
+                ``(nch, Nf_active, Nt_active)`` (AET / AE) inverse-covariance slabs.
+            data_index (array-like): ``(N,)`` data slab per row.
+            noise_index (array-like): ``(N,)`` noise slab per row.
+            tdi_type (str, optional): ``"XYZ"`` (full channel matrix, default), ``"AET"`` or
+                ``"AE"`` (diagonal).
+
+        Returns:
+            tuple: ``(d_h, h_h, stats)``; ``d_h`` and ``h_h`` are ``(N,)`` on the backend.
+
+        Raises:
+            ValueError: For an unknown ``tdi_type`` or buffers that are not slab stacks.
+        """
         if tdi_type not in ("XYZ", "AET", "AE"):
             raise ValueError(f"tdi_type must be one of ('XYZ', 'AET', 'AE'), got {tdi_type!r}")
         xp = self.ev.xp
@@ -767,7 +901,21 @@ class SOBBHDirectWDM:
 
     def kernel_fill(self, out, buf_flat, data_index, factors):
         """Add ``factors[row] * h`` of every row into the 1-D C-contiguous slab buffer in ONE
-        fused launch (== :meth:`sparse_from` + :func:`scatter_add`); returns the stats."""
+        fused launch (== :meth:`sparse_from` + :func:`scatter_add`); returns the stats.
+
+        Args:
+            out (TDTDIOutput): :meth:`response` output.
+            buf_flat (xp.ndarray): 1-D C-contiguous stack of ``(nch, Nf_active, Nt_active)``
+                slabs; written in place.
+            data_index (array-like): ``(N,)`` slab per row.
+            factors (array-like): ``(N,)`` multipliers.
+
+        Returns:
+            dict: The kernel stats (:attr:`last_stats`).
+
+        Raises:
+            ValueError: If ``buf_flat`` is not 1-D C-contiguous or not a slab stack.
+        """
         nch, nfa, nta = self.nchannels, int(self.wdm.Nf_active), int(self.wdm.Nt_active)
         if buf_flat.ndim != 1 or not buf_flat.flags.c_contiguous:
             raise ValueError("fill target must be a 1-D C-contiguous buffer (writes go in place)")
@@ -791,7 +939,15 @@ class SOBBHDirectWDM:
         )
 
     def dense(self, params):
-        """Active-band :class:`~lisatools.domains.WDMSignal` per row (gates and tests)."""
+        """Active-band :class:`~lisatools.domains.WDMSignal` per row (gates, tests, preflights).
+
+        Args:
+            params (array-like): ``(N, 11)`` chunked-basis rows.
+
+        Returns:
+            list[WDMSignal]: One ``(nch, Nf_active, Nt_active)`` signal per row on
+            ``wdm_settings``.
+        """
         from ...domains import WDMSignal
 
         tpl = self.sparse(params)
@@ -832,6 +988,24 @@ def sparse_inner_products(
     ``4 * differential_component`` factor. ``data_flat`` / ``invC_flat`` are the ACA's flat
     per-walker slabs ``(nch, Nf_active, Nt_active)`` / ``(nch[, nch], Nf_active, Nt_active)``;
     ``data_index`` / ``noise_index`` ``(N,)`` pick the slabs. Returns ``(d_h, h_h)`` ``(N,)``.
+
+    Args:
+        tpl (SparseWDMTemplate): The templates (``w``, ``m_act``, ``n_act``).
+        data_flat (xp.ndarray): Flat data slab stack.
+        invC_flat (xp.ndarray): Flat inverse-covariance slab stack.
+        data_index (array-like): ``(N,)`` data slab per row.
+        noise_index (array-like): ``(N,)`` noise slab per row.
+        nchannels (int): Channels.
+        Nf_active (int): Active frequency layers.
+        Nt_active (int): Active time layers.
+        tdi_type (str, optional): ``"XYZ"`` (default), ``"AET"`` or ``"AE"``.
+
+    Returns:
+        tuple[xp.ndarray, xp.ndarray]: ``(d_h, h_h)``, each ``(N,)`` on the template's array
+        module.
+
+    Raises:
+        ValueError: For an unknown ``tdi_type`` or buffers that are not slab stacks.
     """
     if tdi_type not in ("XYZ", "AET", "AE"):
         raise ValueError(f"tdi_type must be one of ('XYZ', 'AET', 'AE'), got {tdi_type!r}")
@@ -873,7 +1047,20 @@ def scatter_add(tpl, buf_flat, data_index, factors, *, nchannels, Nf_active, Nt_
     """Accumulate ``factors[row] * w`` into the flat active-band buffer (per-walker slabs).
 
     ``buf_flat`` must be 1-D and C-contiguous (a view of the ACA's ``linear_data_arr[0]`` or a
-    freshly allocated buffer); ``data_index`` ``(N,)`` picks each row's slab.
+    freshly allocated buffer); ``data_index`` ``(N,)`` picks each row's slab. Repeated indices
+    accumulate (``np.add.at`` / ``cupyx.scatter_add``). Writes in place; returns ``None``.
+
+    Args:
+        tpl (SparseWDMTemplate): The templates.
+        buf_flat (xp.ndarray): The target slab stack.
+        data_index (array-like): ``(N,)`` slab per row.
+        factors (array-like): ``(N,)`` multipliers.
+        nchannels (int): Channels.
+        Nf_active (int): Active frequency layers.
+        Nt_active (int): Active time layers.
+
+    Raises:
+        ValueError: If ``buf_flat`` is not 1-D C-contiguous or not a slab stack.
     """
     xp = get_array_module(buf_flat)
     nch, nfa, nta = int(nchannels), int(Nf_active), int(Nt_active)
@@ -918,16 +1105,53 @@ class SOBBHLookupComputations:
         wdm_settings: the run's :class:`~lisatools.domains.WDMSettings`.
         t_ref: reference epoch [s] of ``f_low`` / ``phi_c``.
         table: :class:`~lisatools.domains.WDMLookupTable` with the grid's layer duration.
-        orbits, tdi_config, tdi_type, t_obs_start: as on ``WDMComputationsBase`` (``tdi_config``
-            may be a string; ``None`` orbits -> ``EqualArmlengthOrbits``).
-        n_grid, buffer_time, eval_dt, num_m_layers, interp: see :class:`SOBBHDirectWDM`.
+        orbits: as on ``WDMComputationsBase``: an :class:`~lisatools.detector.Orbits`
+            instance or class (instantiated); ``None`` -> ``EqualArmlengthOrbits`` (production
+            passes the run's ``frame="icrs"`` unequal-arm orbits).
+        tdi_config: a :class:`~lisatools.response.tdiconfig.TDIConfig` or its generation
+            string; ``None`` -> ``"1st generation"`` (production passes the run's 2nd
+            generation).
+        tdi_type: ``"XYZ"`` (default; full channel matrix), ``"AET"`` or ``"AE"`` (diagonal).
+        t_obs_start: absolute time [s] of grid pixel 0 (default ``wdm_settings.t0``).
+        n_grid: see :class:`SOBBHDirectWDM`. Default ``2048``.
+        buffer_time: see :class:`SOBBHDirectWDM`. Default ``5000.0``.
+        eval_dt: see :class:`SOBBHDirectWDM`. Default ``43200.0``.
+        num_m_layers: see :class:`SOBBHDirectWDM`. Default ``2``.
+        interp: see :class:`SOBBHDirectWDM`. Default ``"spline"``.
         row_batch: rows per tracer / lookup block (bounds their temporaries, ~17 MB per row at
-            6 months); the response is built ONCE per call for all rows.
+            6 months; floored at 1); the response is built ONCE per call for all rows. Default
+            ``32`` (``SOBBH_LOOKUP_ROW_BATCH`` through the stock getter).
         kernel: ``"auto"`` (default: the fused C++/CUDA lookup, ``sobbh_lookup_kernel.cu``, when
             the backend module has it and ``interp == "spline"``, else the Python lookup),
             ``"kernel"`` (required: raises otherwise) or ``"python"``.
         force_backend: backend name at construction (never per call).
         d_d: constant folded into the returned likelihood (default 0 = source-only).
+
+    Attributes:
+        direct (SOBBHDirectWDM): The template builder.
+        uses_kernel (bool): Whether the fused kernel runs.
+        d_h_out (xp.ndarray): ``<d|h>`` per row of the last :meth:`get_ll_wdm`.
+        h_h_out (xp.ndarray): ``<h|h>`` per row of the last :meth:`get_ll_wdm`.
+        last_call_spans (dict): Wall-time spans of the last call.
+        last_stats (dict): Pixel / row accounting of the last call.
+
+    Raises:
+        TypeError: If ``wdm_settings`` is not a :class:`~lisatools.domains.WDMSettings`.
+        ValueError: For an unknown ``tdi_type`` or ``kernel``, or ``kernel="kernel"`` without
+            the compiled kernel.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.domains import WDMLookupTable
+            from lisatools.sources.sobbh.wdm_direct import SOBBHLookupComputations
+
+            comp = SOBBHLookupComputations(
+                wdm_settings, ref_epoch, WDMLookupTable.from_file(path, force_backend="cpu"),
+                orbits=icrs_orbits, tdi_config="2nd generation", tdi_type="XYZ",
+                t_obs_start=data_t0, force_backend="cpu",
+            )
+            ll = comp.get_ll_wdm(rows, acs, data_index=walker_inds)  # rows: (N, 11) chunked
     """
 
     _NPARAMS = 11
@@ -1029,23 +1253,28 @@ class SOBBHLookupComputations:
 
     @property
     def backend(self):
+        """The lisatools backend object of ``force_backend``."""
         import lisatools
 
         return lisatools.get_backend(self.force_backend)
 
     @property
     def xp(self):
+        """Array module of the lookup evaluator (numpy or cupy)."""
         return self.direct.ev.xp
 
     @property
     def args(self):
+        """Positional constructor arguments ``(wdm_settings, t_ref, table)`` (rebuild / copy)."""
         return self._ctor_args
 
     @property
     def kwargs(self):
+        """Keyword constructor arguments (a copy)."""
         return dict(self._ctor_kwargs)
 
     def _note_band(self, m_band_half_width):
+        """Log once that ``m_band_half_width`` is ignored (the band is ``num_m_layers``)."""
         if m_band_half_width is not None and not self._band_noted:
             logger.info(
                 "SOBBHLookupComputations: m_band_half_width=%s ignored (the lookup "
@@ -1056,6 +1285,12 @@ class SOBBHLookupComputations:
             self._band_noted = True
 
     def _prep(self, params, data_index, noise_index, n_slots, convert_to_ra_dec):
+        """Validate the rows and the slab indices; returns host ``(p, di, ni)``.
+
+        ``p`` is ``(N, 11)`` float; with ``convert_to_ra_dec`` the last two columns are
+        converted ecliptic -> ICRS (deprecated, warned). ``data_index`` defaults to 0 for every
+        row and ``noise_index`` to ``data_index``; both must lie in ``[0, n_slots)``.
+        """
         from ...response.directresponse import ecliptic_to_icrs, warn_deprecated_frame_conversion
 
         p = np.atleast_2d(np.asarray(asnumpy(params), dtype=float))
@@ -1101,7 +1336,32 @@ class SOBBHLookupComputations:
         and a ``last_call_spans`` dict (``stage``, ``geom``, ``wrap``, ``launch``, ``response``,
         ``tracer``, ``lookup`` (the three template stages, summed over the row batches),
         ``template`` (their sum), ``inner``, ``total``, ``num_bin``, ``n_groups``); the spans are
-        device-synchronised.
+        device-synchronised. One response for all rows; the fused kernel when
+        ``uses_kernel``, else the Python lookup + :func:`sparse_inner_products` in
+        ``row_batch`` blocks.
+
+        Args:
+            params (array-like): ``(N, 11)`` chunked-basis rows.
+            wdm_holder (AnalysisContainerArray | AnalysisContainer): Residual / PSD holder
+                (single shard: :func:`as_single_shard_holder`).
+            data_index (array-like, optional): ``(N,)`` data slab per row (default 0).
+            noise_index (array-like, optional): ``(N,)`` noise slab per row (default
+                ``data_index``).
+            convert_to_ra_dec (bool, optional): Convert ecliptic sky columns to ICRS
+                (deprecated; the run passes ICRS and ``None`` / ``False``).
+            grid_dim (int, optional): Accepted for signature compatibility; unused.
+            use_layer_groups (bool, optional): Accepted for signature compatibility; unused.
+            group_band_layers (int, optional): Accepted for signature compatibility; unused.
+            margin_layers (int, optional): Accepted for signature compatibility; unused.
+            m_band_half_width (int, optional): Ignored (logged once).
+
+        Returns:
+            xp.ndarray: ``(N,)`` log-likelihood source terms.
+
+        Raises:
+            RuntimeError: When called off the device the comp was built on.
+            ValueError: For malformed rows or indices.
+            IndexError: For slab indices outside the holder.
         """
         t_entry = time.perf_counter()
         dev = current_device(self.xp)
@@ -1235,6 +1495,12 @@ class SOBBHLookupComputations:
         return -0.5 * (self.d_d + h_h - 2.0 * d_h)
 
     def _fill_target(self, templates):
+        """The flat in-place view of the fill target and its slab count ``(flat, n_slots)``.
+
+        Accepts a single-shard ACA (``linear_data_arr[0]``), a ``DomainBase`` (its ``arr``), an
+        :class:`~lisatools.analysiscontainer.AnalysisContainer` (its own residual array) or an
+        array; it must be C-contiguous with trailing shape ``(nch, Nf_active, Nt_active)``.
+        """
         from ...domains import DomainBase
 
         if hasattr(templates, "linear_data_arr"):
@@ -1294,7 +1560,27 @@ class SOBBHLookupComputations:
     ):
         """Accumulate ``factors * h`` into ``templates`` (ACA holder, ``WDMSignal``, or an
         active-band array ``(nch, Nf_active, Nt_active)`` / ``(num, nch, Nf_active, Nt_active)``
-        / flat), slab per row by ``data_index`` (default 0)."""
+        / flat), slab per row by ``data_index`` (default 0).
+
+        The engine's SOBBH template fills and the move's expose / fold go through this in
+        lookup mode. Writes in place; returns ``None``.
+
+        Args:
+            params (array-like): ``(N, 11)`` chunked-basis rows.
+            templates: The fill target (see above).
+            convert_to_ra_dec (bool, optional): As in :meth:`get_ll_wdm`.
+            data_index (array-like, optional): ``(N,)`` slab per row (default 0).
+            factors (array-like, optional): ``(N,)`` multipliers (default 1).
+            grid_dim (int, optional): Accepted for signature compatibility; unused.
+            m_band_half_width (int, optional): Ignored (logged once).
+            band_slab_Nf (int, optional): Must be ``None`` (per-band slabs unsupported).
+            slab_min_f (int, optional): Must be ``None``.
+
+        Raises:
+            RuntimeError: When called off the build device.
+            NotImplementedError: With per-band slabs or a multi-shard ACA.
+            ValueError: For a malformed target, rows or ``factors``.
+        """
         dev = current_device(self.xp)
         if dev != self._build_device:
             raise RuntimeError(
@@ -1372,7 +1658,13 @@ class SOBBHLookupRouter:
     sends every ``get_ll_wdm`` / ``fill_global_wdm`` to the replica of the CURRENT device. The
     per-call stashes (``d_h_out``, ``h_h_out``, ``last_call_spans``, ``last_stats``) and every other
     attribute (``wdm_settings``, ``d_d``, ``xp``, ...) read from the replica of the last call (the
-    primary before any call). The primary replica is built at construction.
+    primary before any call). The primary replica is built at construction. The stock getter
+    ``globalfit.stock.erebor.source_runtime.get_sobbh_lookup_router`` returns one per run.
+
+    Args:
+        build (callable): ``build(device) -> SOBBHLookupComputations``, called under that
+            device's context.
+        force_backend (str): Backend name (resolved by :func:`concrete_backend_name`).
     """
 
     _OWN = ("_build", "_backend_name", "_replicas", "_last", "_primary")
@@ -1386,16 +1678,19 @@ class SOBBHLookupRouter:
 
     @property
     def backend(self):
+        """The lisatools backend object."""
         import lisatools
 
         return lisatools.get_backend(self._backend_name)
 
     @property
     def xp(self):
+        """Array module of the backend (numpy or cupy)."""
         return self.backend.xp
 
     @property
     def primary(self):
+        """The replica built at construction."""
         return self._primary
 
     @property
@@ -1404,6 +1699,7 @@ class SOBBHLookupRouter:
         return dict(self._replicas)
 
     def _for_current_device(self):
+        """The replica of the current device, built on first use."""
         dev = current_device(self.xp)
         comp = self._replicas.get(dev)
         if comp is None:
@@ -1411,11 +1707,13 @@ class SOBBHLookupRouter:
         return comp
 
     def get_ll_wdm(self, *args, **kwargs):
+        """:meth:`SOBBHLookupComputations.get_ll_wdm` on the current device's replica."""
         comp = self._for_current_device()
         self._last = comp
         return comp.get_ll_wdm(*args, **kwargs)
 
     def fill_global_wdm(self, *args, **kwargs):
+        """:meth:`SOBBHLookupComputations.fill_global_wdm` on the current device's replica."""
         comp = self._for_current_device()
         self._last = comp
         return comp.fill_global_wdm(*args, **kwargs)

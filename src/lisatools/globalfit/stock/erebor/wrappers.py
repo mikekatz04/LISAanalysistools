@@ -9,6 +9,35 @@ settings files bind their own configuration explicitly.
 Heavy third-party imports (``bbhx``, ``phentax``, ``few``) stay
 function-local so importing this module never hard-fails for runs that
 don't need them.
+
+Callers: :mod:`~lisatools.globalfit.stock.erebor.source_runtime` (one cached
+wrap per run and device) and :mod:`~lisatools.globalfit.stock.erebor.injections`
+(synthetic streams). On the production path (``all_sources``, ``USE_TDIONFLY``
+unset) the SOBBH branch uses :func:`get_sobbh_tdionfly_gen` +
+:class:`SOBBHTDIonFlyWaveWrap` as the exact (slow) generator of the
+lookup-scored SOBBH move: its fast-vs-slow cross-check (``SOBBH_CHECK_LL``,
+0 on the launchers) and the move's own fallback generator. The residual
+expose/fold does NOT run on it: since 2026-08-28 it is one batched
+``fill_global_wdm`` of the move's fast comp per leaf visit (the lookup comp
+under ``SOBBH_LIKELIHOOD=lookup``). ``SOBBH_CHUNKED_FILL=0`` restores a per-row
+pass through the engine's installed generator, which on the lookup / chunked
+paths is the comp's fill as well. This wrap is the whole SOBBH template path
+only under ``SOBBH_LIKELIHOOD=full``. The MBH branch uses
+:func:`get_mbh_phenom_wave_gen` (``PhenomTHMTDIWaveform``, also the slow
+reference generator of the batched MBH move). The legacy SOBBH
+ResponseWrapper path (:func:`get_sobbh_response_wrapper` /
+:class:`SOBBHWaveWrap`, ``fit.sobbh.use_tdionfly = False``) and the MBH
+TDI-on-the-fly path (:func:`get_mbh_tdionfly_gen` /
+:class:`MBHTDIonFlyWaveWrap`, ``fit.mbh.use_tdionfly = True``; env
+``USE_TDIONFLY`` flips both branches) are documented alternatives. The EMRI
+wrap machinery is re-exported from :mod:`lisatools.sources.emri`.
+
+Note:
+    :mod:`lisatools.sources.sobbh.response` carries its own copies of
+    ``get_sobbh_response_wrapper`` / ``SOBBHWaveWrap`` /
+    ``get_sobbh_tdionfly_gen`` / ``SOBBHTDIonFlyWaveWrap`` (the synthetic
+    SOBBH stream in :func:`~.injections.build_synthetic_source_streams` uses
+    that ``get_sobbh_tdionfly_gen``); the stock run path uses the ones here.
 """
 
 from __future__ import annotations
@@ -56,9 +85,34 @@ def get_sobbh_response_wrapper(
     """Build (and cache) a :class:`ResponseWrapper` around :class:`SOBBHWaveform`.
 
     Mirrors :func:`get_emri_response_wrapper`; one generator per
-    ``(Tobs, dt, t_start, tdi_chan, order, force_backend, id(orbits))``
-    cache key so the injection path and the template path share the same
-    instance.
+    ``(Tobs, dt, t_start, tdi_chan, order, force_backend, id(orbits),
+    reference_time)`` cache key so the injection path and the template path
+    share the same instance. ``tdi_config``, ``role`` and ``t_buffer`` are not
+    part of the key (a second call differing only in those returns the first
+    instance); ``role`` is not used at all.
+
+    Legacy path: the run's SOBBH branch uses it only with
+    ``use_tdionfly=False`` (default ``True``, env ``USE_TDIONFLY``).
+
+    Args:
+        Tobs: Observation span (s).
+        dt: Sample spacing (s).
+        t_start: Data start time (s); also the response ``t0``.
+        tdi_config: TDI combination (generation) for the response.
+        tdi_chan: Output channels. Default ``"XYZ"``.
+        role: Label only (``"template"`` / ``"injection"``); unused.
+        order: Lagrange interpolation order of the response. Default 40.
+        t_buffer: Response time buffer (s). Default ``3e4``.
+        orbits: Orbits; ``None`` -> analytic
+            :class:`~lisatools.detector.EqualArmlengthOrbits` (a convenience
+            default; the run passes its own L1 orbits).
+        force_backend: Backend name (``"cpu"`` / ``"cuda12x"`` / ...).
+        reference_time: Epoch ``f_low`` is defined at (``None`` -> ``t_start``
+            inside :class:`~lisatools.sources.sobbh.SOBBHWaveform`).
+
+    Returns:
+        ResponseWrapper: Callable on the 11-parameter SOBBH waveform basis,
+        returning per-channel TD arrays.
     """
     key = (
         Tobs, dt, t_start, tdi_chan, order, force_backend, id(orbits),
@@ -108,6 +162,22 @@ class SOBBHWaveWrap:
     Mirrors :class:`EMRIWaveWrap` — output is a :class:`DomainBase`
     subclass (FDSignal / WDMSignal / ...) so ACA dispatch and the SOBBH
     move's ``get_waveform_here`` land on the right kernels.
+
+    Calling the wrap evaluates ``wave_gen(*params, **runtime_kwargs,
+    **kwargs)``, stacks the channels on the generator's array backend, keeps
+    the first ``nchannels`` and returns
+    ``TDSignal(arr, td_settings).transform(target_domain, window=td_window)``.
+
+    Args:
+        wave_gen: A :func:`get_sobbh_response_wrapper` generator.
+        td_settings: Data time-domain grid
+            (:class:`~lisatools.domains.TDSettings`).
+        target_domain: The run's analysis domain settings (e.g.
+            :class:`~lisatools.domains.WDMSettings`).
+        td_window (np.ndarray, optional): Window applied in the transform;
+            ``None`` -> the transform's default.
+        runtime_kwargs: Per-call kwargs merged under the call's own kwargs.
+        nchannels: Keep only the first ``nchannels`` channels (``None`` = all).
     """
 
     def __init__(
@@ -193,6 +263,28 @@ def get_mbh_tdionfly_gen(
     referenced to (``MOJITO_REFERENCE_TIME`` in mojito mode); the merger
     lands at ``t_start + t_merge``.  ``dur_s`` is both the phentax ``T``
     and the generator's observation window (pre-merger inspiral + margin).
+
+    Used by the MBH branch only with ``use_tdionfly=True`` (default ``False``;
+    env ``USE_TDIONFLY``). Cached on ``(dt, t_start, dur_s, force_backend,
+    waveform_duration, higher_modes, coarse_scale, tol, dt_min, id(orbits))``
+    (``tdi_config`` is not part of the key).
+
+    Args:
+        dt: Output sample spacing (s).
+        t_start: Merger-time reference epoch (s).
+        dur_s: Generation window (s).
+        tdi_config: TDI combination for the on-the-fly response.
+        orbits: Orbits passed to ``MBHTDIonFly`` (the run's ICRS L1 orbits).
+        waveform_duration: Generator ``waveform_duration`` (s); ``None`` ->
+            ``dur_s``.
+        higher_modes: phentax higher modes. Default ``(21, 33, 44)``.
+        coarse_scale: phentax ``coarse_graining_scale_factor``. Default 48.0.
+        tol: phentax ``atol`` = ``rtol``. Default ``1e-12``.
+        dt_min: ``MBHTDIonFly`` minimum internal step (s). Default 0.1.
+        force_backend: Backend name.
+
+    Returns:
+        bbhx.mbhtdionfly.MBHTDIonFly: The cached generator.
     """
     higher_modes = tuple(higher_modes)
     key = (
@@ -239,6 +331,15 @@ class MBHTDIonFlyWaveWrap:
     (psi before ra/dec) — and reorders it to the ``MBHTDIonFly`` call
     order ``(..., inc, ra, dec, psi, t_merge)`` before evaluating on the
     data time grid (``t_arr``) with ``combine=True``.
+
+    Args:
+        wave_gen: A :func:`get_mbh_tdionfly_gen` generator.
+        t_arr: Data sample times (s), the upsampling grid.
+        td_settings: Data time-domain grid.
+        target_domain: The run's analysis domain settings.
+        td_window (np.ndarray, optional): Window for the domain transform.
+        runtime_kwargs: Per-call kwargs (``convert_to_ra_dec`` is dropped).
+        nchannels: Keep only the first ``nchannels`` channels (``None`` = all).
     """
 
     def __init__(
@@ -260,7 +361,17 @@ class MBHTDIonFlyWaveWrap:
         self.nchannels = nchannels
 
     def raw_td(self, *params, **kwargs):
-        """Combined TD TDI channels on the data grid (before domain projection)."""
+        """Combined TD TDI channels on the data grid (before domain projection).
+
+        Args:
+            *params: The 11 MBH waveform-basis values ``(m1, m2, s1z, s2z,
+                dist [Mpc], phi_ref, inc, psi, ra, dec, t_plunge)``.
+            **kwargs: Extra generator kwargs (merged over ``runtime_kwargs``).
+
+        Returns:
+            ``xp.ndarray`` (numpy or cupy, the generator's native array):
+            ``(nchannels, len(t_arr))`` TD channels.
+        """
         call_kwargs = dict(self.runtime_kwargs)
         call_kwargs.update(kwargs)
         # The TDI-on-the-fly generator reads (ra, dec) in the orbits frame
@@ -314,6 +425,27 @@ def get_sobbh_tdionfly_gen(
     :class:`SOBBHWaveform` amp/phase the legacy path uses, but projects via
     the analytic TDI-on-the-fly response.  ``reference_time`` is the epoch
     ``f_low`` is defined at (``MOJITO_REFERENCE_TIME`` in mojito mode).
+
+    The production SOBBH generator (``use_tdionfly=True``, the default):
+    :func:`~lisatools.globalfit.stock.erebor.source_runtime.get_sobbh_wave_wrap`
+    builds it once per run and device. Cached on ``(Tobs, dt, t_start,
+    force_backend, reference_time, n_grid, buffer_time, id(orbits))``
+    (``tdi_config`` is not part of the key).
+
+    Args:
+        Tobs: Observation span (s).
+        dt: Sample spacing (s).
+        t_start: Data start time (s).
+        tdi_config: TDI combination for the on-the-fly response.
+        reference_time: Epoch ``f_low`` is defined at (``None`` -> ``t_start``
+            inside :class:`~lisatools.sources.sobbh.SOBBHWaveform`).
+        orbits: Orbits passed to ``SOBBHTDIonFly`` (the run's ICRS L1 orbits).
+        n_grid: ``SOBBHTDIonFly`` amp/phase grid size. Default 2048.
+        buffer_time: ``SOBBHTDIonFly`` time buffer (s). Default 5000.0.
+        force_backend: Backend name.
+
+    Returns:
+        bbhx.sobbhtdionfly.SOBBHTDIonFly: The cached generator.
     """
     key = (
         Tobs, dt, t_start, force_backend, reference_time, n_grid, buffer_time,
@@ -352,6 +484,22 @@ class SOBBHTDIonFlyWaveWrap:
     ``(m1, m2, s1, s2, dist, f_low, phi0, inc, ra, dec, psi)`` (no
     ``flip_hx`` arg — the on-the-fly response is the correct handedness;
     ``phi0`` is the catalogue ``TrueAnomaly``).
+
+    The production SOBBH move's exact ``waveform_gen``: the slow-path
+    cross-check of the lookup scorer (``SOBBH_CHECK_LL``, off on the
+    launchers) and the move's fallback generator. The residual expose/fold
+    runs through the lookup comp's batched fill instead (since 2026-08-28;
+    see the module docstring); under ``SOBBH_LIKELIHOOD=full`` this wrap
+    serves every SOBBH template.
+
+    Args:
+        wave_gen: A :func:`get_sobbh_tdionfly_gen` generator.
+        t_arr: Data sample times (s), the upsampling grid.
+        td_settings: Data time-domain grid.
+        target_domain: The run's analysis domain settings.
+        td_window (np.ndarray, optional): Window for the domain transform.
+        runtime_kwargs: Per-call kwargs (``convert_to_ra_dec`` is dropped).
+        nchannels: Keep only the first ``nchannels`` channels (``None`` = all).
     """
 
     def __init__(
@@ -373,7 +521,17 @@ class SOBBHTDIonFlyWaveWrap:
         self.nchannels = nchannels
 
     def raw_td(self, *params, **kwargs):
-        """Combined TD TDI channels on the data grid (before domain projection)."""
+        """Combined TD TDI channels on the data grid (before domain projection).
+
+        Args:
+            *params: The 11 SOBBH waveform-basis values ``(m1, m2, s1, s2,
+                dist [Gpc], inc, f_low [Hz], ra, dec, psi, phi0)``.
+            **kwargs: Extra generator kwargs (merged over ``runtime_kwargs``).
+
+        Returns:
+            ``xp.ndarray`` (numpy or cupy, the generator's native array):
+            ``(nchannels, len(t_arr))`` TD channels.
+        """
         call_kwargs = dict(self.runtime_kwargs)
         call_kwargs.update(kwargs)
         call_kwargs.pop("convert_to_ra_dec", None)
@@ -447,6 +605,48 @@ def get_mbh_phenom_wave_gen(
     given). ``waveform_t0`` is the epoch merger times are referenced to
     (``MOJITO_REFERENCE_TIME`` in mojito mode, the data start in synthetic
     mode).
+
+    The stock MBH generator: the engine-side residual rebuild, the batched MBH
+    move's slow reference generator (production ``MBH_LIKELIHOOD=batched``)
+    and the synthetic / missing-brick MBH injections all resolve through this
+    cache (one phentax setup per configuration). The cache key covers every
+    argument except ``data_span`` (``data_td_settings``, ``orbits`` and
+    ``output_domain_settings`` by ``id``).
+
+    Args:
+        data_td_settings: The data time-domain grid
+            (:class:`~lisatools.domains.TDSettings`).
+        waveform_t0: Merger-time reference epoch (s).
+        dt: Sample spacing (s).
+        orbits (Orbits, optional): Orbits for the response; ``None`` -> the
+            generator's default.
+        output_domain_settings (DomainSettingsBase, optional): The run's
+            analysis domain (``None`` -> TD output only, the injection path).
+        tukey_alpha: Template taper alpha. Default 0.0.
+        force_backend: Backend name.
+        waveform_duration: phentax generation window ``T`` (s). Default
+            ``YRSID_SI / 12``; ``None`` -> ``data_span``.
+        data_span: Data span (s); needed only when
+            ``waveform_duration is None``.
+        higher_modes: phentax higher modes. Default ``(21, 33, 44)``.
+        phenom_tol: phentax ``atol`` = ``rtol``. Default ``1e-12``.
+        start_freq: Lowest generated frequency (Hz). Default ``7e-5``.
+        response_order: Response interpolation order. Default 8 (the
+            launchers set ``MBH_RESPONSE_ORDER=8``).
+        buffer_time: Response time buffer (s). Default 15000.0.
+        tdi_gen_str: ``"1st generation"`` / ``"2nd generation"``.
+        tdi_chan: Output channels. Default ``"XYZ"``.
+        min_freq: Band lower edge (Hz). Default ``1e-4``.
+        max_freq: Band upper edge (Hz). Default ``2.5e-2``.
+        fft_batch_size: FFT batch size of the domain projection. Default 2.
+
+    Returns:
+        PhenomTHMTDIWaveform: The cached
+        :class:`~lisatools.sources.bbh.waveform.PhenomTHMTDIWaveform`.
+
+    Raises:
+        ValueError: When both ``waveform_duration`` and ``data_span`` are
+            ``None``.
     """
     higher_modes = tuple(higher_modes)
     if waveform_duration is None:

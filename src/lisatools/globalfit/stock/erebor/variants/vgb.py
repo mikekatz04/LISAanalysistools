@@ -33,6 +33,13 @@ identically.
 Band separations DEFAULT to the same per-WDM-layer edges as the GB branch;
 ``VGB_BAND_LAYERS=L`` coarsens them to L layers per band. Only bands that
 contain VGB leaves do any work (the band sorter holds real leaves only).
+
+Role in production: the 9mo / 12mo runs use :mod:`.all_sources`, whose VGB
+branch is the same block (:class:`~lisatools.globalfit.stock.erebor.vgb.VGBSettings`)
+built by this module's :func:`setup_vgb_moves`, with the launcher knobs
+``VGB_CHIRP_MASS_BASIS=1``, ``VGB_NTEMPS=8``, ``VGB_BAND_LAYERS=8``,
+``VGB_START_FACTOR=0`` and ``VGB_SIGHET_INMODEL=1``. The ``vgb`` variant
+class itself (and ``vgb_lite``) is the standalone VGB-only fit.
 """
 
 from __future__ import annotations
@@ -58,7 +65,23 @@ logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass
 class VGBGeneralSettings(EreborGeneralSettings):
-    """General block for the ``vgb`` variant."""
+    """General block for the ``vgb`` variant.
+
+    Subclass of :class:`~lisatools.globalfit.stock.erebor.fit.EreborGeneralSettings`
+    (inherited fields documented there).
+
+    Attributes:
+        min_freq: Data-band floor [Hz] (no env here). Default ``2e-4``.
+        max_freq: Data-band ceiling [Hz]. Default ``7e-3``.
+        file_store_dir: Output directory. Env ``FILE_STORE_DIR``. Default
+            ``"./gf_output_vgb/"``.
+        base_file_name: Store file stem. Env ``BASE_FILE_NAME``. Default
+            ``"vgb_test_1"``.
+        source_types: Mojito streams loaded. Default ``("VGB",)``.
+        fixed_psd_params: Fixed ``[Soms_d, Sa_a]``; ``None`` (default) ->
+            the NOISE-brick fit, else ``[15e-12, 3e-15]``.
+        likelihood_source_only: Default ``True`` (fixed PSD).
+    """
 
     # Data band covering the mojito VGB f0 span (0.31–6.22 mHz) + margin.
     min_freq: float = 2e-4
@@ -77,7 +100,30 @@ class VGBGeneralSettings(EreborGeneralSettings):
 
 
 class VGBGlobalFit(EreborFit):
-    """VGB-only global fit: 55 known binaries, fixed-dimensional PE."""
+    """VGB-only global fit: 55 known binaries, fixed-dimensional PE.
+
+    One branch, ``vgb`` (:class:`~lisatools.globalfit.stock.erebor.vgb.VGBSettings`;
+    its ``VGB_*`` knobs are documented there), fixed PSD, data from the
+    mojito VGB brick (``DATA_MODE=mojito``) or the catalogue injected
+    in-process (``"synthetic"``). Default recipe: stage ``vgb_pe`` (kind
+    ``pe``) with ``vgb_pe``. Registered as ``vgb`` (laptop twin ``vgb_lite``).
+    Note that ``erebor.vgb`` is this variant's default INSTANCE (the branch
+    module stays importable as ``lisatools.globalfit.stock.erebor.vgb``).
+
+    Attributes:
+        option_name: ``"vgb"``.
+        setup_classes: ``{"vgb": VGBSetup}``.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.stock import erebor
+
+            fit = erebor.vgb(nwalkers=8, data_mode="synthetic")
+            fit.vgb.ntemps = 4
+            fit.build()
+            fit.run()
+    """
 
     option_name = "vgb"
     description = (
@@ -90,9 +136,11 @@ class VGBGlobalFit(EreborFit):
     setup_classes = {"vgb": VGBSetup}
 
     def default_branches(self) -> typing.Dict[str, Settings]:
+        """``{"vgb": VGBSettings()}``."""
         return {"vgb": VGBSettings()}
 
     def default_recipe(self) -> Recipe:
+        """One PE stage ``vgb_pe`` with the ``vgb_pe`` move."""
         return Recipe(
             [
                 Stage(
@@ -105,6 +153,7 @@ class VGBGlobalFit(EreborFit):
         )
 
     def adjust_general(self, gs: VGBGeneralSettings) -> None:
+        """Variant hook: unset ``fixed_psd_params`` -> NOISE-brick fit, else ``[15e-12, 3e-15]``."""
         # Fixed PSD levels: explicit list > mojito NOISE brick fit > stock.
         if gs.fixed_psd_params is None:
             file_params = self.resolve_noise_file_psd_params(gs)
@@ -113,6 +162,19 @@ class VGBGlobalFit(EreborFit):
             )
 
     def set_default_processor(self, gs: VGBGeneralSettings) -> None:
+        """Mojito: the base L1 loader; synthetic: inject every catalogue VGB in-process.
+
+        The synthetic path reads ``catalogues/vgb_cat_mojito_lite_processed.hdf5``
+        under ``mojito_data_path``, converts the rows to physical GBGPU
+        parameters and injects them with ``SyntheticGBProcessingStep`` (CPU)
+        at ``synthetic_t_start``.
+
+        Args:
+            gs: The build-time general block (mutated in place).
+
+        Raises:
+            ValueError: On another ``data_mode``.
+        """
         if gs.data_mode == "mojito":
             super().set_default_processor(gs)
             return
@@ -162,6 +224,7 @@ class VGBGlobalFit(EreborFit):
         )
 
     def default_preprocess_kwargs(self) -> dict:
+        """Synthetic data: no highpass / trim; mojito: the Erebor default."""
         if self.general.data_mode == "synthetic":
             # The synthetic stream covers exactly Tobs = Nf*Nt*dt; skip the
             # engine's default highpass + edge-trim + Tobs trim so the WDM
@@ -172,6 +235,7 @@ class VGBGlobalFit(EreborFit):
         return super().default_preprocess_kwargs()
 
     def prepare_branch_settings(self, name: str, general_setup: GeneralSetup) -> Settings:
+        """Erebor completion, then ``prepare_vgb_branch`` for ``vgb``."""
         settings = super().prepare_branch_settings(name, general_setup)
         if name != "vgb":
             return settings
@@ -207,6 +271,24 @@ def setup_vgb_moves(engine_info, curr, acs, priors, state) -> dict:
     (post-deepcopy — the orbits wrap is not picklable). FD path: wire the
     orbits/TDI handles for the move's ``GBFDComputations`` prototype. Then
     :func:`~lisatools.globalfit.recipe.build_vgb_moves`.
+
+    With ``sighet_inmodel`` (``VGB_SIGHET_INMODEL``, falling back to
+    ``GB_SIGHET_INMODEL``; launchers ``VGB_SIGHET_INMODEL=1``) the chunked
+    comp is wrapped once in the sig-het engine
+    (:func:`~lisatools.globalfit.stock.erebor.gb.build_sighet_engine`, the
+    same builder as the GB branch). Called by ``all_sources.setup_recipe``
+    in production.
+
+    Args:
+        engine_info: The engine settings.
+        curr: The built current info (``source_info["vgb"]``).
+        acs: The rank's ``AnalysisContainerArray``.
+        priors (dict): Per-branch priors.
+        state (GFState): The starting state.
+
+    Returns:
+        dict: ``{move name: move}`` (``vgb_pe``, plus ``vgb_ridge_gibbs``
+        when the branch is ridge-Gibbs eligible, i.e. the chirp-mass basis).
     """
     general_info = curr.general_info
     gpus = general_info.gpus
@@ -257,9 +339,9 @@ def setup_vgb_moves(engine_info, curr, acs, priors, state) -> dict:
     # only the in-model likelihood differs. The GB branch's births/deaths
     # change the work per iteration between arms and confound the timing.
     #
-    # NOTE the knob is GB_SIGHET_INMODEL (VGBSettings inherits GBSettings'
-    # field, env name included), so in a run carrying BOTH branches -- e.g.
-    # all_sources -- it flips gb and vgb together.
+    # NOTE the knob is VGB_SIGHET_INMODEL when set, else the shared
+    # GB_SIGHET_INMODEL (VGBSettings' default factory), which in a run
+    # carrying BOTH branches -- e.g. all_sources -- flips gb and vgb together.
     if isinstance(general_info.domain_settings, WDMSettings) and getattr(
         vgb_info, "sighet_inmodel", False
     ):
@@ -307,7 +389,11 @@ def setup_vgb_moves(engine_info, curr, acs, priors, state) -> dict:
 
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
-    """Recipe setup for ``vgb`` (the run's ``setup_function``)."""
+    """Recipe setup for ``vgb`` (the run's ``setup_function``).
+
+    Builds :func:`setup_vgb_moves` and materializes the recipe. Arguments as
+    for :func:`setup_vgb_moves`.
+    """
     general_info = curr.general_info
     stock_moves = setup_vgb_moves(engine_info, curr, acs, priors, state)
     ctx = MoveBuildContext(

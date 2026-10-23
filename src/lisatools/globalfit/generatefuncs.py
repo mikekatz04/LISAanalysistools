@@ -1,4 +1,15 @@
-"""Helpers that turn an MCMC state into source templates / data residuals / PSDs."""
+"""Helpers that turn an MCMC state into source templates / data residuals / PSDs.
+
+LEGACY (the frequency-domain A/E settings-file era). No module under ``src/``
+imports this file; the legacy settings files in ``mojito_input/`` and
+``global_fit_input/`` star-import it but use none of its names, and the stock
+global fits and the 9mo/12mo runs never reach it. The current replacement is
+the engine-side template path: each branch registers a ``signal_gen`` and
+:meth:`~lisatools.globalfit.run.GlobalFit.setup_acs` subtracts the templates
+(``rebuild_residuals=True``). Several bodies here reference names that are no
+longer defined (``BBHWaveformFD``, ``mbh_params``, ``emri_params``,
+``less_fill_style``), so they would raise ``NameError`` if called.
+"""
 
 import os
 import pickle
@@ -21,6 +32,7 @@ except (ImportError, ModuleNotFoundError) as e:
     pass
 
 
+# TODO check: keep/remove/document -- no importer uses it; body raises NameError (BBHWaveformFD import commented out, mbh_params undefined)
 class GetMBHTemplates:
     """Callable that builds MBH frequency-domain templates for a given state.
 
@@ -83,6 +95,7 @@ class GetMBHTemplates:
         return out[:, :2]
 
 
+# TODO check: keep/remove/document -- no importer uses it; body raises NameError (emri_params undefined)
 class GetEMRITemplates:
     """Callable that builds EMRI frequency-domain templates for a given state.
 
@@ -142,6 +155,7 @@ class GetEMRITemplates:
 # TODO: generalize this setup to adjustable model inputs
 
 
+# TODO check: keep/remove/document -- legacy FD GB template builder; no importer uses it (superseded by signal_gen + setup_acs)
 class GetGBTemplates:
     """Callable that builds galactic-binary frequency-domain templates.
 
@@ -204,6 +218,7 @@ class GetGBTemplates:
         return templates_in
 
 
+# TODO check: keep/remove/document -- legacy FD likelihood helper; only caller is GenerateCurrentState / get_ll in this file
 def get_ll_source(data, psd, df):
     """Compute the source-only inner-product log-likelihood :math:`-\\frac12 \\langle d|d\\rangle`."""
     inner_here = (
@@ -221,12 +236,14 @@ def get_ll_source(data, psd, df):
     return inner_here
 
 
+# TODO check: keep/remove/document -- legacy FD likelihood helper; only caller is get_ll in this file
 def get_psd_val(psd):
     """Sum :math:`\\log S_n(f)` across channels and frequencies."""
     psd_term_here = np.sum(np.log(np.asarray(psd).transpose(1, 0, 2)), axis=(1, 2))
     return psd_term_here
 
 
+# TODO check: keep/remove/document -- legacy FD likelihood helper; only caller is GenerateCurrentState in this file
 def get_ll(data, psd, df, return_source_only_ll=False):
     """Compute the full noise-weighted log-likelihood ``ll_source - log_det_psd``.
 
@@ -250,6 +267,7 @@ def get_ll(data, psd, df, return_source_only_ll=False):
         return ll_total
 
 
+# TODO check: keep/remove/document -- no importer uses it (only a commented line in run.py prepare_main); body has breakpoint() and undefined less_fill_style
 class GenerateCurrentState:
     """Callable that builds the per-walker data + PSD residuals for a given state.
 

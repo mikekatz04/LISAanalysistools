@@ -2,20 +2,34 @@
    :parser: myst_parser.sphinx_
 
 .. toctree::
-   :maxdepth: 4
-   :caption: Documentation:
+   :maxdepth: 2
+   :caption: Core library:
 
+   user/backends
+   user/domains
    user/sensitivity
    user/detector
    user/response
    user/stochastic
    user/datacontainer
    user/diagnostic
+   user/likelihoodengines
    user/sources
+   user/sampling
+   user/jax
+   user/utility
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Global fit:
+
+   user/globalfitstock
    user/globalfit
    user/globalfitmoves
-   user/globalfitstock
-   user/utility
+   user/globalfit_internals
+   user/globalfitwarmstart
+   user/globalfitmonitor
+   user/legacy
 
 .. toctree::
    :maxdepth: 2
@@ -36,7 +50,7 @@ Workshop exercises
 
 The informational tutorials above are rendered here from the
 `LISA Analysis Tools Workshop (LATW) <https://github.com/lisa-analysis-tools/LATW>`_
-at its pinned ``dev`` commit. The workshop also ships a set of hands-on
+at the ``dev`` commit pinned in ``docs/latw_ref.txt``. The workshop also ships a set of hands-on
 **exercises** that are *not* reproduced in these docs -- work through them in
 the LATW repository itself:
 

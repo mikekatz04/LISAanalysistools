@@ -1,5 +1,30 @@
 """The after-save hook: page + snapshot on the saver rank, watched.
 
+Two entry points:
+
+- :func:`build_products` -- THE build: the monitor page
+  (:func:`~lisatools.globalfit.monitor.build_monitor`, or the short page)
+  and the snapshot tar
+  (:func:`~lisatools.globalfit.monitor.snapshot.build_snapshot`) for one run
+  directory. In the 9mo/12mo jobs it runs on the dedicated monitor rank
+  (``GF_MONITOR_RANK=1``) inside the memory-guarded child of
+  :mod:`~lisatools.globalfit.monitor.buildguard` (its default target).
+- :func:`after_save` with :class:`MonitorWatchdog` -- the saver-rank hook,
+  called by the saver loop
+  (:func:`~lisatools.globalfit.hdfbackend.save_to_backend_asynchronously_and_plot`)
+  after every save ONLY when no monitor rank is active (the launcher
+  disarms ``GF_MONITOR_RANK`` when the task count does not fit). The saver
+  always builds a watchdog and calls :meth:`MonitorWatchdog.note_save`.
+
+Knobs (``"1"`` = on unless stated): ``GF_MONITOR_AFTER_SAVE`` (default
+``0``; launchers ``1``; gates both the hook and the monitor rank's builds),
+``GF_MONITOR_ITER`` (build every Nth save; default 1 here, launchers 10),
+``GF_MONITOR_WARN_FRAC`` (default 0.25), ``GF_MONITOR_PAGE`` (default 1),
+``GF_MONITOR_PAGE_SHORT`` (default 0), ``GF_MONITOR_OUT`` (full-page path),
+``GF_MONITOR_TIMEOUT`` (child-render timeout, default 1800 s),
+``GF_MONITOR_SNAPSHOT`` (default 1), ``GF_MONITOR_SNAPSHOT_SHORT`` and
+``GF_MONITOR_SNAPSHOT_FSTAT`` (default 0).
+
 USER SPEC 2026-09-26: "[production of tar file and html] should occur
 right after the file is saved, on the savers rank ... but should throw
 major warnings if it is holding anything up."
@@ -59,10 +84,12 @@ __all__ = ["after_save", "build_products", "MonitorWatchdog"]
 
 
 def _flag(name: str, default: str = "0") -> bool:
+    """``True`` when env ``name`` (or ``default`` when unset) is exactly ``"1"``."""
     return os.environ.get(name, default) == "1"
 
 
 def _num(name: str, default: float) -> float:
+    """Env ``name`` as a float; ``default`` when unset or empty (warned when unparsable)."""
     try:
         return float(os.environ.get(name, "") or default)
     except ValueError:
@@ -71,7 +98,23 @@ def _num(name: str, default: float) -> float:
 
 
 class MonitorWatchdog:
-    """Per-run state for the hook: cadence, timing history, escalation."""
+    """Per-run state for the hook: cadence, timing history, escalation.
+
+    One instance per saver loop. :meth:`note_save` runs on every save;
+    :meth:`should_build` and :meth:`report` only on the saver-hook path
+    (:func:`after_save`).
+
+    Attributes:
+        disabled_reason (str or None): Set when a build cost stored
+            iterations; the hook then stays off for the rest of the run.
+        last_save_wall (float or None): ``time.monotonic()`` of the last save.
+        save_interval (float or None): Blended save interval [s]
+            (``0.5 * old + 0.5 * newest gap``).
+        builds (int): Builds reported.
+        total_build_s (float): Total build time [s].
+        delayed (int): Builds that held a save up (queued save or over the
+            ``GF_MONITOR_WARN_FRAC`` share of the interval).
+    """
 
     def __init__(self):
         self.disabled_reason: Optional[str] = None
@@ -100,6 +143,14 @@ class MonitorWatchdog:
         self.last_save_wall = now
 
     def should_build(self, i: int) -> bool:
+        """Return whether save ``i`` should build.
+
+        True when the hook is not disabled, ``GF_MONITOR_AFTER_SAVE=1``, and
+        ``i > 0`` is a multiple of ``GF_MONITOR_ITER`` (default 1).
+
+        Args:
+            i: The saver's save counter.
+        """
         if self.disabled_reason is not None:
             return False
         if not _flag("GF_MONITOR_AFTER_SAVE"):
@@ -110,6 +161,18 @@ class MonitorWatchdog:
     # -- the report ----------------------------------------------------
     def report(self, elapsed: float, *, queued_after: bool,
                dropped_delta: int) -> None:
+        """Log the cost of one build and escalate (module docstring, signals 1-3).
+
+        A dropped save state disables the hook (banner); a queued save or a
+        build above ``GF_MONITOR_WARN_FRAC`` of the save interval is a
+        "holding the saver up" banner; otherwise one INFO line.
+
+        Args:
+            elapsed: Build time [s].
+            queued_after: Whether a save was already waiting when the build
+                finished.
+            dropped_delta: Save states dropped by the saver during the build.
+        """
         self.builds += 1
         self.total_build_s += elapsed
         frac = (elapsed / self.save_interval) if self.save_interval else None
@@ -180,6 +243,20 @@ def after_save(gb_reader, comm, main_rank, i, watchdog, *,
 
     Called from the saver loop's quiet gap. Never raises: a diagnostic
     that can kill the run's only writer is worse than no diagnostic.
+
+    Skips the build when :meth:`MonitorWatchdog.should_build` says no or a
+    save is already queued (``comm.iprobe`` on ``main_rank``); otherwise
+    calls :func:`build_products` on the store's directory and reports the
+    cost.
+
+    Args:
+        gb_reader: The saver's backend (its ``filename`` locates the run
+            directory).
+        comm: The run communicator.
+        main_rank (int): The head rank (the sender of saves).
+        i (int): The saver's save counter.
+        watchdog (MonitorWatchdog): The saver's watchdog.
+        dropped_so_far: Total save states the saver has dropped.
     """
     try:
         if not watchdog.should_build(i):
@@ -215,6 +292,29 @@ def build_products(run_dir, watchdog=None):
     one implementation behind both callers: the saver-rank hook above and
     the DEDICATED MONITOR RANK (:mod:`.rank`, 2026-10-04). May raise; both
     callers catch.
+
+    Products, by env knob: the full page (``GF_MONITOR_PAGE``, default on;
+    path ``GF_MONITOR_OUT`` or ``<run_dir>_monitor.html``; build errors are
+    logged, not raised) or, with ``GF_MONITOR_PAGE_SHORT=1``, the short page
+    in its place; then the snapshot tar (``GF_MONITOR_SNAPSHOT``, default on;
+    ``GF_MONITOR_SNAPSHOT_SHORT=1`` for the short tar,
+    ``GF_MONITOR_SNAPSHOT_FSTAT=1`` to include the F-stat caches). The page
+    reads the run's ``GF_MONITOR_ADD_INFO`` itself.
+
+    Args:
+        run_dir (str): The run directory.
+        watchdog (MonitorWatchdog, optional): Used only to warn once when
+            both products are off.
+
+    Returns:
+        float or None: Seconds taken, or ``None`` when nothing was built.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.monitor.hooks import build_products
+
+            seconds = build_products("/data/gf_prod_9mo_v9")
     """
     out = os.environ.get("GF_MONITOR_OUT")
     timeout = _num("GF_MONITOR_TIMEOUT", 1800.0)

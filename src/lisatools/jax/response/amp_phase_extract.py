@@ -1,9 +1,13 @@
 """JAX port of ``new_extract_amplitude_and_phase`` + ``new_unwrap_phase``.
 
-These two functions in ``TDIonTheFly.cu:4262-4341`` (extract) and
-``TDIonTheFly.cu:4197-4258`` (unwrap) post-process the complex TDI
-samples ``M[n]`` into the ``(tdi_amp[n], tdi_phase[n])`` pair the
-downstream WDM / spline machinery consumes.
+These two ``LISATDIonTheFly`` methods (declared in
+``lisatools/cutils/lat_tdi_on_the_fly.hh``, used by ``lat_tdi_on_the_fly.cu``;
+the ``TDIonTheFly.cu:NNNN`` line numbers in the section comments refer to the
+pre-absorption lisa-on-gpu file) post-process the complex TDI samples
+``M[n]`` into the ``(tdi_amp[n], tdi_phase[n])`` pair the downstream WDM /
+spline machinery consumes. Here they are :func:`extract_amplitude_and_phase`
+and :func:`unwrap_phase`; :func:`extract_and_unwrap` applies both to every
+channel (used by ``gbgpu.jax.tdi_on_the_fly``).
 
 The algorithm:
 
@@ -40,10 +44,11 @@ def extract_amplitude_and_phase(M: jnp.ndarray, phiR: jnp.ndarray
         phiR: Real array of shape ``(N,)`` -- reference phase (``get_phase_ref``).
 
     Returns:
-        ``(As, Dphi)``, both real arrays of shape ``(N,)``. ``As`` is the
-        signed amplitude (with the sign flips folded in) and ``Dphi``
-        is the un-unwrapped phase difference; call
-        :func:`unwrap_phase` to get the production output.
+        tuple[jnp.ndarray, jnp.ndarray]: ``(As, Dphi)``, both real arrays of
+        shape ``(N,)``. ``As`` is the signed amplitude (with the sign flips
+        folded in) and ``Dphi`` is the un-unwrapped phase difference
+        ``-arg(M) + count * pi - (phiR mod 2 pi)``; call :func:`unwrap_phase`
+        to get the production output.
     """
     As_raw = jnp.abs(M)
     N = As_raw.shape[0]
@@ -93,12 +98,20 @@ def extract_amplitude_and_phase(M: jnp.ndarray, phiR: jnp.ndarray
 def unwrap_phase(phase: jnp.ndarray) -> jnp.ndarray:
     """Mirror of ``LISATDIonTheFly::new_unwrap_phase``.
 
-    Computes the per-sample correction
+    Computes the per-sample correction::
+
         d[i] = round((phase[i] - phase[i-1]) / (2 pi))
+
     and applies ``-2 pi * cumsum(d)`` so that adjacent samples differ by
     at most ``pi``. Equivalent to ``numpy.unwrap`` but starts at index 0
     (no rotation of the initial sample) -- which is what the C++ does
     so we don't drift relative to it.
+
+    Args:
+        phase: Real phase samples [rad], shape ``(N,)``.
+
+    Returns:
+        jnp.ndarray: The unwrapped phase, shape ``(N,)``.
     """
     diff = jnp.diff(phase)
     # round-to-nearest, ties-to-even -- matches C99 ``rint``/``round``
@@ -114,12 +127,23 @@ def unwrap_phase(phase: jnp.ndarray) -> jnp.ndarray:
 
 def extract_and_unwrap(M_channels: jnp.ndarray, phiR: jnp.ndarray
                        ) -> "tuple[jnp.ndarray, jnp.ndarray]":
-    """Convenience: per-channel extract+unwrap on the full (C, N) TDI block.
+    """Apply :func:`extract_amplitude_and_phase` + :func:`unwrap_phase` to each channel.
 
-    ``M_channels``: complex array of shape ``(nchannels, N)``.
-    ``phiR``: real array of shape ``(N,)``.
+    Args:
+        M_channels: Complex TDI block, shape ``(nchannels, N)``.
+        phiR: Real reference phase, shape ``(N,)``.
 
-    Returns ``(tdi_amp, tdi_phase)``, both shape ``(nchannels, N)``.
+    Returns:
+        tuple[jnp.ndarray, jnp.ndarray]: ``(tdi_amp, tdi_phase)``, both shape
+        ``(nchannels, N)``.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.jax.response import extract_and_unwrap
+
+            # M: (3, N) complex from get_tdi_Xf_single(...).T; phiR from get_phase_ref
+            tdi_amp, tdi_phase = extract_and_unwrap(M, phiR)
     """
     def per_chan(Mc):
         As, Dphi = extract_amplitude_and_phase(Mc, phiR)

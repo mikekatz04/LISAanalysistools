@@ -1,51 +1,103 @@
-"""F-statistic proposal distributions over the GB intrinsic parameters.
+r"""F-statistic proposal distributions over the GB intrinsic parameters.
 
-Implements "Family A" of ``scripts/fstat_proposal/PLAN_scattered_field_
-distributions.md``: a structured tensor grid over the 4 intrinsic sampling
-parameters, filled with batched F-statistic evaluations, turned into an
-exact-sampling distribution via the (flattened) conditional inverse-CDF.
+The GB reversible-jump F-statistic BIRTH machinery: a structured tensor grid over
+4 intrinsic parameters, filled with batched F-statistic evaluations (the fit
+itself lives in :mod:`lisatools.sampling.fstat_gridfit`), turned into an
+exact-sampling distribution via the flattened cell inverse-CDF, and wrapped into
+the 8/9-column RJ birth container. Originally "Family A" of
+``scripts/fstat_proposal/PLAN_scattered_field_distributions.md``.
 
-The target density is
+The target density on the grid box is
 
-    p(theta) ∝ exp( beta * F(theta) )        (masked to the grid box)
+.. math::
 
-with ``F = 0.5 * N^T M^{-1} N`` the Cornish-Crowder F-statistic returned by
-:meth:`lisatools.chunked_het.WDMComputationsBase.get_fstat_ll_wdm` as the
-per-binary ``(N, M)`` pair. F is a function of the 4 *intrinsic* parameters
-only -- the 4 extrinsic amplitude parameters ``(A, iota, psi, phi0)`` are
-analytically maximized inside the statistic.
+    p(\theta) \propto \exp\left[\beta\,\mathcal{F}(\theta)\right], \qquad
+    \mathcal{F} = \tfrac{1}{2}\,N^{\mathsf T} M^{-1} N, \qquad
+    N_i = \langle d | A_i \rangle, \quad M_{ij} = \langle A_i | A_j \rangle,
 
-Sampling basis (matches the stock erebor GB chirp-mass basis):
+the Cornish-Crowder F-statistic of the 4 basis filters ``A_i``, returned per
+binary as the ``(N, M)`` pair by ``get_fstat_ll_wdm``
+(:meth:`lisatools.chunked_het.WDMComputationsBase.get_fstat_ll_wdm`, or the
+sig-het scorer ``GBSignalHetComputations.get_fstat_ll_wdm`` that the production
+fit routes through :func:`~lisatools.sampling.fstat_gridfit.build_sighet_call_fstat`).
+``F`` is a function of the intrinsic parameters only -- the 4 extrinsic
+amplitude parameters ``(A, iota, psi, phi0)`` are analytically maximized inside
+the statistic. ``F`` is the maximized log-likelihood, ``2F`` the squared SNR of
+the maximizing template (so SNR thresholds are ``F = SNR^2 / 2``), and under the
+null ``2F ~ chi^2_4``. The fitted grids use ``beta = 1``.
 
-    theta = (f0 [mHz], Mc [Msol], alpha [rad], sin_delta)
+**Grid bases.** Axis 1 of every grid has two meanings, chosen by
+``FSTAT_FDOT_AXIS`` (:func:`fdot_axis_on`):
 
-``fdot`` is recovered from ``(f0, Mc)`` via the monochromatic-GB relation
-(:func:`gbgpu.utils.utility.get_fdot`) when packing the physical 9-parameter
-waveform rows for the kernel, so the proposal lives natively in the chirp-mass
-sampling basis used by :class:`lisatools.globalfit.stock.erebor.gb.GBSetup`.
+* ``FSTAT_FDOT_AXIS=1`` (default since 2026-09-01; the 9mo/12mo launcher value):
+  ``(f_mid [mHz], fdot [Hz/s], alpha [rad], sin_delta)`` with
+  ``f0 = f_mid - (T/2) fdot``. The linear fdot axis reaches ``fdot < 0`` (the
+  interacting DWDs the old basis could not birth), and :class:`FdotAxisBirth`
+  converts a grid draw into the sampling basis ``(f0, Mc, r, alpha, sin_delta)``.
+* ``FSTAT_FDOT_AXIS=0`` (legacy): ``(f0 [mHz], Mc [Msun], alpha, sin_delta)``
+  with ``fdot = fdot_gr(f0, Mc)`` (:func:`gbgpu.utils.utility.get_fdot`), i.e.
+  the ``r = 0`` manifold, which can only propose ``fdot > 0``.
 
-TODO (fdot proposal / interacting DWDs): the ``(f0, Mc)`` basis can only
-propose ``fdot > 0`` (``Mc > 0`` -> ``fdot > 0`` through the GW relation), so
-the F-stat proposal structurally cannot birth the interacting DWDs that have
-``fdot < 0`` (e.g. mass transfer). We should examine doing the F-stat proposal
-directly in ``(f0, fdot)`` instead of ``(f0, Mc)`` so negative fdot is
-representable -- making sure the fdot grid range is SCALED to each sub-band's
-frequency (the physical fdot bounds are f0-dependent; cf.
-``lisatools.globalfit.priors.gbpriors.get_fdot_mojito(f, sign=+/-)`` which
-gives the +/- fdot envelope per f0). Pairs with the legacy-basis sampling
-route and the ``fdot < 0`` seeding TODO in
-``recipe.setup_state_for_injection``. For now the workaround is to run
-sub-bands that contain no ``fdot < 0`` catalogue sources (or subtract them as
-known signals).
+The class attribute ``param_names = ("f0", "Mc", "alpha", "sin_delta")`` of the
+4-D classes names the legacy layout; under the fdot basis column 0 holds
+``f_mid`` and column 1 ``fdot``. Sky angles are ICRS (``alpha`` = RA,
+``sin_delta``). The physical 9-column rows handed to the scorer are
+``[A, f0 (Hz), fdot (Hz/s), fddot, phi0, iota, psi, alpha, delta]`` with a
+placeholder amplitude and ``iota = pi/2`` (ignored by the statistic).
 
-The distribution object is eryn duck-typed -- ``rvs(size) -> size + (4,)``
-and ``logpdf((n, 4)) -> (n,)`` -- so it registers directly in a
+**Production birth container** (built per F-stat epoch by
+:func:`~lisatools.sampling.fstat_gridfit.build_gb_birth_distribution` for the
+``rj_fstat_search``, ``rj_fstat_pe`` and ``rj_fstat_pe_residual`` moves of
+``GBSpecialRJFStatGridMove``): an eryn ``ProbDistContainer`` whose slot 0
+(``dist``, uniform in ``dist_lims``) and ``phi0`` / ``cos_iota`` / ``psi`` are
+uniform priors, and whose ``(f0, Mc, fdot_astro_ratio, alpha, sin_delta)`` block
+is ``FdotAxisBirth(UniformFloorMixture(MixtureProposal([peak stack, comb])))``
+-- the peak stack a :class:`StackedFStatProposal4D` or
+:class:`GroupedStackedFStatProposal`, the comb a :class:`CombIntrinsicProposal`.
+
+**Entry points.** :func:`compute_fstat` / :func:`fstat_maximized_extrinsics`
+(the statistic and its maximizers); :class:`StackedFStatProposal4D`,
+:class:`GroupedStackedFStatProposal`, :func:`stacked_from_cache` (the peak
+grids); :class:`UniformFloorMixture`, :class:`MixtureProposal`,
+:class:`CombIntrinsicProposal`, :class:`FdotAxisBirth`,
+:class:`RatioTightenedBirth`, :func:`make_gb_rj_birth_container`,
+:func:`reseed_birth_tree` (the container); the knob resolvers below; the GMM
+pack/unpack helpers used by the warm start. :class:`FStatProposal4D` /
+:class:`GridSpec` are the standalone single-box version used by the
+``scripts/fstat_proposal`` tools.
+
+**Knobs read here** (an explicit environment value always wins):
+
+* through :func:`fstat_knob` / :data:`FSTAT_KNOB_DEFAULTS`: ``FSTAT_BATCH``
+  (4096 rows per scorer call), ``FSTAT_PEAKS_PER_BAND`` (200; launchers 200),
+  ``FSTAT_PEAK_HALF_MHZ`` (2.5e-3 mHz peak-box half width), ``FSTAT_MC_MIN``
+  (0.01), ``FSTAT_MC_ETA`` (1.0), ``FSTAT_N_ALPHA`` / ``FSTAT_N_SINDELTA`` (8;
+  setting either pins the stage-B sky), ``FSTAT_FLOOR_EPS`` (0.1),
+  ``FSTAT_COMB_WEIGHT`` (0.3), and the offline-prep keys ``FSTAT_PEAK_SAMPLING``,
+  ``FSTAT_FIT_GMM``, ``FSTAT_GMM_SAMPLES``, ``FSTAT_GMM_MAX_COMP``,
+  ``FSTAT_PLOT_PEAKS``;
+* peak floor: the in-code override (:func:`set_peak_min_F_override`, set per
+  recipe stage: SNR 8 in the seed / ``gb_search_1`` stages, 6.25 in
+  ``gb_search_2`` and ``full_pe``; :func:`peak_min_snr_scope` gives
+  ``rj_fstat_pe`` its own 6.5 from ``GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE``), then
+  ``FSTAT_PEAK_MIN_SNR`` (launchers 8.0), then ``FSTAT_PEAK_MIN_F``;
+  ``FSTAT_PEAK_MIN_SNR_COARSE`` / ``FSTAT_PEAK_MIN_SNR_FINE`` (6.25) for the
+  per-walker stage schedule (off in the launchers);
+* node counts: ``FSTAT_N_F0``, ``FSTAT_N_MC``, ``FSTAT_N_PER_AXIS``;
+* ``FSTAT_FDOT_AXIS`` (default ``"1"``; launchers 1) and ``GB_FSTAT_KEEP_NODES``
+  (unset in the launchers; the recipe drops the node grids because no replace
+  move is composed).
+
+The distributions are eryn duck-typed -- ``rvs(size) -> size + (ndim,)`` and
+``logpdf((n, ndim)) -> (n,)`` -- so they register directly in a
 ``ProbDistContainer`` under a tuple key, e.g.
-``{("f0", "Mc", "alpha", "sin_delta"): proposal}``.
+``{("f0", "Mc", "alpha", "sin_delta"): proposal}``. Each owns a private
+``np.random.Generator`` that :func:`reseed_birth_tree` re-derives from one
+integer per rank and epoch.
 
-Everything is ``xp``-agnostic: the array module is taken from the supplied
-``gb_wdm_comp`` (numpy on CPU, cupy on CUDA backends). Per the sprint
-deepcopy/pickle rule no array module is stored as an attribute.
+Everything is ``xp``-agnostic: the array module is taken from the inputs (or
+from the supplied ``gb_wdm_comp``; numpy on CPU, cupy on CUDA backends). Per the
+sprint deepcopy/pickle rule no array module is stored as an attribute.
 """
 
 from __future__ import annotations
@@ -175,8 +227,30 @@ FSTAT_KNOB_DEFAULTS = {
 
 
 def fstat_knob(name: str, cast=float):
-    """Resolve an ``FSTAT_*`` env knob against :data:`FSTAT_KNOB_DEFAULTS`
-    (explicit environment value wins)."""
+    """Resolve an ``FSTAT_*`` env knob against :data:`FSTAT_KNOB_DEFAULTS`.
+
+    A non-empty (after ``strip``) environment value wins; otherwise the table
+    default is used. Read at every call (no caching), so a knob change takes
+    effect at the next fit. Used throughout this module and
+    :mod:`lisatools.sampling.fstat_gridfit` (batch size, peak cap, box half
+    width, floor and comb weights, ...).
+
+    Args:
+        name: Knob name; must be a key of :data:`FSTAT_KNOB_DEFAULTS`.
+        cast (callable, optional): Converter applied to the raw string or the
+            default (``float``, ``int``, ``str``). Default ``float``.
+
+    Returns:
+        object: ``cast(value)``.
+
+    Raises:
+        KeyError: ``name`` is unset in the environment and has no default.
+        ValueError: ``cast`` rejects the value.
+
+    Example:
+        >>> from lisatools.sampling.fstat_proposal import fstat_knob
+        >>> batch = fstat_knob("FSTAT_BATCH", int)
+    """
     raw = os.environ.get(name, "").strip()
     if raw:
         return cast(raw)
@@ -210,6 +284,20 @@ def set_peak_min_F_override(value) -> Optional[float]:
     line use -- and is stored as ``F = SNR^2 / 2``. Returns the PREVIOUS
     override in F units so a caller can tell whether it actually changed
     anything and restore it if it must.
+
+    Called at stage entry by the recipe: ``SearchStageProfileStep._apply_profile``
+    (the v9 profile's ``peak_min_snr``: 8 for ``gb_search_seed`` /
+    ``gb_search_1``, 6.25 for ``gb_search_2``) and
+    ``PERecipeStep.note_recipe_step`` (``full_pe``: 6.25, or ``None`` to clear).
+    Process-global: it changes what every later :func:`fstat_peak_min_F` returns.
+
+    Args:
+        value (float or None): Peak floor as an SNR; ``None`` clears the
+            override.
+
+    Returns:
+        float or None: The previous override in F units (``None`` when none was
+        set).
     """
     global _PEAK_MIN_F_OVERRIDE
     prev = _PEAK_MIN_F_OVERRIDE
@@ -219,7 +307,14 @@ def set_peak_min_F_override(value) -> Optional[float]:
 
 
 def peak_min_F_override() -> Optional[float]:
-    """The live override in F units, or ``None`` when unset."""
+    """The live override in F units, or ``None`` when unset.
+
+    Read by ``SearchStageProfileStep._apply_profile`` to decide whether a stage
+    entry changed the floor (and must force an F-stat refit).
+
+    Returns:
+        float or None: ``SNR^2 / 2`` of the installed override, or ``None``.
+    """
     return _PEAK_MIN_F_OVERRIDE
 
 
@@ -245,9 +340,21 @@ _STACKED_KEEP_NODES: bool = True
 
 
 def set_stacked_keep_nodes(flag) -> bool:
-    """Install the process-wide default for ``keep_nodes=None`` containers;
-    returns the previous value. The recipe calls this once per process with
-    "a replace move is composed" (see :data:`_STACKED_KEEP_NODES`)."""
+    """Install the process-wide default for ``keep_nodes=None`` containers.
+
+    The recipe (:func:`lisatools.globalfit.recipe.build_gb_moves`) calls this
+    once per process with "a replace move is composed" (see
+    :data:`_STACKED_KEEP_NODES`); the 9mo/12mo runs compose none
+    (``GB_SEARCH_RJ_REPLACE=0``, ``GB_PE_RJ_REPLACE=0``), so they pass ``False``
+    and every stacked grid drops its node stack after construction.
+    ``GB_FSTAT_KEEP_NODES`` still overrides the result (:func:`stacked_keep_nodes`).
+
+    Args:
+        flag (bool): Keep the node grids (``True``) or drop them (``False``).
+
+    Returns:
+        bool: The previous default.
+    """
     global _STACKED_KEEP_NODES
     prev = bool(_STACKED_KEEP_NODES)
     _STACKED_KEEP_NODES = bool(flag)
@@ -255,9 +362,15 @@ def set_stacked_keep_nodes(flag) -> bool:
 
 
 def stacked_keep_nodes() -> bool:
-    """The resolved default: ``GB_FSTAT_KEEP_NODES`` (``1`` / ``0``) when set,
-    else the recipe's :func:`set_stacked_keep_nodes` value (``True`` until
-    the recipe says otherwise)."""
+    """The resolved ``keep_nodes`` default for :class:`StackedFStatProposal4D`.
+
+    ``GB_FSTAT_KEEP_NODES`` (``"1"`` / ``"0"``) when set to one of those, else
+    the recipe's :func:`set_stacked_keep_nodes` value (``True`` until the recipe
+    says otherwise). Read once per stacked-grid construction.
+
+    Returns:
+        bool: Whether a ``keep_nodes=None`` container retains its node grids.
+    """
     env = os.environ.get("GB_FSTAT_KEEP_NODES", "").strip()
     if env in ("0", "1"):
         return env == "1"
@@ -280,6 +393,25 @@ def peak_min_snr_scope(snr):
     refit decline), all of it on the head inside one move's ``setup()``, so
     scoping the process-global override around that call gives each move its
     own floor while every other reader keeps seeing the stage's.
+
+    Used by ``GBSpecialRJFStatGridMove.setup`` with the move's
+    ``fstat_peak_min_snr`` (6.5 on ``rj_fstat_pe`` from
+    ``GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE``; ``None`` on the other F-stat moves).
+
+    Args:
+        snr (float or None): The move's floor as an SNR; ``None`` is a no-op.
+
+    Yields:
+        None: Control, with the override set to ``snr**2 / 2`` for the block;
+        the previous raw value is restored on exit, even on an exception.
+
+    Example:
+        >>> from lisatools.sampling.fstat_proposal import (
+        ...     fstat_peak_min_F, peak_min_snr_scope)
+        >>> with peak_min_snr_scope(6.5):
+        ...     floor = fstat_peak_min_F()
+        >>> floor
+        21.125
     """
     global _PEAK_MIN_F_OVERRIDE
     if snr is None:
@@ -305,6 +437,14 @@ def fstat_peak_min_F() -> float:
     the RUN's floor, set once in the submit script, while the override is
     the STAGE's floor and the stage is the narrower, later statement. A run
     that sets no override is bit-identical to before.
+
+    In the 9mo/12mo runs ``FSTAT_PEAK_MIN_SNR=8.0`` and the recipe overrides it
+    per stage (see :func:`set_peak_min_F_override`). Read by peak selection
+    (:func:`~lisatools.sampling.fstat_gridfit.select_comb_peaks`), the stage-B
+    cache stamp and its load check, and the GB moves and recipe.
+
+    Returns:
+        float: The floor in F units.
     """
     if _PEAK_MIN_F_OVERRIDE is not None:
         return float(_PEAK_MIN_F_OVERRIDE)
@@ -337,6 +477,18 @@ def fstat_peak_min_F_stages() -> tuple:
     ruling: a peak a walker is not ready for costs some proposal mass and
     dies in that walker's own SNR gate, while a peak missing from the
     catalog is invisible to every walker.
+
+    Only reached through :func:`fstat_band_min_F`, i.e. with the per-walker
+    search-stage table bound (``GB_SEARCH_STAGE_PER_WALKER=1``); the 9mo/12mo
+    launchers export 0, so production fits never call it.
+
+    Returns:
+        tuple[float, float]: ``(coarse_F, fine_F)``; ``coarse_F`` from
+        ``FSTAT_PEAK_MIN_SNR_COARSE`` (else :func:`fstat_peak_min_F`), ``fine_F``
+        from ``FSTAT_PEAK_MIN_SNR_FINE`` (default SNR 6.25, F = 19.53).
+
+    Raises:
+        ValueError: The fine floor is above the coarse floor.
     """
     coarse_env = os.environ.get("FSTAT_PEAK_MIN_SNR_COARSE", "").strip()
     coarse = (0.5 * float(coarse_env) ** 2 if coarse_env
@@ -365,6 +517,22 @@ def fstat_band_min_F(band_stage, num_bands: int):
 
     ``band_stage`` of ``None`` (feature off) returns ``None``, and every
     caller then keeps the scalar floor it has always used.
+
+    Called by ``gbspecialstretch.fstat_band_min_F_for``, which passes
+    ``None`` unless ``GB_SEARCH_STAGE_PER_WALKER=1`` (0 in the 9mo/12mo
+    launchers).
+
+    Args:
+        band_stage (array_like or None): ``(nwalkers, nbands)`` or ``(nbands,)``
+            integer stage table (0 = coarse, >= 1 = fine), or ``None``.
+        num_bands: Number of sub-bands of the peak grid.
+
+    Returns:
+        np.ndarray or None: ``(num_bands,)`` float F floors, or ``None``.
+
+    Raises:
+        ValueError: The table does not cover ``num_bands`` bands, or (from
+            :func:`fstat_peak_min_F_stages`) the floors are inverted.
     """
     if band_stage is None:
         return None
@@ -399,7 +567,21 @@ def fstat_band_skip(shut_w, num_bands: int):
     This is the PER-WALKER half of the skip set only. The fit's caller,
     ``gbspecialstretch.fstat_band_skip_for``, ORs in the per-band
     empty-band valve (births OFF there on every walker by construction)
-    and applies the empty-catalog guard to the union.
+    and applies the empty-catalog guard to the union. Live in the 9mo/12mo
+    search stages (``GB_SEARCH_BAND_SHUTOFF_PER_WALKER=1`` with the all-walker
+    rule); PE fits pass no valve.
+
+    Args:
+        shut_w (array_like or None): ``(nwalkers, nbands)`` or ``(nbands,)`` bool
+            valve table (True = shut), or ``None``.
+        num_bands: Number of sub-bands of the peak grid.
+
+    Returns:
+        np.ndarray or None: ``(num_bands,)`` bool, True where every walker is
+        shut; ``None`` when ``shut_w`` is ``None``.
+
+    Raises:
+        ValueError: The table does not cover ``num_bands`` bands.
     """
     if shut_w is None:
         return None
@@ -424,7 +606,20 @@ def fstat_n_f0(box_width_mHz: float, Tobs_s: float) -> int:
     AUTO -- one cell per ~1/Tobs (the matched-filter peak width), clamped to
     ``[12, 96]`` (~40 for the default +-2.5e-3 mHz box at 90 d). The f0
     cell width is the proposal's sharpest efficiency lever: cells much wider
-    than the peak spread birth mass off-source.
+    than the peak spread birth mass off-source. Neither knob is set by the
+    9mo/12mo launchers, so the AUTO rule applies there; with the default box it
+    hits the 96 clamp beyond ~7 months of data, i.e. on both runs. Called once
+    per stage-B fit by
+    :func:`~lisatools.sampling.fstat_gridfit.run_stacked_stage_b` with
+    ``box_width_mHz = 2 * FSTAT_PEAK_HALF_MHZ``.
+
+    Args:
+        box_width_mHz: Full f0 width of a peak box (mHz).
+        Tobs_s: Observation span (s).
+
+    Returns:
+        int: ``clip(round(box_width_mHz / (1e3 / Tobs_s)) + 1, 12, 96)`` under
+        AUTO, else the explicit knob value.
     """
     raw = os.environ.get("FSTAT_N_F0", "").strip()
     if raw:
@@ -440,7 +635,12 @@ _MSUN_S = 4.925490947641267e-6  # GM_sun / c^3 [s]
 
 
 def _fdot_gr(mc, f0_hz):
-    """GR chirp fdot [Hz/s] at chirp mass ``mc`` [Msun], ``f0_hz`` [Hz]."""
+    """GR chirp fdot [Hz/s] at chirp mass ``mc`` [Msun], ``f0_hz`` [Hz].
+
+    Scalar helper of :func:`fstat_n_mc` (note the ``(mc, f0)`` argument order,
+    the reverse of :func:`lisatools.sampling.gb_observable_basis.fdot_gr`). Uses
+    the hard-coded ``_MSUN_S = GM_sun / c^3`` above rather than lisaconstants.
+    """
     return (
         (96.0 / 5.0) * np.pi ** (8.0 / 3.0)
         * (_MSUN_S * float(mc)) ** (5.0 / 3.0)
@@ -462,6 +662,11 @@ def fdot_axis_on() -> bool:
     the r = 0 grid bit-identically -- but note that an existing
     ``*_peaks_stacked.npz`` fitted in the other basis is REFUSED on load
     (by design), so flipping this on an in-flight run means refitting.
+    The 9mo/12mo launchers export ``FSTAT_FDOT_AXIS=1``.
+
+    Returns:
+        bool: ``True`` unless ``FSTAT_FDOT_AXIS`` (stripped) is something other
+        than ``"1"``.
     """
     return os.environ.get("FSTAT_FDOT_AXIS", "1").strip() == "1"
 
@@ -487,6 +692,20 @@ def fstat_n_mc(f0_mHz: float, mc_lo: float, mc_hi: float,
     n (stage B only); the 1-yr clamp at 96 is a documented limitation --
     the comb's Mc-fixed detection stage decoheres there anyway and needs
     its own design (fdot-resolved or warm-started comb) first.
+
+    Legacy Mc-axis path only: :func:`~lisatools.sampling.fstat_gridfit.run_stacked_stage_b`
+    calls it per box when ``FSTAT_FDOT_AXIS=0``; the production fdot axis sizes
+    its nodes with :func:`lisatools.sampling.gb_observable_basis.n_fdot_nodes`
+    instead.
+
+    Args:
+        f0_mHz: Box frequency (mHz).
+        mc_lo: Lower Mc of the grid box (Msun).
+        mc_hi: Upper Mc of the grid box (Msun).
+        Tobs_s: Observation span (s).
+
+    Returns:
+        int: Mc node count.
     """
     raw = os.environ.get("FSTAT_N_MC", "").strip()
     if raw:
@@ -514,7 +733,15 @@ def fstat_n_axis(name: str) -> int:
     any of the three env vars above is set, ``run_stacked_stage_b`` takes it
     as an instruction to pin the sky and skips the f0-adaptive sizing
     entirely. Reading the return value does not by itself mean the adaptive
-    path is off -- the caller checks the environment for that.
+    path is off -- the caller checks the environment for that. The 9mo/12mo
+    launchers set none of them (adaptive stage-B sky, ``FSTAT_STAGEB_SKY_ADAPT=1``).
+
+    Args:
+        name: ``"FSTAT_N_MC"``, ``"FSTAT_N_ALPHA"`` or ``"FSTAT_N_SINDELTA"``
+            (any key of :data:`FSTAT_KNOB_DEFAULTS` works).
+
+    Returns:
+        int: The node count.
     """
     raw = os.environ.get(name, "").strip()
     if raw:
@@ -526,7 +753,17 @@ def fstat_n_axis(name: str) -> int:
 
 
 def _host(x):
-    """cupy/numpy array -> host numpy (no-op on numpy)."""
+    """cupy/numpy array -> host numpy (no-op on numpy).
+
+    Also imported by :mod:`lisatools.sampling.fstat_gridfit` as ``_to_host``.
+
+    Args:
+        x (array_like): A cupy array (``.get()`` is called) or anything
+            ``np.asarray`` accepts.
+
+    Returns:
+        np.ndarray: Host array.
+    """
     return x.get() if hasattr(x, "get") else np.asarray(x)
 
 
@@ -554,7 +791,15 @@ def _host(x):
 
 
 def _child_seeds(ss, n: int):
-    """``n`` independent integer seeds spawned off ``ss`` (a SeedSequence)."""
+    """``n`` independent integer seeds spawned off ``ss`` (a SeedSequence).
+
+    Args:
+        ss (np.random.SeedSequence): Parent sequence (``spawn`` advances it).
+        n: Number of children.
+
+    Returns:
+        list[int]: One uint32-derived integer seed per child.
+    """
     return [int(kid.generate_state(1, dtype=np.uint32)[0])
             for kid in ss.spawn(int(n))]
 
@@ -585,6 +830,14 @@ def _reseed_node(node, seed):
     ``FullGaussianMixtureModel`` returns through the ``priors_in`` branch
     before the check is reached (its wrapped child is ``base_prior``, not
     ``base``), so the legitimate skips are unaffected.
+
+    Args:
+        node (object or None): The node; ``None`` is a no-op.
+        seed (int or None): Integer seed; ``None`` is a no-op.
+
+    Raises:
+        TypeError: ``node`` owns ``_rng`` / ``base`` / ``components`` / ``grid4``
+            but has no ``reseed`` method.
     """
     if node is None or seed is None:
         return
@@ -618,7 +871,22 @@ def reseed_birth_tree(obj, seed):
     that forgot ``reseed`` then fails loudly in the birth-seed unit test
     instead of silently leaving a birth stream on entropy in a production run.
 
-    ``seed=None`` is a no-op (the type check still runs).
+    ``seed=None`` is a no-op (the type check still runs). Called once per
+    container by
+    :func:`~lisatools.sampling.fstat_gridfit.build_gb_birth_distribution` with
+    the move's per-rank, per-epoch ``_birth_seed(k)`` (``None`` when
+    ``general.random_seed`` is unset).
+
+    Args:
+        obj (object): The container root (a ``reseed`` owner or a
+            ``ProbDistContainer``).
+        seed (int or None): One integer for the whole tree.
+
+    Returns:
+        object: ``obj`` itself (reseeded in place).
+
+    Raises:
+        TypeError: ``obj`` (or a node inside it) cannot be reseeded.
     """
     if not (callable(getattr(obj, "reseed", None))
             or isinstance(getattr(obj, "priors_in", None), dict)):
@@ -641,21 +909,42 @@ _TRIU_COLS = (0, 1, 2, 3, 1, 2, 3, 2, 3, 3)
 
 
 def compute_fstat(N_arr, M_upper, ridge: float = 1e-12):
-    """``F = 0.5 * N^T M^{-1} N`` from the batched ``(N, M)`` F-stat pieces.
+    r"""``F = 0.5 * N^T M^{-1} N`` from the batched ``(N, M)`` F-stat pieces.
+
+    .. math::
+
+        \mathcal{F} = \tfrac{1}{2}\, N^{\mathsf T}
+            \left(M + \epsilon\,\bar m\,\mathbb{1}\right)^{-1} N,
+        \qquad \bar m = \max\!\left(\tfrac{1}{4}\textstyle\sum_i |M_{ii}|,
+            10^{-300}\right),
+
+    with ``epsilon = ridge``, solved per binary with ``xp.linalg.solve``. This is
+    the scorer of every comb, stage-B and center sweep in
+    :mod:`lisatools.sampling.fstat_gridfit` (and of the para-search tool).
 
     Args:
-        N_arr: ``(num_bin, 4)`` data-filter inner products ``<d | A_i>``.
-        M_upper: ``(num_bin, 10)`` row-major upper triangle of the symmetric
-            filter Gram matrix ``<A_i | A_j>``.
+        N_arr (xp.ndarray): ``(num_bin, 4)`` data-filter inner products
+            ``<d | A_i>`` (1-D input is promoted to one row).
+        M_upper (xp.ndarray): ``(num_bin, 10)`` row-major upper triangle of the
+            symmetric filter Gram matrix ``<A_i | A_j>``, ordered
+            ``[M00, M01, M02, M03, M11, M12, M13, M22, M23, M33]``.
         ridge: Fractional Tikhonov regularization added to the diagonal
             (scaled by the mean diagonal per binary) so grid cells with a
             near-singular Gram matrix (e.g. dead sky/frequency corners)
-            return a finite, tiny F instead of raising.
+            return a finite, tiny F instead of raising. Default ``1e-12``.
 
     Returns:
-        ``(num_bin,)`` F-statistic values (same array module as the inputs;
-        non-finite results are mapped to ``-inf`` so downstream
+        xp.ndarray: ``(num_bin,)`` float64 F-statistic values (same array module
+        as the inputs; non-finite results are mapped to ``-inf`` so downstream
         ``exp(beta * F)`` weights vanish cleanly).
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.sampling.fstat_proposal import compute_fstat
+        >>> N = np.array([[1.0, 0.0, 0.0, 0.0]])
+        >>> M = np.array([[2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 2.0, 0.0, 2.0]])
+        >>> float(np.round(compute_fstat(N, M)[0], 6))
+        0.25
     """
     from ..utils.utility import get_array_module
 
@@ -682,18 +971,32 @@ def compute_fstat(N_arr, M_upper, ridge: float = 1e-12):
 
 
 def fstat_maximized_extrinsics(N_arr, M_upper, ridge: float = 1e-12):
-    """``(A_max, phi0_max, iota_max, psi_max, F)`` from the F-stat ``(N, M)``.
+    r"""``(A_max, phi0_max, iota_max, psi_max, F)`` from the F-stat ``(N, M)``.
 
     Ports the Jaranowski-Krol amplitude-vector inversion from
     ``gbgpu.GBGPU.get_fstat_ll`` to the ``(N, M)`` pieces returned by the new
     ``GBFDComputations.get_fstat_ll_fd`` / ``GBWDMComputations.get_fstat_ll_wdm``
+    (and the sig-het ``GBSignalHetComputations.get_fstat_ll_wdm``)
     -- which build the SAME 4 basis filters at the SAME fixed reference
     ``(A, iota, psi, phi0) = (2, pi/2, {0,pi/4,0,pi/4}, {0,pi,3pi/2,pi/2})`` and
     return the SAME 10-element upper-triangle ``M`` layout, so the inversion is
     identical. ``a = M^-1 N`` is the ML amplitude vector; ``A_max`` is the
     physical maximized amplitude (reference A=2 baked into the filters, matching
-    the legacy formula) and ``F = 0.5 * a . N``.
+    the legacy formula) and ``F = 0.5 * a . N``. With ``a = (a1, a2, a3, a4)``:
 
+    .. math::
+
+        r_{1,2} &= \sqrt{(a_1 \mp a_4)^2 + (a_2 \pm a_3)^2}, \qquad
+        A_+ = r_1 + r_2, \quad A_\times = r_1 - r_2, \\
+        A_{\max} &= \tfrac{1}{2}\left(A_+ + \sqrt{A_+^2 - A_\times^2}\right), \qquad
+        \iota_{\max} = \arccos\!\frac{A_\times}{A_+ + \sqrt{A_+^2 - A_\times^2}}
+            \bmod \pi, \\
+        \alpha &= \operatorname{atan2}(-(a_2 + a_3),\, a_1 - a_4), \qquad
+        \beta = \operatorname{atan2}(a_2 - a_3,\, a_1 + a_4), \\
+        \phi_{0,\max} &= -\tfrac{1}{2}(\alpha + \beta) \bmod 2\pi, \qquad
+        \psi_{\max} = \tfrac{1}{4}(\alpha - \beta) \bmod \pi.
+
+    Here ``alpha`` and ``beta`` are auxiliary angles, not sky coordinates.
     Numerically guarded (ridge on ``M``, non-negative discriminant, clipped
     ``arccos``) so near-singular / off-peak births return finite maxima instead
     of NaN. Same array module as the inputs.
@@ -702,7 +1005,47 @@ def fstat_maximized_extrinsics(N_arr, M_upper, ridge: float = 1e-12):
     amplitude on a noise-free truth residual through the GBGPU CPU basis
     filters), retiring the old "known adjustment" TODO here; the actual
     long-standing defect was the psi/phi0 angle convention, fixed below
-    (see the inline calibration note).
+    (see the inline calibration note). ``phi0_max`` is the sampling-basis
+    ``phi0`` and ``psi_max`` the sampling-basis ``psi``.
+
+    Callers: :func:`~lisatools.sampling.fstat_gridfit.run_center_sweep` (the
+    per-epoch center table, built every epoch in the 9mo/12mo runs under
+    ``GB_FSTAT_CTR_MODE=epoch``), ``GBSpecialBase._fstat_dist_centers`` (the
+    F-stat distance birth / replace path) and the para-search tool. The table's
+    entries are consumed only by the distance birth (``GB_RJ_FSTAT_DIST_BIRTH=0``
+    in the launchers) and the replace moves (not composed), so in production
+    the table is built but none of these outputs reaches a birth.
+
+    Args:
+        N_arr (xp.ndarray): ``(num_bin, 4)`` data-filter inner products.
+        M_upper (xp.ndarray): ``(num_bin, 10)`` upper-triangle Gram matrix (the
+            :func:`compute_fstat` layout).
+        ridge: Fractional diagonal ridge, as in :func:`compute_fstat`. Default
+            ``1e-12``.
+
+    Returns:
+        tuple: ``(A_max, phi0_max, iota_max, psi_max, F)``, each a
+        ``(num_bin,)`` float64 array on the input module: ``A_max`` the
+        maximized strain amplitude (0 where non-finite), ``phi0_max`` in
+        ``[0, 2 pi)``, ``iota_max`` in ``[0, pi)`` (see the warning),
+        ``psi_max`` in ``[0, pi)``, and ``F`` (``-inf`` where non-finite).
+
+    Warning:
+        DORMANT cos(iota) SIGN DEFECT (found 2026-10-16; left unfixed by
+        ruling). The returned ``iota_max`` is ``pi - iota`` of the source on
+        BOTH F-stat paths (the sig-het shared-reference scorer and the chunked
+        ``get_fstat_ll_wdm``): ``cos(iota_max) = -cos(iota)`` in the GB
+        sampling convention, so a consumer that pins or centers
+        ``cos_iota = cos(iota_max)`` gets the wrong sign (28-60 nats lost at
+        ``|cos iota|`` 0.3-0.6 on SNR-10 noise-free injections), while
+        ``-cos(iota_max)`` reproduces ``F`` on all four scorers. ``A_max``,
+        ``phi0_max``, ``psi_max`` and ``F`` are correct. The affected
+        consumers -- the F-stat distance birth's pin and the PE extrinsic draw
+        centres (:func:`pe_extrinsic_rvs` / :func:`pe_extrinsic_logpdf` use
+        ``cos(iota_c % pi)``) and the replace pins -- are all off in the
+        9mo/12mo runs (``GB_RJ_FSTAT_DIST_BIRTH=0``, no replace move); the
+        center table stores the uncorrected ``iota``. Repro:
+        ``scripts/diagnostics/xcheck_fstat_cos_iota.py``.
     """
     from ..utils.utility import get_array_module
 
@@ -753,6 +1096,12 @@ def fstat_maximized_extrinsics(N_arr, M_upper, ridge: float = 1e-12):
     # candidate's <r|h> (root cause of rj_replace's delta shortfall even
     # at exact intrinsics; verified: corrected pins recover the full
     # truth delta, match 1.0000).
+    #
+    # 2026-10-16 CORRECTION: ``iota_max`` is NOT right in the sampling
+    # convention -- it comes out as ``pi - iota`` (cos flipped) on both F-stat
+    # paths; see the docstring Warning and
+    # scripts/diagnostics/xcheck_fstat_cos_iota.py. Dormant in production, left
+    # unfixed by ruling.
     r1 = xp.sqrt((a1 - a4) ** 2 + (a2 + a3) ** 2)
     r2 = xp.sqrt((a1 + a4) ** 2 + (a2 - a3) ** 2)
     A_plus = r1 + r2       # = 2 A+  (legacy scale convention retained)
@@ -872,6 +1221,7 @@ def _pe_log_i0(x, xp):
     return xp.log(i0e(x)) + xp.abs(x)
 
 
+# TODO check: keep/remove/document -- only reachable through the F-stat distance birth / replace centre path (GB_RJ_FSTAT_DIST_BIRTH=1), off in the 9mo/12mo runs and by default
 def pe_extrinsic_sigma(ln_snr, geom: float = 2.0):
     """Angle-coordinate proposal width from the F-stat curvature.
 
@@ -895,6 +1245,7 @@ def _pe_logaddexp(a, b, xp):
     return xp.where(xp.isfinite(m), out, -xp.inf)
 
 
+# TODO check: keep/remove/document -- only caller GBSpecialBase._pe_extr_logg (via _pe_or_pin_extrinsics: the F-stat distance birth, GB_RJ_FSTAT_DIST_BIRTH=1, and the PE replace step); both off in the 9mo/12mo runs
 def pe_extrinsic_logpdf(phi0, cos_iota, psi, phi0_c, iota_c, psi_c, ln_snr,
                         eps: float = 0.05, geom: float = 2.0):
     """Joint log density of the PE-mode extrinsic proposal.
@@ -1006,6 +1357,7 @@ def _pe_vonmises_rvs(kappa, rand, xp):
     return xp.where(tiny, 2.0 * np.pi * rand(n) - np.pi, theta)
 
 
+# TODO check: keep/remove/document -- only caller GBSpecialBase._pe_extr_draw (via _pe_or_pin_extrinsics: the F-stat distance birth, GB_RJ_FSTAT_DIST_BIRTH=1, and the PE replace step); both off in the 9mo/12mo runs
 def pe_extrinsic_rvs(phi0_c, iota_c, psi_c, ln_snr, eps: float = 0.05,
                      geom: float = 2.0, rand=None, seed: Optional[int] = None):
     """Draw ``(phi0, cos_iota, psi)`` from the PE-mode extrinsic proposal.
@@ -1069,9 +1421,28 @@ class GridSpec:
     """Tensor-grid design over the 4 intrinsic sampling parameters.
 
     Ranges are the closed box edges; ``n_*`` are the node counts per axis
-    (``n`` nodes -> ``n - 1`` cells). Units match the sampling basis:
+    (``n`` nodes -> ``n - 1`` cells). Units match the legacy sampling basis:
     ``f0`` in mHz, ``Mc`` in solar masses, ``alpha`` in radians (ICRS RA),
-    ``sin_delta`` dimensionless in ``[-1, 1]``.
+    ``sin_delta`` dimensionless in ``[-1, 1]``. The design of a single
+    :class:`FStatProposal4D` box (offline / script use; the in-run fit builds
+    its boxes in :mod:`lisatools.sampling.fstat_gridfit`).
+
+    Args:
+        f0_range: ``(lo, hi)`` f0 box edges (mHz).
+        Mc_range: ``(lo, hi)`` chirp-mass box edges (Msun).
+        alpha_range: ``(lo, hi)`` right-ascension box edges (rad).
+        sin_delta_range: ``(lo, hi)`` sin(declination) box edges.
+        n_f0: f0 node count. Default ``24``.
+        n_Mc: Mc node count. Default ``24``.
+        n_alpha: alpha node count. Default ``24``.
+        n_sin_delta: sin_delta node count. Default ``24``.
+
+    Example:
+        >>> from lisatools.sampling.fstat_proposal import GridSpec
+        >>> spec = GridSpec((3.0, 3.01), (0.1, 1.0), (0.0, 6.28), (-1.0, 1.0),
+        ...                 n_f0=12, n_Mc=4, n_alpha=8, n_sin_delta=8)
+        >>> spec.shape
+        (12, 4, 8, 8)
     """
 
     f0_range: Tuple[float, float]
@@ -1084,6 +1455,12 @@ class GridSpec:
     n_sin_delta: int = 24
 
     def axes(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """The four uniformly spaced node axes (``np.linspace`` over each range).
+
+        Returns:
+            tuple: ``(f0_ax [mHz], Mc_ax [Msun], alpha_ax [rad], sin_delta_ax)``,
+            host float arrays of lengths ``n_f0, n_Mc, n_alpha, n_sin_delta``.
+        """
         return (
             np.linspace(*map(float, self.f0_range), int(self.n_f0)),
             np.linspace(*map(float, self.Mc_range), int(self.n_Mc)),
@@ -1093,6 +1470,7 @@ class GridSpec:
 
     @property
     def shape(self) -> Tuple[int, int, int, int]:
+        """Node-grid shape ``(n_f0, n_Mc, n_alpha, n_sin_delta)``."""
         return (int(self.n_f0), int(self.n_Mc), int(self.n_alpha), int(self.n_sin_delta))
 
 
@@ -1102,30 +1480,54 @@ class FStatProposal4D:
     Construction sweeps the F-statistic over the :class:`GridSpec` nodes in
     batched ``get_fstat_ll_wdm`` calls, stores ``g = beta * F`` on the node
     grid, and precomputes the flattened cell CDF. The represented density is
-    piecewise-constant on the ``(n - 1)^4`` cells (each cell carries its
-    lower-corner node's ``g``), which makes ``rvs`` and ``logpdf`` *exactly*
-    consistent with each other.
+    piecewise-constant on the ``(n - 1)^4`` cells (each cell carries the
+    average of ``exp(g)`` over its 2^4 corner nodes -- see :meth:`_build_cdf`),
+    which makes ``rvs`` and ``logpdf`` *exactly* consistent with each other.
+
+    The standalone single-box proposal (the in-run birth grid is the stacked
+    :class:`StackedFStatProposal4D`). Used by the ``scripts/fstat_proposal``
+    plotting / mock tools; not on the 9mo/12mo run path.
 
     Args:
-        gb_wdm_comp: Object providing ``get_fstat_ll_wdm(params, wdm_holder)
-            -> (N, M_upper)`` -- normally a ``gbgpu.gbcomps.GBWDMComputations``
-            (any object with that method works, e.g. the mock in
-            ``scripts/fstat_proposal/plot_fstat_proposal_mock_highest_gb.py``).
-        wdm_holder: Passed through untouched to ``get_fstat_ll_wdm`` (an
+        gb_wdm_comp (object): Object providing ``get_fstat_ll_wdm(params,
+            wdm_holder, **kwargs) -> (N, M_upper)`` -- normally a
+            ``gbgpu.gbcomps.GBWDMComputations`` (any object with that method
+            works, e.g. the mock in
+            ``scripts/fstat_proposal/plot_fstat_proposal_mock_highest_gb.py``);
+            its ``xp`` attribute (if any) sets the array module.
+        wdm_holder (object): Passed through untouched to ``get_fstat_ll_wdm`` (an
             ``AnalysisContainerArray`` holding the WDM residual + invC).
         grid_spec: The tensor-grid design box + resolution.
         beta: Inverse temperature; ``beta < 1`` broadens the proposal for
-            healthier MCMC acceptance, ``beta > 1`` sharpens it.
+            healthier MCMC acceptance, ``beta > 1`` sharpens it. Default ``1.0``.
         amp_ref: Amplitude packed into the physical parameter rows. The
             F-stat maximizes over the extrinsics analytically, so this only
-            has to be a sane waveform amplitude, not the source's.
-        batch_size: Grid nodes per ``get_fstat_ll_wdm`` launch.
+            has to be a sane waveform amplitude, not the source's. Default
+            ``1e-22``.
+        batch_size: Grid nodes per ``get_fstat_ll_wdm`` launch. Default ``16384``.
         seed: RNG seed for ``rvs`` (fresh ``default_rng`` when None).
         fstat_kwargs: Extra keyword arguments forwarded to
-            ``get_fstat_ll_wdm`` (e.g. ``m_band_half_width``).
+            ``get_fstat_ll_wdm`` (e.g. ``m_band_half_width``). Default ``None``.
+
+    Raises:
+        ValueError: Every grid cell has zero target mass.
+
+    Attributes:
+        ndim (int): 4.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.sampling.fstat_proposal import FStatProposal4D, GridSpec
+
+            spec = GridSpec((3.0, 3.01), (0.1, 1.0), (0.0, 2 * np.pi), (-1.0, 1.0),
+                            n_f0=40, n_Mc=3, n_alpha=8, n_sin_delta=8)
+            prop = FStatProposal4D(gb_wdm_comp, wdm_holder, spec, beta=1.0)
+            theta = prop.rvs(1000)          # (1000, 4)
+            lp = prop.logpdf(theta)         # (1000,)
     """
 
-    #: sampling-basis column names, in order
+    #: sampling-basis column names, in order: ``("f0", "Mc", "alpha", "sin_delta")``
     param_names = ("f0", "Mc", "alpha", "sin_delta")
     ndim = 4
 
@@ -1166,14 +1568,20 @@ class FStatProposal4D:
                   seed: Optional[int] = None):
         """Rebuild a proposal from a cached node grid (no F-stat sweep).
 
+        The result has no scorer (``gb_wdm_comp is None``), so it runs on numpy.
+
         Args:
-            axes: 4 node arrays ``(f0_mHz, Mc, alpha, sin_delta)`` --
-                uniformly spaced, as produced by :class:`GridSpec`.
-            logp_grid: node-shaped ``beta * F`` array (what a prior
+            axes (sequence of np.ndarray): 4 node arrays ``(f0_mHz, Mc, alpha,
+                sin_delta)`` -- uniformly spaced, as produced by :class:`GridSpec`.
+            logp_grid (np.ndarray): node-shaped ``beta * F`` array (what a prior
                 instance stored in ``_logp_grid`` / a grid cache).
             beta: the inverse temperature already applied to ``logp_grid``
-                (recorded for bookkeeping; the grid is used as-is).
+                (recorded for bookkeeping; the grid is used as-is). Default
+                ``1.0``.
             seed: RNG seed for :meth:`rvs`.
+
+        Returns:
+            FStatProposal4D: The rebuilt proposal.
         """
         self = cls.__new__(cls)
         f0_ax, mc_ax, al_ax, sd_ax = [np.asarray(a, dtype=float) for a in axes]
@@ -1204,6 +1612,7 @@ class FStatProposal4D:
     # ------------------------------------------------------------------
     @property
     def xp(self):
+        """Array module of the scorer (``gb_wdm_comp.xp``), else numpy."""
         return getattr(self.gb_wdm_comp, "xp", np)
 
     def __getstate__(self):
@@ -1233,9 +1642,17 @@ class FStatProposal4D:
     def _pack_physical(self, theta):
         """Sampling-basis ``(n, 4)`` -> physical 9-parameter GB rows ``(n, 9)``.
 
-        Physical order: ``[A, f0(Hz), fdot, fddot, phi0, iota, psi, lam,
-        beta_sky]``. Extrinsic slots carry fixed reference values -- the
+        Physical order: ``[A, f0(Hz), fdot, fddot, phi0, iota, psi, alpha,
+        delta]`` (ICRS). Extrinsic slots carry fixed reference values
+        (``A = amp_ref``, ``iota = pi/2``, ``phi0 = psi = fddot = 0``) -- the
         F-stat kernel builds its own 4 basis-filter extrinsic combinations.
+        ``fdot = get_fdot(f0, Mc)`` (the ``r = 0`` manifold).
+
+        Args:
+            theta (array_like): ``(n, 4)`` rows ``(f0 [mHz], Mc, alpha, sin_delta)``.
+
+        Returns:
+            xp.ndarray: ``(n, 9)`` float64 physical rows.
         """
         from gbgpu.utils.utility import get_fdot
 
@@ -1258,7 +1675,12 @@ class FStatProposal4D:
         return params
 
     def _sweep_fstat(self):
-        """Batched F-stat over every grid node -> node-shaped array."""
+        """Batched F-stat over every grid node -> node-shaped array.
+
+        Returns:
+            xp.ndarray: ``grid_spec.shape`` float64 F values (``batch_size``
+            nodes per scorer call).
+        """
         xp = self.xp
         shape = self.grid_spec.shape
         n_total = int(np.prod(shape))
@@ -1286,7 +1708,11 @@ class FStatProposal4D:
         its 2^4 nodes rather than the lower-corner value -- this removes the
         systematic +dx/2 mean shift a lower-corner histogram density carries,
         while keeping the density piecewise-constant (rvs/logpdf stay exactly
-        consistent).
+        consistent). Sets ``_log_wcell`` (cell log weights), ``_cdf`` (flat
+        normalized CDF) and ``_log_norm`` (``log sum_cells w_cell * cell_vol``).
+
+        Raises:
+            ValueError: Every cell has zero target mass.
         """
         xp = self.xp
         g_max = float(xp.max(self._logp_grid))
@@ -1318,8 +1744,14 @@ class FStatProposal4D:
     def rvs(self, size=1):
         """Exact draws from the piecewise-constant grid density.
 
-        Returns ``size + (4,)`` in the sampling basis
-        ``(f0 [mHz], Mc, alpha, sin_delta)``.
+        A cell is drawn from the CDF, then the position is uniform in it.
+
+        Args:
+            size (int or tuple[int, ...], optional): Batch shape. Default ``1``.
+
+        Returns:
+            xp.ndarray: ``size + (4,)`` float64 draws in the sampling basis
+            ``(f0 [mHz], Mc, alpha, sin_delta)``.
         """
         xp = self.xp
         if isinstance(size, int):
@@ -1340,8 +1772,14 @@ class FStatProposal4D:
         return (corners + jitter).reshape(size + (4,))
 
     def logpdf(self, x):
-        """Normalized log density at ``x`` of shape ``(n, 4)`` (``-inf``
-        outside the grid box), exactly consistent with :meth:`rvs`."""
+        """Normalized log density at ``x``, exactly consistent with :meth:`rvs`.
+
+        Args:
+            x (array_like): ``(n, 4)`` points (1-D input is one row).
+
+        Returns:
+            xp.ndarray: ``(n,)`` log density; ``-inf`` outside the grid box.
+        """
         xp = self.xp
         x = xp.atleast_2d(xp.asarray(x, dtype=xp.float64))
 
@@ -1414,20 +1852,57 @@ class StackedFStatProposal4D:
        Device footprint ~1-2 GB; a rewrite of the chunk routing in
        :meth:`rvs` / :meth:`logpdf`; GPU-only validation.
 
+    AXIS 1 IS THE GRID BASIS'S SECOND AXIS: chirp mass (Msun) on a legacy
+    ``grid_basis="Mc"`` grid, ``fdot`` (Hz/s) on the production
+    ``grid_basis="fdot"`` grid (``FSTAT_FDOT_AXIS=1``), where axis 0 then holds
+    ``f_mid`` (mHz) rather than ``f0``. This class is agnostic: it only sees
+    uniform axes. Built by :func:`~lisatools.sampling.fstat_gridfit.run_stacked_stage_b`
+    (one per Mc group) and by :meth:`from_cache` / :func:`stacked_from_cache`
+    on every epoch load; drawn from and scored by ``BandSorter`` through the RJ
+    birth container on every F-stat RJ propose.
+
     Args:
-        logp_grids: ``(K, n0, n1, n2, n3)`` node grids of ``beta * F``
-            (numpy or cupy; computation stays on the input's module, except
-            the host-resident CDF).
-        f0_los: ``(K,)`` per-box f0 axis start [mHz].
-        f0_dxs: ``(K,)`` per-box f0 node spacing [mHz].
-        mc_ax, alpha_ax, sin_delta_ax: shared node axes (uniform spacing).
-        weights: ``(K,)`` mixture weights (normalized internally);
-            ``None`` -> equal.
+        logp_grids (xp.ndarray): ``(K, n0, n1, n2, n3)`` node grids of
+            ``beta * F`` (numpy or cupy; computation stays on the input's
+            module, except the host-resident CDF).
+        f0_los (array_like): ``(K,)`` per-box axis-0 start [mHz].
+        f0_dxs (array_like): ``(K,)`` per-box axis-0 node spacing [mHz].
+        mc_ax (array_like): shared axis-1 nodes (uniform spacing), length ``n1``.
+        alpha_ax (array_like): shared alpha nodes [rad], length ``n2``.
+        sin_delta_ax (array_like): shared sin(delta) nodes, length ``n3``.
+        weights (array_like, optional): ``(K,)`` non-negative mixture weights
+            (normalized internally); ``None`` -> equal.
         seed: RNG seed for :meth:`rvs`.
         mem_budget_mb: When set and the stacked cell arrays exceed this
             budget, the K axis is held/evaluated in chunks that fit it
-            (``FSTAT_GRID_MEM_MB`` in the scripts). ``rvs``/``logpdf``
-            stay fully vectorized within each chunk.
+            (``FSTAT_GRID_MEM_MB``; the 9mo/12mo launchers set 512).
+            ``rvs``/``logpdf`` stay fully vectorized within each chunk.
+        keep_nodes: Retain the raw node grids after construction (needed only
+            by the ``"trilinear"`` in-cell mode). ``None`` -> the process
+            default :func:`stacked_keep_nodes` (``False`` in the 9mo/12mo runs,
+            which compose no replace move).
+
+    Raises:
+        ValueError: ``logp_grids`` is not 5-D, the axes' lengths disagree with
+            the grid, or the total mixture mass is zero / non-finite.
+        AssertionError: ``f0_los`` / ``f0_dxs`` / ``weights`` have the wrong
+            length or the weights are negative or all zero.
+
+    Attributes:
+        K (int): Number of peak boxes.
+        weights (np.ndarray): ``(K,)`` normalized box weights (host).
+        keep_nodes (bool): Whether the node grids were retained.
+
+    Example:
+        .. code-block:: python
+
+            import numpy as np
+            from lisatools.sampling.fstat_proposal import StackedFStatProposal4D
+
+            d = np.load("epoch_0003/fstat_grid_peaks_stacked.npz")  # legacy 1-group
+            prop = StackedFStatProposal4D.from_cache(d, use_cupy=True, device=0)
+            x = prop.rvs(512)               # (512, 4) on the device
+            lp = prop.logpdf(x)             # (512,)
     """
 
     param_names = ("f0", "Mc", "alpha", "sin_delta")
@@ -1587,6 +2062,7 @@ class StackedFStatProposal4D:
     # ------------------------------------------------------------------
     @property
     def xp(self):
+        """Array module of the cell log-weights (numpy, or cupy on device)."""
         from ..utils.utility import get_array_module
 
         return get_array_module(self._chunks[0]["log_wcell"])
@@ -1595,6 +2071,9 @@ class StackedFStatProposal4D:
         """Re-derive :attr:`_rng` from ``seed``; LEAF (no child proposals).
 
         ``seed is None`` returns immediately and touches nothing.
+
+        Args:
+            seed (int or None): Integer seed.
         """
         if seed is None:
             return
@@ -1619,6 +2098,20 @@ class StackedFStatProposal4D:
         subsequent ``rvs`` / ``logpdf`` would then mix a device-0 grid with
         the run's coordinates on another device. Passing the run's GPU makes
         the container safe to build anywhere in the setup order.
+
+        Args:
+            d (Mapping): The cache (an ``np.load`` NpzFile or any mapping with
+                those keys).
+            weights (array_like, optional): ``(K,)`` box weights; ``None`` ->
+                equal.
+            seed: RNG seed for :meth:`rvs`.
+            mem_budget_mb: K-chunking budget (MB), as in the constructor.
+            use_cupy: Upload the grid stack to the GPU. Default ``False``.
+            device: GPU id for the upload (``None`` = cupy's current device).
+            keep_nodes: As in the constructor.
+
+        Returns:
+            StackedFStatProposal4D: The rebuilt proposal.
         """
         if use_cupy:
             import cupy as _cp
@@ -1642,7 +2135,17 @@ class StackedFStatProposal4D:
 
     # ------------------------------------------------------------------
     def _corners_from_cells(self, kk, cell_flat, xp):
-        """(box index, flat cell index) -> cell corner coords ``(n, 4)``."""
+        """(box index, flat cell index) -> cell corner coords ``(n, 4)``.
+
+        Args:
+            kk (xp.ndarray): ``(n,)`` global box indices.
+            cell_flat (xp.ndarray): ``(n,)`` flat cell indices within a box.
+            xp (module): Array module.
+
+        Returns:
+            tuple[xp.ndarray, xp.ndarray]: ``(corners (n, 4), f0_dx (n,))`` --
+            the lower cell corners and each row's axis-0 spacing.
+        """
         multi = xp.unravel_index(cell_flat, self._cell_shape)
         f0_lo = xp.asarray(self._f0_lo)[kk]
         f0_dx = xp.asarray(self._f0_dx)[kk]
@@ -1742,10 +2245,21 @@ class StackedFStatProposal4D:
         return xp.where(ok[:, None], out, u4)
 
     def rvs(self, size=1):
-        """Exact draws from the stacked mixture; returns ``size + (4,)`` in
-        ``(f0 [mHz], Mc, alpha, sin_delta)``. Cell selection is always by
-        the corner-averaged cell weights; the within-cell law follows
-        ``self.in_cell`` (see the class attribute)."""
+        """Exact draws from the stacked mixture.
+
+        Cell selection is always by the corner-averaged cell weights (the
+        host CDF, one ``searchsorted`` per chunk); the within-cell law follows
+        ``self.in_cell`` (see the class attribute). Each draw also increments
+        the per-box census returned by :meth:`pop_draw_counts`.
+
+        Args:
+            size (int or tuple[int, ...], optional): Batch shape. Default ``1``.
+
+        Returns:
+            xp.ndarray: ``size + (4,)`` float64 draws on :attr:`xp` in the grid
+            basis (``(f0 [mHz], Mc, alpha, sin_delta)``, or
+            ``(f_mid [mHz], fdot [Hz/s], alpha, sin_delta)`` on an fdot grid).
+        """
         xp = self.xp
         if isinstance(size, int):
             size = (size,)
@@ -1774,11 +2288,22 @@ class StackedFStatProposal4D:
         return out.reshape(size + (4,))
 
     def pop_draw_counts(self):
-        """Per-peak ``rvs`` draw counts since the last call (length K)."""
+        """Per-peak ``rvs`` draw counts since the last call, then reset.
+
+        Read by the GB move's ``[FSTAT_PEAKS]`` census
+        (``GBSpecialBase._stacked_for_census``). That walker does not descend
+        into :class:`FdotAxisBirth` (``grid4``), so under the production
+        ``FSTAT_FDOT_AXIS=1`` container it never reaches this method and the
+        census line is not logged (none in the 9mo/12mo run logs).
+
+        Returns:
+            np.ndarray: ``(K,)`` int64 counts, in box order.
+        """
         c = self._draw_counts
         self._draw_counts = np.zeros_like(c)
         return c
 
+    # TODO check: keep/remove/document -- only caller is fit_gmm_to_stacked (the offline GMM layer of scripts/fstat_proposal); not reached by the 9mo/12mo runs
     def rvs_per_box(self, n_per_box: int):
         """``(K, n, 4)`` draws, ``n`` from EACH box's own grid density
         (ignoring mixture weights) -- the GMM-fitting sample source."""
@@ -1805,8 +2330,21 @@ class StackedFStatProposal4D:
         return out
 
     def logpdf(self, x):
-        """Normalized mixture log density at ``x`` of shape ``(n, 4)``;
-        vectorized gather over the (actual) max f0-overlap depth D."""
+        """Normalized mixture log density, exactly consistent with :meth:`rvs`.
+
+        Vectorized gather over the (actual) max f0-overlap depth D: every box
+        whose axis-0 interval contains the point contributes
+        ``g + log w_k - log Z_k`` (``g`` = the cell log weight, or the
+        multilinear interpolant in trilinear mode), log-summed over boxes.
+
+        Args:
+            x (array_like): ``(n, 4)`` points in the grid basis (1-D input is
+                one row).
+
+        Returns:
+            xp.ndarray: ``(n,)`` log density on :attr:`xp`; ``-inf`` outside every
+            box or outside the shared axes 1-3.
+        """
         xp = self.xp
         x = xp.atleast_2d(xp.asarray(x, dtype=xp.float64))
         n = x.shape[0]
@@ -1898,6 +2436,29 @@ class GroupedStackedFStatProposal:
     walker matches on this attribute BEFORE descending into components),
     ``rvs_per_box`` (GMM layer), ``components`` (walked by
     :func:`iter_stacked_components`, e.g. the trilinear in-cell switch).
+
+    This is the peak stack of every multi-group stage-B fit -- in practice
+    every full-band 9mo/12mo epoch (the banded node ladder and the f0-adaptive
+    sky split a full-band fit into several groups). Each group may carry its own axis-1
+    (fdot) axis and sky axes.
+
+    Args:
+        components (sequence of StackedFStatProposal4D): The group stacks, in
+            f0-sorted global box order.
+        box_weights (array_like, optional): ``(K,)`` GLOBAL per-box weights
+            (``K`` = total boxes over all groups); the group mixture weight is
+            each group's summed share. ``None`` -> equal per box.
+        seed: RNG seed for the group draw.
+
+    Raises:
+        ValueError: No groups, ``box_weights`` of the wrong length, or weights
+            that are negative or sum to zero.
+
+    Attributes:
+        components (list[StackedFStatProposal4D]): The group stacks.
+        group_sizes (np.ndarray): ``(n_groups,)`` boxes per group.
+        K (int): Total box count.
+        weights (np.ndarray): ``(n_groups,)`` normalized group weights.
     """
 
     param_names = ("f0", "Mc", "alpha", "sin_delta")
@@ -1944,13 +2505,24 @@ class GroupedStackedFStatProposal:
     # global per-box metadata (group order == f0-sorted global order)
     @property
     def f0_los(self):
+        """``(K,)`` host per-box axis-0 starts [mHz], in global box order."""
         return np.concatenate([c._f0_lo for c in self.components])
 
     @property
     def f0_dxs(self):
+        """``(K,)`` host per-box axis-0 node spacings [mHz], in global box order."""
         return np.concatenate([c._f0_dx for c in self.components])
 
     def rvs(self, size=1):
+        """Draw a group by its weight, then from that group's stack.
+
+        Args:
+            size (int or tuple[int, ...], optional): Batch shape. Default ``1``.
+
+        Returns:
+            np.ndarray: ``size + (4,)`` HOST float64 draws in the grid basis
+            (each group's device output is copied back).
+        """
         if isinstance(size, int):
             size = (size,)
         n = int(np.prod(size))
@@ -1963,6 +2535,15 @@ class GroupedStackedFStatProposal:
         return out.reshape(size + (4,))
 
     def logpdf(self, x):
+        """Mixture log density ``log sum_g W_g p_g(x)``, exact w.r.t. :meth:`rvs`.
+
+        Args:
+            x (array_like): ``(n, 4)`` points in the grid basis.
+
+        Returns:
+            xp.ndarray: ``(n,)`` log density on the array module of ``x``
+            (``-inf`` outside every group).
+        """
         from ..utils.utility import get_array_module
 
         xp = get_array_module(x)
@@ -1979,10 +2560,15 @@ class GroupedStackedFStatProposal:
         return xp.where(xp.isfinite(m), out, -xp.inf)
 
     def pop_draw_counts(self):
-        """Per-peak draw counts in the GLOBAL (f0-sorted) box order."""
+        """Per-peak draw counts in the GLOBAL (f0-sorted) box order, then reset.
+
+        Returns:
+            np.ndarray: ``(K,)`` int64 counts.
+        """
         return np.concatenate(
             [c.pop_draw_counts() for c in self.components])
 
+    # TODO check: keep/remove/document -- only caller is fit_gmm_to_stacked (offline GMM layer); not reached by the 9mo/12mo runs
     def rvs_per_box(self, n_per_box: int):
         xp = self.components[0].xp
         return xp.concatenate(
@@ -2010,6 +2596,40 @@ def stacked_from_cache(d, weights=None, seed: Optional[int] = None,
     Axis 2 means chirp mass in one basis and Hz/s in the other; a consumer
     that reads one as the other gets NO error, just births at absurd
     parameters. An absent stamp is the legacy ``"Mc"`` basis.
+
+    Called on every epoch load by
+    :func:`~lisatools.sampling.fstat_gridfit.build_gb_birth_distribution` and on
+    the completed-epoch short circuit of
+    :func:`~lisatools.sampling.fstat_gridfit.run_fstat_grid_fit`.
+
+    Args:
+        d (Mapping): The cache (``np.load`` NpzFile, or the
+            :func:`~lisatools.sampling.fstat_gridfit.stacked_cache_at_floor`
+            view).
+        weights (array_like, optional): ``(K,)`` GLOBAL per-box weights;
+            ``None`` -> equal.
+        seed: RNG seed for every stack and the group draw.
+        mem_budget_mb: K-chunking budget per stack (MB).
+        use_cupy: Upload the grids to the GPU. Default ``False``.
+        device: GPU id for the upload (``None`` = cupy's current device).
+        keep_nodes: As in :class:`StackedFStatProposal4D`.
+
+    Returns:
+        StackedFStatProposal4D or GroupedStackedFStatProposal: The rebuilt peak
+        proposal (single-stack cache -> the former).
+
+    Raises:
+        ValueError: ``grid_basis`` disagrees with :func:`fdot_axis_on`.
+
+    Example:
+        .. code-block:: python
+
+            import numpy as np
+            from lisatools.sampling.fstat_proposal import stacked_from_cache
+
+            d = np.load("epoch_0003/fstat_grid_peaks_stacked.npz")
+            prop = stacked_from_cache(d, use_cupy=True, device=0)
+            x = prop.rvs(256)
     """
     keys = getattr(d, "files", None) or list(d)
     want = "fdot" if fdot_axis_on() else "Mc"
@@ -2075,6 +2695,18 @@ def iter_stacked_components(dist, _seen=None):
     values -> ``UniformFloorMixture.base`` ->
     ``MixtureProposal.components`` -> stacked. Purely attribute-duck-typed
     (``base`` / ``components`` / ``priors_in`` / ``priors``), cycle-safe.
+
+    It does NOT descend into :class:`FdotAxisBirth`, whose child is
+    ``grid4`` -- so on a production ``FSTAT_FDOT_AXIS=1`` container it yields
+    nothing (only consumer: :func:`stacked_in_cell_mode`, i.e. the replace
+    moves, which the 9mo/12mo runs do not compose).
+
+    Args:
+        dist (object): Root of the wrapper chain.
+        _seen (set, optional): Internal ``id`` set for cycle safety.
+
+    Yields:
+        StackedFStatProposal4D: Each stacked component found (depth-first).
     """
     if _seen is None:
         _seen = set()
@@ -2111,6 +2743,21 @@ def stacked_in_cell_mode(dist, mode: str):
     forward/reverse density bookkeeping consistent with what was drawn
     (the rj_replace usage: draw AND both logpdf sides inside ONE ``with``
     block). ``mode == "uniform"`` is a no-op that yields ``False``.
+
+    Used by the replace step (``GBSpecialBase._run_replace_step``, stock
+    default ``rj_replace`` / ``rj_replace_pe``; not composed in the 9mo/12mo
+    runs). Trilinear mode needs the node grids (``keep_nodes``).
+
+    Args:
+        dist (object): The birth container (walked by
+            :func:`iter_stacked_components`).
+        mode: ``"uniform"`` or ``"trilinear"``.
+
+    Yields:
+        bool: Whether the trilinear density is in force inside the block.
+
+    Raises:
+        ValueError: ``mode`` is not one of the two names.
     """
     if mode not in ("uniform", "trilinear"):
         raise ValueError(
@@ -2127,7 +2774,7 @@ def stacked_in_cell_mode(dist, mode: str):
 
 
 class UniformFloorMixture:
-    """``(1 - eps) * base + eps * Uniform(box)`` over the 4 intrinsics.
+    r"""``(1 - eps) * base + eps * Uniform(box)`` over the 4 intrinsics.
 
     RJ detailed-balance factors evaluate ``+logpdf(current leaf)`` for a
     death: a leaf whose in-model refinement drifted outside the base
@@ -2136,13 +2783,27 @@ class UniformFloorMixture:
     ``logpdf`` finite everywhere the sampler can go (the plan's
     "mixture + background floor").
 
+    .. math::
+
+        q(x) = (1 - \epsilon)\, q_{\rm base}(x)
+            + \epsilon\, \frac{\mathbb{1}[x \in \text{box}]}{V_{\rm box}}.
+
+    In the production container it wraps ``MixtureProposal([peak stack, comb])``
+    with ``eps = FSTAT_FLOOR_EPS`` (default 0.1), built by
+    :func:`~lisatools.sampling.fstat_gridfit.build_gb_birth_distribution`.
+
     Args:
-        base: Intrinsic 4-D distribution (``rvs``/``logpdf`` duck-typed),
-            e.g. :class:`FStatProposal4D`.
-        box_lo, box_hi: Per-axis floor-box bounds in the sampling basis
-            ``(f0 [mHz], Mc, alpha, sin_delta)`` -- normally the band's f0
-            edges plus the full prior ranges of the other three axes.
-        eps: Floor mixture weight.
+        base (object): Intrinsic 4-D distribution (``rvs``/``logpdf``
+            duck-typed), e.g. :class:`StackedFStatProposal4D` or
+            :class:`MixtureProposal`.
+        box_lo (array_like): ``(4,)`` lower floor-box bounds in the grid basis.
+        box_hi (array_like): ``(4,)`` upper floor-box bounds. Normally the
+            band's interior f0 edges plus the full ranges of the other three
+            axes: ``(f0 [mHz], Mc, alpha, sin_delta)`` on a legacy grid, or
+            ``(f_mid [mHz], fdot [Hz/s], alpha, sin_delta)`` with the fitted
+            fdot axis range on an fdot grid.
+        eps: Floor mixture weight. Default ``0.05`` (the production caller passes
+            ``FSTAT_FLOOR_EPS``).
         seed: RNG seed for ``rvs``.
     """
 
@@ -2169,6 +2830,14 @@ class UniformFloorMixture:
         _reseed_node(self.base, _child_seeds(ss, 1)[0])
 
     def rvs(self, size=1):
+        """Draw from the floor with probability ``eps``, else from ``base``.
+
+        Args:
+            size (int or tuple[int, ...], optional): Batch shape. Default ``1``.
+
+        Returns:
+            np.ndarray: ``size + (4,)`` HOST float64 draws.
+        """
         if isinstance(size, int):
             size = (size,)
         n = int(np.prod(size))
@@ -2182,6 +2851,15 @@ class UniformFloorMixture:
         return out.reshape(size + (4,))
 
     def logpdf(self, x):
+        """``log[(1 - eps) q_base(x) + eps / V_box]`` (floor term only inside the box).
+
+        Args:
+            x (array_like): ``(n, 4)`` points in the grid basis.
+
+        Returns:
+            xp.ndarray: ``(n,)`` log density on the array module of ``x``; NaN
+            results are mapped to ``-inf``.
+        """
         from ..utils.utility import get_array_module
 
         xp = get_array_module(x)
@@ -2203,31 +2881,60 @@ def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False,
     """Wrap a 4-D intrinsic proposal into the 8/9-column GB RJ birth container.
 
     Mirrors the stock GMM birth container
-    (``gbspecialstretch.GBSpecialRJRefitMove.setup``): the intrinsics
-    ``(f0 [mHz], Mc, alpha, sin_delta)`` come from ``intrinsic_dist`` under a
-    tuple key; slot 0 (``lnA`` or ``dist``) and the remaining extrinsics come
-    from the stock prior uniforms (the band engines re-maximize phi0
-    analytically when ``phase_maximize`` is on). Returns an eryn
-    ``ProbDistContainer`` whose ``rvs(size) -> (size, N)`` /
-    ``logpdf((n, N)) -> (n,)`` match what ``BandSorter`` expects of
-    ``rj_proposal_distribution["gb"]`` (``N = 8``, or ``9`` with
-    ``fdot_astro_ratio_max``).
+    (``gbspecialstretch.GBSpecialRJRefitMove.setup``): the intrinsics come from
+    ``intrinsic_dist`` under a tuple key; slot 0 (``lnA`` or ``dist``) and the
+    remaining extrinsics come from the stock prior uniforms
+    (``phi0 ~ U[0, 2 pi)``, ``cos_iota ~ U[-1, 1]``, ``psi ~ U[0, pi)``; the band
+    engines re-maximize phi0 analytically when ``phase_maximize`` is on).
+    Returns an eryn ``ProbDistContainer`` (or its :class:`RatioTightenedBirth`
+    wrapper) whose ``rvs(size) -> (size, N)`` / ``logpdf((n, N)) -> (n,)``
+    match what ``BandSorter`` expects of ``rj_proposal_distribution["gb"]``
+    (``N = 8``, or ``9`` with ``fdot_astro_ratio_max``), in the sampler's
+    column order ``[A|dist, f0, Mc, phi0, cos_iota, psi, alpha, sin_delta(,
+    fdot_astro_ratio)]``.
+
+    Three layouts of the intrinsic block:
+
+    * ``fdot_astro_ratio_max`` set and ``FSTAT_FDOT_AXIS=1`` (the 9mo/12mo
+      runs): ``intrinsic_dist`` lives on the fdot grid and is wrapped in
+      :class:`FdotAxisBirth` under the 5-D key
+      ``("f0", "Mc", "fdot_astro_ratio", "alpha", "sin_delta")``; ``ratio_tight``
+      is ignored.
+    * ``fdot_astro_ratio_max`` set, legacy axis: the 4-D key
+      ``("f0", "Mc", "alpha", "sin_delta")`` plus ``fdot_astro_ratio ~ U[-M, M]``,
+      wrapped in :class:`RatioTightenedBirth` when ``ratio_tight`` is given.
+    * ``fdot_astro_ratio_max=None``: the 8-column container, 4-D key only.
+
+    Called by :func:`~lisatools.sampling.fstat_gridfit.build_gb_birth_distribution`.
 
     Args:
-        intrinsic_dist: 4-D distribution over the intrinsic sampling basis
-            (e.g. :class:`FStatProposal4D` or :class:`UniformFloorMixture`).
-        A_lims: ``[A_min, A_max]`` physical amplitude limits
+        intrinsic_dist (object): 4-D distribution over the grid basis
+            (e.g. :class:`UniformFloorMixture`).
+        A_lims (sequence of float): ``[A_min, A_max]`` physical amplitude limits
             (``GBSettings.A_lims``); lnA is drawn uniform in ``log(A_lims)``
             when ``dist_lims`` is None.
-        use_cupy: Match the run backend (False for CPU runs).
-        fdot_astro_ratio_max: When not ``None``, append a 9th
-            ``fdot_astro_ratio`` column drawn from ``U[-M, M]`` (births draw
-            the ratio from its prior; it is degenerate with Mc under the
-            F-stat). ``None`` -> 8-column container.
-        dist_lims: When not ``None``, slot 0 is the luminosity DISTANCE
-            (kpc) drawn uniform in ``dist_lims`` (linear) instead of lnA --
-            the distance basis. Follow-up: when the real 3-D (dist, sky)
-            distribution lands, births should draw ``dist | sky`` from it.
+        use_cupy: Match the run backend (False for CPU runs). Default ``False``.
+        fdot_astro_ratio_max (float, optional): When not ``None``, the 9-column
+            container with the ratio column (see above). ``None`` -> 8-column
+            container.
+        dist_lims (sequence of float, optional): When not ``None``, slot 0 is the
+            luminosity DISTANCE (kpc) drawn uniform in ``dist_lims`` (linear)
+            instead of lnA -- the distance basis (the 9mo/12mo runs). Follow-up:
+            when the real 3-D (dist, sky) distribution lands, births should
+            draw ``dist | sky`` from it.
+        ratio_tight (dict, optional): Keyword arguments of
+            :class:`RatioTightenedBirth` (``tobs``, ``phase_rad``, ``eps``,
+            ``w_min``); used only on the legacy axis. Default ``None``.
+        tobs (float, optional): Observation span (s); REQUIRED on the fdot axis
+            (the ``f_mid`` shear), pass ``1.0 / df``.
+        mc_lims (sequence of float, optional): Chirp-mass prior box for
+            :class:`FdotAxisBirth`; ``None`` -> ``[0.001, 1.0]``.
+
+    Returns:
+        eryn.priors.ProbDistContainer or RatioTightenedBirth: The birth container.
+
+    Raises:
+        ValueError: The fdot axis is on and ``tobs`` is falsy.
     """
     from eryn.priors import ProbDistContainer, UniformDistribution
 
@@ -2319,6 +3026,29 @@ class RatioTightenedBirth:
     ``rvs``/``logpdf`` are exactly consistent (the same mixture), so the
     RJ Metropolis-Hastings factors remain correct; ndim and the prior are
     untouched, so stores resume cleanly and the change is proposal-only.
+
+    Legacy-axis only: :func:`make_gb_rj_birth_container` applies it when
+    ``GB_FSTAT_BIRTH_RATIO_TIGHT=1`` supplies ``ratio_tight`` AND
+    ``FSTAT_FDOT_AXIS=0``. Under the production fdot axis :class:`FdotAxisBirth`
+    owns ``r`` and this wrapper is not built.
+
+    Args:
+        base (object): The 9-column birth ``ProbDistContainer`` (its ratio column
+            drawn ``U[-M, M]``).
+        ratio_max (float): ``M``.
+        tobs (float): Observation span (s); keyword-only.
+        phase_rad (float, optional): Allowed carrier-phase drift (rad). Default
+            ``2 pi`` (``GB_FSTAT_BIRTH_RATIO_PHASE``).
+        eps (float, optional): Weight of the full-prior component. Default
+            ``0.1`` (``GB_FSTAT_BIRTH_RATIO_EPS``).
+        w_min (float, optional): Floor on the tight half-width ``w``. Default
+            ``0.05`` (``GB_FSTAT_BIRTH_RATIO_WMIN``).
+        f0_col (int, optional): Column of ``f0`` (mHz). Default ``1``.
+        mc_col (int, optional): Column of ``Mc``. Default ``2``.
+        r_col (int, optional): Column of ``fdot_astro_ratio``. Default ``8``.
+        use_cupy (bool, optional): Array module when no input fixes it. Default
+            ``False``.
+        seed (int, optional): RNG seed. Default ``None``.
     """
 
     ndim = 9
@@ -2349,6 +3079,7 @@ class RatioTightenedBirth:
         _reseed_node(self.base, _child_seeds(ss, 1)[0])
 
     def _xp(self, x=None):
+        """Array module of ``x``, else cupy when ``use_cupy``, else numpy."""
         if x is not None:
             from ..utils.utility import get_array_module
             return get_array_module(x)
@@ -2358,12 +3089,22 @@ class RatioTightenedBirth:
         return np
 
     def _width(self, f0_mHz, mc, xp):
+        """Tight half-width ``w = clip(phase_rad / (pi T^2 fdot_gr), w_min, M)`` per row."""
         fdot_gr = _FDOT_K * xp.maximum(mc, 1e-6) ** (5.0 / 3.0) * \
             xp.maximum(f0_mHz * 1e-3, 1e-6) ** (11.0 / 3.0)
         dfdot = self.phase_rad / (np.pi * self.tobs ** 2)
         return xp.clip(dfdot / fdot_gr, self.w_min, self.M)
 
     def rvs(self, size=1):
+        """Draw from ``base`` and redraw the ratio column from the tight mixture.
+
+        Args:
+            size (int or tuple[int, ...], optional): Number of rows (a tuple is
+                flattened). Default ``1``.
+
+        Returns:
+            xp.ndarray: ``(n, 9)`` rows.
+        """
         n = int(np.prod(size)) if not isinstance(size, int) else int(size)
         x = self.base.rvs(size=n)
         xp = self._xp(x)
@@ -2376,6 +3117,14 @@ class RatioTightenedBirth:
         return x
 
     def logpdf(self, x):
+        """Base log density with its ``U[-M, M]`` ratio term replaced by the mixture.
+
+        Args:
+            x (array_like): ``(n, 9)`` rows.
+
+        Returns:
+            xp.ndarray: ``(n,)`` log density (NaN mapped to ``-inf``).
+        """
         xp = self._xp(x)
         x = xp.atleast_2d(xp.asarray(x))
         lp = xp.asarray(self.base.logpdf(x))
@@ -2438,6 +3187,37 @@ class FdotAxisBirth:
     ``_defect`` injects a deliberate error for those controls. It is a
     TEST-ONLY hook and it validates its argument: a silently-ignored
     defect name would make a control pass while testing nothing.
+
+    This is the intrinsic birth block of every 9mo/12mo F-stat RJ birth
+    (``FSTAT_FDOT_AXIS=1``), built by :func:`make_gb_rj_birth_container` with
+    ``tobs = 1/df``, ``mc_lims`` from the GB settings and
+    ``ratio_max = fdot_astro_ratio_max``. Rows that fall outside the feasible
+    set are counted in ``n_infeasible`` (see :meth:`rvs`).
+
+    Args:
+        grid4 (object): 4-D distribution over the fdot grid basis
+            ``(f_mid [mHz], fdot [Hz/s], alpha, sin_delta)`` (the floored
+            peak/comb mixture).
+        tobs (float): Observation span (s); keyword-only. Sets
+            ``c_t = shear * tobs``.
+        mc_lo (float): Chirp-mass prior floor (Msun).
+        mc_hi (float): Chirp-mass prior ceiling (Msun).
+        ratio_max (float): Ratio half-width ``M``.
+        shear (float, optional): Shear fraction. Default ``0.5`` (``f_mid``);
+            must match the grid's ``grid_c_t``.
+        seed (int, optional): RNG seed for the ``Mc`` draw. Default ``None``.
+        use_cupy (bool, optional): Array module when no input fixes it.
+            Default ``False``.
+        _defect (str, optional): Test-only defect name from :attr:`DEFECTS`.
+            Default ``None``.
+
+    Raises:
+        ValueError: ``_defect`` is not a recognised name.
+
+    Attributes:
+        param_names (tuple[str, ...]): ``("f0", "Mc", "fdot_astro_ratio",
+            "alpha", "sin_delta")``.
+        ndim (int): 5.
     """
 
     param_names = ("f0", "Mc", "fdot_astro_ratio", "alpha", "sin_delta")
@@ -2475,9 +3255,11 @@ class FdotAxisBirth:
 
     @property
     def _c_t(self):
+        """Shear coefficient ``c_t = shear * tobs`` in seconds."""
         return self.shear * self.tobs
 
     def _xp(self, x=None):
+        """Array module of ``x``, else cupy when ``use_cupy``, else numpy."""
         if x is not None:
             from ..utils.utility import get_array_module
             return get_array_module(x)
@@ -2502,6 +3284,20 @@ class FdotAxisBirth:
         return mc_floor_for_fdot(fdot, f0_hz, self.M, self.mc_lo)
 
     def rvs(self, size=1):
+        """Draw ``(f_mid, fdot, alpha, sd)`` from the grid, then ``Mc`` on its fiber.
+
+        ``f0 = f_mid - c_t fdot``; ``Mc ~ U[mc_floor(fdot, f0), mc_hi]``;
+        ``r = fdot / fdot_gr(f0, Mc) - 1``. A row whose floor exceeds ``mc_hi``
+        (a mis-sized grid) is clamped and counted in ``self.n_infeasible``.
+
+        Args:
+            size (int or tuple[int, ...], optional): Number of rows (a tuple is
+                flattened). Default ``1``.
+
+        Returns:
+            np.ndarray: ``(n, 5)`` float64 rows ``(f0 [mHz], Mc, r, alpha,
+            sin_delta)`` (host: the grid draw is converted with ``np.asarray``).
+        """
         n = int(np.prod(size)) if not isinstance(size, int) else int(size)
         z = np.atleast_2d(np.asarray(self.grid4.rvs(size=n), dtype=float))
         xp = self._xp(z)
@@ -2538,6 +3334,19 @@ class FdotAxisBirth:
         return out
 
     def logpdf(self, x):
+        """``log p_grid(f_mid, fdot, alpha, sd) + log fdot_gr - log(mc_hi - mc_floor)``.
+
+        Exactly the density :meth:`rvs` samples (see the class docstring for the
+        measure). Boundary rows are judged with a ``1e-9`` relative tolerance.
+
+        Args:
+            x (array_like): ``(n, 5)`` rows ``(f0 [mHz], Mc, r, alpha, sin_delta)``.
+
+        Returns:
+            xp.ndarray: ``(n,)`` log density; ``-inf`` outside the feasible set
+            (``|r| > M``, ``Mc`` outside ``[mc_floor, mc_hi]``, empty interval, or
+            a non-finite grid density).
+        """
         xp = self._xp(x)
         x = xp.atleast_2d(xp.asarray(x, dtype=xp.float64))
         f0_hz = x[:, 0] * 1e-3
@@ -2580,7 +3389,20 @@ class FdotAxisBirth:
 
 
 class MixtureProposal:
-    """Weighted mixture of 4-D intrinsic proposals (``rvs``/``logpdf``)."""
+    """Weighted mixture of 4-D intrinsic proposals (``rvs``/``logpdf``).
+
+    In the production birth container this is ``[peak stack, comb]`` with
+    weights ``[1 - FSTAT_COMB_WEIGHT, FSTAT_COMB_WEIGHT]`` (0.7 / 0.3 by
+    default), built by
+    :func:`~lisatools.sampling.fstat_gridfit.build_gb_birth_distribution`
+    whenever the epoch has a comb cache.
+
+    Args:
+        components (sequence): 4-D distributions (``rvs``/``logpdf`` duck-typed).
+        weights (array_like, optional): Component weights (normalized
+            internally); ``None`` -> equal.
+        seed: RNG seed for the component draw.
+    """
 
     ndim = 4
 
@@ -2607,6 +3429,14 @@ class MixtureProposal:
             _reseed_node(child, kid)
 
     def rvs(self, size=1):
+        """Draw a component by weight, then from it.
+
+        Args:
+            size (int or tuple[int, ...], optional): Batch shape. Default ``1``.
+
+        Returns:
+            np.ndarray: ``size + (4,)`` HOST float64 draws.
+        """
         if isinstance(size, int):
             size = (size,)
         n = int(np.prod(size))
@@ -2619,6 +3449,15 @@ class MixtureProposal:
         return out.reshape(size + (4,))
 
     def logpdf(self, x):
+        """Mixture log density ``log sum_k w_k q_k(x)``.
+
+        Args:
+            x (array_like): ``(n, 4)`` points.
+
+        Returns:
+            xp.ndarray: ``(n,)`` log density on the array module of ``x``; NaN
+            results are mapped to ``-inf``.
+        """
         from ..utils.utility import get_array_module
 
         xp = get_array_module(x)
@@ -2646,6 +3485,38 @@ class CombIntrinsicProposal:
     (an ``exp(F)`` weighting would collapse onto the single loudest peak).
     The other three axes are uniform over their prior boxes (the band
     engines re-maximize phi0; sky/Mc refine in-model after birth).
+
+    In the 9mo/12mo runs (``FSTAT_FDOT_AXIS=1``) it is built with
+    ``fdot_conditional=True`` by
+    :func:`~lisatools.sampling.fstat_gridfit.build_gb_birth_distribution` from
+    the epoch's ``*_comb.npz`` (weight ``FSTAT_COMB_WEIGHT``, default 0.3):
+    column 0 is then read downstream as ``f_mid`` and column 1 is ``fdot``
+    drawn uniformly over the feasible range at the row's own frequency.
+
+    Args:
+        f0_nodes_mHz (array_like): ``(n_nodes,)`` uniformly spaced comb nodes
+            (mHz).
+        F_max (array_like): ``(n_nodes,)`` per-node sky-maximized F.
+        mc_lims (sequence of float): ``(lo, hi)`` box for column 1 when it is
+            ``Mc`` (Msun).
+        alpha_lims (tuple[float, float], optional): RA box (rad). Default
+            ``(0, 2 pi)``.
+        sin_delta_lims (tuple[float, float], optional): sin(dec) box. Default
+            ``(-1, 1)``.
+        power: Exponent of the cell weight ``clip(F, 0) ** power``. Default
+            ``1.0``.
+        seed: RNG seed.
+        fdot_conditional: Draw column 1 as ``fdot`` [Hz/s] uniform on
+            ``fdot_axis_bounds(f0, mc_hi, ratio_max)`` (see the attribute
+            comment below). Default ``False``.
+        ratio_max: ``M``; required when ``fdot_conditional``.
+        mc_hi: Upper chirp-mass bound (Msun); required when
+            ``fdot_conditional``.
+
+    Raises:
+        ValueError: The comb weights are empty / non-finite, or
+            ``fdot_conditional`` is set while ``ratio_max`` or ``mc_hi`` is
+            ``None``.
     """
 
     ndim = 4
@@ -2717,6 +3588,14 @@ class CombIntrinsicProposal:
         return (1.0 - self._ratio_max) * g, 2.0 * self._ratio_max * g
 
     def rvs(self, size=1):
+        """Draw a comb cell by weight (uniform inside it), then the other axes.
+
+        Args:
+            size (int or tuple[int, ...], optional): Batch shape. Default ``1``.
+
+        Returns:
+            np.ndarray: ``size + (4,)`` HOST float64 draws.
+        """
         if isinstance(size, int):
             size = (size,)
         n = int(np.prod(size))
@@ -2736,6 +3615,16 @@ class CombIntrinsicProposal:
         return out.reshape(size + (4,))
 
     def logpdf(self, x):
+        """Comb f0 cell density times the uniform densities of the other axes.
+
+        Args:
+            x (array_like): ``(n, 4)`` points.
+
+        Returns:
+            xp.ndarray: ``(n,)`` log density on the array module of ``x``;
+            ``-inf`` outside the comb span or the boxes (the per-row fdot
+            interval in conditional mode).
+        """
         from ..utils.utility import get_array_module
 
         xp = get_array_module(x)
@@ -2782,6 +3671,7 @@ class CombIntrinsicProposal:
 _GMM_COLUMN_PERM = (1, 0, 2, 3)
 
 
+# TODO check: keep/remove/document -- only built by build_peak_gmm (offline GMM layer, FSTAT_PEAK_SAMPLING=gmm in scripts/fstat_proposal/run_fstat_rj_search.py); not reached by the 9mo/12mo runs
 class ColumnPermutedProposal:
     """View of a distribution whose native columns are a permutation of the
     canonical ``(f0, Mc, alpha, sin_delta)`` basis (Jacobian = 1).
@@ -2822,6 +3712,7 @@ class ColumnPermutedProposal:
         return self.base.logpdf(x[..., list(self._perm)])
 
 
+# TODO check: keep/remove/document -- not reached by the 9mo/12mo runs; only callers scripts/fstat_proposal/run_fstat_rj_search.py and plot_fstat_proposal_mojito.py (FSTAT_FIT_GMM=1); already flagged TODO(fstat-gmm-deprecation)
 def fit_gmm_to_stacked(stacked, n_samples_per_box: int = 4096, gpu=None,
                        min_comp: int = 1, max_comp: int = 12,
                        verbose: bool = False):
@@ -2850,7 +3741,26 @@ def fit_gmm_to_stacked(stacked, n_samples_per_box: int = 4096, gpu=None,
 
 
 def pack_gmm_components(comps) -> dict:
-    """Flatten ragged per-box GMM component lists into npz-storable arrays."""
+    """Flatten ragged per-box GMM component lists into npz-storable arrays.
+
+    The storage format of the GB warm-start components
+    (``GB_WARM_START_COMPONENTS``, the ``GB_WARM_SELF`` refit): written by
+    :mod:`lisatools.globalfit.warmstart.fit_from_store` (and the para-search
+    tool), read back with :func:`unpack_gmm_components`.
+
+    Args:
+        comps (sequence): ``[weights, means, covs, invcovs, dets, mins, maxs]``,
+            each a length-``K`` list of per-box arrays (numpy or cupy):
+            ``weights`` ``(n_k,)``, ``means`` ``(n_k, d)``, ``covs`` /
+            ``invcovs`` ``(n_k, d, d)``, ``dets`` ``(n_k,)``, ``mins`` /
+            ``maxs`` ``(d,)``.
+
+    Returns:
+        dict[str, np.ndarray]: Host arrays ``gmm_ncomp`` ``(K,)`` int,
+        ``gmm_weights`` ``(sum n_k,)``, ``gmm_means`` ``(sum n_k, d)``,
+        ``gmm_covs`` / ``gmm_invcovs`` ``(sum n_k, d, d)``, ``gmm_dets``
+        ``(sum n_k,)``, ``gmm_mins`` / ``gmm_maxs`` ``(K, d)``.
+    """
     weights, means, covs, invcovs, dets, mins, maxs = comps
     return dict(
         gmm_ncomp=np.array([len(_host(w)) for w in weights], dtype=int),
@@ -2865,7 +3775,19 @@ def pack_gmm_components(comps) -> dict:
 
 
 def unpack_gmm_components(d):
-    """Inverse of :func:`pack_gmm_components` (accepts an npz mapping)."""
+    """Inverse of :func:`pack_gmm_components` (accepts an npz mapping).
+
+    Called when the warm-start proposal loads its components
+    (:mod:`lisatools.globalfit.warmstart.proposal`).
+
+    Args:
+        d (Mapping): Mapping with the ``gmm_*`` keys written by
+            :func:`pack_gmm_components`.
+
+    Returns:
+        list: ``[weights, means, covs, invcovs, dets, mins, maxs]``, each a
+        length-``K`` list of host float arrays (the per-box split).
+    """
     ncomp = np.asarray(d["gmm_ncomp"], dtype=int)
     splits = np.cumsum(ncomp)[:-1]
     return [
@@ -2879,6 +3801,7 @@ def unpack_gmm_components(d):
     ]
 
 
+# TODO check: keep/remove/document -- not reached by the 9mo/12mo runs; only caller scripts/fstat_proposal/run_fstat_rj_search.py (FSTAT_PEAK_SAMPLING=gmm); already flagged TODO(fstat-gmm-deprecation)
 def build_peak_gmm(comps, box_weights=None, use_cupy: bool = False,
                    limit: float = 10.0):
     """Assemble the batched peak-GMM sampling object from fitted components.

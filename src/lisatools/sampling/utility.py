@@ -1,4 +1,11 @@
-"""Helper utilities for LISA sampling: GB grouping, state restoration, updates."""
+"""Legacy sampler helpers: the MBH heterodyne update and a PSD-transform stub.
+
+The GB grouping and state-restoration helpers that used to live here were
+removed (see the comment below). What remains, :class:`HeterodynedUpdate` and
+:func:`get_psd_transform_container`, has no live callers: the dev MBH search
+:mod:`lisatools.globalfit.mbhsearch` imports :class:`HeterodynedUpdate` but
+never uses it, and the global-fit runs use neither.
+"""
 
 import os
 from multiprocessing.sharedctypes import Value
@@ -23,6 +30,7 @@ from ..utils.utility import asnumpy
 # stock path restores GB state through the model AnalysisContainerArray.
 
 
+# TODO check: keep/remove/document -- no callers; only an unused import in globalfit/mbhsearch.py
 class HeterodynedUpdate:
     """Periodic update that re-centers the heterodyne reference for MBH likelihoods.
 
@@ -78,6 +86,7 @@ class HeterodynedUpdate:
         # sampler.backend.save_step(sample_state, np.full_like(lp, True))
 
 
+# TODO check: keep/remove/document -- empty stub (returns None); no callers
 def get_psd_transform_container(
     Soms_fill: float = None,
     Sa_fill: float = None,
@@ -85,7 +94,10 @@ def get_psd_transform_container(
     freq_min: float = None,
     freq_max: float = None,
 ) -> TransformContainer:
-    """Prepare a :class:`eryn.utils.transform.TransformContainer` for PSD sampling.
+    """Prepare a :class:`eryn.utils.transform.TransformContainer` for PSD sampling (stub).
+
+    The body is empty: nothing is built and the call returns ``None``. The
+    arguments describe the intended interface only.
 
     Args:
         Soms_fill: Optical metrology noise level used to fill PSD knots.
@@ -95,7 +107,8 @@ def get_psd_transform_container(
         freq_max: Maximum frequency (Hz) of the PSD spline.
 
     Returns:
-        Configured ``TransformContainer`` for PSD parameter sampling.
+        None: The intended return value is a ``TransformContainer`` for PSD
+        parameter sampling, but none is constructed yet.
     """
     # TODO/DOCS: function body is currently empty; this docstring describes
     # the intended interface but no transforms are actually constructed yet.

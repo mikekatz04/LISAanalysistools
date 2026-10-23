@@ -1,4 +1,50 @@
-"""Per-branch sampler-state subclasses used by the global fit."""
+"""Per-branch sampler-state subclasses used by the global fit.
+
+The run state is a :class:`GFState`: an eryn :class:`~eryn.state.State`
+holding the engine's ladder, which is the COLD CHAIN only in the stock fits
+(``ntemps=1``, ``erebor.blank`` aside; coords
+``(1, nwalkers, nleaves_max, ndim)`` per branch, ``log_like`` /
+``log_prior`` ``(1, nwalkers)``) plus ``sub_states``, one
+:class:`ModuleSubState` per tempered branch, which owns that branch's FULL tempered
+ensemble (its own ladder, ``coords`` ``(ntemps_branch, nwalkers,
+nleaves_max, ndim)``, counters, the per-leaf cold-chain ``d_h`` / ``h_h``):
+
+* :class:`ModuleSubState` -- the base (psd, galfor and sgwb use it directly);
+* :class:`GBState` -- gb and vgb; the ladder is per band
+  (``band_info["band_temps"]``, ``(num_bands, ntemps)``) and ``band_info``
+  carries every per-band record (counters, leaf caps, cap cells, the RJ
+  shutoff valves, the search-stage latch);
+* :class:`PerLeafLadderState` -> :class:`MBHState`, :class:`EMRIState`,
+  :class:`SOBBHState` -- one ladder per source (``betas_all``,
+  ``(nleaves_max, ntemps)``).
+
+Storage contract ("the sub-state IS the schema",
+``docs/conventions.md``): the matching
+:class:`~lisatools.globalfit.hdfbackend.ModuleSubBackend` (HDF group
+``global_fit/sub_backend/<branch>``) derives every dataset from what the
+sub-state declares -- :meth:`ModuleSubState.storage_arrays` (per saved
+iteration), :meth:`~ModuleSubState.static_arrays` (once at reset),
+:meth:`~ModuleSubState.storage_attrs` (group attrs),
+:meth:`~ModuleSubState.make_template` (the zeroed instance reset shapes the
+datasets from) and :meth:`~ModuleSubState.from_stored` (resume). Extending a
+module's storage means extending its sub-state.
+
+Cold-row consistency: the main state's cold row of a branch must equal row 0
+of its sub-state. Moves write the sub-state and mirror row 0 with
+:meth:`ModuleSubState.sync_cold_row` (or :meth:`~ModuleSubState.pull_cold_row`
+for moves that sample the main state); every
+:class:`~lisatools.globalfit.moves.globalfitmove.GFCombineMove` propose
+verifies it first with :meth:`ModuleSubState.check_cold_row` (env
+``GF_SUBSTATE_CHECK``, default ``"1"``; ``0`` disables).
+
+The module-level ``ensure_*`` helpers backfill / validate the ``band_info``
+record families on a fresh start and on resume
+(:meth:`GBState.initialize_band_information`); the per-walker families are
+switched by GB settings (``GB_SEARCH_BAND_SHUTOFF_PER_WALKER``, ON in the
+9mo/12mo runs; ``GB_LEAF_CAP_PER_WALKER`` and ``GB_SEARCH_STAGE_PER_WALKER``,
+off). :func:`make_cap_edges` builds the leaf-cap cell grid (``GB_CAP_DIVISOR``
+/ ``GB_CAP_STAGGER``; the runs use 1 / staggered).
+"""
 
 import logging
 from copy import deepcopy
@@ -40,6 +86,14 @@ def branch_nleaves_max(possible_state, name: str) -> int:
     :class:`eryn.state.State`, which is not subscriptable. Both carry the
     ``(ntemps, nwalkers, nleaves_max, ndim)`` shape; dispatch on which one
     arrived.
+
+    Args:
+        possible_state: ``{branch: coords}`` dict or an object with
+            ``branches`` (eryn ``State``).
+        name: Branch name.
+
+    Returns:
+        int: The leaf axis length (``shape[-2]``) of that branch's coords.
     """
     branches = getattr(possible_state, "branches", None)
     if branches is not None:
@@ -104,14 +158,30 @@ def make_cap_edges(band_edges, divisor: int, stagger: bool = False):
     cell, v7 rows 5-6). At ``K == 1`` that function returns the own-cell
     test for every row, so the destination cell is what gates the birth.
 
+    Called at a fresh start by ``run._branch_cap_edges`` (gb / vgb band
+    info) and by the GB / VGB move code; the 9mo/12mo runs use
+    ``GB_CAP_DIVISOR=1`` with ``GB_CAP_STAGGER=1``, i.e. the
+    midpoint-to-midpoint grid.
+
     Args:
         band_edges: 1D ascending array of sub-band edges (Hz).
-        divisor: Number of cap cells per sub-band (``K >= 1``).
+        divisor: Number of cap cells per sub-band (``K >= 1``; values below 1
+            are treated as 1).
         stagger: Shift interior cap edges by half a cell so no cap edge
-            equals a band edge (requires ``K >= 2``; ignored at ``K == 1``).
+            equals a band edge. At ``K == 1`` this gives the
+            midpoint-to-midpoint grid described above.
 
     Returns:
-        ``np.ndarray`` of length ``K * num_bands + 1`` in both modes.
+        np.ndarray: Cap-cell edges (Hz), length ``K * num_bands + 1`` in both
+        modes.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.globalfit.state import make_cap_edges
+        >>> make_cap_edges(np.array([0.0, 1.0, 2.0]), 1, stagger=True).tolist()
+        [0.0, 0.5, 2.0]
+        >>> make_cap_edges(np.array([0.0, 1.0, 2.0]), 2).tolist()
+        [0.0, 0.5, 1.0, 1.5, 2.0]
     """
     be = np.asarray(band_edges, dtype=float)
     k = max(1, int(divisor))
@@ -149,16 +219,24 @@ def make_cap_edge_extensions(band_edges, cap_edges, divisor, overlap_frac):
     one value everywhere). The two END edges get ``x = 0``: the analysis
     window never widens, so neighbour indices stay in range by construction.
 
+    Called by the GB move setup only when ``GBSettings.cap_overlap_frac``
+    (env ``GB_CAP_OVERLAP_FRAC``) is above 0; the default and the 9mo/12mo
+    launchers use 0, so the production runs never call it.
+
     Args:
-        band_edges: 1D ascending sub-band edges (Hz).
-        cap_edges: the cap-cell edge array from :func:`make_cap_edges`
-            (nested or staggered) built over the same ``band_edges``.
-        divisor: cap cells per sub-band (``K``).
-        overlap_frac: ``p`` in ``[0, 0.5)``.
+        band_edges (np.ndarray): 1D ascending sub-band edges (Hz).
+        cap_edges (np.ndarray): The cap-cell edge array from
+            :func:`make_cap_edges` (nested or staggered) built over the same
+            ``band_edges``.
+        divisor (int): Cap cells per sub-band (``K``).
+        overlap_frac (float): ``p`` in ``[0, 0.5)``.
 
     Returns:
-        ``np.ndarray`` of length ``len(cap_edges)`` -- one half-extension
-        per cap edge, zeros at both ends.
+        np.ndarray: Length ``len(cap_edges)`` -- one half-extension (Hz) per
+        cap edge, zeros at both ends.
+
+    Raises:
+        ValueError: ``overlap_frac`` outside ``[0, 0.5)``.
     """
     p = float(overlap_frac)
     if not (0.0 <= p < 0.5):
@@ -179,6 +257,7 @@ def make_cap_edge_extensions(band_edges, cap_edges, divisor, overlap_frac):
     return x
 
 
+# TODO check: keep/remove/document -- no caller outside tests (test_cap_stagger.py, test_gb_cap_cell_grid.py)
 def cap_divisor_from_edges(band_edges, cap_edges) -> int:
     """Infer the cap divisor ``K`` from a stored (band_edges, cap_edges) pair."""
     nb = len(np.asarray(band_edges)) - 1
@@ -283,6 +362,18 @@ def ensure_cap_cell_fields(band_info: dict, num_cells: int,
     array is allocated and not one key is added, so a store written by a
     build carrying this change is byte-identical to one written without
     it. ``tests/test_gb_cap_per_walker.py`` asserts exactly that.
+
+    Args:
+        band_info (dict): The GB/VGB band-info record, modified in place
+            (``setdefault``: existing arrays are never overwritten).
+        num_cells (int): Number of cap cells (``len(cap_edges) - 1``).
+        staggered (bool): The cap grid differs in value from the band grid
+            (see :func:`_cap_grid_is_staggered`); True in the 9mo/12mo runs.
+        per_walker (bool): ``GB_LEAF_CAP_PER_WALKER`` (off in the 9mo/12mo
+            runs).
+
+    Raises:
+        ValueError: ``per_walker`` without ``band_info["nwalkers"]``.
     """
     if (not staggered and not per_walker
             and int(num_cells) == int(band_info.get("num_bands", num_cells))):
@@ -365,11 +456,6 @@ def ensure_band_shutoff_fields(band_info: dict, num_bands: int) -> str:
     ``legacy_dtype_names`` so the counters keep int64/bool rather than
     being coerced to the backend float dtype.
 
-    Returns a short origin token for the status line -- ``"fresh"``,
-    ``"restored"``, or ``"reset(...)"`` -- because a persisted clock that
-    silently failed to restore would be the same invisible failure this
-    whole investigation was about.
-
     Degrades, never raises:
 
     * ABSENT (any store written before this existed) -> fresh zeros.
@@ -377,6 +463,17 @@ def ensure_band_shutoff_fields(band_info: dict, num_bands: int) -> str:
     * LENGTH MISMATCH (the band grid changed between runs) -> discarded,
       fresh zeros, warning naming both lengths. Restoring a streak
       indexed by a different grid would freeze arbitrary bands.
+
+    Args:
+        band_info (dict): The band-info record, modified in place (the
+            :data:`BAND_SHUTOFF_FIELDS`).
+        num_bands (int): Number of sub-bands of this run's grid.
+
+    Returns:
+        str: A short origin token for the status line -- ``"fresh"``,
+        ``"restored"``, or ``"reset(...)"`` -- because a persisted clock that
+        silently failed to restore would be the same invisible failure this
+        whole investigation was about.
     """
     present = [f for f in BAND_SHUTOFF_FIELDS if band_info.get(f) is not None]
     if not present:
@@ -478,14 +575,10 @@ def ensure_search_stage_fields(band_info: dict, num_bands: int,
 
     ``per_walker`` FALSE is a hard no-op: not one array is allocated and not
     one key is added, so a store written by a build carrying this change is
-    byte-identical to one written without it.
+    byte-identical to one written without it. The 9mo/12mo runs export
+    ``GB_SEARCH_STAGE_PER_WALKER=0``, so there it returns ``"off"``.
 
-    Returns a short origin token for the status line -- ``"off"``,
-    ``"fresh"``, ``"restored"`` or ``"reset(...)"`` -- because a persisted
-    latch that silently failed to restore is the same invisible failure the
-    shutoff valve's own clock had.
-
-    Degrades, never raises:
+    A stored record degrades rather than raising:
 
     * ABSENT (any store written before this existed) -> fresh COARSE.
     * PARTIAL (a half-written record) -> discarded whole, fresh COARSE.
@@ -495,6 +588,21 @@ def ensure_search_stage_fields(band_info: dict, num_bands: int,
     Every degradation lands on COARSE, which is the TIGHTER floor: a
     record we cannot trust must never hand a walker the relaxed prior it
     did not earn.
+
+    Args:
+        band_info (dict): The band-info record, modified in place (the
+            :data:`SEARCH_STAGE_FIELDS` plus the ``band_stage`` mirror).
+        num_bands (int): Number of sub-bands of this run's grid.
+        per_walker (bool): ``GB_SEARCH_STAGE_PER_WALKER``.
+
+    Returns:
+        str: A short origin token for the status line -- ``"off"``,
+        ``"fresh"``, ``"restored"`` or ``"reset(...)"`` -- because a persisted
+        latch that silently failed to restore is the same invisible failure
+        the shutoff valve's own clock had.
+
+    Raises:
+        ValueError: ``per_walker`` without ``band_info["nwalkers"]``.
     """
     if not per_walker:
         return "off"
@@ -690,7 +798,14 @@ def ensure_valve_window_rule(band_info: dict) -> int:
     streak) was learned by code older than the stamp, i.e. under
     :data:`VALVE_WINDOW_RULE_CENTRES`; an empty one (a fresh valve, or one
     that never judged) has nothing to re-learn and is stamped with the
-    current rule. Returns the rule now on ``band_info``.
+    current rule.
+
+    Args:
+        band_info (dict): The band-info record; ``band_window_rule`` is set
+            in place (shape ``(1,)``, int64).
+
+    Returns:
+        int: The rule now on ``band_info``.
     """
     cur = band_info.get(VALVE_WINDOW_RULE_FIELD)
     if cur is not None:
@@ -776,6 +891,17 @@ def ensure_search_shutoff_window(band_info: dict, num_bands: int,
     but neither window array -- KEEPS its earned valve and simply starts
     the window empty. That is the same degradation the in-memory window
     always had, so this can only improve on it.
+
+    Args:
+        band_info (dict): The band-info record, modified in place (the
+            :data:`SEARCH_SHUTOFF_WINDOW_FIELDS`, each ``(nwalkers,
+            num_bands)``).
+        num_bands (int): Number of sub-bands of this run's grid.
+        nwalkers (int): Walker count.
+
+    Returns:
+        str: ``"fresh"``, ``"reset(partial)"``, ``"reset(shape)"`` or
+        ``"restored"``.
     """
     present = [f for f in SEARCH_SHUTOFF_WINDOW_FIELDS
                if band_info.get(f) is not None]
@@ -833,7 +959,27 @@ def ensure_search_shutoff_fields(band_info: dict, num_bands: int,
     ``per_walker`` FALSE is a hard no-op. Same all-or-nothing degradation
     rules as :func:`ensure_band_shutoff_fields`, and every degradation
     lands on ALL-OPEN, which is the permissive direction: a valve we
-    cannot trust must never freeze a band the search still needs.
+    cannot trust must never freeze a band the search still needs. Every
+    path that installs or restores the valve also backfills its window
+    (:func:`ensure_search_shutoff_window`) and the window-rule stamp
+    (:func:`ensure_valve_window_rule`). ON in the 9mo/12mo runs
+    (``GB_SEARCH_BAND_SHUTOFF_PER_WALKER=1``, code default off).
+
+    Args:
+        band_info (dict): The band-info record, modified in place (the
+            :data:`SEARCH_SHUTOFF_FIELDS`: ``band_rj_shutoff_w``
+            ``(nwalkers, num_bands)`` bool and ``band_shutoff_w_step``
+            ``(1,)`` int64, plus the window and the stamp).
+        num_bands (int): Number of sub-bands of this run's grid.
+        per_walker (bool): ``GB_SEARCH_BAND_SHUTOFF_PER_WALKER``.
+
+    Returns:
+        str: ``"off"``, ``"fresh"``, ``"reset(partial)"``,
+        ``"reset(shape)"``, ``"restored"`` or ``"restored (window ...)"``
+        (valve kept, window restarted).
+
+    Raises:
+        ValueError: ``per_walker`` without ``band_info["nwalkers"]``.
     """
     if not per_walker:
         return "off"
@@ -909,7 +1055,16 @@ def ensure_leaf_cap_fields(band_info: dict, num_bands: int,
     Kept OUT of ``band_info_keys`` so band-info dicts loaded from HDF5
     files written before this feature still pass the setter's required-key
     check; this backfill runs from both branches of
-    :meth:`GBState.initialize_band_information`.
+    :meth:`GBState.initialize_band_information`. Allocated on every run
+    (the 9mo/12mo launchers leave the caps disarmed at the ``-1`` sentinel:
+    ``GB_LEAF_CAP_START`` empty).
+
+    Args:
+        band_info (dict): The band-info record, modified in place
+            (``setdefault``: existing arrays are kept).
+        num_bands (int): Number of sub-bands.
+        per_walker (bool): Also allocate ``band_best_ll_w`` (the
+            ``GB_LEAF_CAP_PER_WALKER`` monitor series).
     """
     band_info.setdefault("band_leaf_cap", np.full(num_bands, -1, dtype=int))
     band_info.setdefault("band_cap_iters", np.zeros(num_bands, dtype=int))
@@ -959,7 +1114,46 @@ class ModuleSubState(eryn_State):
       kwargs; the backend's ``reset`` shapes every dataset from it.
     - :meth:`from_stored`: rebuild an instance from one stored iteration.
     - :meth:`reset_delta_counters`: zero per-iteration-delta counters after
-      each save (default: nothing to zero).
+      each save (default: the ``delta_counter_names`` of the tempered block;
+      on the writing process only, see that method for the saver-rank case).
+
+    The tempered block is allocated by :meth:`initialize_tempered` (fresh
+    start: :meth:`~lisatools.globalfit.run.GlobalFit.load_info`; resume:
+    :meth:`from_stored`). Under the multi-rank layout a compute rank works on
+    :meth:`slice_walkers` of it and the head folds the result back with
+    :meth:`merge_walkers`.
+
+    Args:
+        possible_state: An instance of the same class to copy the tempered
+            block from; anything else (a coords dict, an eryn ``State``,
+            ``None``) gives an empty instance whose block is allocated later.
+        copy (bool): Deep-copy the arrays from ``possible_state`` (default
+            ``False``: share them).
+        **kwargs: Ignored (subclass constructors take extra keywords).
+
+    Attributes:
+        ntemps (int): This branch's rung count.
+        nwalkers (int): Walkers.
+        nleaves_max (int): Leaf slots.
+        ndim (int): Parameters per leaf.
+        coords (np.ndarray): ``(ntemps, nwalkers, nleaves_max, ndim)``,
+            sampling basis.
+        inds (np.ndarray): ``(ntemps, nwalkers, nleaves_max)`` bool, alive
+            leaves.
+        log_like (np.ndarray): ``(ntemps, nwalkers)`` (per-leaf subclasses:
+            ``(nleaves_max, ntemps, nwalkers)``).
+        log_prior (np.ndarray): Same shape as ``log_like``.
+        betas (np.ndarray): ``(ntemps,)`` inverse temperatures (base class
+            only; see ``betas_attr_name``).
+        d_h (np.ndarray): ``(nwalkers, nleaves_max)`` cold-chain
+            ``<d|h>`` per leaf, NaN = dead or not recorded.
+        h_h (np.ndarray): ``(nwalkers, nleaves_max)`` cold-chain ``<h|h>``.
+        in_model_proposed (np.ndarray): ``(ntemps,)`` int counter (per-leaf
+            subclasses ``(nleaves_max, ntemps)``); likewise
+            ``in_model_accepted``, ``rj_proposed``, ``rj_accepted``.
+        swaps_proposed (np.ndarray): ``(ntemps - 1,)`` int counter (per-leaf
+            subclasses ``(nleaves_max, ntemps - 1)``); likewise
+            ``swaps_accepted``.
     """
 
     static_names: tuple = ()
@@ -987,7 +1181,9 @@ class ModuleSubState(eryn_State):
     #: persists a flat ``betas (ntemps,)``; subclasses with richer ladders
     #: (``band_temps``, ``betas_all``) override this and skip the flat one.
     betas_attr_name: str = "betas"
-    #: counters zeroed after every save (per-iteration deltas)
+    #: counters zeroed after every save (per-iteration deltas) by the WRITING
+    #: process only: under a saver rank the head's copy keeps running totals
+    #: (see :meth:`reset_delta_counters`)
     delta_counter_names: tuple = (
         "in_model_proposed",
         "in_model_accepted",
@@ -1015,12 +1211,15 @@ class ModuleSubState(eryn_State):
         return getattr(self, "_tempered_initialized", False)
 
     def _ll_shape(self):
+        """Shape of ``log_like`` / ``log_prior``: ``(ntemps, nwalkers)``."""
         return (self.ntemps, self.nwalkers)
 
     def _counter_shape(self):
+        """Shape of the in-model / RJ counters: ``(ntemps,)``."""
         return (self.ntemps,)
 
     def _swaps_shape(self):
+        """Shape of the swap counters: ``(ntemps - 1,)``."""
         return (max(self.ntemps - 1, 0),)
 
     def initialize_tempered(self, ntemps, nwalkers, nleaves_max, ndim, coords=None, inds=None):
@@ -1028,6 +1227,23 @@ class ModuleSubState(eryn_State):
 
         Idempotent: on an already-initialized sub-state the geometry must
         match exactly and any provided ``coords`` / ``inds`` are copied in.
+        A fresh block gets ``log_like`` / ``log_prior`` zeros, ``betas`` ones
+        (when the class uses a flat ladder and has none yet), ``d_h`` /
+        ``h_h`` NaN and zeroed counters (shapes in the class docstring).
+
+        Args:
+            ntemps (int): Rung count of this branch.
+            nwalkers (int): Walkers.
+            nleaves_max (int): Leaf slots.
+            ndim (int): Parameters per leaf.
+            coords (np.ndarray, optional): ``(ntemps, nwalkers, nleaves_max,
+                ndim)`` start coords (copied); ``None`` -> zeros.
+            inds (np.ndarray, optional): ``(ntemps, nwalkers, nleaves_max)``
+                alive mask (copied as bool); ``None`` -> all True.
+
+        Raises:
+            ValueError: The geometry differs from an existing block, or
+                ``coords`` / ``inds`` have the wrong shape.
         """
         dims = (int(ntemps), int(nwalkers), int(nleaves_max), int(ndim))
         if self.tempered_initialized:
@@ -1122,7 +1338,21 @@ class ModuleSubState(eryn_State):
     def slice_walkers(self, w0: int, w1: int):
         """Copy walkers ``[w0, w1)`` of the tempered block into a fresh instance.
 
-        Returns a bare instance when this sub-state has no tempered block.
+        Used by the multi-rank fan-out (``communication.walkerslice``) to give
+        a compute rank its walker block. Arrays with a walker axis
+        (:attr:`walker_axes`) are sliced; a flat ``betas`` ladder is copied by
+        value; the counters of the slice start at zero.
+
+        Args:
+            w0: First global walker of the block.
+            w1: One past the last walker.
+
+        Returns:
+            ModuleSubState: An instance of the same class holding the block
+            (a bare instance when this sub-state has no tempered block).
+
+        Raises:
+            ValueError: ``[w0, w1)`` is not inside ``[0, nwalkers)``.
         """
         part = self._bare_like()
         if not self.tempered_initialized:
@@ -1155,6 +1385,18 @@ class ModuleSubState(eryn_State):
         Ladders are NOT written back; delta counters are SUM-added when
         ``sum_counters`` (a slice starts from zero, so its counters are the
         deltas of the command that produced it).
+
+        Args:
+            part (ModuleSubState): The block returned by a compute rank (from
+                :meth:`slice_walkers`).
+            w0: First global walker of the block.
+            w1: One past the last walker.
+            sum_counters: Add ``part``'s ``delta_counter_names`` into this
+                instance's. Default ``True``.
+
+        Raises:
+            ValueError: ``part`` has no tempered block while ``self`` does,
+                the block is out of range, or its walker count differs.
         """
         part_initialized = getattr(part, "tempered_initialized", False)
         if not self.tempered_initialized and not part_initialized:
@@ -1193,6 +1435,7 @@ class ModuleSubState(eryn_State):
     #: all three are deliberately left intact.
     _reseed_state_arrays: tuple = ("coords", "inds", "log_like", "log_prior")
 
+    # TODO check: keep/remove/document -- only caller the GB replace move with GB_COLD_RESEED_EVERY > 0 (code default 0, unset in 9mo/12mo, undocumented)
     def reseed_cold_into_hottest(
         self, perm=None, rng=None, *, cold_rung: int = 0, hot_rung=None
     ):
@@ -1246,7 +1489,17 @@ class ModuleSubState(eryn_State):
         return eryn_Branch(self.coords, inds=self.inds)
 
     def sync_cold_row(self, main_state, branch_name: str):
-        """Write this sub-state's cold row (temp 0) into the main state."""
+        """Write this sub-state's cold row (temp 0) into the main state.
+
+        The mirror every move that writes the sub-state must call (GB/VGB,
+        add/remove source moves, PSD moves, ``GFCombineMove``), so the
+        engine's cold chain and the saved main chain follow the module's
+        rung 0. Copies ``coords[0]`` and ``inds[0]``.
+
+        Args:
+            main_state (GFState): The run state (cold chain only).
+            branch_name: The branch this sub-state belongs to.
+        """
         main_branch = main_state.branches[branch_name]
         main_branch.coords[0] = self.coords[0]
         main_branch.inds[0] = self.inds[0]
@@ -1255,9 +1508,14 @@ class ModuleSubState(eryn_State):
         """Write the main state's cold row (temp 0) into this sub-state's row 0.
 
         Inverse of :meth:`sync_cold_row` — for moves that sample the main
-        (engine) state directly (e.g. the ridge-Gibbs fiber move) and must
-        hand the result back to the module's tempered ladder, which the
-        band moves treat as authoritative.
+        (engine) state directly (e.g. the ridge-Gibbs fiber move,
+        ``gb_ridge_gibbs`` / ``vgb_ridge_gibbs``) and must hand the result
+        back to the module's tempered ladder, which the band moves treat as
+        authoritative.
+
+        Args:
+            main_state (GFState): The run state (cold chain only).
+            branch_name: The branch this sub-state belongs to.
         """
         main_branch = main_state.branches[branch_name]
         self.coords[0] = main_branch.coords[0]
@@ -1265,6 +1523,17 @@ class ModuleSubState(eryn_State):
 
     def check_cold_row(self, main_state, branch_name: str):
         """Verify the main state's cold row matches this sub-state's row 0.
+
+        Compares ``inds[0]`` exactly, then the alive leaves' coords exactly.
+        Called for every tempered sub-state at the start of every
+        :class:`~lisatools.globalfit.moves.globalfitmove.GFCombineMove`
+        propose, and for their own branch at the top of the noise and source
+        moves' proposes (``GF_SUBSTATE_CHECK``, default ``"1"``; ``0`` skips
+        it).
+
+        Args:
+            main_state (GFState): The run state (cold chain only).
+            branch_name: The branch this sub-state belongs to.
 
         Raises:
             ValueError: labeled description of the mismatch (inds or coords).
@@ -1293,7 +1562,14 @@ class ModuleSubState(eryn_State):
 
         Initializes the tempered block from the main branch on first use;
         afterwards copies coords/inds at every temperature (the Phase-2
-        dual-representation sync).
+        dual-representation sync). On the run path only as the resume
+        fallback in :meth:`~lisatools.globalfit.run.GlobalFit.load_info` for a
+        sub-state that arrived without a tempered block (the block then has
+        the main state's rung count, i.e. 1).
+
+        Args:
+            main_state (GFState): The run state.
+            branch_name: The branch this sub-state belongs to.
         """
         main_branch = main_state.branches[branch_name]
         if not self.tempered_initialized:
@@ -1314,7 +1590,13 @@ class ModuleSubState(eryn_State):
     # ------------------------------------------------------------------
 
     def tempered_storage_arrays(self) -> dict:
-        """The standard tempered dict (``chain``/``inds``/logL/logP + counters)."""
+        """The standard tempered dict (``chain``/``inds``/logL/logP + counters).
+
+        Returns:
+            dict: ``{"chain": coords, "inds": inds, "log_like", "log_prior",
+            "betas" (flat-ladder classes only), "d_h", "h_h", counters...}``
+            as live references (no copies); ``{}`` without a tempered block.
+        """
         if not self.tempered_initialized:
             return {}
         out = {
@@ -1333,7 +1615,12 @@ class ModuleSubState(eryn_State):
         return out
 
     def _load_tempered_from_stored(self, arrays):
-        """Fill the tempered block from one stored iteration (leading axis 1)."""
+        """Fill the tempered block from one stored iteration (leading axis 1).
+
+        ``arrays`` maps on-disk names to ``(1, ...)`` arrays; without a
+        ``chain`` entry nothing is loaded. Optional entries absent from the
+        store keep their fresh values.
+        """
         if "chain" not in arrays:
             return
         coords = np.asarray(arrays["chain"][0])
@@ -1352,15 +1639,25 @@ class ModuleSubState(eryn_State):
                 getattr(self, name)[:] = arrays[name][0]
 
     def storage_arrays(self) -> dict:
-        """``{on-disk name: array}`` persisted every saved iteration."""
+        """``{on-disk name: array}`` persisted every saved iteration.
+
+        The backend's ``reset`` creates one growable dataset per entry (shape
+        ``(0, *arr.shape)``) and ``save_step`` writes each entry by name
+        (dead leaves' coords masked on write); an entry the store lacks gets
+        its dataset at the next save. Base class: :meth:`tempered_storage_arrays`.
+        """
         return self.tempered_storage_arrays()
 
     def static_arrays(self) -> dict:
-        """``{on-disk name: array}`` persisted once at backend reset."""
+        """``{on-disk name: array}`` persisted once at backend reset (base: none)."""
         return {}
 
     def storage_attrs(self) -> dict:
-        """``{name: scalar}`` written as HDF5 group attributes at reset."""
+        """``{name: scalar}`` written as HDF5 group attributes at reset.
+
+        Base class: ``ntemps``, ``nwalkers``, ``nleaves_max``, ``ndim`` (empty
+        without a tempered block).
+        """
         if not self.tempered_initialized:
             return {}
         return {
@@ -1372,7 +1669,25 @@ class ModuleSubState(eryn_State):
 
     @classmethod
     def make_template(cls, nwalkers, ntemps, nleaves_max=None, ndim=None, **dims):
-        """Allocate a zeroed instance from dimension kwargs (extras ignored)."""
+        """Allocate a zeroed instance from dimension kwargs (extras ignored).
+
+        Called by ``ModuleSubBackend.reset`` with this branch's
+        :attr:`reset_kwargs`; the returned instance's storage methods define
+        every dataset.
+
+        Args:
+            nwalkers (int): Walkers.
+            ntemps (int): Rung count.
+            nleaves_max (int): Leaf slots (required).
+            ndim (int): Parameters per leaf (required).
+            **dims: Other reset kwargs (ignored here).
+
+        Returns:
+            ModuleSubState: A zeroed instance with its tempered block.
+
+        Raises:
+            ValueError: ``nleaves_max`` or ``ndim`` missing (or not scalar).
+        """
         template = cls(None)
         if _scalar_or_none(nleaves_max) is None or _scalar_or_none(ndim) is None:
             raise ValueError("Must provide nleaves_max and ndim kwargs.")
@@ -1381,20 +1696,52 @@ class ModuleSubState(eryn_State):
 
     @classmethod
     def from_stored(cls, arrays, statics=None, attrs=None):
-        """Rebuild an instance from one stored iteration's arrays."""
+        """Rebuild an instance from one stored iteration's arrays.
+
+        Called by ``ModuleSubBackend.get_a_sample`` (resume).
+
+        Args:
+            arrays (dict): ``{on-disk name: (1, ...) array}`` of one row.
+            statics (dict, optional): The static datasets (unused here).
+            attrs (dict, optional): The group attrs (unused here).
+
+        Returns:
+            ModuleSubState: The rebuilt sub-state.
+        """
         instance = cls(None)
         instance._load_tempered_from_stored(arrays)
         return instance
 
     def reset_delta_counters(self):
-        """Zero per-iteration-delta counters (called after each save)."""
+        """Zero per-iteration-delta counters (called after each save).
+
+        Called by ``ModuleSubBackend.save_step`` right after the row is
+        written, on the process that writes it. With a dedicated saver rank
+        (communicator size >= 3, the 9mo/12mo layout) that is the saver's
+        unpickled copy of the state, so the head's live counters are not
+        zeroed by this call. Counters that a move ADDS into (the per-leaf
+        add/remove moves; GB's ``band_num_*`` / ``band_swaps_*``) are then
+        stored as running totals since the head process started (a resume
+        reloads them from the stored row), while a single-process run (size
+        below 3) stores true per-save deltas; counters a move ASSIGNS per
+        propose (PSD, ``fanout_assigns_counters``) are per-propose values in
+        both cases. The monitor's per-band RJ panel and
+        ``scripts/diagnostics/gb_temper_audit.py`` difference consecutive rows,
+        i.e. they assume the running totals
+        (``scripts/diagnostics/gb_band_temp_history.py`` detects either form).
+        """
         if self.tempered_initialized:
             for name in self.delta_counter_names:
                 getattr(self, name)[:] = 0
 
     @property
     def reset_kwargs(self):
-        """Kwargs passed back to the backend when re-initializing the state."""
+        """Kwargs passed back to the backend when re-initializing the state.
+
+        :meth:`storage_attrs` merged with :meth:`static_arrays`; routed to this
+        branch's sub-backend ``reset`` by
+        :meth:`~lisatools.globalfit.run.GlobalFit._open_run_backend`.
+        """
         out = {name: value for name, value in self.storage_attrs().items()}
         out.update(self.static_arrays())
         return out
@@ -1405,7 +1752,24 @@ class GBState(ModuleSubState):
 
     Tracks per-band temperature ladders, swap counters, and binary-count
     arrays that the GB special moves use to drive the band-temperature
-    sampler.
+    sampler. Used by the ``gb`` and ``vgb`` branches. The tempered block is
+    the base class's plus ``source_uid``; the ladder is per band
+    (``betas_attr_name = "band_temps"``, no flat ``betas``), and the
+    per-branch ``log_like`` / ``log_prior`` / base counters are not stored:
+    ``band_info`` carries the GB tempering record at per-band resolution.
+
+    ``band_info`` (built by :meth:`initialize_band_information`) holds the
+    scalars ``nwalkers``, ``ntemps``, ``num_bands``, ``num_cap_cells``, the
+    grids ``band_edges`` ``(num_bands + 1,)`` and ``cap_edges`` (Hz), the
+    ladder ``band_temps`` ``(num_bands, ntemps)``, the counters
+    ``band_num_proposed`` / ``_accepted`` / ``_proposed_rj`` /
+    ``_accepted_rj`` ``(num_bands, ntemps)`` and ``band_swaps_proposed`` /
+    ``_accepted`` ``(num_bands, ntemps - 1)``, the occupancy
+    ``band_num_binaries`` ``(ntemps, nwalkers, num_bands)``, and the
+    record families of the ``ensure_*`` helpers of this module (leaf caps,
+    cap cells, the per-band and per-(walker, band) RJ shutoff valves, the
+    search-stage latch). Every ndarray in it except the two edge grids is
+    saved every iteration (:meth:`storage_arrays`).
 
     Args:
         possible_state: Existing :class:`GBState` or a state-like object to
@@ -1413,6 +1777,7 @@ class GBState(ModuleSubState):
             is copied over.
         band_info: Optional pre-built band-information dict.
         copy: If ``True``, deep-copy the band info from ``possible_state``.
+        **kwargs: Ignored.
     """
 
     # copy this still for each. At general hdf5 function to deal with these setups rather than specific
@@ -1452,7 +1817,9 @@ class GBState(ModuleSubState):
         """The base allocation plus ``source_uid`` (all ``-1``).
 
         A refill of an existing block (``coords`` / ``inds`` given) replaces
-        the leaves wholesale, so no ID survives it.
+        the leaves wholesale, so no ID survives it. Arguments as
+        :meth:`ModuleSubState.initialize_tempered`; ``source_uid`` has the
+        shape of ``inds``, int64.
         """
         fresh = not self.tempered_initialized
         super().initialize_tempered(ntemps, nwalkers, nleaves_max, ndim, coords=coords, inds=inds)
@@ -1467,6 +1834,7 @@ class GBState(ModuleSubState):
             uid = self.source_uid = np.full(self.inds.shape, -1, dtype=np.int64)
         return uid
 
+    # TODO check: keep/remove/document -- only caller the GB replace move with GB_COLD_RESEED_EVERY > 0 (code default 0, unset in 9mo/12mo, undocumented)
     def reseed_cold_into_hottest(self, perm=None, rng=None, *, cold_rung: int = 0, hot_rung=None):
         """The base reseed; the reseeded rung's sources are NEW sources, so
         they carry no ID (fresh ones are issued at the next sorter build)."""
@@ -1512,7 +1880,24 @@ class GBState(ModuleSubState):
         branch_name=None, leaf_caps=True, leaf_cap_per_walker=False,
         search_stage_per_walker=False, search_shutoff_per_walker=False,
     ):
-        """Allocate the band-info dict with zeroed counters.
+        """Allocate the band-info dict with zeroed counters, or validate a resumed one.
+
+        FRESH (no band info yet): builds the record described in the class
+        docstring and runs every ``ensure_*`` backfill. Called at a fresh
+        start by :meth:`~lisatools.globalfit.run.GlobalFit.load_info` (gb and
+        vgb, ``band_temps`` all zero). The GB / VGB move builders
+        (``recipe.build_gb_moves`` / ``build_vgb_moves``) call it again, which
+        then takes the validation path below, and write the real per-band
+        ladder into ``band_temps`` themselves.
+
+        ALREADY INITIALIZED (a resumed store's band info, or an earlier call):
+        strips the stored leading step axis, backfills the record families
+        (enable / restore /
+        degrade, see the ``ensure_*`` helpers), then refuses a corrupted or
+        incompatible record: per-band arrays that disagree with the stored
+        ladder, a different walker count, a different band grid, or (with
+        ``leaf_caps``) a different cap grid. A different rung count is NOT an
+        error: the stored ladder wins (warning), and the return value says so.
 
         Args:
             nwalkers: Number of MCMC walkers.
@@ -1573,6 +1958,13 @@ class GBState(ModuleSubState):
             (``TemperatureControl``, per-move ``accepted`` arrays, the
             branch's ``betas``) must use this return value rather than the
             ``ntemps`` they passed in.
+
+        Raises:
+            AssertionError: Fresh path, ``band_temps`` is not
+                ``(num_bands, ntemps)``.
+            ValueError: Resume path: corrupted stored band info, a walker-count
+                mismatch, a band-grid mismatch or a cap-grid mismatch (each
+                message names the knobs and the migration script).
         """
         if cap_edges is None:
             cap_edges = np.asarray(band_edges, dtype=float).copy()
@@ -1903,6 +2295,7 @@ class GBState(ModuleSubState):
 
             return _stored_nt
 
+    # TODO check: keep/remove/document -- no caller anywhere; superseded by accumulate_proposals / accumulate_swaps
     def update_band_information(
         self,
         band_temps,
@@ -1972,7 +2365,14 @@ class GBState(ModuleSubState):
         self._accumulate_into("band_swaps_accepted", accepted)
 
     def reset_band_counters(self):
-        """Zero all per-band proposal/acceptance/swap counters."""
+        """Zero all per-band proposal/acceptance/swap counters.
+
+        The GB :meth:`reset_delta_counters`: ``band_num_proposed`` /
+        ``_accepted`` / ``_proposed_rj`` / ``_accepted_rj`` and
+        ``band_swaps_proposed`` / ``_accepted``. Same caveat as
+        :meth:`ModuleSubState.reset_delta_counters`: with a saver rank it runs
+        on the saver's copy only.
+        """
         self.band_info["band_num_proposed"][:] = 0
         self.band_info["band_num_accepted"][:] = 0
         self.band_info["band_num_proposed_rj"][:] = 0
@@ -2032,11 +2432,14 @@ class GBState(ModuleSubState):
     predating_fill_values = {VALVE_WINDOW_RULE_FIELD: VALVE_WINDOW_RULE_CENTRES}
 
     def storage_arrays(self):
-        """Every per-band array plus the tempered ``chain``/``inds``.
+        """Every per-band array plus the tempered ``chain``/``inds`` (and ``d_h``/``h_h``).
 
-        The per-branch ``log_like``/``log_prior`` and base counters are
-        omitted -- ``band_info`` carries the GB tempering record
-        (``band_temps`` + ``band_num_*``) at per-band resolution.
+        "Every per-band array" is every ndarray value in ``band_info`` except
+        the static ``band_edges`` / ``cap_edges``, so a record family exists in
+        the store exactly when the live band info carries it. The per-branch
+        ``log_like``/``log_prior`` and base counters are omitted --
+        ``band_info`` carries the GB tempering record (``band_temps`` +
+        ``band_num_*``) at per-band resolution.
         """
         out = {
             name: dat
@@ -2053,6 +2456,7 @@ class GBState(ModuleSubState):
         return out
 
     def static_arrays(self):
+        """``{"band_edges", "cap_edges"}`` (``cap_edges`` defaults to the band grid)."""
         return {
             "band_edges": self.band_info["band_edges"],
             "cap_edges": self.band_info.get(
@@ -2061,6 +2465,7 @@ class GBState(ModuleSubState):
         }
 
     def storage_attrs(self):
+        """The base attrs plus ``num_bands`` and ``num_cap_cells``."""
         out = dict(super().storage_attrs())
         out["num_bands"] = len(self.band_info["band_edges"]) - 1
         out["num_cap_cells"] = len(self.static_arrays()["cap_edges"]) - 1
@@ -2120,6 +2525,12 @@ class GBState(ModuleSubState):
         forwarded to :meth:`initialize_band_information`, so a store created
         with a per-walker knob on gets that family's datasets from the start.
         All default to the flag-off layout (a store that never had them).
+        The tempered block is allocated only when ``nleaves_max`` and ``ndim``
+        are scalars. ``num_cap_cells`` is accepted and ignored (the cell count
+        follows ``cap_edges``).
+
+        Raises:
+            ValueError: ``num_bands`` or ``band_edges`` missing.
         """
         if num_bands is None or band_edges is None:
             raise ValueError("Must provide num_bands and band_edges kwargs.")
@@ -2139,6 +2550,23 @@ class GBState(ModuleSubState):
 
     @classmethod
     def from_stored(cls, arrays, statics=None, attrs=None):
+        """Rebuild a GB sub-state from one stored row (resume).
+
+        Every stored ``band_*`` / ``cap_cell_*`` array becomes ``band_info``
+        (still with its leading step axis, stripped later by
+        :meth:`initialize_band_information`); ``band_edges`` / ``cap_edges``
+        come from ``statics`` (stores without ``cap_edges`` use the band
+        grid); ``chain`` / ``inds`` / ``d_h`` / ``h_h`` fill the tempered
+        block.
+
+        Args:
+            arrays (dict): ``{on-disk name: (1, ...) array}`` of one row.
+            statics (dict): The static datasets; must hold ``band_edges``.
+            attrs (dict, optional): The group attrs (unused).
+
+        Returns:
+            GBState: The rebuilt sub-state.
+        """
         # The stored band arrays keep their leading step axis; GBState's
         # initialize_band_information strips it rank-based on reload.
         band_info = {
@@ -2156,6 +2584,7 @@ class GBState(ModuleSubState):
         return instance
 
     def reset_delta_counters(self):
+        """Zero the per-band counters (:meth:`reset_band_counters`)."""
         self.reset_band_counters()
 
 
@@ -2165,14 +2594,21 @@ class PerLeafLadderState(ModuleSubState):
     ``betas_all`` has shape ``(nleaves_max, ntemps)`` -- one independent
     ladder per source. Concrete classes set ``branch_name`` and the legacy
     per-branch leaf-count attribute name (``num_mbhs`` / ``num_emris`` /
-    ``num_sobbhs``) via ``leaf_count_name``.
+    ``num_sobbhs``) via ``leaf_count_name``. Everything in the tempered block
+    is per leaf: ``log_like`` / ``log_prior`` ``(nleaves_max, ntemps,
+    nwalkers)`` (walker axis last), counters ``(nleaves_max, ntemps)``, swap
+    counters ``(nleaves_max, ntemps - 1)``. Stored: ``betas_all`` plus the
+    standard tempered dict; attrs add the leaf count.
 
     Args:
-        possible_state: Existing instance of the same class or coords-like
-            dict.
+        possible_state: Existing instance of the same class (copied), a
+            coords-like dict or eryn ``State`` (the leaf count is read from
+            its ``branch_name`` coords), or ``None`` (leaf count from
+            ``betas_all``; 20 when that is ``None`` too).
         betas_all: Optional ``(nleaves_max, ntemps)`` array of inverse
             temperatures, one row per leaf.
         copy: If ``True``, deep-copy data from ``possible_state``.
+        **kwargs: Ignored.
     """
 
     branch_name: str = None
@@ -2201,6 +2637,7 @@ class PerLeafLadderState(ModuleSubState):
                 )
 
     def _set_leaf_count(self, n):
+        """Store the leaf count under the class's legacy name (``num_mbhs`` etc.)."""
         setattr(self, self.leaf_count_name, int(n))
 
     @property
@@ -2220,32 +2657,47 @@ class PerLeafLadderState(ModuleSubState):
     walker_axes = {**ModuleSubState.walker_axes, "log_like": 2, "log_prior": 2}
 
     def _bare_like(self):
+        """A fresh instance carrying a copy of ``betas_all`` (for walker slices)."""
         betas_all = None if self.betas_all is None else np.array(self.betas_all, copy=True)
         return type(self)(None, betas_all=betas_all)
 
     # per-leaf resolution: each leaf carries its own ladder, likelihood
     # rows, and counters
     def _ll_shape(self):
+        """``(nleaves_max, ntemps, nwalkers)``."""
         return (self.nleaves_max, self.ntemps, self.nwalkers)
 
     def _counter_shape(self):
+        """``(nleaves_max, ntemps)``."""
         return (self.nleaves_max, self.ntemps)
 
     def _swaps_shape(self):
+        """``(nleaves_max, ntemps - 1)``."""
         return (self.nleaves_max, max(self.ntemps - 1, 0))
 
     def storage_arrays(self):
+        """``betas_all`` plus :meth:`ModuleSubState.tempered_storage_arrays`."""
         out = {"betas_all": self.betas_all}
         out.update(self.tempered_storage_arrays())
         return out
 
     def storage_attrs(self):
+        """The base attrs plus the leaf count under ``leaf_count_name``."""
         out = dict(super().storage_attrs())
         out[self.leaf_count_name] = self.num_leaves
         return out
 
     @classmethod
     def make_template(cls, nwalkers, ntemps, nleaves_max=None, ndim=None, **dims):
+        """Zeroed instance: ``betas_all`` zeros ``(num_leaves, ntemps)`` + tempered block.
+
+        The leaf count is ``dims[leaf_count_name]`` when given, else
+        ``nleaves_max``; the tempered block is allocated when ``ndim`` is a
+        scalar.
+
+        Raises:
+            ValueError: No leaf count.
+        """
         num_leaves = _scalar_or_none(dims.get(cls.leaf_count_name))
         if num_leaves is None:
             num_leaves = _scalar_or_none(nleaves_max)
@@ -2258,6 +2710,7 @@ class PerLeafLadderState(ModuleSubState):
 
     @classmethod
     def from_stored(cls, arrays, statics=None, attrs=None):
+        """Rebuild from one stored row: ``betas_all[0]`` plus the tempered block."""
         # [0] squeezes the (single) iteration axis to the live
         # (nleaves, ntemps) shape.
         instance = cls(None, betas_all=arrays["betas_all"][0])
@@ -2300,13 +2753,38 @@ class GFState(eryn_State):
     (``gb``, ``mbh``, ``emri``, ...) to an associated state subclass
     (e.g. :class:`GBState`, :class:`MBHState`).
 
+    The eryn part is the engine's COLD CHAIN (stock fits: ``ntemps=1``;
+    ``erebor.blank`` keeps an engine ladder, default 2, on the leading axis):
+    ``branches[name].coords`` ``(1, nwalkers, nleaves_max, ndim)`` in the
+    sampling basis, ``inds`` ``(1, nwalkers, nleaves_max)``, ``log_like`` /
+    ``log_prior`` ``(1, nwalkers)`` and ``supplemental["walker_inds"]`` (the
+    global walker ids, stamped by
+    :meth:`~lisatools.globalfit.run.GlobalFit.prepare_main`). Each
+    ``sub_states[name]`` owns the branch's full tempered ensemble (module
+    docstring); a branch whose ``sub_state_bases`` entry is ``None`` gets
+    ``None`` and tempers on the engine ladder through plain eryn moves.
+    Built at a fresh start by :meth:`~lisatools.globalfit.run.GlobalFit.load_info`
+    and on resume by ``GFHDFBackend.get_a_sample``; ``GFState(state,
+    copy=True)`` copies main state and sub-states together.
+
     Args:
         possible_state: Either an existing :class:`GFState` to copy from or a
-            coords-like input.
+            coords-like input (``{branch: coords}``, forwarded to eryn and to
+            every sub-state constructor).
+        *args: Forwarded to :class:`eryn.state.State` and to each sub-state
+            constructor.
         is_eryn_state_input: When ``True``, treat ``possible_state`` as a
             plain :class:`eryn.state.State` rather than a :class:`GFState`.
         sub_state_bases: Mapping ``{branch_name: state_class}`` giving the
-            sub-state class to instantiate for each branch.
+            sub-state class to instantiate for each branch (the
+            ``EngineInfo.branch_states``). Ignored when copying a
+            :class:`GFState`, whose own mapping is reused.
+        **kwargs: Forwarded to :class:`eryn.state.State` (``inds``,
+            ``random_state``, ``copy``, ...) and to each sub-state constructor.
+
+    Attributes:
+        sub_states (dict): ``{branch: ModuleSubState or None}``.
+        sub_state_bases (dict): ``{branch: sub-state class or None}``.
     """
 
     # TODO: bandaid fix this
@@ -2362,6 +2840,7 @@ class GFState(eryn_State):
         #             self.sub_states[name] = None
 
 
+# TODO check: keep/remove/document -- only the legacy settings files in mojito_input/ and global_fit_input/ use it; not reached by the 9mo/12mo runs
 class AllGFBranchInfo:
     """Aggregate of two or more :class:`GFBranchInfo` instances.
 
@@ -2474,6 +2953,7 @@ class AllGFBranchInfo:
 from eryn.backends import backend as eryn_Backend
 
 
+# TODO check: keep/remove/document -- only the legacy settings files in mojito_input/ and global_fit_input/ use it; not reached by the 9mo/12mo runs
 @dataclass
 class GFBranchInfo:
     """Metadata describing a single branch in the global fit.

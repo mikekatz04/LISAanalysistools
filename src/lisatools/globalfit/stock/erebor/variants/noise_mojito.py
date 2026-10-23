@@ -33,6 +33,12 @@ Usage::
 
 Requires a mojito L1 folder (``MOJITO_DATA_PATH`` / ``general
 .mojito_data_path``) containing ``data/INSTRUMENT/L1``.
+
+Two registered variants: ``noise_mojito`` (:class:`MojitoNoiseGlobalFit`,
+psd only) and ``noise_galfor_mojito`` (:class:`MojitoNoiseGalForGlobalFit`,
+psd + galfor on the NOISE + GALFOR streams). Both use the
+:mod:`~lisatools.globalfit.stock.erebor.variants.noise` ``setup_recipe``.
+Not part of the production runs.
 """
 
 from __future__ import annotations
@@ -60,6 +66,30 @@ class MojitoNoiseGeneralSettings(NoiseGeneralSettings):
     s with ``Nf = 1440`` / ``Nt = 2160`` (90 d, ~1 h wavelets), over the full
     1e-4 -- 2.5e-2 Hz analysis band so both noise parameters are constrained
     (``Sa_a`` from the low-frequency end, ``Soms_d`` from the high).
+
+    Subclass of :class:`~lisatools.globalfit.stock.erebor.variants.noise.NoiseGeneralSettings`
+    (other fields documented there).
+
+    Attributes:
+        dt: Sample spacing [s]. Default ``2.5``.
+        nf: WDM frequency layers; overrides ``tobs_target`` when ``nt`` is
+            set too. Env ``NF``. Default ``1440``.
+        nt: WDM time layers. Env ``NT``. Default ``2160`` (90 d; 6 months is
+            ``4320``).
+        min_freq: Data-band floor [Hz]. Env ``MIN_FREQ``. Default ``1e-4``.
+        max_freq: Data-band ceiling [Hz]. Env ``MAX_FREQ``. Default ``2.5e-2``.
+        window_tukey_alpha: Default ``0.0``.
+        edge_crop_wavelets: Env ``EDGE_CROP_WAVELETS``. Default ``20``.
+        source_types: Default ``("NOISE",)``.
+        data_mode: Only ``"mojito"`` is supported. Read from the env var
+            ``DATA_PROCESSOR`` (the deprecated alias), not ``DATA_MODE``.
+            Default ``"mojito"``.
+        file_store_dir: Env ``FILE_STORE_DIR``. Default
+            ``"./gf_output_noise_mojito/"``.
+        base_file_name: Env ``BASE_FILE_NAME``. Default ``"noise_mojito"``.
+        keep_noise_estimates: Stash mojito's own noise estimate and the raw
+            noise series on the processor. Env ``KEEP_NOISE_ESTIMATES``.
+            Default ``False``.
     """
 
     # mojito L1 is sampled at dt = 2.5 s (the noise-variant default is 5.0).
@@ -121,7 +151,27 @@ class MojitoNoiseGeneralSettings(NoiseGeneralSettings):
 
 
 class MojitoNoiseGlobalFit(_NoiseFitBase):
-    """Instrument-PSD fit on mojito's simulated instrument-noise stream."""
+    """Instrument-PSD fit on mojito's simulated instrument-noise stream.
+
+    One branch, ``psd``
+    (:class:`~lisatools.globalfit.stock.erebor.variants.noise.NoisePSDSettings`);
+    stage ``noise_pe`` with ``psd_pe``; data = the mojito ``NOISE`` stream
+    chopped to ``Nf * Nt`` samples at load; the Erebor WDM domain (with the
+    edge crop).
+
+    Attributes:
+        option_name: ``"noise_mojito"``.
+        setup_classes: ``{"psd": PSDSetup}``.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.stock import erebor
+
+            fit = erebor.noise_mojito(nwalkers=16, keep_noise_estimates=True)
+            fit.build()
+            fit.run()
+    """
 
     option_name = "noise_mojito"
     description = (
@@ -133,10 +183,12 @@ class MojitoNoiseGlobalFit(_NoiseFitBase):
     setup_classes = {"psd": PSDSetup}
 
     def default_branches(self) -> typing.Dict[str, Settings]:
+        """``{"psd": NoisePSDSettings()}``."""
         # psd only: the INSTRUMENT stream has no galaxy for a galfor branch.
         return {"psd": NoisePSDSettings()}
 
     def default_recipe(self) -> Recipe:
+        """Stage ``noise_pe`` with ``psd_pe``."""
         # psd-ONLY PE stage (no galfor branch on this variant). New
         # Move/Recipe/Stage API (2026-09-04 migration; the old
         # RecipeSpec/StageSpec/MoveSpec version was pre-refactor dead code).
@@ -154,6 +206,7 @@ class MojitoNoiseGlobalFit(_NoiseFitBase):
         )
 
     def make_domain_settings(self, gs, Nf, Nt, wavelet_duration, edge_crop):
+        """The Erebor WDM factory (with the edge crop), not the noise fits' bare one."""
         # Back to the Erebor default (honors the wavelet edge crop); the
         # synthetic noise fits deliberately drop the crop so their (nch, Nf, Nt)
         # draw covers the full grid, which does not apply to real data.
@@ -162,12 +215,22 @@ class MojitoNoiseGlobalFit(_NoiseFitBase):
         )
 
     def default_preprocess_kwargs(self) -> dict:
+        """No highpass / trim (the loader chops to ``Tobs``)."""
         # mojito L1 is already conditioned, and the Tobs chop happens at load
         # (below), so the engine's highpass / edge-trim / Tobs-trim would only
         # eat samples the fixed Nf*Nt grid needs. Same choice as all_sources.
         return dict(highpass_kwargs=None, trim_kwargs=None, Tobs=None, normalize=False)
 
     def set_default_processor(self, gs: MojitoNoiseGeneralSettings) -> None:
+        """``L1ProcessingStep`` on ``source_types`` with a ``Tobs`` chop at load.
+
+        Args:
+            gs: The build-time general block (mutated in place).
+
+        Raises:
+            ValueError: When ``data_mode`` is not ``"mojito"`` or
+                ``source_types`` lacks ``NOISE``.
+        """
         if gs.data_mode != "mojito":
             raise ValueError(
                 f"noise_mojito data_mode={gs.data_mode!r}; only 'mojito' is "
@@ -213,6 +276,13 @@ class MojitoNoiseGalForGeneralSettings(MojitoNoiseGeneralSettings):
     the instrument-noise stream PLUS mojito's galactic-foreground stream, and
     the store defaults are separate (the branch set differs, and a resume
     across a branch-set change fails with a bare ``KeyError``).
+
+    Attributes:
+        source_types: Default ``("NOISE", "GALFOR")``.
+        file_store_dir: Env ``FILE_STORE_DIR``. Default
+            ``"./gf_output_noise_galfor_mojito/"``.
+        base_file_name: Env ``BASE_FILE_NAME``. Default
+            ``"noise_galfor_mojito"``.
     """
 
     # NOISE + GALFOR: data/INSTRUMENT/L1 summed with data/GALFOR/L1. Both are
@@ -273,9 +343,11 @@ class MojitoNoiseGalForGlobalFit(MojitoNoiseGlobalFit):
     setup_classes = {"psd": PSDSetup, "galfor": GalForSetup}
 
     def default_branches(self) -> typing.Dict[str, Settings]:
+        """``psd`` and ``galfor`` blocks."""
         return {"psd": NoisePSDSettings(), "galfor": GalForSettings()}
 
     def default_recipe(self) -> Recipe:
+        """Stage ``noise_pe``: ``psd_pe`` + ``galfor_pe``, or one ``noise_pe`` (joint)."""
         # Mirrors NoiseOnlyGlobalFit.default_recipe: the noise-move split
         # gives each branch its own move + ladder inside one PE stage
         # (share_temperature_control=False is what keeps the ladders
@@ -302,6 +374,11 @@ class MojitoNoiseGalForGlobalFit(MojitoNoiseGlobalFit):
         )
 
     def set_default_processor(self, gs: MojitoNoiseGalForGeneralSettings) -> None:
+        """Require ``GALFOR`` in ``source_types``, then the parent's L1 processor.
+
+        Raises:
+            ValueError: When ``source_types`` lacks ``GALFOR`` (or ``NOISE``).
+        """
         # The parent validates NOISE and builds the L1 processor kwargs from
         # gs.source_types, which already carries GALFOR. Only the extra
         # requirement is checked here: without the GALFOR stream this is just

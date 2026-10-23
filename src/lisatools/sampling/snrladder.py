@@ -44,6 +44,18 @@ Everything here is a pure function of plain values (no state, no RNG); the
 move (``ResidualAddOneRemoveOneMove._maybe_update_snr_ladders``), the
 builder (``recipe.resolve_snr_keyed_ladders``) and the store migration
 (``scripts/fstat_proposal/rerung_store_branches.py --top-snr``) share it.
+
+Entry points: :func:`top_snr_value` (the knob cast), :func:`ceiling_tmax` /
+:func:`check_clip` (the clip), :func:`snr_tmax` and :func:`snr_keyed_ladder`
+(one leaf's ``T_max`` and ladder), :func:`leaf_snr` / :func:`leaf_snrs` /
+:func:`substate_leaf_snrs` (the measured SNRs), :func:`snr_changed` (the
+refresh test), :func:`describe_leaf` (the log line) and
+:func:`make_ladder_count` (the store migration's rung count).
+
+Production status: OFF in the 9mo / 12mo runs. Neither launcher sets
+``{BRANCH}_LADDER_TOP_SNR``, so :func:`top_snr_value` returns 0 and the
+ladders are the fixed-ceiling ``make_ladder`` ladders of
+``{BRANCH}_LADDER_TMAX`` (EMRI 625, MBH 10, SOBBH 6 in both launchers).
 """
 
 from __future__ import annotations
@@ -58,8 +70,9 @@ import numpy as np
 LADDER_TOP_SNR_DEFAULT = 2.0
 #: ``{BRANCH}_LADDER_TMAX_MIN``: the floor of a leaf's top temperature
 LADDER_TMAX_MIN_DEFAULT = 4.0
-#: relative SNR change since a leaf's ladder was built that triggers a
-#: refresh (``{BRANCH}_LADDER_TOP_SNR_REFRESH``)
+#: relative SNR change since a leaf's ladder was built above which a DUE
+#: refresh rebuilds it (:func:`snr_changed`); the refresh cadence itself is
+#: ``{BRANCH}_LADDER_TOP_SNR_REFRESH`` (every N proposes, 0 = never)
 LADDER_SNR_REFRESH_CHANGE = 0.2
 #: lnL at or below this is the out-of-domain sentinel, never a maximum
 _SENTINEL = -1e299
@@ -69,13 +82,29 @@ _WORDS_OFF = ("off", "false", "no", "")
 
 
 def top_snr_value(raw) -> float:
-    """Cast of ``{BRANCH}_LADDER_TOP_SNR`` (a module-level function: the
-    settings tree must pickle).
+    """Cast ``{BRANCH}_LADDER_TOP_SNR`` to the top SNR (0 = off).
+
+    A module-level function because the settings tree must pickle.
 
     A number is the top SNR (``<= 0`` = off); the words on / true / yes are
     :data:`LADDER_TOP_SNR_DEFAULT`; off / false / no / an empty string (and
     ``None``) are off. ``"1"`` is the number 1, not "on". Anything else
     raises (a mistyped knob must not silently do nothing).
+
+    Args:
+        raw (str, float, bool or None): The knob value (env string or kwarg).
+
+    Returns:
+        float: The top SNR, or ``0.0`` when off.
+
+    Raises:
+        ValueError: ``raw`` is a string that is neither a word above nor a
+            number, or is a non-finite number.
+
+    Example:
+        >>> from lisatools.sampling.snrladder import top_snr_value
+        >>> top_snr_value("on"), top_snr_value("1"), top_snr_value(None)
+        (2.0, 1.0, 0.0)
     """
     if raw is None:
         return 0.0
@@ -95,8 +124,20 @@ def top_snr_value(raw) -> float:
 
 
 def ceiling_tmax(ndim, ntemps, ladder_tmax=None) -> float:
-    """The clip's ceiling: ``ladder_tmax`` when set, else the top temperature
-    of the uncapped ``make_ladder(ndim, ntemps)`` (eryn's ~25 % spacing)."""
+    """Return the clip's ceiling temperature.
+
+    Args:
+        ndim (int): Parameters per leaf (sets eryn's ladder spacing).
+        ntemps (int): Rung count of the branch ladder.
+        ladder_tmax (float, optional): ``{BRANCH}_LADDER_TMAX``. Used when set
+            and finite; ``None`` (default) or a non-finite value falls back to
+            the top temperature of the uncapped
+            :func:`eryn.moves.tempering.make_ladder` ladder (eryn's ~25 %
+            spacing).
+
+    Returns:
+        float: The ceiling ``T_max``.
+    """
     if ladder_tmax is not None:
         val = float(ladder_tmax)
         if math.isfinite(val):
@@ -108,7 +149,19 @@ def ceiling_tmax(ndim, ntemps, ladder_tmax=None) -> float:
 
 
 def check_clip(tmax_min, tmax_ceiling) -> typing.Tuple[float, float]:
-    """``(floor, ceiling)`` as floats; refuses a floor <= 1 or above the ceiling."""
+    """Validate the clip and return it as floats.
+
+    Args:
+        tmax_min (float): Floor of a leaf's ``T_max`` (``{BRANCH}_LADDER_TMAX_MIN``).
+        tmax_ceiling (float): Ceiling (:func:`ceiling_tmax`).
+
+    Returns:
+        tuple[float, float]: ``(floor, ceiling)``.
+
+    Raises:
+        ValueError: The floor is not a finite temperature ``> 1``, or the
+            ceiling is not finite or lies below the floor.
+    """
     lo, hi = float(tmax_min), float(tmax_ceiling)
     if not (math.isfinite(lo) and lo > 1.0):
         raise ValueError(f"LADDER_TMAX_MIN must be a temperature > 1, got {tmax_min!r}")
@@ -121,12 +174,32 @@ def check_clip(tmax_min, tmax_ceiling) -> typing.Tuple[float, float]:
 
 
 def snr_tmax(snr, top_snr, tmax_min, tmax_ceiling):
-    """``(T_leaf, T_raw, clip)`` for one leaf.
+    """Return the SNR-keyed top temperature of one leaf.
 
     ``T_raw = (snr / top_snr)^2`` and ``T_leaf = clip(T_raw, tmax_min,
     tmax_ceiling)``; ``clip`` is ``"floor"``, ``"ceiling"`` or ``""``. A
     missing / non-finite / non-positive ``snr`` (no source) has ``T_raw = 0``
     and lands on the floor.
+
+    Args:
+        snr (float or None): The leaf's SNR (:func:`leaf_snr`).
+        top_snr (float): Effective SNR the top rung should see; ``> 0``.
+        tmax_min (float): Floor of ``T_leaf``.
+        tmax_ceiling (float): Ceiling of ``T_leaf``.
+
+    Returns:
+        tuple[float, float, str]: ``(T_leaf, T_raw, clip)``.
+
+    Raises:
+        ValueError: ``top_snr <= 0``, or the clip is invalid
+            (:func:`check_clip`).
+
+    Example:
+        >>> from lisatools.sampling.snrladder import snr_tmax
+        >>> snr_tmax(34.0, 2.0, 4.0, 625.0)
+        (289.0, 289.0, '')
+        >>> snr_tmax(50.2, 2.0, 4.0, 625.0)[2]
+        'ceiling'
     """
     top = float(top_snr)
     if not top > 0.0:
@@ -142,14 +215,25 @@ def snr_tmax(snr, top_snr, tmax_min, tmax_ceiling):
 
 
 def snr_keyed_ladder(ndim, ntemps, tmax) -> np.ndarray:
-    """``make_ladder(ndim, ntemps, Tmax=tmax)``: geometric from 1 to ``1 / tmax``."""
+    """Build one leaf's inverse-temperature ladder, geometric from 1 to ``1 / tmax``.
+
+    Thin wrapper of :func:`eryn.moves.tempering.make_ladder` with ``Tmax``.
+
+    Args:
+        ndim (int): Parameters per leaf.
+        ntemps (int): Rung count (the branch's frozen count).
+        tmax (float): Top temperature (:func:`snr_tmax`).
+
+    Returns:
+        np.ndarray: ``(ntemps,)`` float betas, ``betas[0] == 1``.
+    """
     from eryn.moves.tempering import make_ladder
 
     return np.asarray(make_ladder(int(ndim), ntemps=int(ntemps), Tmax=float(tmax)), dtype=float)
 
 
 def leaf_snr(d_h, h_h, cold_ll=None):
-    """``(snr, walker, kind)`` of one leaf from its per-walker inner products.
+    """Return ``(snr, walker, kind)`` of one leaf from its per-walker inner products.
 
     ``walker`` is the max-lnL cold walker among those with a usable
     measurement (``cold_ll``: the leaf's cold-rung lnL per walker, the
@@ -158,6 +242,21 @@ def leaf_snr(d_h, h_h, cold_ll=None):
     fallback ``sqrt(<d|h>)``, the detection SNR at the maximum, used only
     when that walker's ``<h|h>`` is unusable). No usable walker:
     ``(nan, None, None)``.
+
+    Args:
+        d_h (array-like or None): ``<d|h>`` per walker, shape ``(nwalkers,)``;
+            ``None`` or a shape mismatch means no ``<d|h>`` values.
+        h_h (array-like): ``<h|h>`` per walker, shape ``(nwalkers,)``.
+        cold_ll (array-like, optional): Cold-rung lnL per walker; values at
+            or below the ``-1e299`` out-of-domain sentinel are ignored.
+
+    Returns:
+        tuple[float, int or None, str or None]: ``(snr, walker, kind)``.
+
+    Example:
+        >>> from lisatools.sampling.snrladder import leaf_snr
+        >>> leaf_snr([90.0, 99.0], [100.0, 121.0], cold_ll=[-5.0, -1.0])
+        (11.0, 1, 'optimal')
     """
     hh = np.asarray(h_h, dtype=float).ravel()
     dh = np.asarray(d_h, dtype=float).ravel() if d_h is not None else np.full(hh.shape, np.nan)
@@ -184,7 +283,17 @@ def leaf_snr(d_h, h_h, cold_ll=None):
 
 
 def leaf_alive(inds, leaf) -> bool:
-    """Whether ``leaf`` carries a source on any cold walker (``inds`` ``(nt, nw, nl)``)."""
+    """Return whether ``leaf`` carries a source on any cold walker.
+
+    Args:
+        inds (array-like or None): Boolean ``(ntemps, nwalkers, nleaves)`` leaf
+            occupancy. ``None``, a non-3-D array or an out-of-range ``leaf``
+            count as alive.
+        leaf (int): Leaf index.
+
+    Returns:
+        bool: ``True`` when any cold-rung (``inds[0]``) walker has the leaf.
+    """
     if inds is None:
         return True
     arr = np.asarray(inds)
@@ -194,11 +303,19 @@ def leaf_alive(inds, leaf) -> bool:
 
 
 def leaf_snrs(d_h, h_h, log_like=None, nleaves=None):
-    """``[(snr, walker, kind), ...]`` per leaf from sub-state-shaped arrays.
+    """Apply :func:`leaf_snr` to every leaf of sub-state-shaped arrays.
 
-    ``d_h`` / ``h_h`` ``(nwalkers, nleaves)``; ``log_like`` the per-leaf
-    ladder ``(nleaves, ntemps, nwalkers)`` (its cold rung picks the walker)
-    or ``None``. Missing arrays give ``nan`` for every leaf.
+    Args:
+        d_h (array-like or None): ``<d|h>``, shape ``(nwalkers, nleaves)``.
+        h_h (array-like or None): ``<h|h>``, shape ``(nwalkers, nleaves)``.
+            ``None`` or a non-2-D array gives ``nan`` for every leaf.
+        log_like (array-like, optional): The per-leaf ladder lnL,
+            ``(nleaves, ntemps, nwalkers)``; its cold rung picks the walker.
+        nleaves (int, optional): Number of leaves to report; default
+            ``h_h.shape[1]`` (leaves beyond it get ``nan``).
+
+    Returns:
+        list[tuple]: ``[(snr, walker, kind), ...]``, one per leaf.
     """
     if h_h is None:
         n = int(nleaves or 0)
@@ -224,8 +341,18 @@ def leaf_snrs(d_h, h_h, log_like=None, nleaves=None):
 
 
 def substate_leaf_snrs(sub, nleaves=None):
-    """:func:`leaf_snrs` read off a per-leaf ladder sub-state (``d_h`` / ``h_h`` /
-    ``log_like``); every leaf ``nan`` when the sub-state recorded nothing."""
+    """Apply :func:`leaf_snrs` to a per-leaf ladder sub-state.
+
+    Reads the sub-state's ``d_h`` / ``h_h`` / ``log_like`` attributes; every
+    leaf is ``nan`` when the sub-state recorded nothing.
+
+    Args:
+        sub (object): The add/remove move's per-leaf sub-state.
+        nleaves (int, optional): Leaf count; default ``sub.nleaves_max``.
+
+    Returns:
+        list[tuple]: ``[(snr, walker, kind), ...]``, one per leaf.
+    """
     if nleaves is None:
         nleaves = getattr(sub, "nleaves_max", None)
     return leaf_snrs(getattr(sub, "d_h", None), getattr(sub, "h_h", None),
@@ -233,7 +360,18 @@ def substate_leaf_snrs(sub, nleaves=None):
 
 
 def snr_changed(snr, ref, frac=LADDER_SNR_REFRESH_CHANGE) -> bool:
-    """``|snr - ref| > frac * ref`` (both finite, ``ref > 0``)."""
+    """Return whether ``|snr - ref| > frac * ref``.
+
+    Args:
+        snr (float or None): Current SNR.
+        ref (float or None): SNR the leaf's ladder was built at.
+        frac (float, optional): Relative threshold. Default
+            :data:`LADDER_SNR_REFRESH_CHANGE` (0.2).
+
+    Returns:
+        bool: ``False`` when either value is ``None`` or non-finite or
+        ``ref <= 0``.
+    """
     if snr is None or ref is None:
         return False
     s, r = float(snr), float(ref)
@@ -243,7 +381,18 @@ def snr_changed(snr, ref, frac=LADDER_SNR_REFRESH_CHANGE) -> bool:
 
 
 def describe_clip(clip, tmax_min, tmax_ceiling, tmax) -> str:
-    """``"ceiling 625 -> 625.0"`` / ``"floor 4 -> 4.0"`` / ``"within [4, 625]"``."""
+    """Format the clip part of the ladder log line.
+
+    Args:
+        clip (str): ``"ceiling"``, ``"floor"`` or ``""`` (:func:`snr_tmax`).
+        tmax_min (float): Floor.
+        tmax_ceiling (float): Ceiling.
+        tmax (float): The leaf's clipped ``T_max``.
+
+    Returns:
+        str: ``"ceiling 625 -> 625.0"``, ``"floor 4 -> 4.0"`` or
+        ``"within [4, 625]"``.
+    """
     if clip == "ceiling":
         return f"ceiling {float(tmax_ceiling):g} -> {float(tmax):.1f}"
     if clip == "floor":
@@ -252,12 +401,19 @@ def describe_clip(clip, tmax_min, tmax_ceiling, tmax) -> str:
 
 
 def rung_ratio(betas) -> float:
-    """Adjacent-temperature ratio of a geometric ladder: ``T_max^(1 / (ntemps - 1))``.
+    """Return the adjacent-temperature ratio of a geometric ladder, ``T_max^(1 / (ntemps - 1))``.
 
     The rung COUNT is frozen per branch by the store (``betas_all`` has a
     fixed ``ntemps`` axis), so a leaf whose ``T_max`` sits below the ceiling
     gets a DENSER ladder than the ceiling's: a smaller ratio, a higher swap
     acceptance than make_ladder's ~25 % (harmless; it costs nothing extra).
+
+    Args:
+        betas (array-like): Inverse temperatures, cold first.
+
+    Returns:
+        float: The ratio; ``1.0`` for fewer than two rungs or a non-positive
+        last beta.
     """
     b = np.asarray(betas, dtype=float).ravel()
     if b.size < 2 or not b[-1] > 0.0:
@@ -266,8 +422,19 @@ def rung_ratio(betas) -> float:
 
 
 def make_ladder_count(ndim, tmax) -> int:
-    """The rung count ``make_ladder(ndim, Tmax=tmax)`` picks for its ~25 % swap
-    spacing (eryn: ``int(log(Tmax) / log(tstep) + 2)``)."""
+    """Return the rung count eryn's ``make_ladder`` picks for ``Tmax=tmax``.
+
+    The count that gives eryn's ~25 % swap spacing (eryn:
+    ``int(log(Tmax) / log(tstep) + 2)``); used by
+    ``scripts/fstat_proposal/rerung_store_branches.py --ntemps-from-tmax``.
+
+    Args:
+        ndim (int): Parameters per leaf.
+        tmax (float): Top temperature.
+
+    Returns:
+        int: Number of rungs.
+    """
     from eryn.moves.tempering import make_ladder
 
     return int(np.size(make_ladder(int(ndim), Tmax=float(tmax))))
@@ -275,12 +442,31 @@ def make_ladder_count(ndim, tmax) -> int:
 
 def describe_leaf(tag, leaf, snr, tmax, raw, clip, top_snr, tmax_min, tmax_ceiling, betas,
                   why, kind="optimal", walker=None) -> str:
-    """The per-leaf log line of a build / reset / refresh::
+    """Format the per-leaf log line of a build / reset / refresh, for example::
 
         [EMRI_LADDER] leaf 3: SNR 50.2 -> T_max 630.0 (top SNR 2.0, ceiling 625 -> 625.0),
         ladder [1 ... 0.0016], ratio 1.90 over 11 rungs (fresh store; optimal SNR at walker 1)
 
     The ratio is the leaf's adjacent-temperature ratio (:func:`rung_ratio`).
+
+    Args:
+        tag (str): Log prefix, e.g. ``"[EMRI_LADDER]"``.
+        leaf (int): Leaf index.
+        snr (float or None): Measured SNR; non-finite prints ``no source``.
+        tmax (float): Clipped ``T_max``.
+        raw (float): Unclipped ``T_raw``.
+        clip (str): Clip code from :func:`snr_tmax`.
+        top_snr (float): Top SNR.
+        tmax_min (float): Floor.
+        tmax_ceiling (float): Ceiling.
+        betas (array-like): The leaf's new ladder.
+        why (str): Reason text (``"fresh store"``, ...).
+        kind (str, optional): SNR kind from :func:`leaf_snr`. Default
+            ``"optimal"``.
+        walker (int, optional): Walker the SNR was measured at.
+
+    Returns:
+        str: The log line (one line; wrapped above for width).
     """
     b = np.asarray(betas, dtype=float).ravel()
     s = float("nan") if snr is None else float(snr)

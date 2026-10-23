@@ -22,7 +22,15 @@ per row picks the rows that take the wider step.
 Knobs (per branch, the attribute rule): ``{BRANCH}_EIGEN_JUMP_MIX`` (default
 0 = off) and ``{BRANCH}_EIGEN_JUMP_FACTOR`` (default 3), the settings fields
 ``eigen_jump_mix`` / ``eigen_jump_factor`` of the MBH / EMRI / SOBBH branch
-blocks; built by ``stock.erebor.common.make_default_inner_moves``.
+blocks; built by
+:func:`~lisatools.globalfit.stock.erebor.common.make_default_inner_moves`
+(``mode="axis"``) whenever the branch's ``inner_move_kind`` is ``"eigen"``
+and the mix is positive. The 9mo / 12mo launchers set ``0.1`` / ``3.0`` for
+all three branches, so this is the eigen move of the EMRI, MBH and SOBBH
+add/remove PE stacks (and the ``fallback`` of their
+:class:`~lisatools.sampling.moves.walkerdiffjump.WalkerDifferenceJumpMove`).
+The per-leaf axis tables are installed by
+:class:`~lisatools.globalfit.moves.addremovemove.ResidualAddOneRemoveOneMove`.
 """
 
 from __future__ import annotations
@@ -37,14 +45,43 @@ __all__ = ["EigenAxisJumpMixMove"]
 class EigenAxisJumpMixMove(EigenAxisMove):
     """:class:`~eryn.moves.EigenAxisMove` with a ``jump_mix`` share of wider steps.
 
+    Each proposed row takes the parent's step (one eigen axis, 1-sigma width,
+    times the parent's ``jump_factor`` in ``"axis"`` mode; a joint draw in
+    ``"full"`` mode), and with probability ``jump_mix`` that step is multiplied
+    by ``jump_mix_factor``. The proposal stays symmetric, so the returned
+    factors are zero.
+
     Args:
-        *args: Forwarded to :class:`~eryn.moves.EigenAxisMove`.
-        jump_mix (float): Probability, per proposed row, of the wider step;
-            in ``[0, 1]``. ``0`` is the parent move exactly.
-        jump_mix_factor (float): Step multiplier of the wider draws (on top
-            of the parent's own ``jump_factor``); ``> 0``.
+        *args: Forwarded to :class:`~eryn.moves.EigenAxisMove`
+            (``axes_and_sigmas``, ``mode``, ``jump_factor``).
+        jump_mix (float, optional): Probability, per proposed row, of the wider
+            step; in ``[0, 1]``. ``0`` is the parent move exactly. Default ``0.0``.
+        jump_mix_factor (float, optional): Step multiplier of the wider draws
+            (on top of the parent's own ``jump_factor``); ``> 0``. Default ``3.0``.
         **kwargs: Forwarded to :class:`~eryn.moves.EigenAxisMove`
             (``mode``, ``jump_factor``, ``periodic``, ...).
+
+    Raises:
+        ValueError: ``jump_mix`` outside ``[0, 1]`` or ``jump_mix_factor <= 0``
+            (and whatever the parent raises, e.g. an unknown ``mode``).
+
+    Attributes:
+        jump_mix (float): The wider-step probability.
+        jump_mix_factor (float): The wider-step multiplier.
+        last_pick (dict): After a :meth:`get_proposal` with ``jump_mix > 0`` in
+            ``"axis"`` mode, ``{branch: np.ndarray}`` of the eigen axis each row
+            stepped along; empty when ``jump_mix == 0``.
+        last_jump_scale (dict): ``{branch: np.ndarray}`` of each row's step
+            multiplier (``1.0`` or ``jump_mix_factor``); empty when
+            ``jump_mix == 0``.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.sampling.moves.eigenjumpmix import EigenAxisJumpMixMove
+        >>> tables = {"emri": (np.eye(2), np.array([0.1, 0.5]))}
+        >>> move = EigenAxisJumpMixMove(tables, mode="axis", jump_mix=0.1, jump_mix_factor=3.0)
+        >>> move.describe()
+        'jump mix 0.10 x 3.0'
     """
 
     def __init__(self, *args, jump_mix=0.0, jump_mix_factor=3.0, **kwargs):
@@ -63,6 +100,15 @@ class EigenAxisJumpMixMove(EigenAxisMove):
 
         One host uniform per row, drawn AFTER the base step (so the base step
         consumes the stream exactly as the parent does).
+
+        Args:
+            n (int): Number of rows.
+            random (numpy.random.Generator or numpy.random.RandomState): Host
+                random stream (the sampler's ``model.random``).
+
+        Returns:
+            np.ndarray: Shape ``(n,)`` float multipliers, each ``1.0`` or
+            ``jump_mix_factor``.
         """
         if hasattr(random, "integers"):          # numpy Generator
             u = np.asarray(random.random(n))
@@ -84,7 +130,27 @@ class EigenAxisJumpMixMove(EigenAxisMove):
         (1 or ``jump_mix_factor``), both in the row order of the alive
         leaves. With ``jump_mix == 0`` the eryn method runs untouched and
         both are left EMPTY (the accounting then derives the axis from the
-        displacement).
+        displacement). In ``"full"`` mode ``last_pick`` gets no entry.
+
+        Args:
+            branches_coords (dict): ``{branch: xp.ndarray}`` of shape
+                ``(ntemps, nwalkers, nleaves_max, ndim)``.
+            random (numpy.random.Generator or numpy.random.RandomState): Host
+                random stream.
+            branches_inds (dict, optional): ``{branch: bool array}`` of shape
+                ``(ntemps, nwalkers, nleaves_max)``; ``None`` means every leaf
+                is proposed.
+            supps (optional): Forwarded to the parent when ``jump_mix == 0``;
+                unused otherwise.
+            branch_supps (dict, optional): Branch supplementals; the
+                ``"eigen_axes"`` / ``"eigen_sigmas"`` entries are used when no
+                explicit table is set.
+            **kwargs: Forwarded to the parent when ``jump_mix == 0``.
+
+        Returns:
+            tuple[dict, np.ndarray]: The proposed coordinates (same layout as
+            ``branches_coords``, periodic columns wrapped) and the
+            ``(ntemps, nwalkers)`` proposal factors (all zero).
         """
         if self.jump_mix <= 0.0:
             self.last_pick = {}
@@ -155,7 +221,12 @@ class EigenAxisJumpMixMove(EigenAxisMove):
         return q, np.zeros((ntemps, nwalkers))
 
     def describe(self) -> str:
-        """``"jump mix 0.10 x 3.0"`` (the inner-move stack log suffix)."""
+        """Return the inner-move stack log suffix, e.g. ``"jump mix 0.10 x 3.0"``.
+
+        Returns:
+            str: ``"jump mix off"`` when ``jump_mix == 0``, otherwise the mix and
+            the factor.
+        """
         if self.jump_mix <= 0.0:
             return "jump mix off"
         return f"jump mix {self.jump_mix:.2f} x {self.jump_mix_factor:.1f}"

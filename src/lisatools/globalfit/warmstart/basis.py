@@ -1,8 +1,14 @@
 """Observable-basis adapter for the warm-start pipeline.
 
-ONE place the fitter, the referee, the SNR gate and the proposal all get
-their ``GBObservableFiberBasis`` from, so the four stages can never drift
-apart on Tobs, shear or the fiber coordinate.
+ONE place the fitter (:mod:`.fit_from_store`), the referee
+(:mod:`.match_referee`), the SNR gate (:mod:`.opt_snr`), the consensus filter
+(:func:`.self_refit.consensus_filter`), the para-search epoch writer and the
+proposal (:class:`.proposal.WarmStartComponents`) all get their
+:class:`~lisatools.sampling.gb_observable_basis.GBObservableFiberBasis` from,
+so the stages can never drift apart on Tobs, shear or the fiber coordinate.
+A fitted npz records the map in its ``meta["map_params"]``
+(:func:`map_params_from_map`) and every reader rebuilds it from there
+(:func:`build_map_from_stored_params`).
 
 The map is a 9-to-9 bijection (see the class docstring); indices 3..7 pass
 through unchanged, so the pipeline's ``CIRCULAR_COLS`` / ``COS_IOTA_COL``
@@ -15,9 +21,12 @@ constants are valid in BOTH bases::
     3..7    phi0 cos_iota psi alpha sin_delta   (identical)
     8       fdot_astro_ratio      Mc   (the fiber)
 
+Units: the sampling ``f0`` is in mHz, the observable ``f_mid`` in Hz and
+``fdot`` in Hz/s; the sky columns are ICRS (``alpha`` = RA, ``sin_delta``).
+
 **Measure convention.** ``GBObservableFiberBasis.log_jacobian(y)`` is
 ``ln|dy/dz|`` evaluated at a SAMPLING point ``y``.  A density fitted in
-``z`` therefore transports to the sampling basis as
+``z`` therefore transports to the sampling basis as::
 
     ln q_y(y) = ln q_z(z(y)) - log_jacobian(y)
 
@@ -45,6 +54,19 @@ def build_map(transform_container, *, Tobs, shear=0.5, fiber_coord="Mc"):
     does not exist on ``FDSettings`` and has broken every FD-domain GB flow
     once. This mirrors the in-model caller in
     ``globalfit/moves/gbspecialstretch.py``.
+
+    Args:
+        transform_container: The GB transform container (or a
+            :class:`BasisContainer`); only its ``input_basis`` (the sampling
+            column names) is read.
+        Tobs (float): Observation time [s] the map's ``f_mid`` / ``fdot``
+            are defined at (for a warm-start fit: the SOURCE run's Tobs).
+        shear (float, optional): The map's shear. Default ``0.5``.
+        fiber_coord (str, optional): The fiber coordinate. Default ``"Mc"``.
+
+    Returns:
+        GBObservableFiberBasis: The map (``to_internal`` / ``from_internal`` /
+        ``log_jacobian``).
     """
     return GBObservableFiberBasis(
         transform_container, Tobs=float(Tobs), shear=float(shear),
@@ -53,7 +75,15 @@ def build_map(transform_container, *, Tobs, shear=0.5, fiber_coord="Mc"):
 
 
 def map_params_from_map(m) -> dict:
-    """The parameters needed to rebuild ``m`` without the source store."""
+    """The parameters needed to rebuild ``m`` without the source store.
+
+    Args:
+        m (GBObservableFiberBasis): A built map.
+
+    Returns:
+        dict: ``{"Tobs", "shear", "fiber_coord", "input_basis"}``, JSON-safe;
+        stored as ``meta["map_params"]`` of every observable-basis npz.
+    """
     return {
         "Tobs": float(m.Tobs),
         "shear": float(m.shear),
@@ -68,6 +98,18 @@ def build_map_from_params(transform_container, params: dict):
     Refuses when the container's sampling basis differs from the one the
     params were written with -- a silent mismatch would mis-index every
     column rather than fail.
+
+    Args:
+        transform_container: The run's GB transform container (its
+            ``input_basis`` is checked against ``params["input_basis"]``).
+        params: :func:`map_params_from_map` output. ``shear`` and
+            ``fiber_coord`` default to ``0.5`` / ``"Mc"`` when absent.
+
+    Returns:
+        GBObservableFiberBasis: The rebuilt map.
+
+    Raises:
+        ValueError: When the two sampling bases differ.
     """
     want = list(params["input_basis"])
     got = list(getattr(transform_container, "input_basis", []) or [])
@@ -91,6 +133,12 @@ class BasisContainer:
     only attribute it reads. Stored ``map_params`` carry their own
     ``input_basis``, which makes :func:`build_map_from_stored_params`
     possible without a live run object.
+
+    Args:
+        input_basis (sequence of str): The sampling column names.
+
+    Attributes:
+        input_basis (list of str): The sampling column names.
     """
 
     def __init__(self, input_basis):
@@ -104,6 +152,12 @@ def build_map_from_stored_params(params: dict):
     run object is needed. Pass a REAL container to
     :func:`build_map_from_params` instead when one is available -- that
     additionally checks the run's basis against the file's.
+
+    Args:
+        params: A stored ``meta["map_params"]`` dict.
+
+    Returns:
+        GBObservableFiberBasis: The rebuilt map.
     """
     return build_map_from_params(BasisContainer(params["input_basis"]),
                                  params)
@@ -112,10 +166,24 @@ def build_map_from_stored_params(params: dict):
 def component_means_sampling(d, meta: dict, transform_container=None):
     """Component means in the SAMPLING basis, whichever format ``d`` is.
 
-    ``d`` is an open npz mapping. Returns ``(means_sampling, obs_map)``;
-    ``obs_map`` is ``None`` for a legacy set. This is the seam the referee
-    and the SNR gate use: both build real waveforms, which need astro
-    columns whatever basis the fit ran in.
+    This is the seam the SNR gate uses (the referee does the same mapping
+    inline): both build real waveforms, which need astro columns whatever
+    basis the fit ran in.
+
+    Args:
+        d (mapping): An open fitter / refereed npz.
+        meta: Its decoded ``meta`` JSON. ``meta["basis"] != "observable"``
+            (or absent) = a legacy sampling-basis set.
+        transform_container (optional): A real GB transform container; when
+            given, the map is rebuilt with the basis check of
+            :func:`build_map_from_params`. Default ``None`` = from the stored
+            params alone.
+
+    Returns:
+        tuple[np.ndarray, GBObservableFiberBasis | None]: ``(means_sampling,
+        obs_map)``. ``means_sampling`` is ``(n_components, 9)`` (the
+        per-component ``gmm_means`` mapped back, or the legacy ``means``);
+        ``obs_map`` is ``None`` for a legacy set.
     """
     import numpy as _np
 
@@ -151,6 +219,18 @@ def log_density_to_sampling(log_q_z, x_sampling, obs_map, leaf_inds=None):
     ``rj_prop.logpdf`` on device-resident band coordinates, and
     ``log_jacobian`` is itself ``xp``-generic, so it hands back cupy. The
     laptop tests never saw it because there is no cupy there.
+
+    Args:
+        log_q_z (array-like): ``(n,)`` observable-basis log density.
+        x_sampling (array-like): ``(n, 9)`` the same points in the sampling
+            basis.
+        obs_map (GBObservableFiberBasis): The map the density was fitted in.
+        leaf_inds (optional): Forwarded to ``obs_map.log_jacobian``. Default
+            ``None``.
+
+    Returns:
+        ``xp.ndarray``: ``(n,)`` float64 ``ln q_y``; cupy when either input
+        is a cupy array, else numpy.
     """
     from ...utils.utility import get_array_module
 

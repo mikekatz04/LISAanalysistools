@@ -1,13 +1,21 @@
-"""Mojito-specific Orbits implementation with JAX.
+"""Retired Mojito-specific Orbits implementation with JAX (no live code).
 
-# TODO/DOCS: as of this revision the entire module body below the imports is
-# commented out (legacy/dead code for ``L1Orbits``, ``JAXL1Orbits``, and
-# ``XYZSensitivityBackend`` plus their wrapping/interpolation helpers). The
-# active replacements live in :mod:`lisatools.detector` (``L1Orbits``,
-# ``JAXL1Orbits``). Verify whether this file is still needed or should be
-# removed; the wrapping/dips-masking logic specific to Mojito L1 frequency
-# transfer functions is too intricate to document accurately here.
+Everything below the imports is commented out: the legacy ``L1Orbits``, ``JAXL1Orbits`` and
+``XYZSensitivityBackend`` plus their wrapping / interpolation helpers. The active
+replacements live in :mod:`lisatools.detector` (:class:`~lisatools.detector.L1Orbits`,
+``JAXL1Orbits``) and :mod:`lisatools.sensitivity`. The only names the module defines are
+its imports and ``NUM_SPLINE_THREADS``.
+
+Importing it still requires ``jax``, ``cudakima`` and ``lisaconstants.indexing``, and turns
+on JAX 64-bit mode (``jax_enable_x64``). Nothing in ``lisatools``, its tests or the LATW
+tutorials imports it (the LATW atlas lists it as retired).
+
+TODO/DOCS: verify whether this file is still needed or should be removed; the
+wrapping/dips-masking logic specific to Mojito L1 frequency transfer functions in the
+commented-out code is too intricate to document accurately here.
 """
+
+# TODO check: keep/remove/document -- whole module body is commented out; nothing imports lisatools.mojito_detector
 
 from copy import deepcopy
 from typing import Optional

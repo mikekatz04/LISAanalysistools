@@ -71,7 +71,7 @@ The gates above validate the **in-process multi-GPU router** — one process
 switching cupy contexts across several devices. That router is still live
 code and still exercised, but which of its paths run depends on the rank
 layout (`docs/global-fit-launch.md`; design spec
-[`docs/superpowers/specs/2026-09-15-multirank-walker-blocks-design.md`](superpowers/specs/2026-09-15-multirank-walker-blocks-design.md),
+[`docs/superpowers/specs/2026-09-15-multirank-walker-blocks-design.md`](https://github.com/lisa-analysis-tools/lisa-analysis-tools/blob/dev/docs/superpowers/specs/2026-09-15-multirank-walker-blocks-design.md),
 Decision 12):
 
 - **At `-n 1`** (or any layout where a lone compute rank owns its node's
@@ -111,7 +111,7 @@ Decision 12):
 **New runbook for the rank axis itself** — transport parity across layouts,
 the statistical gate against today's in-process 2-GPU run, and the
 load-balance/payload-size measurements — lives separately in
-[`docs/multirank-cluster-gates.md`](multirank-cluster-gates.md). Run this
+[`docs/multirank-cluster-gates.md`](https://github.com/lisa-analysis-tools/lisa-analysis-tools/blob/dev/docs/multirank-cluster-gates.md). Run this
 document's Gates 1-4 first (single-rank multi-GPU router still correct),
 then that runbook for the multi-rank transport and statistics gates.
 

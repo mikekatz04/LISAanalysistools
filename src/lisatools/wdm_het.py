@@ -2,10 +2,16 @@
 
 These are the Python primitives that
 :class:`gbgpu.gbcomps.GBWDMComputations` /
-:class:`bbhx.sobbhcomps.SOBBHWDMComputations` hand off to the C++ / JAX
+:class:`bbhx.sobbhcomps.SOBBHWDMComputations` (through
+:class:`lisatools.chunked_het.WDMComputationsBase`) hand off to the C++ / JAX
 kernels. Moved here at Phase 3L.7i (2026-06-04) as part of the
 lisa-on-gpu retirement work; previously lived at
-``fastlisaresponse.utils.wdm_het``.
+``fastlisaresponse.utils.wdm_het``. ``gbgpu.wdm_het`` re-exports the chunked-het
+names for older GB imports.
+
+The chunked-het transform covers the ``Nt``-pixel WDM grid with overlapping
+chunks of ``Nt_sub`` pixels each; ``n_pad`` pixels at each interior chunk edge are
+discarded at the stitch.
 
 Pieces here:
 
@@ -21,10 +27,16 @@ Pieces here:
   centralised Tukey alpha selection. ``USE_RECOMMENDED_TUKEY`` is the
   sentinel; ``recommended_tukey_alpha("heterodyne", N_sparse=...)``
   is the auto-pick (0.01 for N_sparse>=512, 0.05 otherwise).
+* :func:`wdm_chunk_of_td`, :func:`chunk_start_for_pixels`,
+  :func:`tail_chunk_plan`, :func:`splice_chunk` -- source-agnostic single-chunk
+  primitives (TD -> WDM of one even-start chunk, its placement and splice). The
+  first three are used by the EMRI direct-to-WDM plunge chunk
+  (:mod:`lisatools.sources.emri.wdm_direct`); :func:`splice_chunk` is the matching
+  raw splice (exercised by the tests; the EMRI path writes its chunks itself).
 
 Algorithm reference for the chunk geometry / layer-grouping lives in
-``check_shortened_wdm.py`` and the design notes
-``CHUNKED_HET_DESIGN_NOTES.md``.
+``scripts/diagnostics/check_shortened_wdm.py`` and the design notes
+``scripts/notes/CHUNKED_HET_DESIGN_NOTES.md``.
 """
 from __future__ import annotations
 
@@ -53,11 +65,23 @@ def recommended_tukey_alpha(path, N_sparse=None):
     """Return the recommended Tukey alpha for a chunked-WDM workflow.
 
     Args:
-        path: ``"td"`` for the TD-based chunked stitch or
-            ``"heterodyne"`` / ``"het"`` / ``"fd"`` for the FD-direct
-            heterodyne stitch.
-        N_sparse: heterodyne FFT length. Wider for >= 512, narrower
-            otherwise.
+        path (str): ``"td"`` (also ``"td_stitched"`` / ``"td-based"``) for the
+            TD-based chunked stitch, or ``"heterodyne"`` / ``"het"`` / ``"fd"`` /
+            ``"fd_heterodyne"`` for the FD-direct heterodyne stitch. Case-insensitive.
+        N_sparse (int, optional): Heterodyne FFT length. ``None`` or ``>= 512``
+            selects the wide value.
+
+    Returns:
+        float: ``0.02`` (TD), ``0.01`` (heterodyne, wide) or ``0.05``
+        (heterodyne, ``N_sparse < 512``).
+
+    Raises:
+        ValueError: For an unknown ``path``.
+
+    Example:
+        >>> from lisatools.wdm_het import recommended_tukey_alpha
+        >>> recommended_tukey_alpha("heterodyne", N_sparse=256)
+        0.05
     """
     p = str(path).lower()
     if p in ("td", "td_stitched", "td-based"):
@@ -74,9 +98,18 @@ def recommended_tukey_alpha(path, N_sparse=None):
 def resolve_tukey_alpha(tukey_alpha, use_tukey, path, N_sparse=None):
     """Resolve the actual Tukey alpha to apply, per the ``use_tukey`` flag.
 
-    Precedence: explicit numeric ``tukey_alpha`` (>= 0) is honoured;
-    ``USE_RECOMMENDED_TUKEY`` triggers :func:`recommended_tukey_alpha`;
-    ``use_tukey=False`` forces 0.0; otherwise the value is kept.
+    ``use_tukey=False`` always gives ``0.0``. Otherwise ``USE_RECOMMENDED_TUKEY``
+    (``-1.0``) triggers :func:`recommended_tukey_alpha` and any other value is
+    returned as a float.
+
+    Args:
+        tukey_alpha (float): Requested alpha or ``USE_RECOMMENDED_TUKEY``.
+        use_tukey (bool): Master switch.
+        path (str): Workflow passed to :func:`recommended_tukey_alpha`.
+        N_sparse (int, optional): Heterodyne FFT length for the auto-pick.
+
+    Returns:
+        float: The alpha to apply.
     """
     if tukey_alpha == USE_RECOMMENDED_TUKEY:
         if not use_tukey:
@@ -152,15 +185,37 @@ def compute_chunk_geometry(Nt, Nt_sub, n_pad):
 
     Returns a dict of numpy arrays:
 
-      ``starts``      (n_chunks,) int64   -- chunk start in WDM-pixel units
-      ``keep_lo``     (n_chunks,) int32   -- chunk-local lo to keep
-      ``keep_hi``     (n_chunks,) int32   -- chunk-local hi (exclusive)
-      ``n_global_lo`` (n_chunks,) int32   -- global WDM pixel where the
-                                             first kept sample lands
+    - ``starts``: ``(n_chunks,)`` int64 -- chunk start in WDM-pixel units
+    - ``keep_lo``: ``(n_chunks,)`` int32 -- chunk-local lo to keep
+    - ``keep_hi``: ``(n_chunks,)`` int32 -- chunk-local hi (exclusive)
+    - ``n_global_lo``: ``(n_chunks,)`` int32 -- global WDM pixel where the
+      first kept sample lands
+
+    Chunks start every ``step = Nt_sub - 2 * n_pad`` pixels; the first chunk keeps
+    from its local 0 and the last full chunk ending exactly at ``Nt`` keeps through
+    its end, every other edge drops ``n_pad`` pixels. ``Nt_sub >= Nt`` gives a
+    single chunk keeping ``[0, Nt)``.
 
     Handles the partial-slide case (``(Nt - Nt_sub) % step != 0``) by
-    appending one extra chunk at ``Nt - Nt_sub`` and trimming the prior
-    ``keep_hi`` so the overlap region isn't double-counted.
+    appending one extra chunk at ``Nt - Nt_sub`` whose kept range starts where the
+    previous chunk's kept range ends, so the overlap region isn't double-counted.
+
+    Args:
+        Nt (int): WDM time pixels of the full grid.
+        Nt_sub (int): Pixels per chunk.
+        n_pad (int): Pixels discarded at each interior chunk edge.
+
+    Returns:
+        dict: The four arrays above.
+
+    Raises:
+        AssertionError: If ``step`` is not a positive even number.
+
+    Example:
+        >>> from lisatools.wdm_het import compute_chunk_geometry
+        >>> g = compute_chunk_geometry(Nt=512, Nt_sub=256, n_pad=32)
+        >>> g["starts"].tolist(), g["keep_lo"].tolist(), g["keep_hi"].tolist()
+        ([0, 192, 256], [0, 32, 160], [224, 224, 256])
     """
     step = int(Nt_sub) - 2 * int(n_pad)
     assert step > 0 and step % 2 == 0, (Nt_sub, n_pad, step)
@@ -219,6 +274,15 @@ def compute_wdm_window(Nf, Nt_sub, dt, backend="cpu"):
     full settings object. The window is a real-valued host array; we
     always build it through the ``cpu`` backend (lisatools' WDMSettings
     in-place initializer doesn't support jax arrays).
+
+    Args:
+        Nf (int): WDM frequency layers.
+        Nt_sub (int): Pixels per chunk.
+        dt (float): Time-domain sample step (s).
+        backend (str): Ignored (the window is always built on the host).
+
+    Returns:
+        np.ndarray: Float array of length ``Nt_sub``.
     """
     del backend  # window is host-side; always CPU
     return np.asarray(
@@ -240,7 +304,23 @@ def wdm_chunk_of_td(td_arr, start_sample, Nf, Nt_sub, dt, backend="cpu"):
     edge rule), and the lookup side never sees a window. Start on an EVEN global
     pixel (``start_sample = n0 * Nf``, ``n0`` even) or the real WDM differs from
     the full transform; discard ``n_pad`` pixels at each edge.
-    Returns the chunk's ``(nch, Nf_active, Nt_sub)`` coefficient array.
+
+    Args:
+        td_arr: Time-domain array ``(..., N)`` (numpy or cupy).
+        start_sample (int): First sample of the chunk.
+        Nf (int): WDM frequency layers.
+        Nt_sub (int): Pixels in the chunk (the chunk has ``Nf * Nt_sub`` samples).
+        dt (float): Sample step (s).
+        backend (str): ``force_backend`` of the chunk transform. Default ``"cpu"``.
+
+    Returns:
+        ``xp.ndarray``: The chunk's coefficients, ``td_arr.shape[:-1] + (Nf, Nt_sub)``
+        (``(nch, Nf, Nt_sub)`` for a ``(nch, N)`` input; a 1-D input gets a channel
+        axis of length 1). The chunk's WDM settings are full-band.
+
+    Raises:
+        ValueError: If ``td_arr`` has fewer than ``Nf * Nt_sub`` samples from
+            ``start_sample``.
     """
     from .domains import TDSettings, TDSignal, WDMSettings  # domains imports this module
 
@@ -254,9 +334,27 @@ def wdm_chunk_of_td(td_arr, start_sample, Nf, Nt_sub, dt, backend="cpu"):
 
 
 def chunk_start_for_pixels(n_lo, n_hi, Nt, Nt_sub, n_pad):
-    """EVEN global start pixel ``n0`` with ``[n_lo, n_hi)`` inside
-    ``[n0 + n_pad, n0 + Nt_sub - n_pad)`` (the last chunk of the grid may keep its
-    right edge: nothing follows it). Raises if no such chunk exists."""
+    """EVEN global start pixel ``n0`` of a chunk whose interior holds ``[n_lo, n_hi)``.
+
+    The interior is ``[n0 + n_pad, n0 + Nt_sub - n_pad)``; the grid-start chunk may
+    keep pixels from 0, and a range reaching the last ``n_pad`` pixels of the grid
+    uses the grid-end chunk ``n0 = Nt - Nt_sub`` (nothing follows it). Otherwise the
+    lowest valid even start is returned.
+
+    Args:
+        n_lo (int): First pixel to cover.
+        n_hi (int): One past the last pixel to cover.
+        Nt (int): Pixels of the full grid.
+        Nt_sub (int): Pixels per chunk.
+        n_pad (int): Pixels discarded at each interior edge.
+
+    Returns:
+        int: The chunk start pixel ``n0``.
+
+    Raises:
+        ValueError: If the range exceeds the chunk interior or no even-start chunk
+            covers it.
+    """
     n_lo, n_hi, Nt, Nt_sub, n_pad = map(int, (n_lo, n_hi, Nt, Nt_sub, n_pad))
     # the last n_pad pixels of the grid can only come from the grid-end chunk
     right_pad = 0 if n_hi > Nt - n_pad else n_pad
@@ -281,6 +379,19 @@ def tail_chunk_plan(n_lo, n_hi, Nt, Nt_sub):
     Each chunk keeps its interior ``[n_pad, Nt_sub - n_pad)`` (``n_pad = Nt_sub // 4``;
     the grid-end chunk keeps through its end). The step is the interior minus 2 so the
     even-start constraint always fits.
+
+    Args:
+        n_lo (int): First pixel to cover.
+        n_hi (int): One past the last pixel to cover.
+        Nt (int): Pixels of the full grid.
+        Nt_sub (int): Pixels per chunk.
+
+    Returns:
+        list[tuple[int, int, int]]: ``(n0, keep_lo, keep_hi)`` per chunk, with
+        chunk-local keep bounds, tiling ``[n_lo, n_hi)`` without overlap.
+
+    Raises:
+        ValueError: From :func:`chunk_start_for_pixels`.
     """
     n_pad = Nt_sub // 4
     plan = []
@@ -299,6 +410,14 @@ def splice_chunk(out, chunk, n0, keep_lo, keep_hi):
     """Raw-assignment splice ``out[..., n0+keep_lo : n0+keep_hi] = chunk[..., keep_lo:keep_hi]``.
 
     Not ``add_signal``: ``domains._apply_wdm_add`` has no partial-overlap path.
+    Writes ``out`` in place along its last (time-pixel) axis.
+
+    Args:
+        out: Destination array, last axis = global pixels.
+        chunk: Chunk coefficients, last axis = chunk-local pixels.
+        n0 (int): Chunk start pixel.
+        keep_lo (int): First chunk-local pixel to copy.
+        keep_hi (int): One past the last chunk-local pixel to copy.
     """
     out[..., int(n0) + int(keep_lo):int(n0) + int(keep_hi)] = chunk[..., int(keep_lo):int(keep_hi)]
 
@@ -325,10 +444,33 @@ def compute_layer_groups(params_array, layer_df, f0_param_index=1,
     spillover so 2-3 layers around the carrier capture essentially all
     of the in-band power.
 
-    Returns the per-group arrays the kernels consume:
-        ``binary_perm``, ``group_starts``, ``group_ends``,
-        ``group_m_lo``, ``group_m_hi``, ``group_data_index``,
-        ``n_groups``.
+    Binaries are sorted by ``(data_index, m_floor)`` with ``m_floor =
+    floor(f0 / layer_df)``; a group is a run of sorted binaries in one data slot
+    whose carriers span fewer than ``group_band_layers`` layers. The scan runs on
+    the host (one device-to-host copy on CuPy).
+
+    Args:
+        params_array: ``(num_bin, nparams)`` parameters (numpy or cupy; outputs
+            follow).
+        layer_df (float): WDM layer spacing (Hz).
+        f0_param_index (int): Column of the carrier frequency. Default ``1`` (GB).
+        group_band_layers (int): Band width in layers. Default ``5``.
+        margin_layers (int): Extra layers on each side. Default ``0``.
+        data_index_all: ``(num_bin,)`` data slot per binary; default all zeros.
+        noise_index_all: ``(num_bin,)`` noise slot per binary; must equal
+            ``data_index_all`` when not all zero.
+
+    Returns:
+        dict: The per-group arrays the kernels consume: ``binary_perm``
+        ``(num_bin,)`` (sort order), ``group_starts`` / ``group_ends`` (ranges into
+        the sorted order), ``group_m_lo`` / ``group_m_hi`` (layer band
+        ``[m0 - half - margin, m_last + group_band_layers - half + margin)``, with
+        ``half = group_band_layers // 2``), ``group_data_index`` (int32 arrays) and
+        ``n_groups`` (int).
+
+    Raises:
+        AssertionError: For misshapen index arrays, or a non-trivial
+            ``noise_index_all`` that differs from ``data_index_all``.
     """
     xp = get_array_module(params_array)
     params_array = xp.asarray(params_array)
@@ -423,6 +565,23 @@ def compute_swap_layer_groups(params_add, params_remove, layer_df,
     the ADD template's carrier WDM layer) plus per-pair remove-template
     bands (``pair_m_lo_b``, ``pair_m_hi_b``) the kernel uses for its
     second pass over the leftover <d|rem> / <rem|rem> pixels.
+
+    Args:
+        params_add: ``(num_bin, nparams)`` add-template parameters.
+        params_remove: ``(num_bin, nparams)`` remove-template parameters.
+        layer_df (float): WDM layer spacing (Hz).
+        f0_param_index (int): Column of the carrier frequency. Default ``1``.
+        group_band_layers (int): Band width in layers. Default ``5``.
+        margin_layers (int): Extra layers on each side. Default ``0``.
+        data_index_all: Per-binary data slot (see :func:`compute_layer_groups`).
+        noise_index_all: Per-binary noise slot (see :func:`compute_layer_groups`).
+
+    Returns:
+        dict: :func:`compute_layer_groups` output plus ``pair_m_lo_b`` /
+        ``pair_m_hi_b`` (``(num_bin,)`` int32, in ``binary_perm`` order).
+
+    Raises:
+        AssertionError: If the two parameter arrays differ in length.
     """
     xp = get_array_module(params_add)
     params_add    = xp.asarray(params_add)

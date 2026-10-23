@@ -1,8 +1,10 @@
-"""JAX port of ``fast_wdm_inner`` (TDIonTheFly.cu:1306-1424).
+"""JAX port of ``fast_wdm_inner`` (formerly ``TDIonTheFly.cu:1306-1424``).
 
 Per-time-pixel projection + central-difference frequency computation,
 returning the convention ``M' = conj(M * exp(-i pi/2))`` that
-:func:`WaveletLookupTableWrapJAX.get_w_mn_lookup` expects.
+:meth:`~lisatools.jax.wdm.wavelet_lookup.WaveletLookupTableWrapJAX.get_w_mn_lookup`
+expects. The C++ line references point at the pre-absorption lisa-on-gpu
+file. Consumer: ``gbgpu.jax.wdm.kernels``.
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ def _project_at(t: jnp.ndarray, params: jnp.ndarray,
                 tdi_config: TDIConfigWrapJAX,
                 k: jnp.ndarray, u: jnp.ndarray, v: jnp.ndarray
                 ) -> jnp.ndarray:
-    """Project at a single ``t``, returning complex (nchannels,) array."""
+    """Project at one ``t`` (:func:`get_tdi_Xf_single`); complex ``(nchannels,)`` output."""
     return get_tdi_Xf_single(t, params, source, orbits, tdi_config, k, u, v)
 
 
@@ -33,23 +35,36 @@ def fast_wdm_inner_jax(tn: jnp.ndarray, params: jnp.ndarray,
                        k: jnp.ndarray, u: jnp.ndarray, v: jnp.ndarray,
                        deriv_delta_t: float = 500.0
                        ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Mirror of the C++ ``fast_wdm_inner``.
+    """Mirror of the C++ ``fast_wdm_inner``: TDI value, frequency and fdot at one pixel time.
 
-    Returns
-    -------
-    M_prime : complex (nchannels,)
-        The rotated TDI value ``conj(M * exp(-i pi/2))`` --
-        the convention the WDM lookup expects.
-    f : real (nchannels,)
-        Per-channel instantaneous frequency from the central-difference
-        phase derivative.
-    fdot : real (nchannels,)
-        Per-channel fdot (currently held at 0 to match the C++ default;
-        the C++ has the analytic-fdot path commented out at
-        ``TDIonTheFly.cu:1399-1403``).
-    phase_ref : real scalar
-        Reference phase at ``tn`` (for diagnostics; the kernels here
-        don't use it -- the rotation has already absorbed it).
+    Projects at ``tn`` and ``tn +- deriv_delta_t``; the instantaneous
+    frequency is the reference-phase derivative plus the central difference
+    of each channel's TDI phase (each side unwrapped against the middle). If
+    the first channel is exactly zero at any of the three times (outside the
+    orbit tables in the C++), ``M'`` is zeroed.
+
+    Args:
+        tn: Pixel time [s] (scalar).
+        params: 1-D source parameters.
+        source: The amplitude / phase source.
+        orbits: The JAX orbits.
+        tdi_config: The JAX TDI configuration.
+        k: Sky vector from :func:`~lisatools.jax.response.projection.get_sky_vectors`.
+        u: Sky vector.
+        v: Sky vector.
+        deriv_delta_t: Half-step of the central difference [s]. Default ``500.0``.
+
+    Returns:
+        tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        ``(M_prime, f, fdot, phase_ref)``:
+
+        - ``M_prime``: complex ``(nchannels,)``, the rotated TDI value
+          ``conj(M * exp(-i pi/2))`` -- the convention the WDM lookup expects.
+        - ``f``: real ``(nchannels,)`` per-channel instantaneous frequency [Hz].
+        - ``fdot``: real ``(nchannels,)``, currently held at 0 to match the
+          C++ default (the C++ analytic-fdot path is commented out).
+        - ``phase_ref``: real scalar, the reference phase at ``tn`` (for
+          diagnostics; the rotation has already absorbed it).
     """
     M_mid = _project_at(tn, params, source, orbits, tdi_config, k, u, v)
     M_up = _project_at(tn + deriv_delta_t, params, source, orbits, tdi_config, k, u, v)

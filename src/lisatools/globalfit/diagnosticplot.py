@@ -1,4 +1,24 @@
-"""Diagnostic plotting utilities (corner plots, log-likelihood traces, styling)."""
+"""Diagnostic plotting utilities (corner plots, log-likelihood traces, styling).
+
+Plot producers that read a chain reader (``get_chain`` / ``get_log_like``,
+e.g. a :class:`~lisatools.globalfit.hdfbackend.GFHDFBackend` or an eryn
+sampler): :func:`plot_loglikelihood`, :func:`base_branch_plots` and the
+per-branch ``produce_*_plots`` (dispatched by :data:`all_branches_functions`),
+plus :class:`DiagnosticPlotter`, an eryn ``update_fn`` callback that runs them
+every ``plot_every`` iterations.
+
+Not on the production path: no global-fit module imports this one, and the
+running fit plots through eryn's ``PlotContainer``
+(:meth:`~lisatools.globalfit.run.GlobalFit.make_plot_container`,
+``MAKE_DIAGNOSTIC_PLOTS`` / ``PLOT_ITERATIONS``), not through
+:class:`DiagnosticPlotter`. The LATW tutorial 01 lists the producers.
+
+Style side effects: the producers decorated with
+:func:`with_custom_plotting_style` call :func:`set_plotting_style` first and
+leave those ``matplotlib.rcParams`` in place (LaTeX text only when a
+``latex`` executable is found). Importing the module needs ``chainconsumer``,
+``corner``, ``seaborn`` and ``pandas``.
+"""
 
 import os
 import shutil
@@ -27,10 +47,18 @@ def set_plotting_style(background_color: str = "white", front_color: str = "blac
     """
     Set the plotting style for matplotlib.
 
-    Args:
-        background_color (str): Background color for the plots.
-        front_color (str): Main color for the plots.
+    Mutates the global ``matplotlib.rcParams``: serif Computer Modern text
+    (``text.usetex`` only when ``latex`` is on the ``PATH``), font sizes,
+    grid and tick styling, ``figure.figsize`` ``(7, 7)``, tight bounding
+    boxes, and the colours of :func:`set_colors`.
 
+    Args:
+        background_color: Background color for the plots. Default
+            ``"white"``.
+        front_color: Main color for the plots. Default ``"black"``.
+
+    Raises:
+        ValueError: The two colours are equal.
     """
     if background_color == front_color:
         raise ValueError("Background color and main color cannot be the same.")
@@ -76,6 +104,10 @@ def set_colors(background_color="white", front_color="black"):
     """
     Set the colors for the plot.
 
+    Writes the text, label, edge, tick, title, legend, grid and line colours
+    (``front_color``) and the axes / figure / legend face colours
+    (``background_color``) into the global ``matplotlib.rcParams``.
+
     Args:
         background_color (str): The background color of the plot. Default is 'white'.
         front_color (str): The foreground color of the plot. Default is 'black'.
@@ -100,8 +132,13 @@ def override_plotting_style(custom_style: dict) -> None:
     """
     Override the default plotting style with a custom style dictionary.
 
+    Each entry is written into ``matplotlib.rcParams``; then
+    :func:`set_colors` reapplies the colours from the resulting
+    ``axes.facecolor`` / ``text.color``.
+
     Args:
-        custom_style (dict): Dictionary containing custom style parameters.
+        custom_style: Dictionary containing custom style parameters
+            (``rcParams`` keys).
     """
     for key, value in custom_style.items():
         mpl.rcParams[key] = value
@@ -114,6 +151,9 @@ def override_plotting_style(custom_style: dict) -> None:
 def restore_default_plotting_style() -> None:
     """
     Restore the default matplotlib plotting style.
+
+    ``rcParams.update(rcParamsDefault)``, then :func:`set_colors` with the
+    default face / text colours.
     """
     mpl.rcParams.update(mpl.rcParamsDefault)
     set_colors(
@@ -127,8 +167,13 @@ def with_custom_plotting_style(func):
     """
     Decorator to set the plotting style for a function.
 
+    The wrapper calls :func:`set_plotting_style` with its defaults before
+    every call and does NOT restore the previous ``rcParams`` afterwards.
+    The wrapper does not copy the wrapped function's name or docstring.
+
     Args:
         func (callable): Function to be decorated.
+
     Returns:
         callable: Decorated function with plotting style set.
     """
@@ -145,8 +190,13 @@ def with_default_plotting_style(func):
     """
     Decorator to set the default plotting style for a function.
 
+    The wrapper copies ``rcParams``, applies
+    :func:`restore_default_plotting_style`, calls ``func`` and restores the
+    copy (not restored if ``func`` raises).
+
     Args:
         func (callable): Function to be decorated.
+
     Returns:
         callable: Decorated function with default plotting style set.
     """
@@ -165,10 +215,25 @@ def with_default_plotting_style(func):
 def plot_loglikelihood(reader, discard=0, save_dir="./"):
     """Plot per-walker log-likelihood traces and a per-walker facet grid.
 
+    Uses the cold chain (temperature 0). Writes
+    ``<save_dir>loglikelihood_evolution.png`` (all walkers) and
+    ``<save_dir>loglikelihood_facetgrid.png`` (one panel per walker, the
+    log-likelihood minus the per-step walker mean). Applies the
+    :func:`set_plotting_style` style first (decorator).
+
     Args:
         reader: HDF backend or any reader with ``get_log_like(discard=)``.
-        discard: Burn-in steps to discard.
-        save_dir: Directory to write the resulting PNGs into.
+        discard: Burn-in steps to discard. Default ``0``.
+        save_dir: Directory to write the resulting PNGs into, used as a
+            string prefix (keep the trailing ``/``). Default ``"./"``.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.diagnosticplot import plot_loglikelihood
+            from lisatools.globalfit.hdfbackend import GFHDFBackend
+
+            plot_loglikelihood(GFHDFBackend("run_store.h5"), discard=100, save_dir="plots/")
     """
     logl = reader.get_log_like(discard=discard)[:, 0]
 
@@ -215,14 +280,21 @@ def base_branch_plots(
 ):
     """Generic per-branch trace + corner plotting helper.
 
+    Writes ``<save_dir><key>_traceplot.png`` (one panel per parameter, every
+    walker and leaf) and ``<save_dir><key>_corner.png`` (a ``chainconsumer``
+    corner of all rows with finite values, leaves pooled). Applies the
+    :func:`set_plotting_style` style first (decorator).
+
     Args:
         chain: Branch chain of shape ``(nsteps, nwalkers, nleaves, ndim)``.
         key: Branch name used to build output filenames.
         labels: Per-dimension axis labels.
-        save_dir: Directory to write PNGs into.
+        save_dir: Directory to write PNGs into (a string prefix). Default
+            ``"./"``.
         plot_trace: If ``True``, render a per-dimension trace plot.
         plot_corner: If ``True``, render a corner plot.
-        truths: Optional injection truths overlaid on the plots.
+        truths: Optional injection truths overlaid on the plots (one per
+            dimension).
     """
     nsteps, nwalkers, nleaves, ndim = chain.shape
 
@@ -264,7 +336,24 @@ def base_branch_plots(
 
 
 def produce_mbh_plots(chain=None, reader=None, discard=0, save_dir="./", truths=None):
-    """Plot the MBH chain (trace + corner) with default parameter labels."""
+    """Plot the MBH chain (trace + corner) with default parameter labels.
+
+    The 11 labels follow a legacy basis order (``log m1``, ``q``, ``a1``,
+    ``a2``, ``d_L``, ``Phi0``, ``cos iota``, ``beta``, ``sin lambda``,
+    ``psi``, ``t_c``) that does not match the stock ICRS MBH sampling basis
+    ``(logM, Q, s1z, s2z, dist, phi_ref, cos_iota, psi, alpha, sin_delta,
+    t_plunge)``: labels 0 and 7-9 are wrong for stock chains.
+
+    Args:
+        chain (np.ndarray, optional): ``(nsteps, nwalkers, nleaves, 11)``;
+            read from ``reader`` (branch ``"mbh"``, cold chain) when
+            ``None``.
+        reader (optional): Chain reader with ``get_chain(discard=)``.
+        discard (int): Burn-in steps when reading. Default ``0``.
+        save_dir (str): Output prefix (see :func:`base_branch_plots`).
+            Default ``"./"``.
+        truths (array-like, optional): Values overlaid on the plots.
+    """
     labels = [
         r"$\log (m_1 / M_\odot)$",
         r"$q$",
@@ -286,12 +375,29 @@ def produce_mbh_plots(chain=None, reader=None, discard=0, save_dir="./", truths=
 
 
 def produce_gb_plots(chain=None, reader=None, discard=0, save_dir="./"):
-    """Placeholder for GB diagnostic plots (no-op for now)."""
+    """Placeholder for GB diagnostic plots (no-op for now).
+
+    Takes no ``truths`` argument, so the :class:`DiagnosticPlotter` call
+    (which passes one) raises ``TypeError`` there, which it logs.
+    """
     pass
 
 
 def produce_emri_plots(chain=None, reader=None, discard=0, save_dir="./", truths=None):
-    """Plot the EMRI chain (trace + corner) with default parameter labels."""
+    """Plot the EMRI chain (trace + corner) with default parameter labels.
+
+    The 12 labels match the stock EMRI sampling basis (``logm1, m2, a, p0,
+    e0, dist [Gpc], cos qS, phiS, cos qK, phiK, Phi_phi0, Phi_r0``).
+
+    Args:
+        chain (np.ndarray, optional): ``(nsteps, nwalkers, nleaves, 12)``;
+            read from ``reader`` (branch ``"emri"``, cold chain) when
+            ``None``.
+        reader (optional): Chain reader with ``get_chain(discard=)``.
+        discard (int): Burn-in steps when reading. Default ``0``.
+        save_dir (str): Output prefix. Default ``"./"``.
+        truths (array-like, optional): Values overlaid on the plots.
+    """
     labels = [
         r"$\log (m_1 / M_\odot)$",
         r"$m_2 / M_\odot$",
@@ -314,7 +420,19 @@ def produce_emri_plots(chain=None, reader=None, discard=0, save_dir="./", truths
 
 
 def produce_psd_plots(chain=None, reader=None, discard=0, save_dir="./", truths=None):
-    """Plot the PSD chain (trace + corner) with default parameter labels."""
+    """Plot the PSD chain (trace + corner) with default parameter labels.
+
+    Labels ``S_oms_A, S_acc_A, S_oms_E, S_acc_E``, truncated to the chain's
+    ``ndim`` (at most 4 parameters).
+
+    Args:
+        chain (np.ndarray, optional): ``(nsteps, nwalkers, nleaves, ndim)``;
+            read from ``reader`` (branch ``"psd"``, cold chain) when ``None``.
+        reader (optional): Chain reader with ``get_chain(discard=)``.
+        discard (int): Burn-in steps when reading. Default ``0``.
+        save_dir (str): Output prefix. Default ``"./"``.
+        truths (array-like, optional): Values overlaid on the plots.
+    """
     labels = [
         r"$S_{\mathrm{oms}_A}$",
         r"$S_{\mathrm{acc}_A}$",
@@ -335,11 +453,16 @@ def produce_psd_plots(chain=None, reader=None, discard=0, save_dir="./", truths=
 
 
 def produce_galfor_plots(chain=None, reader=None, discard=0, save_dir="./"):
-    """Placeholder for galactic-foreground diagnostic plots (no-op for now)."""
+    """Placeholder for galactic-foreground diagnostic plots (no-op for now).
+
+    Like :func:`produce_gb_plots`, it takes no ``truths`` argument.
+    """
     pass
 
 
+#: Branch names :class:`DiagnosticPlotter` has a producer for.
 all_branches = ["mbh", "gb", "emri", "psd", "galfor"]
+#: ``{branch: produce_*_plots}`` dispatch table of :class:`DiagnosticPlotter`.
 all_branches_functions = dict(
     zip(
         all_branches,
@@ -357,10 +480,27 @@ all_branches_functions = dict(
 class DiagnosticPlotter:
     """Sampler callback that periodically writes per-branch diagnostic plots.
 
+    Matches eryn's ``update_fn(i, state, sampler)`` hook of
+    :class:`~eryn.ensemble.EnsembleSampler`. Not wired into the stock global
+    fits (they plot through eryn's ``PlotContainer``); usable with a plain
+    eryn sampler. Construction creates the plot folder.
+
     Args:
         curr: Global-fit info object exposing ``source_info`` and
-            ``general_info``.
-        plot_every: Iteration cadence at which plots are regenerated.
+            ``general_info``. The folder is
+            ``general_info.main_file_path`` with
+            ``"parameter_estimation_main.h5"`` replaced by
+            ``"diagnostic_plots/"`` (a path without that legacy file name is
+            used unchanged, so pass a store named that way). Injection
+            truths are read from ``source_info[branch].injection``.
+        plot_every (int): Iteration cadence at which plots are regenerated.
+            Default ``10``.
+
+    Attributes:
+        curr: Constructor argument.
+        plot_every (int): Constructor argument.
+        savedir (str): Plot folder.
+        truths (dict): ``{branch: injection or None}``.
     """
 
     def __init__(self, curr, plot_every=10):
@@ -384,7 +524,20 @@ class DiagnosticPlotter:
         logger.info("Saving diagnostic plots to %s", self.savedir)
 
     def __call__(self, iteration, last_sample, sampler):
-        """Print per-move acceptance and write diagnostic plots every ``plot_every`` iterations."""
+        """Print per-move acceptance and write diagnostic plots every ``plot_every`` iterations.
+
+        On iterations ``> 0`` that are multiples of ``plot_every``: logs each
+        move's cold acceptance fraction, then, discarding the first 10 % of
+        ``sampler.iteration``, runs the producer of every branch in
+        :data:`all_branches` (EMRI with its injection truths, PSD with the
+        fixed truths ``[7.9e-12, 2.4e-15, 7.9e-12, 2.4e-15]``; producer
+        errors are logged, not raised) and :func:`plot_loglikelihood`.
+
+        Args:
+            iteration (int): Iteration counter passed by the sampler.
+            last_sample: Current state (unused).
+            sampler: The eryn sampler (also the chain reader).
+        """
         if iteration > 0 and iteration % self.plot_every == 0:
 
             for move in sampler.moves:
@@ -414,6 +567,7 @@ class DiagnosticPlotter:
             plot_loglikelihood(sampler, discard=discard, save_dir=self.savedir)
 
 
+# Developer snippet with a hard-coded store path of an old run; not part of the API.
 if __name__ == "__main__":
     filepath = "/data/asantini/packages/LISAanalysistools/global_fit_output/psd_separate_9th_try_parameter_estimation_main.h5"
     reader = GFHDFBackend(filepath)

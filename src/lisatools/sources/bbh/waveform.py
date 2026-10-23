@@ -1,4 +1,29 @@
-"""Binary black hole waveform classes (frequency-domain SNR waveforms and PhenomTHM TDI waveforms)."""
+"""Binary black hole waveform classes (bbhx FD SNR waveform and phentax PhenomTHM TDI waveforms).
+
+Classes:
+
+- :class:`PhenomTHMTDIWaveform`: phentax ``IMRPhenomTHM`` polarizations with LAT's
+  :class:`~lisatools.response.directresponse.pyResponseTDI` response
+  (:class:`~lisatools.sources.waveformbase.TDPyResponseWaveformBase`). The stock global-fit MBH
+  generator: with ``MBH_LIKELIHOOD=batched`` (the 9mo / 12mo runs) it rebuilds the engine
+  residuals and serves as the batched move's reference generator, while scoring runs through
+  the grid-aligned subclasses in :mod:`lisatools.sources.bbh.gridaligned`.
+- :class:`PhenomTHMTDIOnFlyWaveform`: the same model through the TDI-on-the-fly response
+  (``use_tdionfly``; off in production).
+- :class:`PhenomTHMWaveformBase`: the shared phentax wrapper (a
+  :class:`~lisatools.jax.jaxbase.JaxBase` mixin; reference-time / start-frequency handling).
+- :class:`BBHSNRWaveform`: a quick bbhx ``BBHWaveformFD`` AET SNR helper (not a global-fit
+  template).
+
+The ``MBH_PHENOM_DEFAULT_*`` constants are the stock :class:`PhenomTHMTDIWaveform` defaults,
+kept equal to ``globalfit.stock.erebor`` (``SourceMBHSettings`` /
+``wrappers.get_mbh_phenom_wave_gen``). jax and phentax are optional imports: without them the
+module still imports (``BBHSNRWaveform`` works) but the PhenomTHM classes raise ``ImportError``.
+
+Waveform basis of the PhenomTHM classes (the stock MBH transform's output, ICRS run frame):
+``(m1 [Msun], m2 [Msun], s1z, s2z, distance [Mpc], phi_ref, inclination, psi, ra, dec,
+merger_time [s from waveform_t0])``.
+"""
 
 from __future__ import annotations
 
@@ -88,13 +113,24 @@ class BBHSNRWaveform(SNRWaveform):
     reports the ``AET`` SNR channels rather than the ``XYZ`` residual channels.
 
     Args:
-        bbh_waveform_kwargs: ``amp_phase_kwargs`` for :class:`BBHWaveformFD`
+        bbh_waveform_kwargs: ``amp_phase_kwargs`` for :class:`bbhx.waveformbuild.BBHWaveformFD`
             (``None`` -> ``{"run_phenomd": False}``).
-        response_kwargs: ``response_kwargs`` for :class:`BBHWaveformFD`
-            (``None`` -> ``{"TDItag": "AET", "tdi2": True}``).
+        response_kwargs: ``response_kwargs`` for :class:`bbhx.waveformbuild.BBHWaveformFD`
+            (``None`` -> ``{}``; ``TDItag="AET"`` and ``tdi2=True`` are filled in when absent).
         force_backend: Backend selection at construction (``"cpu"`` /
-            ``"cuda12x"`` / ...); forwarded to :class:`BBHWaveformFD`.
+            ``"cuda12x"`` / ...); forwarded to :class:`bbhx.waveformbuild.BBHWaveformFD`.
 
+    Attributes:
+        wave_gen (BBHWaveformFD): The bbhx generator.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.sources.bbh import BBHSNRWaveform
+
+            wave = BBHSNRWaveform(force_backend="cpu")
+            # (m1, m2, chi1z, chi2z, distance [m], phi_ref, f_ref, inc, lam, beta, psi, t_ref [s])
+            A, E, T = wave(*params)
     """
 
     def __init__(
@@ -126,7 +162,7 @@ class BBHSNRWaveform(SNRWaveform):
 
     @property
     def f_arr(self) -> np.ndarray:
-        """Frequency array."""
+        """Frequency array [Hz] of the last call (unset before the first call)."""
         return self._f_arr
 
     @f_arr.setter
@@ -145,21 +181,26 @@ class BBHSNRWaveform(SNRWaveform):
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray] | np.ndarray:
         """Generate waveforms for SNR calculations.
 
+        Calls :class:`bbhx.waveformbuild.BBHWaveformFD` with ``direct=True``, ``combine=True``
+        on a sparse frequency grid and stores the grid in :attr:`f_arr`.
+
         Args:
-            *params: Parameters for the ``__call__`` function
-                for :class:`BBHWaveformFD`.
-            return_array: If ``True``, return ``array([A, E, T]).
-                If ``False``, return (A, E, T).
-            mf_min: Minimum dimensionless frequency to evaluate.
-            mf_max: Maximum dimensionless frequency to evaluate.
-            freqs: If ``None``, then default will be ``np.logspace(mf_min / M, mf_max / M, 1024)``.
-                Otherwise, it will calulate frequencies based on this exact array.
+            *params: Parameters for :class:`bbhx.waveformbuild.BBHWaveformFD`: ``(m1, m2
+                [Msun], chi1z, chi2z, distance [m], phi_ref, f_ref, inc, lam, beta, psi,
+                t_ref [s])``.
+            return_array: If ``True``, return ``array([A, E, T])``.
+                If ``False``, return ``(A, E, T)``.
+            mf_min: Minimum dimensionless frequency ``M f`` to evaluate.
+            mf_max: Maximum dimensionless frequency ``M f`` to evaluate.
+            freqs: If ``None``, 1024 points log-spaced between ``mf_min / M`` and
+                ``mf_max / M`` (``M = (m1 + m2) * MTSUN_SI``, in s). Otherwise this exact
+                ``np.ndarray`` [Hz].
             **kwargs: ``kwargs`` for the ``__call__`` function
-                for :class:`BBHWaveformFD`.
+                for :class:`bbhx.waveformbuild.BBHWaveformFD`.
 
         Returns:
-            Output waveform.
-
+            np.ndarray | tuple: The ``(3, len(f_arr))`` complex AET array, or the tuple
+            ``(A, E, T)`` (backend array module).
         """
 
         # determine frequency array (sparse, log-spaced)
@@ -191,16 +232,34 @@ class BBHSNRWaveform(SNRWaveform):
             return (AET[0], AET[1], AET[2])
 
 class PhenomTHMWaveformBase(JaxBase):
-    """
-    Base class for PhenomTHM waveforms.
+    """Base class for PhenomTHM waveforms (phentax ``IMRPhenomTHM`` wrapper).
 
-        This class is not meant to be used directly, but it contains the common code for both :class:`PhenomTHMTDIWaveform` and :class:`PhenomTHMTDIOnFlyWaveform`. In particular, it contains the common code for handling the waveform generation and the reference and starting frequencies.
-    
-        Args:
-            waveform_kwargs: Keyword arguments forwarded to :class:`phentax.waveform.IMRPhenomTHM`.
-            Tobs: Observation time in years.
-            start_freq: Starting frequency in Hz for the waveform generation. If `None`, it has to be explicitly provided in the waveform generation calls.
-            ref_freq: Reference frequency in Hz for the waveform generation. If `None` and `start_freq` is provided, it will default to `start_freq`. Otherwise, it has to be explicitly provided in the waveform generation calls.
+    Not meant to be used directly: the shared code of :class:`PhenomTHMTDIWaveform` and
+    :class:`PhenomTHMTDIOnFlyWaveform` (the phentax model, the reference-time / start-frequency
+    handling of :meth:`get_reference_quantities`, and the time-grid helpers). JAX inputs and
+    outputs move through the :class:`~lisatools.jax.jaxbase.JaxBase` helpers ``_to_jax`` /
+    ``_from_jax``.
+
+    Args:
+        waveform_kwargs: Keyword arguments forwarded to :class:`phentax.waveform.IMRPhenomTHM`.
+        Tobs: phentax generation window ``T`` in **seconds** (the template spans ``[-Tobs, ...]``
+            before the merger when ``time_bounded_start``).
+        start_freq: Starting frequency in Hz (phentax ``f_min``). If ``None``, it has to be
+            provided in the waveform generation calls.
+        ref_freq: Reference frequency in Hz (phentax ``f_ref``), used only when
+            ``use_reference_time`` is ``False``. ``None`` is passed through unless the call
+            provides one.
+        use_reference_time: If ``True`` (default), phases are referenced to a time ``t_ref``
+            instead of to ``f_ref``.
+        use_coalescence_time: With ``use_reference_time``: ``True`` (default here) sets
+            ``t_ref = 0`` (the merger); ``False`` sets ``t_ref = -merger_time`` per call, i.e.
+            ``phi_ref`` is the phase at ``waveform_t0``.
+        time_bounded_start: If ``True`` (default), passes ``t_min = -Tobs`` so the template
+            spans its full window regardless of mass (phentax otherwise starts it where the
+            (2,2) mode reaches ``f_min``).
+
+    Raises:
+        ImportError: If jax / phentax are not installed.
     """
     def __init__(
         self,
@@ -230,7 +289,9 @@ class PhenomTHMWaveformBase(JaxBase):
 
     @property
     def phenom_kwargs(self) -> dict:
-        """Keyword arguments for the waveform generationDictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
+        """dict: Constructor kwargs of :class:`PhenomTHMWaveformBase` read back from the phentax
+        model (``waveform_kwargs``, ``Tobs``, ``start_freq``, ``ref_freq``, the three flags), for
+        reproducibility and debugging."""
 
         waveform_kwargs = dict(
             higher_modes=self.waveform.higher_modes,
@@ -260,17 +321,21 @@ class PhenomTHMWaveformBase(JaxBase):
         xp: ArrayModule,
         dt: float,
     ) -> np.ndarray | cp.ndarray:
-        """
-        Shift and trim the time arrays for each source according to its mask, so that the resulting time arrays have the same shape (Nbatch, max_valid_times). the initial time points can be different across sources.
+        """Trim every row to the longest valid suffix and rebuild the invalid leading times.
+
+        Keeps the last ``max_valid = max(mask.sum(axis=1))`` columns. A row with fewer valid
+        samples gets its ``n_pad`` leading entries replaced by times continuing its first valid
+        time backwards in steps of ``dt``, so every row is a strictly increasing, ``dt``-spaced
+        grid. Assumes each row's valid samples are a right-aligned suffix.
 
         Args:
-            times (Array): Time arrays for each source, shape (Nbatch, Ntimes).
-            mask (Array): Boolean mask indicating valid time samples for each source, shape (Nbatch, Ntimes).
+            times: Time arrays for each source, shape ``(Nbatch, Ntimes)``.
+            mask: Boolean mask of valid samples, shape ``(Nbatch, Ntimes)``.
             xp: Array module (numpy or cupy).
             dt: Time step in seconds.
 
         Returns:
-            Shifted time arrays, shape (Nbatch, max_valid_times).
+            xp.ndarray: Times, shape ``(Nbatch, max_valid)``.
         """
         valid_points = mask.sum(axis=1)
         max_valid_points = int(valid_points.max())
@@ -294,18 +359,20 @@ class PhenomTHMWaveformBase(JaxBase):
     
     @staticmethod
     def _leading_onset_ramp(num_points: int, num_pad: int, taper_length: int, xp: ArrayModule) -> NDArrayLike:
-        """
-        Get a leading onset ramp to smoothly turn on the waveform.
-        This avoids the sharp jump from zero to the first valid point.
+        """Leading onset ramp that turns each row's waveform on smoothly.
+
+        ``0.5 (1 - cos(pi x))`` with ``x = clip((j - num_pad) / taper_length, 0, 1)``: zero on
+        the invalid head, a raised-cosine over ``taper_length`` samples, then one. Avoids a
+        sharp jump from zero to the first valid point.
 
         Args:
-            num_points: Total number of points in the output array.
-            num_pad: Number of initial points that are invalid.
+            num_points: Total number of points per row.
+            num_pad: Invalid leading points per row, shape ``(Nbatch,)`` (int array-like).
             taper_length: Length of the taper in number of points.
             xp: Array module (numpy or cupy).
 
         Returns:
-            Ramp array of shape (num_points,).
+            xp.ndarray: Ramp, shape ``(Nbatch, num_points)``.
         """
         rj = xp.arange(num_points)
         offset = rj[None, :] - xp.asarray(num_pad, dtype=int)[:, None]
@@ -317,16 +384,20 @@ class PhenomTHMWaveformBase(JaxBase):
                                 start_freq: float | np.ndarray | cp.ndarray = None,
                                 ref_freq: float | np.ndarray | cp.ndarray = None
                                 ) -> dict:
-        """
-        Get the reference quantities for the waveform generation, depending on the settings of the class.
+        """Reference kwargs for the phentax call, following the class flags.
+
+        With ``use_reference_time``: ``{"t_ref", "f_min"}`` where ``t_ref = -merger_time`` (or
+        ``0`` with ``use_coalescence_time``); otherwise ``{"f_min", "f_ref"}``. With
+        ``time_bounded_start`` the dict also carries ``t_min = -Tobs``.
 
         Args:
-            merger_time: Merger time in seconds, shape (Nbatch,).
-            start_freq: Starting frequency in Hz. If `None`, it will default to `self.start_freq` if that is not `None`, otherwise it has to be explicitly provided.
-            ref_freq: Reference frequency in Hz. If `None`, it will default to `self.ref_freq` if that is not `None`, otherwise it has to be explicitly provided.
+            merger_time: Merger time [s] relative to ``waveform_t0``, scalar or ``(Nbatch,)``.
+            start_freq: Starting frequency in Hz. ``None`` uses the constructor's
+                ``start_freq``.
+            ref_freq: Reference frequency in Hz. ``None`` uses the constructor's ``ref_freq``.
 
         Returns:
-            Dictionary of reference quantities for the waveform generation.
+            dict: Keyword arguments for phentax (JAX arrays).
         """
 
         start_freq = self._to_jax(start_freq) if start_freq is not None else self.start_freq
@@ -356,18 +427,27 @@ class PhenomTHMWaveformBase(JaxBase):
             return {'f_min': start_freq, 'f_ref': ref_freq, **extra}
 
 class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
-    """
-    Generate PhenomTHM waveforms with the TDI LISA Response (global-fit aligned).
+    """Generate PhenomTHM waveforms with the TDI LISA Response (global-fit aligned).
 
-    A bare instance reproduces the generator configuration the stock
-    ``all_sources`` global fit uses for its default (legacy) MBH branch — see
+    A bare instance reproduces the generator configuration the stock ``all_sources`` global fit
+    uses for its MBH branch (see
     ``lisatools.globalfit.stock.erebor.wrappers.get_mbh_phenom_wave_gen`` and
-    ``source_runtime.SourceMBHSettings``. Every waveform-config default below
-    is drawn from the module-level ``MBH_PHENOM_DEFAULT_*`` constants (the
-    sources-side single source of truth); only the *run-specific* arguments
-    (``waveform_t0``, ``data_td_settings``, ``orbits``, ``sampling_frequency``,
-    ``tukey_alpha``, ``output_domain_settings``, ``force_backend``) must be
-    supplied per run.
+    ``source_runtime.SourceMBHSettings``). Every waveform-config default below is drawn from the
+    module-level ``MBH_PHENOM_DEFAULT_*`` constants (the sources-side single source of truth);
+    only the *run-specific* arguments (``waveform_t0``, ``data_td_settings``, ``orbits``,
+    ``sampling_frequency``, ``tukey_alpha``, ``output_domain_settings``, ``force_backend``) must
+    be supplied per run.
+
+    In the 9mo / 12mo runs (``MBH_LIKELIHOOD=batched``) this class rebuilds the engine's MBH
+    residuals (:meth:`~lisatools.sources.waveformbase.TDWaveformBase.get_signals_for_residuals`
+    onto the WDM domain) and is the batched move's reference generator; the scoring itself
+    uses :class:`~lisatools.sources.bbh.gridaligned.WindowedGridAlignedMBHWaveform`.
+
+    Call / :meth:`compute_tdi_channels` parameters: ``(m1, m2, s1z, s2z, distance, phi_ref,
+    inclination, psi, ra, dec, merger_time)`` -- masses in solar masses, distance in Mpc,
+    angles in radians, ``(ra, dec, psi)`` in the orbits' frame (ICRS on the run),
+    ``merger_time`` in seconds from ``waveform_t0``. Scalars give one source; 1-D arrays a
+    batch.
 
     Args:
         waveform_kwargs: Keyword arguments forwarded to
@@ -376,29 +456,63 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             ``(21, 33, 44)``, negative modes on, ``t_low_fit=True``,
             ``coarse_grain=False``, ``atol=rtol=1e-12``).
         Tobs: phentax generation window in seconds (its ``T``); default
-            :data:`MBH_PHENOM_DEFAULT_TOBS`.
+            :data:`MBH_PHENOM_DEFAULT_TOBS` (1/12 yr).
         start_freq: Starting frequency in Hz; default
             :data:`MBH_PHENOM_DEFAULT_START_FREQ`.
-        ref_freq: Reference frequency in Hz (``None`` -> ``start_freq``).
+        ref_freq: Reference frequency in Hz, used only with ``use_reference_time=False``
+            (``None`` is passed through).
+        use_reference_time: Reference the phase to a time (default ``True``); see
+            :class:`PhenomTHMWaveformBase`.
+        use_coalescence_time: Default ``False`` here: ``phi_ref`` is the phase at
+            ``waveform_t0`` (``t_ref = -merger_time``); ``True`` references it to the merger.
+        time_bounded_start: Bound the template at ``t_min = -Tobs`` (default ``True``).
+        *args: Additional positional arguments forwarded to
+            :class:`~lisatools.sources.waveformbase.TDPyResponseWaveformBase` (its first
+            positional is ``waveform_t0``). Pass the run arguments by keyword.
         order: pyResponseTDI Lagrange order; default
-            :data:`MBH_PHENOM_DEFAULT_RESPONSE_ORDER`.
+            :data:`MBH_PHENOM_DEFAULT_RESPONSE_ORDER` (8; the launchers set
+            ``MBH_RESPONSE_ORDER=8``).
         buffer_time: TDI response buffer in seconds; default
             :data:`MBH_PHENOM_DEFAULT_BUFFER_TIME`.
-        freq_min / freq_max: FD/STFT output frequency bounds; defaults
-            :data:`MBH_PHENOM_DEFAULT_FREQ_MIN` / :data:`MBH_PHENOM_DEFAULT_FREQ_MAX`.
+        freq_min: FD / STFT output lower frequency bound [Hz]; default
+            :data:`MBH_PHENOM_DEFAULT_FREQ_MIN`.
+        freq_max: FD / STFT output upper frequency bound [Hz]; default
+            :data:`MBH_PHENOM_DEFAULT_FREQ_MAX`.
         fft_batch_size: FD transform batch size; default
             :data:`MBH_PHENOM_DEFAULT_FFT_BATCH_SIZE`.
-        tdi_generation / tdi_channels: TDI configuration; defaults
-            :data:`MBH_PHENOM_DEFAULT_TDI_GENERATION` (2nd gen) /
-            :data:`MBH_PHENOM_DEFAULT_TDI_CHANNELS` (``XYZ``).
-        *args: Additional positional arguments forwarded to
-            :class:`TDPyResponseWaveformBase` (its first positional is
-            ``waveform_t0``).
+        tdi_generation: TDI generation; default :data:`MBH_PHENOM_DEFAULT_TDI_GENERATION`
+            (2nd generation).
+        tdi_channels: TDI channels; default :data:`MBH_PHENOM_DEFAULT_TDI_CHANNELS` (``XYZ``).
         **kwargs: Run-specific keyword arguments forwarded to
-            :class:`TDPyResponseWaveformBase` (``waveform_t0``,
-            ``data_td_settings``, ``orbits``, ``sampling_frequency``,
-            ``tukey_alpha``, ``stft_dt``, ``output_domain_settings``,
-            ``force_backend``).
+            :class:`~lisatools.sources.waveformbase.TDPyResponseWaveformBase`
+            (``waveform_t0``, ``data_td_settings``, ``orbits``, ``sampling_frequency``,
+            ``tukey_alpha``, ``stft_dt``, ``output_domain_settings``, ``force_backend``, ...).
+
+    Raises:
+        ValueError: If ``waveform_kwargs`` sets ``coarse_grain=True`` (``pyResponseTDI`` needs
+            equispaced times).
+        ImportError: If jax / phentax are not installed.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.detector import EqualArmlengthOrbits
+            from lisatools.domains import TDSettings
+            from lisatools.sources.bbh import PhenomTHMTDIWaveform
+
+            dt, Tobs_wf = 10.0, 7.0 * 86400.0
+            mbh = PhenomTHMTDIWaveform(
+                waveform_t0=0.0,
+                data_td_settings=TDSettings(N=int(Tobs_wf / dt) + 4096, dt=dt, t0=0.0,
+                                            force_backend="cpu"),
+                Tobs=Tobs_wf,
+                sampling_frequency=1.0 / dt,
+                orbits=EqualArmlengthOrbits(force_backend="cpu"),
+                force_backend="cpu",
+            )
+            # (m1, m2, s1z, s2z, dist [Mpc], phi_ref, iota, psi, ra, dec, merger_time [s])
+            times, xyz = mbh.compute_tdi_channels(
+                1.2e6, 0.8e6, 0.3, 0.2, 15000.0, 1.0, 1.0, 1.2, 2.0, 0.4, 0.9 * Tobs_wf)
     """
 
     def __init__(
@@ -454,7 +568,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
 
     @property
     def kwargs(self) -> dict:
-        """Dictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
+        """dict: ``phenom_kwargs`` merged with ``wrapper_kwargs`` (reproducibility, debugging)."""
 
         phenom_kwargs = self.phenom_kwargs  # get the PhenomTHM-specific kwargs
         wrapper_kwargs = self.wrapper_kwargs # get the TD TDI wrapper-specific kwargs
@@ -481,28 +595,32 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         start_freq: float = None,
         synchronize: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Generate the waveform's polarizations for a single source.
+        """Generate the polarizations of a single source with phentax.
+
+        ``compute_polarizations_at_once`` on the ``dt`` grid with the reference kwargs of
+        :meth:`get_reference_quantities`; the outputs are masked to the valid samples.
 
         Args:
             m1: Source-1 mass in solar masses.
             m2: Source-2 mass in solar masses.
-            s1z: Dimensionless spin of source 1.
-            s2z: Dimensionless spin of source 2.
+            s1z: Dimensionless aligned spin of source 1.
+            s2z: Dimensionless aligned spin of source 2.
             distance: Luminosity distance in Mpc.
             phi_ref: Reference phase in radians.
             inclination: Inclination angle in radians.
             psi: Polarisation angle in radians.
-            ra: Right ascension for the source in radians.
-            dec: Declination for the source in radians.
-            merger_time: Time of merger in seconds.
-            ref_freq: Reference frequency in Hz. If `None`, it will default to `self.ref_freq` if that is not `None`, otherwise it has to be explicitly provided.
-            start_freq: Starting frequency in Hz. If `None`, it will default to `self.start_freq` if that is not `None`, otherwise it has to be explicitly provided.
-            synchronize: If `True`, it will call `block_until_ready()` on the waveform outputs. :meth:`self._from_jax` relies on `dlpack` to move data from JAX to Cupy, that should already handle CUDA streams correctly.
+            ra: Right ascension in radians; accepted for the call signature, unused here (the
+                response consumes it).
+            dec: Declination in radians; unused here, as ``ra``.
+            merger_time: Merger time in seconds relative to ``waveform_t0`` (sets ``t_ref``).
+            ref_freq: Reference frequency in Hz. ``None`` uses the constructor's value.
+            start_freq: Starting frequency in Hz. ``None`` uses the constructor's value.
+            synchronize: If ``True``, synchronize when moving the JAX outputs to :attr:`xp`.
+                ``_from_jax`` relies on DLPack, which should already handle CUDA streams.
 
         Returns:
-            t_arr, h_plus, h_cross
-
+            tuple[xp.ndarray, xp.ndarray, xp.ndarray]: ``(t_arr, h_plus, h_cross)``, 1-D on the
+            valid samples, ``t_arr`` [s] relative to the merger.
         """
 
         reference_kwargs = self.get_reference_quantities(merger_time=merger_time, start_freq=start_freq, ref_freq=ref_freq)
@@ -552,32 +670,41 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Generate polarizations for a batch of sources using phentax's vectorised path.
 
-        phentax uses JAX vmap internally, so all parameters must be broadcastable
-        to the batch shape.  The returned arrays still carry the padded time axis;
-        per-source masking is handled by the caller (:meth:`_call_batched`).
+        phentax uses JAX vmap internally, so all parameters must be broadcastable to the batch
+        shape. The rows are trimmed to the longest valid suffix
+        (:meth:`trim_and_shift_times`); rows with fewer valid samples are masked by the
+        leading onset ramp (taper ``5 * tdi_buffer_time``) anchored at their own onset.
 
         Args:
-            m1: Source-1 masses in solar masses, shape (Nbatch,).
-            m2: Source-2 masses in solar masses, shape (Nbatch,).
-            s1z: Dimensionless spin of source 1, shape (Nbatch,).
-            s2z: Dimensionless spin of source 2, shape (Nbatch,).
-            distance: Luminosity distance in Mpc, shape (Nbatch,).
-            phi_ref: Reference phase in radians, shape (Nbatch,).
-            inclination: Inclination angle in radians, shape (Nbatch,).
-            psi: Polarisation angle in radians, shape (Nbatch,).
-            ref_freq: Reference frequency in Hz, float.
-            start_freq: Starting frequency in Hz, float.
-            ra: Right ascension in radians, shape (Nbatch,).
-            dec: Declination in radians, shape (Nbatch,).
-            merger_time: Time of merger in seconds, shape (Nbatch,).
-            synchronize: If `True`, it will call `block_until_ready()` on the waveform outputs. :meth:`self._from_jax` relies on `dlpack` to move data from JAX to Cupy, that should already handle CUDA streams correctly.
+            m1: Source-1 masses in solar masses, shape ``(Nbatch,)``.
+            m2: Source-2 masses in solar masses, shape ``(Nbatch,)``.
+            s1z: Dimensionless aligned spin of source 1, shape ``(Nbatch,)``.
+            s2z: Dimensionless aligned spin of source 2, shape ``(Nbatch,)``.
+            distance: Luminosity distance in Mpc, shape ``(Nbatch,)``.
+            phi_ref: Reference phase in radians, shape ``(Nbatch,)``.
+            inclination: Inclination angle in radians, shape ``(Nbatch,)``.
+            psi: Polarisation angle in radians, shape ``(Nbatch,)``.
+            ra: Right ascension in radians, shape ``(Nbatch,)``; unused here.
+            dec: Declination in radians, shape ``(Nbatch,)``; unused here.
+            merger_time: Merger time in seconds relative to ``waveform_t0``, ``(Nbatch,)``.
+            ref_freq: Reference frequency in Hz (``None``: the constructor's).
+            start_freq: Starting frequency in Hz (``None``: the constructor's).
+            synchronize: If ``True``, synchronize when moving the JAX outputs to :attr:`xp`.
+            onset_ramp: Apply the leading onset ramp (default ``True``). ``False`` returns the
+                bit-identical-to-:meth:`wave_gen` samples and requires every row to have the
+                same number of valid samples.
             **kwargs: Additional keyword arguments forwarded to
                 ``compute_polarizations_at_once`` (e.g. ``T`` for observation time
                 override, ``t_min``, ``t_ref``).
 
         Returns:
-            Tuple of (times_batch, h_plus_batch, h_cross_batch),
-            each of shape (Nbatch, N_valid_times) as plain NumPy or Cupy arrays.
+            tuple[xp.ndarray, xp.ndarray, xp.ndarray]: ``(times_batch, h_plus_batch,
+            h_cross_batch)``, each ``(Nbatch, N_valid_times)`` on :attr:`xp`, times [s]
+            relative to each merger.
+
+        Raises:
+            BatchNotLaunchable: With ``onset_ramp=False`` when the rows have different valid
+                lengths (the container falls back to per-row evaluation).
         """
 
         reference_kwargs = self.get_reference_quantities(merger_time=merger_time, start_freq=start_freq, ref_freq=ref_freq)
@@ -642,13 +769,28 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
 
 
 class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
-    """
-    Generate PhenomTHM waveforms with the TDI LISA Response, on the fly.
+    """Generate PhenomTHM waveforms with the TDI LISA Response, on the fly.
 
-    This class inherits from :class:`TDTDIOnFlyWaveformBase`, which means that it generates the waveform sparsely and evaluate the tdi delays on splined versions of each mode's amplitude and phase.
+    Inherits from :class:`~lisatools.sources.waveformbase.TDTDIOnFlyWaveformBase`: the
+    waveform is generated per mode as amplitude and phase (already including the
+    spherical-harmonic factors) and the TDI delays are evaluated on splines of each mode. No
+    global-fit builder constructs it (``globalfit.moves.mbhspecialmove`` only names it in a
+    type annotation); a general-use alternative to :class:`PhenomTHMTDIWaveform`.
 
     Args:
-
+        waveform_kwargs: Keyword arguments for :class:`phentax.waveform.IMRPhenomTHM` (no
+            default here).
+        Tobs: phentax generation window ``T`` in seconds.
+        start_freq: Starting frequency in Hz. Default ``None``.
+        ref_freq: Reference frequency in Hz. Default ``None``.
+        use_reference_time: See :class:`PhenomTHMWaveformBase`. Default ``True``.
+        use_coalescence_time: See :class:`PhenomTHMWaveformBase`. Default ``False``.
+        *args: Positional arguments for
+            :class:`~lisatools.sources.waveformbase.TDTDIOnFlyWaveformBase` (first:
+            ``waveform_t0``).
+        **kwargs: Keyword arguments for
+            :class:`~lisatools.sources.waveformbase.TDTDIOnFlyWaveformBase`
+            (``data_td_settings``, ``orbits``, ``zero_inclination``, ...).
     """
 
     def __init__(
@@ -681,7 +823,7 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
 
     @property
     def kwargs(self) -> dict:
-        """Dictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
+        """dict: ``phenom_kwargs`` merged with ``wrapper_kwargs`` (reproducibility, debugging)."""
 
         phenom_kwargs = self.phenom_kwargs  # get the PhenomTHM-specific kwargs
         wrapper_kwargs = self.wrapper_kwargs # get the TD TDI wrapper-specific kwargs
@@ -708,7 +850,7 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
         amplitude/phase spline, and :meth:`pad` already provides exactly that
         -- it extends the spline ``ceil(tdi_buffer_time / right_dt)`` nodes
         past the last one, i.e. at least ``tdi_buffer_time`` = 600 s, while
-        the largest such read is |k.x|/c <= 499 s.  Trimming here as well only
+        the largest such read is ``|k.x|/c <= 499`` s.  Trimming here as well only
         discarded live ringdown: ``right_dt`` is the FINE post-merger spacing
         (0.39 s on mojito MBHB 0), so ``end_buffer`` ran to 1521 nodes and cut
         the grid 600 s below the last node, at merger+798.9 s where the
@@ -758,12 +900,17 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
             merger_time: Time of merger in seconds, shape (Nbatch,).
             ref_freq: Reference frequency in Hz. If `None`, it will default to `self.ref_freq` if that is not `None`, otherwise it has to be explicitly provided.
             start_freq: Starting frequency in Hz. If `None`, it will default to `self.start_freq` if that is not `None`, otherwise it has to be explicitly provided.
-            synchronize: If `True`, it will call `block_until_ready()` on the waveform outputs. :meth:`self._from_jax` relies on `dlpack` to move data from JAX to Cupy, that should already handle CUDA streams correctly.
+            synchronize: If ``True``, synchronize when moving the JAX outputs to :attr:`xp`.
+                ``_from_jax`` relies on DLPack, which should already handle CUDA streams.
             **kwargs: Additional keyword arguments forwarded to
-                ``compute_strain_components_amp_phase``.
+                ``compute_strain_components_amp_phase`` (``delta_t`` is popped first and
+                replaces ``dt`` as the generation step).
 
         Returns:
-            times, mode amplitudes and mode phases
+            tuple[xp.ndarray, xp.ndarray, xp.ndarray]: ``(times, amplitude, phase)``: times
+            ``(Nbatch, N)`` relative to the merger (:meth:`trim_and_shift_times`) and mode
+            amplitudes / phases ``(Nbatch, num_modes, N)``. No onset taper is applied (it would
+            change the waveform on an adaptive grid).
         """
         
         reference_kwargs = self.get_reference_quantities(
@@ -814,16 +961,18 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
     def process_amp_phase(
         self, amp: np.ndarray | cp.ndarray, phase: np.ndarray | cp.ndarray
     ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
-        """
-        Process the waveform amplitude and phase to align to the tdi on fly conventions.
-        For this specific waveform, we need :math:`A \\to A/2` and :math:`\\phi \\to \\pi-\\phi`.
+        r"""Map the phentax mode amplitude and phase to the TDI-on-the-fly convention.
+
+        For this waveform :math:`A \to A/2` and :math:`\phi \to \pi - \phi`.
 
         Args:
-            amp (Array): Waveform modes amplitude, already including the spherical harmonic contributions. Shape (num_binaries, num_modes, num_times).
-            phase (Array): Waveform modes phase, already including the spherical harmonic contributions. Shape (num_binaries, num_modes, num_times).
+            amp: Mode amplitudes, already including the spherical-harmonic contributions,
+                shape ``(num_binaries, num_modes, num_times)``.
+            phase: Mode phases, same shape.
 
         Returns:
-            Tuple of (processed_amplitude, processed_phase), each of shape (num_binaries, num_modes, num_times).
+            tuple[xp.ndarray, xp.ndarray]: ``(processed_amplitude, processed_phase)``, same
+            shapes.
         """
 
         return (amp / 2.0, self.xp.pi - phase)

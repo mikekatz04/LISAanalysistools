@@ -1,11 +1,17 @@
 """EMRI TDI waveform: the LISA response around FEW's ``GenerateEMRIWaveform``.
 
+Holds :class:`EMRITDIWaveform` (stand-alone, tutorial-facing), the catalogue glue
+:func:`emri_catalogue_to_waveform_basis` (on the run path: the stock EMRI branch converts the
+mojito catalogue with it), and the ``EMRI_STOCK_*`` response defaults.
+
 **Alignment guarantee (2026-07-12).** A bare :class:`EMRITDIWaveform` builds
 its generator through
 :func:`lisatools.sources.emri.response.get_emri_response_wrapper` — the *same*
-builder the stock ``all_sources`` global fit uses for its default EMRI branch
-(see ``lisatools.globalfit.stock.erebor.source_runtime.SourceEMRISettings`` and
-``get_emri_wave_wrap``). Its defaults therefore match the global-fit EMRI path
+builder the stock ``all_sources`` global fit uses for its legacy EMRI wrap
+(``lisatools.globalfit.stock.erebor.source_runtime.SourceEMRISettings`` and
+``get_emri_wave_wrap``; since 2026-10 the production scoring and templates use the
+direct-to-WDM template, :mod:`lisatools.sources.emri.wdm_direct`, and the wrap is the
+cross-check / fallback and the synthetic-injection generator). Its defaults match that wrap
 exactly:
 
 * ``FastKerrEccentricEquatorialFlux`` intrinsic model,
@@ -15,7 +21,7 @@ exactly:
 * the validated SPECIAL frame (``special_frame=True``) that converts the
   ecliptic-polar sky to the ICRS orbit frame per call.
 
-Constructing this class and the global fit's EMRI ``signal_gen`` with the same
+Constructing this class and the global fit's legacy EMRI wrap with the same
 run essentials (``T``, ``dt``, ``t0``, ``orbits``) yields byte-identical raw
 TDI channels — the generator is even shared through the module-level cache in
 ``get_emri_response_wrapper``.
@@ -81,11 +87,17 @@ def emri_catalogue_to_waveform_basis(entry: dict) -> np.ndarray:
     ``lisatools.response.directresponse`` (they differ by ~1e-4 rad).
 
     Args:
-        entry: One source's catalogue dict (mojito L1 ``catalogue["EMRI"][i]``).
+        entry: One source's catalogue dict (mojito L1 ``catalogue["EMRI"][i]``): the SSB-frame
+            masses (``PrimaryMassSSBFrame``, ``SecondaryMassSSBFrame``), ``LuminosityDistance``
+            in Mpc, ICRS ``RightAscension`` / ``Declination``, and the spin, orbit and phase
+            fields named in the code.
 
     Returns:
-        ``(14,)`` array ``[M, mu, a, p0, e0, xI0, dist (Gpc), qS, phiS, qK,
+        np.ndarray: ``(14,)`` array ``[M, mu, a, p0, e0, xI0, dist (Gpc), qS, phiS, qK,
         phiK, Phi_phi0, Phi_theta0, Phi_r0]``.
+
+    Raises:
+        ValueError: If ``InclinationAngle`` is not 0 or pi (to 1e-8 in its cosine).
     """
     ra = float(entry["RightAscension"]) % (2 * np.pi)
     dec = float(entry["Declination"])
@@ -121,9 +133,11 @@ def emri_catalogue_to_waveform_basis(entry: dict) -> np.ndarray:
 class EMRITDIWaveform(AETTDIWaveform):
     """Generate EMRI waveforms with the LISA TDI response (global-fit aligned).
 
-    Delegates to :func:`get_emri_response_wrapper`, so a bare instance
-    reproduces the stock ``all_sources`` EMRI generator (see the module
-    docstring for the alignment guarantee).
+    Delegates to :func:`~lisatools.sources.emri.response.get_emri_response_wrapper`, so a bare
+    instance reproduces the stock ``all_sources`` legacy EMRI wrap (see the module docstring
+    for the alignment guarantee). Calls take the 14-parameter FEW basis ``(M, mu, a, p0, e0,
+    xI0, dist [Gpc], qS, phiS, qK, phiK, Phi_phi0, Phi_theta0, Phi_r0)`` (masses in solar
+    masses; ``qS`` / ``phiS`` ecliptic-polar sky angles, ``qK`` / ``phiK`` the spin angles).
 
     Args:
         T: Observation time in years.
@@ -156,6 +170,26 @@ class EMRITDIWaveform(AETTDIWaveform):
         response_kwargs: **Deprecated** back-compat dict. If given, its
             ``t0`` / ``order`` / ``tdi_chan`` / ``orbits`` entries override the
             corresponding keyword arguments.
+
+    Attributes:
+        response: The (cached, shared) generator from
+            :func:`~lisatools.sources.emri.response.get_emri_response_wrapper`.
+
+    Note:
+        ``orbits=None`` gives analytic equal-arm orbits, fine for a stand-alone waveform; the
+        production model is unequal-arm (:class:`~lisatools.detector.L1Orbits`). Since
+        :class:`~lisatools.sources.waveformbase.AETTDIWaveform` defines ``f_arr`` / ``df`` as
+        ``None``, those stay ``None`` here.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.sources.emri import EMRITDIWaveform
+
+            emri = EMRITDIWaveform(T=0.1, dt=10.0, t0=0.0, force_backend="cpu")
+            # [M, mu, a, p0, e0, xI0, dist (Gpc), qS, phiS, qK, phiK, Phi_phi0, Phi_theta0, Phi_r0]
+            p = [1e6, 10.0, 0.5, 12.0, 0.3, 1.0, 1.0, 0.8, 2.0, 1.5, 1.2, 1.0, 2.0, 3.0]
+            x, y, z = emri(*p)   # XYZ TDI-2 time series
     """
 
     def __init__(
@@ -225,7 +259,12 @@ class EMRITDIWaveform(AETTDIWaveform):
             **kwargs: Keyword arguments forwarded to the response generator.
 
         Returns:
-            The list of per-channel TDI arrays from the underlying response.
+            list: The per-channel TDI arrays from the underlying response (backend array
+            module).
+
+        Raises:
+            WaveformDomainError: When FEW refuses the parameters (outside its domain of
+                validity; see :func:`~lisatools.sources.emri.domain.few_domain_guard`).
         """
         # Typed re-raise of FEW's bare out-of-domain errors (see .domain).
         from .domain import few_domain_guard

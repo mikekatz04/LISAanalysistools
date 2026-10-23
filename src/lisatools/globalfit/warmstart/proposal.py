@@ -3,10 +3,12 @@
 Workstream B of the warm-start pipeline (``docs/warm-start-gb-proposal.md``,
 ``docs/6mo-run-prep.md``): the offline fitter
 ``lisatools.globalfit.warmstart.fit_from_store`` turns a finished run's cold-chain
-GB leaf table into Gaussian components (one per recovered source mode) with
-inclusion probabilities ``p``; :class:`WarmStartComponents` loads that npz and
-serves it as an eryn duck-typed RJ birth distribution over the FULL 9-column
-sampled GB basis::
+GB leaf table into clusters (one per recovered source) with inclusion
+probabilities ``p`` -- a Gaussian mixture per cluster in the production
+(observable-basis) format, one Gaussian per cluster in the legacy one --
+the referee prunes them, and :class:`WarmStartComponents` loads the refereed
+npz and serves it as an eryn duck-typed RJ birth distribution over the FULL
+9-column sampled GB basis::
 
     0 dist [kpc], 1 f0 [mHz], 2 Mc [Msun], 3 phi0 [rad, 2pi), 4 cos_iota,
     5 psi [rad, pi), 6 alpha [rad, 2pi), 7 sin_delta, 8 fdot_astro_ratio
@@ -75,6 +77,31 @@ Metropolis-Hastings factors require. Key design points:
 
 Pickle/deepcopy safe (sprint rule): master tables are numpy; the per-device
 cupy cache is dropped on ``__getstate__``.
+
+WHERE IT SITS. ``recipe.build_gb_moves`` loads the npz named by
+``GB_WARM_START_COMPONENTS`` twice with :meth:`WarmStartComponents.from_npz`:
+the ``rj_warm_search`` container (minimal-image charge) and the
+``rj_warm_pe`` container (``circ_images = GB_WARM_START_CIRC_IMAGES``, the
+exact wrapped-normal density PE needs), both at ``new_tobs`` = this run's
+Tobs, ``floor_box`` = the run's 9-D prior box (f0 over the interior bands),
+``floor_eps = GB_WARM_START_FLOOR_EPS`` and ``p_floor =
+GB_WARM_START_P_FLOOR``, and per-rank seeds. With ``GB_WARM_SELF=1`` each is
+then wrapped by :class:`~lisatools.globalfit.warmstart.self_refit.WarmSelfMixer`,
+which loads every self-refit epoch with the same options. The
+``BandSorter`` of the GB RJ moves calls :meth:`~WarmStartComponents.logpdf`
+on device-resident leaves for the death factors.
+
+Env knobs:
+
+* ``GB_WARM_START_FLOOR_EPS`` (recipe, default ``"0.05"``; launchers 0.05),
+  ``GB_WARM_START_P_FLOOR`` (recipe, default ``"0"``; unset) and
+  ``GB_WARM_START_CIRC_IMAGES`` (recipe, the PE twin and the opt-in
+  para-search container, default ``"3"``; launchers 3) -- read by the
+  recipe and passed in.
+* ``GB_WARM_START_F0_WINDOW_DF`` -- the logpdf candidate-window half-width
+  in units of ``1/Tobs`` when ``window_df=None``; default 10; unset.
+* ``GB_WARM_START_LOGPDF_MAX_BYTES`` -- byte budget of one logpdf chunk,
+  read at import; default ``2**30``; unset.
 """
 
 from __future__ import annotations
@@ -129,28 +156,45 @@ CIRC_SIGMA_WARN_FRAC = 1.0 / 6.0
 
 
 def _host(x):
+    """cupy-or-numpy -> numpy."""
     return x.get() if hasattr(x, "get") else np.asarray(x)
 
 
 class WarmStartComponents:
     """f0-windowed Gaussian-mixture RJ birth proposal over the 9-col GB basis.
 
+    The ``rj_proposal_distribution`` of the ``rj_warm_search`` /
+    ``rj_warm_pe`` moves (directly, or inside a
+    :class:`~lisatools.globalfit.warmstart.self_refit.WarmSelfMixer`); also
+    the container of every self-refit epoch and of the para-search epochs.
+    Normally built with :meth:`from_npz`. ``rvs`` returns and ``logpdf``
+    takes SAMPLING-basis rows ``(dist [kpc], f0 [mHz], Mc [Msun], phi0,
+    cos_iota, psi, alpha, sin_delta, fdot_astro_ratio)``, ICRS sky, whatever
+    basis the components were fitted in.
+
     Args:
-        means: ``(n, 9)`` component means in the sampled basis (f0 in mHz).
-        covs: ``(n, 9, 9)`` covariances (must be positive definite; the
-            fitter's eigenvalue floors guarantee it).
-        p: ``(n,)`` inclusion probabilities; mixture weights are
+        means (array-like): ``(n, 9)`` component means in the fitted basis:
+            the sampled basis (f0 in mHz) for ``basis="sampling"``, the
+            observable basis (f_mid in Hz) for ``basis="observable"``.
+        covs (array-like): ``(n, 9, 9)`` covariances in the same basis (must
+            be positive definite; the fitter's eigenvalue floors guarantee
+            it).
+        p (array-like): ``(n,)`` strictly positive weights (inclusion
+            probabilities; :meth:`from_npz` passes cluster ``p`` x the
+            component's share for a mixture set); mixture weights are
             ``max(p, p_floor)`` renormalized.
-        new_tobs: THE NEW RUN's observation time [s]; f0 candidate windows
-            are derived from ``df = 1/new_tobs`` (cross-Tobs v1 policy --
-            widths themselves stay as stored).
-        window_df: candidate window half-width in units of df. ``None`` ->
-            ``GB_WARM_START_F0_WINDOW_DF`` env (default 10).
+        new_tobs (float): THE NEW RUN's observation time [s]; f0 candidate
+            windows are derived from ``df = 1/new_tobs`` (cross-Tobs v1
+            policy -- widths themselves stay as stored).
+        window_df (float, optional): candidate window half-width in units of
+            df. ``None`` -> ``GB_WARM_START_F0_WINDOW_DF`` env (default 10).
         p_floor: optional floor applied to ``p`` before renormalizing.
-        floor_box: ``(lo, hi)`` 9-vector pair bounding the uniform floor
-            component (normally the run's prior box). ``None`` with
-            ``floor_eps > 0`` raises.
-        floor_eps: uniform-floor mixture weight (0 = bare mixture).
+            Default ``0.0``.
+        floor_box (tuple, optional): ``(lo, hi)`` 9-vector pair in the
+            SAMPLING basis bounding the uniform floor component (normally the
+            run's prior box). ``None`` with ``floor_eps > 0`` raises.
+        floor_eps: uniform-floor mixture weight in ``[0, 1)`` (0 = bare
+            mixture). Default ``0.0``.
         circ_images: wrapped-normal image count for the circular columns.
             0 (default) charges the minimal-image approximation -- the
             SEARCH behavior, bit-identical to the pre-knob code. K > 0
@@ -162,12 +206,57 @@ class WarmStartComponents:
             narrow columns stay single-image (their neglected mass is
             < e^-18) and only genuinely wide columns pay. Draws are
             unaffected (rvs wraps either way; only the CHARGE changes).
+        bounded_cols: ``{column: (lo, hi)}`` box-truncated columns of the
+            FITTED basis (at most 2, never circular): ``logpdf`` carries each
+            component's rectangle normalization and is ``-inf`` outside,
+            ``rvs`` rejects and redraws. Default ``None`` = none.
         mult, n_members, island_id, f0_window_edges, meta: carried through
             from the npz for diagnostics; unused by rvs/logpdf (``mult`` is
             deliberately NOT a weight -- PROVISIONAL v1 policy).
         use_cupy: keep a device copy of the tables and return device draws
             (GPU runs). The master copy stays numpy (pickle rule).
         seed: RNG seed for :meth:`rvs`.
+        basis: ``"sampling"`` (default) or ``"observable"`` -- the basis of
+            ``means`` / ``covs``.
+        map_params (dict, optional): The stored ``meta["map_params"]``;
+            required for ``basis="observable"`` (the map is rebuilt from it at
+            construction).
+        gmm_ncomp (array-like, optional): Per-cluster component counts of a
+            mixture set (partitions the flat component arrays).
+
+    Attributes:
+        weights (np.ndarray): ``(n,)`` normalized mixture weights.
+        tobs (float): ``new_tobs``.
+        df_mhz (float): ``1e3 / new_tobs``.
+        df_col1 (float): ``1/new_tobs`` in column-1 units of the fitted
+            basis (mHz sampling, Hz observable).
+        window_df (float): The resolved candidate half-width in df units.
+        window_halfwidth_mhz (np.ndarray): ``(n,)`` per-component window
+            half-widths, in column-1 units despite the name.
+        obs_map (GBObservableFiberBasis or None): The observable map
+            (``None`` for a sampling set).
+        floor_eps, circ_images, bounded_cols, basis, use_cupy: As given.
+        p, mult, n_members, island_id, f0_window_edges, meta: Diagnostics.
+
+    Raises:
+        ValueError: On a shape mismatch, non-positive ``p``, a bad
+            ``bounded_cols`` / ``floor_box`` / ``floor_eps`` /
+            ``circ_images`` / ``new_tobs``, or ``basis="observable"`` without
+            ``map_params``.
+        NotImplementedError: For more than 2 ``bounded_cols``.
+        numpy.linalg.LinAlgError: For a covariance that is not positive
+            definite.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.globalfit.warmstart.proposal import WarmStartComponents
+        >>> means = np.array([[1.0, 3.0, 0.3, 1.0, 0.1, 1.0, 2.0, 0.2, 0.0]])
+        >>> covs = np.diag([1e-2, 1e-8, 1e-4, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2])[None]
+        >>> comps = WarmStartComponents(means, covs, np.array([1.0]), new_tobs=3.15e7, seed=1)
+        >>> comps.rvs(4).shape
+        (4, 9)
+        >>> comps.logpdf(comps.rvs(2)).shape
+        (2,)
     """
 
     ndim = 9
@@ -456,10 +545,12 @@ class WarmStartComponents:
     # ------------------------------------------------------------------
     @property
     def n_components(self) -> int:
+        """Flat mixture component count (all clusters' components)."""
         return int(self._tables["means"].shape[0])
 
     @property
     def xp(self):
+        """``cupy`` when ``use_cupy``, else ``numpy`` (derived, never stored)."""
         if self.use_cupy:
             import cupy as cp
 
@@ -467,8 +558,7 @@ class WarmStartComponents:
         return np
 
     def _t(self, xp):
-        """The tables on ``xp`` (numpy = the masters; device copies cached
-        PER DEVICE).
+        """The tables on ``xp`` (numpy = the masters; device copies cached PER DEVICE).
 
         MULTI-GPU (2026-10-09, 9mo job 751): the cache used to be keyed by
         the literal ``"dev"``, so the device current on the FIRST call (GPU 0:
@@ -502,12 +592,41 @@ class WarmStartComponents:
     @classmethod
     def from_npz(cls, path: str, new_tobs: typing.Optional[float] = None,
                  use_cupy: bool = False, **kwargs) -> "WarmStartComponents":
-        """Load a fitter npz (``warmstart_fit_from_store.py`` writer schema).
+        """Load a fitter / refereed npz (the :mod:`.fit_from_store` writer schema).
 
         ``new_tobs=None`` falls back to the npz's OWN ``meta['tobs']`` (same-
         Tobs reuse); pass the new run's Tobs [s] for the cross-Tobs policy.
-        Remaining ``kwargs`` forward to the constructor (``floor_box``,
-        ``floor_eps``, ``window_df``, ``p_floor``, ``seed``...).
+        ``meta["basis"]`` selects the format (absent = the legacy sampling
+        set). For an observable set the packed ``gmm_*`` arrays are
+        flattened to one entry per mixture component, with weight = cluster
+        ``p`` x the component's within-cluster weight (floored at ``1e-12``)
+        and the per-cluster diagnostics repeated per component. The
+        ``bounded_cols`` in the meta apply unless passed explicitly. Also
+        loads the self-refit and para-search epoch npz files (same schema).
+
+        Args:
+            path: The npz.
+            new_tobs: This run's Tobs [s]. Default ``None`` = the file's.
+            use_cupy: Device tables / draws. Default ``False``.
+            **kwargs: Forwarded to the constructor (``floor_box``,
+                ``floor_eps``, ``window_df``, ``p_floor``, ``seed``,
+                ``circ_images``, ``bounded_cols``).
+
+        Returns:
+            WarmStartComponents: The loaded container.
+
+        Raises:
+            ValueError: When a required key is missing, or the meta's
+                ``column_names`` / ``f0_units`` / ``circular_cols`` disagree
+                with this module's basis.
+
+        Example:
+            .. code-block:: python
+
+                comps = WarmStartComponents.from_npz(
+                    "warmstart/gf_prod_6mo_v9_4gpu_refereed.npz",
+                    new_tobs=23328000.0, floor_box=(lo, hi), floor_eps=0.05,
+                    circ_images=3, seed=1)
         """
         with np.load(path, allow_pickle=False) as d:
             meta = json.loads(str(d["meta"])) if "meta" in d else {}
@@ -617,6 +736,7 @@ class WarmStartComponents:
         return obj
 
     # ------------------------------------------------------------------
+    # TODO check: keep/remove/document -- no caller outside tests (from_npz builds the map eagerly)
     def attach_transform(self, transform_container):
         """Rebind the observable map against a REAL transform container.
 
@@ -639,8 +759,18 @@ class WarmStartComponents:
         """Draws from the FULL mixture (+ floor); ``size + (9,)`` array.
 
         Component choice ~ ``weights`` (~ p); per-component draw
-        ``mean + L z`` (Cholesky); circular columns wrapped to
-        ``[0, period)``. Host RNG; returned on ``xp`` (cupy iff use_cupy).
+        ``mean + L z`` (Cholesky); bounded columns rejected and redrawn (up
+        to 500 passes, then clipped); circular columns wrapped to
+        ``[0, period)``; an observable set is mapped back with
+        ``from_internal``. A fraction ``floor_eps`` of the draws is uniform
+        in ``floor_box``. Host RNG; returned on ``xp`` (cupy iff use_cupy).
+
+        Args:
+            size (int or tuple of int, optional): Draw shape. Default ``1``.
+
+        Returns:
+            ``xp.ndarray``: ``size + (9,)`` float64 SAMPLING-basis rows (f0
+            in mHz); cupy when ``use_cupy``.
         """
         if isinstance(size, int):
             size = (size,)
@@ -702,7 +832,21 @@ class WarmStartComponents:
 
         Computed over the f0-windowed candidate set (search structure; equal
         to the full mixture to machine precision -- module docstring bound).
-        Dispatches on the INPUT's array module; never returns NaN.
+        Dispatches on the INPUT's array module; never returns NaN. For an
+        observable set the density is transported to the sampling basis
+        (:func:`.basis.log_density_to_sampling`). Rows are processed in
+        chunks sized by ``GB_WARM_START_LOGPDF_MAX_BYTES``.
+
+        Args:
+            x (array-like): ``(n, 9)`` (or ``(9,)``) SAMPLING-basis rows,
+                numpy or cupy.
+
+        Returns:
+            ``xp.ndarray``: ``(n,)`` log density on the input's array module;
+            ``-inf`` outside the support.
+
+        Raises:
+            RuntimeError: For an observable set with no map.
         """
         from ...utils.utility import get_array_module
 
@@ -771,16 +915,23 @@ class WarmStartComponents:
 
     @staticmethod
     def _logpdf_rows_per_chunk(depth, budget=None):
-        """Rows of one logpdf block so its ``(rows, D)`` temporaries fit the
-        byte budget (``GB_WARM_START_LOGPDF_MAX_BYTES``); at least one row,
-        however small the budget or large the depth."""
+        """Rows of one logpdf block so its ``(rows, D)`` temporaries fit the byte budget.
+
+        The budget is ``GB_WARM_START_LOGPDF_MAX_BYTES`` (``budget=None``) at
+        ``_LOGPDF_BYTES_PER_CANDIDATE`` bytes per (row, candidate) cell; at
+        least one row, however small the budget or large the depth.
+        """
         budget = _LOGPDF_MAX_BYTES if budget is None else int(budget)
         per_row = _LOGPDF_BYTES_PER_CANDIDATE * max(int(depth), 1)
         return max(1, int(budget // max(per_row, 1)))
 
     def _mixture_logpdf_rows(self, x, t, xp):
-        """One block of :meth:`_mixture_logpdf`: ``x`` is ``(n, ndim)`` in
-        the fitted basis on ``xp``, ``t`` the tables on that module."""
+        """One block of :meth:`_mixture_logpdf`.
+
+        ``x`` is ``(n, ndim)`` in the fitted basis on ``xp``, ``t`` the
+        tables on that module. Returns the ``(n,)`` windowed mixture log
+        density (``-inf`` outside the bounded box or with no candidate).
+        """
         n = x.shape[0]
         f0 = x[:, 1]
 

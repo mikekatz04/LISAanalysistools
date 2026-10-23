@@ -18,6 +18,22 @@ What the fake does NOT model:
   under real MPI's rendezvous protocol for large messages (see fanout.py's
   ``WalkerFanout.run`` isend/wait ordering, finding F1) cannot be
   reproduced here.
+
+Not used by the production runs; it is the harness of the multi-rank tests
+(``tests/test_fakecomm.py``, ``tests/test_fanout_fakecomm.py`` and the
+``test_multirank_*`` smoke tests).
+
+Example:
+    .. code-block:: python
+
+        from lisatools.globalfit.communication import FakeWorld
+
+        world = FakeWorld(3, nodes=[0, 0, 1])
+
+        def body(rank, comm):
+            return comm.allgather(rank * 10)
+
+        results = world.run(body)   # {0: [0, 10, 20], 1: [...], 2: [...]}
 """
 
 from __future__ import annotations
@@ -40,10 +56,13 @@ class FakeAbort(RuntimeError):
 
 
 def _pcopy(obj):
+    """Deep copy through pickle (the transport of every fake message)."""
     return pickle.loads(pickle.dumps(obj))
 
 
 class _Request:
+    """Completed request returned by :meth:`FakeComm.isend` (the send already happened)."""
+
     def wait(self):
         return None
 
@@ -72,6 +91,25 @@ class FakeCommNull:
 
 
 class FakeComm:
+    """One rank's view of a fake communicator (mpi4py ``Comm`` subset).
+
+    Obtained from :meth:`FakeWorld.comm` (the world communicator) or from
+    :meth:`Split` / :meth:`Split_type`. Point-to-point messages go through
+    one FIFO queue per ``(dest, source)`` pair; collectives use a shared
+    slot exchange guarded by a :class:`threading.Barrier`, so every member
+    must call them in the same order. Every blocking call raises
+    :class:`FakeAbort` once any rank aborts the world.
+
+    Args:
+        world (FakeWorld): The owning world.
+        group (_Group): The communicator's shared plumbing.
+        world_rank (int): This rank's world rank.
+
+    Attributes:
+        COMM_TYPE_SHARED (int): Mirror of the mpi4py constant.
+        UNDEFINED (int): Split colour that yields :class:`FakeCommNull`.
+    """
+
     COMM_TYPE_SHARED = COMM_TYPE_SHARED
     UNDEFINED = UNDEFINED
 
@@ -83,27 +121,38 @@ class FakeComm:
 
     # -- topology ---------------------------------------------------------
     def Get_rank(self):
+        """Return this rank's index in the communicator."""
         return self._rank
 
     def Get_size(self):
+        """Return the number of members."""
         return len(self._group.members)
 
     def Get_processor_name(self):
+        """Return ``"node<k>"`` for this rank's node in :attr:`FakeWorld.nodes`."""
         return self._world.node_name(self._world_rank)
 
     def Free(self):
+        """No-op (mpi4py API compatibility)."""
         return None
 
     # -- point to point ---------------------------------------------------
     def send(self, obj, dest, tag=0):
+        """Queue a pickle copy of ``obj`` for rank ``dest`` (``tag`` ignored)."""
         self._check_abort()
         self._group.inbox[(int(dest), self._rank)].put(_pcopy(obj))
 
     def isend(self, obj, dest, tag=0):
+        """Same as :meth:`send`; returns an already-complete request."""
         self.send(obj, dest, tag)
         return _Request()
 
     def recv(self, source, tag=0):
+        """Block until a message from ``source`` arrives and return it.
+
+        Polls every 20 ms and raises :class:`FakeAbort` if the world is
+        aborted meanwhile. ``tag`` is ignored.
+        """
         q = self._group.inbox[(self._rank, int(source))]
         while True:
             self._check_abort()
@@ -113,10 +162,12 @@ class FakeComm:
                 continue
 
     def iprobe(self, source, tag=0):
+        """Return ``True`` when a message from ``source`` is waiting."""
         return not self._group.inbox[(self._rank, int(source))].empty()
 
     # -- collectives (every member calls them in the same order) ----------
     def _wait_barrier(self):
+        """Barrier wait with the world timeout; a broken barrier raises :class:`FakeAbort`."""
         self._check_abort()
         try:
             self._group.barrier.wait(timeout=self._world.timeout)
@@ -126,6 +177,7 @@ class FakeComm:
             ) from None
 
     def _exchange(self, value):
+        """Publish ``value`` in this rank's slot and return every member's slot."""
         group = self._group
         group.slots[self._rank] = value
         self._wait_barrier()
@@ -134,6 +186,7 @@ class FakeComm:
         return out
 
     def bcast(self, obj, root=0):
+        """Return a copy of ``root``'s ``obj`` on every member (collective)."""
         out = self._exchange(_pcopy(obj) if self._rank == int(root) else None)
         return _pcopy(out[int(root)])
 
@@ -185,14 +238,22 @@ class FakeComm:
         return None
 
     def allgather(self, obj):
+        """Return the list of every member's ``obj`` in rank order (collective)."""
         return [_pcopy(v) for v in self._exchange(_pcopy(obj))]
 
     def barrier(self):
+        """Wait until every member arrives (collective)."""
         self._wait_barrier()
 
     Barrier = barrier
 
     def Split(self, color, key=0):
+        """Split by ``color``, ordering members by ``(key, world rank)`` (collective).
+
+        Returns:
+            FakeComm or FakeCommNull: The new communicator, or the null comm
+            for ``color == UNDEFINED``.
+        """
         colors = self._exchange((color, key))
         gid = self._exchange(self._world.next_group_id() if self._rank == 0 else None)[0]
         if color == UNDEFINED:
@@ -205,21 +266,43 @@ class FakeComm:
         return FakeComm(self._world, self._world.group(gid, members), self._world_rank)
 
     def Split_type(self, split_type, key=0):
+        """Split by node (``split_type`` ignored), like a shared-memory split."""
         return self.Split(color=self._world.node_of(self._world_rank), key=key)
 
     # -- failure ----------------------------------------------------------
     def Abort(self, errorcode=1):
+        """Abort the world (breaks every barrier) and raise :class:`FakeAbort` here."""
         self._world.abort(errorcode, self._world_rank)
         raise FakeAbort(f"rank {self._world_rank} called Abort({errorcode})")
 
     def _check_abort(self):
+        """Raise :class:`FakeAbort` when the world has been aborted."""
         if self._world.aborted is not None:
             code, who = self._world.aborted
             raise FakeAbort(f"rank {self._world_rank}: world aborted by rank {who} (code {code})")
 
 
 class FakeWorld:
-    """``size`` ranks on ``nodes`` (e.g. ``[0, 1, 0, 1, 0]``), one thread each."""
+    """``size`` ranks on ``nodes`` (e.g. ``[0, 1, 0, 1, 0]``), one thread each.
+
+    Args:
+        size (int): Number of ranks.
+        nodes (list[int], optional): Node id per rank (drives
+            ``Get_processor_name`` and ``Split_type``). Default ``None``
+            puts every rank on node 0.
+        timeout (float): Seconds a collective (and :meth:`run`) may wait.
+            Default ``60.0``.
+
+    Raises:
+        ValueError: When ``nodes`` does not have one entry per rank.
+
+    Attributes:
+        size (int): Number of ranks.
+        nodes (list[int]): Node id per rank.
+        timeout (float): Collective / run timeout in seconds.
+        aborted (tuple[int, int] or None): ``(errorcode, rank)`` once a rank
+            aborted, else ``None``.
+    """
 
     def __init__(self, size, nodes=None, timeout=60.0):
         self.size = int(size)
@@ -234,17 +317,21 @@ class FakeWorld:
         self._world_group = self.group(0, tuple(range(self.size)))
 
     def node_of(self, rank):
+        """Return the node id of world rank ``rank``."""
         return int(self.nodes[int(rank)])
 
     def node_name(self, rank):
+        """Return ``"node<k>"`` for world rank ``rank``."""
         return f"node{self.node_of(rank)}"
 
     def next_group_id(self):
+        """Return a fresh communicator id (thread-safe)."""
         with self._lock:
             self._gid += 1
             return self._gid
 
     def group(self, gid, members):
+        """Return the shared plumbing of communicator ``(gid, members)``, creating it once."""
         with self._lock:
             key = (int(gid), tuple(members))
             if key not in self._groups:
@@ -252,9 +339,11 @@ class FakeWorld:
             return self._groups[key]
 
     def comm(self, rank):
+        """Return world rank ``rank``'s :class:`FakeComm` on the world communicator."""
         return FakeComm(self, self._world_group, int(rank))
 
     def abort(self, code, rank):
+        """Mark the world aborted by ``rank`` and break every communicator's barrier."""
         self.aborted = (int(code), int(rank))
         with self._lock:
             for g in self._groups.values():
@@ -267,6 +356,22 @@ class FakeWorld:
         Re-raises the first NON-abort failure (the root cause) as a
         ``RuntimeError`` carrying the remote traceback text, after aborting
         the world so no other thread stays blocked.
+
+        Args:
+            fn (Callable[[int, FakeComm], object]): The per-rank body.
+            ranks (list[int], optional): Ranks to run. Default ``None`` runs
+                every rank.
+            timeout (float, optional): Overall seconds. Default ``None`` uses
+                :attr:`timeout`.
+
+        Returns:
+            dict[int, object]: ``{rank: fn's return value}``.
+
+        Raises:
+            RuntimeError: When any rank raised (lowest rank with a non-abort
+                failure is reported).
+            TimeoutError: When ranks are still running at the deadline and
+                none failed.
         """
         ranks = list(range(self.size)) if ranks is None else list(ranks)
         results, errors = {}, {}

@@ -1,8 +1,9 @@
-"""Observable-basis bijection for GB proposals: ``y <-> (u, v)``.
+r"""Observable-basis bijection for GB proposals: ``y <-> z``.
 
 The 9-column GB sampling basis
-``y = [dist, f0(mHz), Mc, phi0, cos_iota, psi, alpha, sin_delta, r]``
-is the right thing to SAMPLE in -- ``f0`` anchored at ``t_ref`` is stable as
+``y = [dist (kpc), f0 (mHz), Mc (Msun), phi0, cos_iota, psi, alpha, sin_delta, r]``
+(ICRS sky; ``r = fdot_astro_ratio``) is the right thing to SAMPLE in -- ``f0``
+anchored at ``t_ref`` is stable as
 the mission's observation span grows, and bands / cap cells / storage are all
 keyed on it. It is the wrong thing to PROPOSE in, for two independent reasons
 measured on the flagship (20.380377 mHz, SNR 46) in 2026-08/09:
@@ -25,16 +26,30 @@ measured on the flagship (20.380377 mHz, SNR 46) in 2026-08/09:
    **That scaling is why high frequency has been the hard region.**
 
 So proposals convert here, propose in
-``z = [lnA, f_mid, fdot, phi0, cos_iota, psi, alpha, sin_delta, Mc]``
+``z = [lnA, f_mid (Hz), fdot (Hz/s), phi0, cos_iota, psi, alpha, sin_delta, Mc]``
 where ``fdot`` is a coordinate (nothing can cancel in it) and ``f_mid``
 decorrelates the shear, then convert back. ``Mc`` is the fiber coordinate: the
-exactly-flat direction, along which the likelihood cannot change.
+exactly-flat direction, along which the likelihood cannot change. The map is
 
-THE MEASURE
------------
+.. math::
+
+    \ln A = \ln A(f_0, M_c, d), \qquad
+    f_{\rm mid} = f_0 + c_t\,\dot f, \qquad
+    \dot f = \dot f_{\rm GR}(f_0, M_c)\,(1 + r), \qquad c_t = s\,T_{\rm obs},
+
+with shear fraction ``s = 0.5`` by default and the extrinsics passed through.
+
+**The measure.**
 ``|dy/dz| = dist / fdot_gr(f0, Mc)`` -- with ``y = (dist, f0, Mc, r)`` and
-``z = (lnA, f0, fdot, Mc)`` the Jacobian is block-triangular and expanding on
-the ``lnA`` column gives ``(-dist) * (-1/fdot_gr)``. Verified three ways:
+``z = (lnA, f_mid, fdot, Mc)`` the Jacobian is block-triangular and expanding on
+the ``lnA`` column gives ``(-dist) * (-1/fdot_gr)``:
+
+.. math::
+
+    \left|\frac{\partial y}{\partial z}\right|
+        = \frac{d}{\dot f_{\rm GR}(f_0, M_c)}.
+
+Verified three ways:
 analytically; numerically (ratio to analytic 0.9999987, and **identical for
 shear coefficients 0, T/2, 0.41T, T, -3T** -- the shear is unit-determinant so
 it contributes nothing); and by prior-invariance simulation under a flat
@@ -52,8 +67,7 @@ Consumed by the in-model proposal (chain side, via the class) and by the
 F-stat grid (scalar half only -- grid rows are the physical waveform layout
 and carry no ``transform_container``).
 
-THE VGB RESTRICTION
--------------------
+**The VGB restriction.**
 :class:`VGBObservableBasis` is the SAME map with fewer columns, not a second
 implementation: the verification-binary branch pins ``f0``, ``alpha``,
 ``sin_delta`` (and, in the default basis, ``Mc``) per LEAF in the transform
@@ -78,6 +92,29 @@ come from. Two structural consequences, both deliberate:
 ``dr/dfdot = 1/fdot_gr``) rather than block-triangular, and the determinant
 comes out to the same expression -- which is why both bases call the one
 :meth:`GBObservableFiberBasis.log_jacobian`.
+
+**Entry points and callers** (this module reads no env knob itself):
+
+* :class:`GBObservableFiberBasis` / :class:`VGBObservableBasis` and
+  :func:`gb_observable_step_scales` -- the in-model observable proposal of
+  ``GBSpecialStretchMove`` / ``VGBSpecialStretchMove``
+  (:mod:`lisatools.globalfit.moves.gbspecialstretch`), selected by
+  ``GB_INMODEL_PROPOSAL=observable`` / ``VGB_INMODEL_PROPOSAL=observable`` in the
+  9mo/12mo launchers. The move builds the map with ``Tobs = 1/df`` and
+  ``shear = GB_INMODEL_OBSERVABLE_SHEAR`` (launchers 0.5) and sizes the steps
+  from ``GB_INMODEL_OBSERVABLE_MC_STEP`` (launchers 0.05) and
+  ``GB_INMODEL_OBSERVABLE_JUMP`` / ``VGB_INMODEL_OBSERVABLE_JUMP`` (launchers 1.5 /
+  1.0). The warm-start tools (:mod:`lisatools.globalfit.warmstart.basis`) build
+  the same map.
+* :func:`fdot_gr`, :func:`fdot_axis_bounds`, :func:`n_fdot_nodes`,
+  :func:`fdot_coherence_width`, :func:`mc_floor_for_fdot`, :func:`r_from_fdot` --
+  the F-stat grid's linear fdot axis (``FSTAT_FDOT_AXIS=1``, the launcher value):
+  :func:`lisatools.sampling.fstat_gridfit.run_stacked_stage_b`,
+  :func:`~lisatools.sampling.fstat_gridfit.enumerate_center_nodes`,
+  :class:`~lisatools.sampling.fstat_proposal.FdotAxisBirth` and
+  :class:`~lisatools.sampling.fstat_proposal.CombIntrinsicProposal`.
+* :func:`sky_doppler_alias_jump_batch` -- the search-only sky-Doppler jump
+  (``GB_DOPPLER_JUMP_EVERY``, default 0; off in the launchers).
 """
 from __future__ import annotations
 
@@ -113,8 +150,11 @@ try:                                        # pragma: no cover - import shape
 except ImportError:                         # pragma: no cover
     from ..utils.constants import MSUN_SI as _MSUN_SI, G_SI as _G_SI, C_SI as _C_SI
 
-#: ``fdot_gr = FDOT_K * Mc[Msol]**(5/3) * f0[Hz]**(11/3)``. Absorbs the two
-#: duplicate definitions in ``sampling/fstat_proposal.py``.
+#: ``fdot_gr = FDOT_K * Mc[Msol]**(5/3) * f0[Hz]**(11/3)``, with
+#: ``FDOT_K = (96/5) pi^(8/3) (G Msun / c^3)^(5/3)`` (lisaconstants values via
+#: gbgpu). Meant to absorb the two duplicate definitions in
+#: ``sampling/fstat_proposal.py`` (``_fdot_gr`` / ``_MSUN_S`` and ``_FDOT_K``),
+#: which still exist there (2026-10-19).
 FDOT_K = (96.0 / 5.0) * np.pi ** (8 / 3) * (_G_SI * _MSUN_SI / _C_SI ** 3) ** (5 / 3)
 
 _TWO_POW_1_5 = 2.0 ** (1.0 / 5.0)
@@ -164,14 +204,38 @@ OBSERVABLE_CD_FLOOR_DEFAULT = 1e-3
 
 
 def fdot_gr(f0_hz, mc):
-    """GR-driven ``fdot`` from ``(f0[Hz], Mc[Msol])``. Elementwise, xp-agnostic."""
+    r"""GR-driven ``fdot`` from ``(f0[Hz], Mc[Msol])``. Elementwise, xp-agnostic.
+
+    .. math::
+
+        \dot f_{\rm GR} = K\, M_c^{5/3} f_0^{11/3}, \qquad
+        K = \frac{96}{5}\pi^{8/3}\left(\frac{G M_\odot}{c^3}\right)^{5/3}
+
+    with ``K`` = :data:`FDOT_K`. The same expression as
+    :func:`gbgpu.utils.utility.get_fdot` (pinned by ``test_fdot_gr_matches_gbgpu``).
+    Used by the observable map, the F-stat fdot
+    axis, :class:`~lisatools.sampling.fstat_proposal.FdotAxisBirth` and
+    :class:`~lisatools.sampling.fstat_proposal.CombIntrinsicProposal`, and by
+    ``gbspecialstretch``.
+
+    Args:
+        f0_hz (float or xp.ndarray): GW frequency in Hz (NOT the mHz sampling
+            column).
+        mc (float or xp.ndarray): Chirp mass in solar masses.
+
+    Returns:
+        float or xp.ndarray: ``fdot_gr`` in Hz/s, broadcast over the inputs, on
+        their array module.
+    """
     return FDOT_K * mc ** (5.0 / 3.0) * f0_hz ** (11.0 / 3.0)
 
 
 def _shear_coeff(tobs, c_t=None):
+    """Shear coefficient in seconds: ``tobs / 2`` when ``c_t`` is None, else ``c_t``."""
     return 0.5 * float(tobs) if c_t is None else float(c_t)
 
 
+# TODO check: keep/remove/document -- not reached by the 9mo/12mo runs; only caller is tests/test_gb_observable_basis.py (GBObservableFiberBasis and FdotAxisBirth inline the same shear)
 def f_mid_from_f0(f0_hz, fdot, tobs, *, c_t=None):
     """``f_mid = f0 + c_t * fdot`` with ``c_t = T/2`` by default.
 
@@ -181,11 +245,13 @@ def f_mid_from_f0(f0_hz, fdot, tobs, *, c_t=None):
     return f0_hz + _shear_coeff(tobs, c_t) * fdot
 
 
+# TODO check: keep/remove/document -- not reached by the 9mo/12mo runs; only caller is tests/test_gb_observable_basis.py
 def f0_from_f_mid(f_mid_hz, fdot, tobs, *, c_t=None):
     """Exact inverse of :func:`f_mid_from_f0` at the same ``fdot``."""
     return f_mid_hz - _shear_coeff(tobs, c_t) * fdot
 
 
+# TODO check: keep/remove/document -- not reached by the 9mo/12mo runs; only caller is tests/test_gb_observable_basis.py
 def fdot_shear_hz(mc, f0_ref_hz, tobs, *, c_t=None):
     """The ``f0`` offset a GR chirp of this ``(f0_ref, Mc)`` induces.
 
@@ -197,6 +263,7 @@ def fdot_shear_hz(mc, f0_ref_hz, tobs, *, c_t=None):
     return _shear_coeff(tobs, c_t) * fdot_gr(f0_ref_hz, mc)
 
 
+# TODO check: keep/remove/document -- not reached by the 9mo/12mo runs; only caller is tests/test_sky_doppler_jump.py (scalar reference for the batch version)
 def sky_doppler_alias_jump(f0_hz, fdot_hz_s, alpha, sin_delta, *, sky_step,
                            v_over_c, times):
     """Sky-Doppler degeneracy jump: shift the sky, return the compensating (f0, fdot).
@@ -249,6 +316,7 @@ def sky_doppler_alias_jump(f0_hz, fdot_hz_s, alpha, sin_delta, *, sky_step,
     return f0_hz + df0, fdot_hz_s + dfdot, a2, sd2
 
 
+# TODO check: keep/remove/document -- only reachable with GB_DOPPLER_JUMP_EVERY>0 (default 0), which no launcher sets; caller gbspecialstretch._doppler_jump_proposal
 def sky_doppler_alias_jump_batch(f0_hz, fdot_hz_s, alpha, sin_delta, *,
                                  sky_step, v_over_c, times):
     """Vectorized :func:`sky_doppler_alias_jump` over a batch of ``n`` sources.
@@ -285,20 +353,38 @@ def sky_doppler_alias_jump_batch(f0_hz, fdot_hz_s, alpha, sin_delta, *,
 
 
 def fdot_coherence_width(tobs, *, aligned=False, eta=1.0):
-    """``fdot`` node spacing at the one-radian criterion.
+    r"""``fdot`` node spacing at the one-radian criterion.
 
     With ``a = df0*T``, ``b = dfdot*T**2`` and uniform weighting the residual
-    phase variance is ``Q = a**2/12 + a*b/12 + b**2/45``. Substituting
-    ``a' = a + b/2`` (the shear) gives ``Q = a'**2/12 + b**2/720`` -- the cross
-    term vanishes exactly and ``det`` is preserved (``1/8640`` both ways), an
-    independent confirmation of the unit-determinant result.
+    phase variance (in cycles squared) is
+
+    .. math::
+
+        Q = \frac{a^2}{12} + \frac{ab}{12} + \frac{b^2}{45}
+          = \frac{a'^2}{12} + \frac{b^2}{720}, \qquad a' = a + \frac{b}{2}
+
+    (the shear) -- the cross term vanishes exactly and ``det`` is preserved
+    (``1/8640`` both ways), an independent confirmation of the unit-determinant
+    result.
 
     So the *irreducible* fdot residual is ``b**2/720`` rather than the raw
     ``b**2/45 + cross``, and one radian at the end of the observation allows a
     node spacing ``sqrt(720)/(2 pi)`` instead of ``1/pi`` -- **13.4x coarser at
     the same criterion**.
 
-    ``aligned=False`` reproduces the live rule byte-identically.
+    ``aligned=False`` reproduces the legacy Mc-axis rule of
+    :func:`lisatools.sampling.fstat_proposal.fstat_n_mc` (``eta / (pi T^2)``)
+    byte-identically; the fdot axis (:func:`n_fdot_nodes`, the production
+    ``FSTAT_FDOT_AXIS=1`` path) uses ``aligned=True``.
+
+    Args:
+        tobs (float): Observation span ``T`` in seconds.
+        aligned (bool, optional): Use the sheared width ``eta sqrt(720) /
+            (2 pi T^2)`` instead of ``eta / (pi T^2)``. Default ``False``.
+        eta (float, optional): Node spacing in units of the width. Default ``1.0``.
+
+    Returns:
+        float: The fdot node spacing in Hz/s.
     """
     t2 = float(tobs) ** 2
     if aligned:
@@ -324,6 +410,10 @@ def fdot_axis_bounds(f0_ref_hz, mc_hi, ratio_max):
     ``fdot = fdot_gr(f0, Mc) * (1 + r)`` with ``Mc`` in ``[mc_lo, mc_hi]``
     and ``r`` in ``[-M, M]``. ``fdot_gr > 0`` and increasing in ``Mc``, so
     both extremes sit at ``Mc = mc_hi``: ``(1 -+ M) * fdot_gr(f0, mc_hi)``.
+    Called per peak box by
+    :func:`lisatools.sampling.fstat_gridfit.run_stacked_stage_b` under
+    ``FSTAT_FDOT_AXIS=1`` (the group's axis is the intersection of its boxes'
+    bounds).
 
     **``mc_lo`` deliberately does not appear.** The tempting form
     ``[fdot_gr(mc_lo)(1-M), fdot_gr(mc_hi)(1+M)]`` looks symmetric and is
@@ -336,6 +426,16 @@ def fdot_axis_bounds(f0_ref_hz, mc_hi, ratio_max):
     ``f0 = f_mid - (T/2) fdot`` an exact unit-determinant shear. With the
     node's own f0 the determinant is ``1 - 2.6e-4`` -- a needless
     inexactness in a term that reaches the RJ acceptance ratio.
+
+    Args:
+        f0_ref_hz (float): Reference frequency in Hz (a per-group constant).
+        mc_hi (float): Upper chirp-mass bound (Msun).
+        ratio_max (float): Ratio half-width ``M`` (launchers:
+            ``FSTAT_FDOT_RATIO_MAX=5.0``).
+
+    Returns:
+        tuple[float, float]: ``((1 - M) g, (1 + M) g)`` with
+        ``g = fdot_gr(f0_ref_hz, mc_hi)``, in Hz/s.
     """
     g = fdot_gr(float(f0_ref_hz), float(mc_hi))
     return (1.0 - float(ratio_max)) * g, (1.0 + float(ratio_max)) * g
@@ -350,12 +450,29 @@ def n_fdot_nodes(fdot_lo, fdot_hi, tobs, *, eta=1.0, aligned=True,
     (``sqrt(720)/(2 pi T^2)``, 13.4x coarser; see
     :func:`fdot_coherence_width`) and across the FULL prior range rather
     than the positive ``r = 0`` sliver. At the flagship that is ~50 nodes
-    over 10x the coverage, against ~70-96 today.
+    over 10x the coverage, against ~70-96 for the old Mc rule.
 
     The ``[3, 96]`` clamp is inherited verbatim. The floor matters at low
     frequency, where ``fdot`` is simply not measurable over 90 d and the
     span is under one width -- 3 nodes there is the correct answer, not a
     degradation.
+
+    Called per peak box by
+    :func:`lisatools.sampling.fstat_gridfit.run_stacked_stage_b` with
+    ``aligned=True`` and ``eta = FSTAT_MC_ETA`` (default 1.0).
+
+    Args:
+        fdot_lo (float): Lower axis bound (Hz/s).
+        fdot_hi (float): Upper axis bound (Hz/s).
+        tobs (float): Observation span in seconds.
+        eta (float, optional): Spacing in coherence widths. Default ``1.0``.
+        aligned (bool, optional): Use the sheared width (see
+            :func:`fdot_coherence_width`). Default ``True``.
+        clip (tuple[int, int], optional): ``(min, max)`` node count. Default
+            ``(3, 96)``.
+
+    Returns:
+        int: ``clip(round(|hi - lo| / width) + 1, *clip)``.
     """
     span = abs(float(fdot_hi) - float(fdot_lo))
     width = fdot_coherence_width(tobs, aligned=aligned, eta=eta)
@@ -364,22 +481,40 @@ def n_fdot_nodes(fdot_lo, fdot_hi, tobs, *, eta=1.0, aligned=True,
 
 
 def mc_floor_for_fdot(fdot, f0_hz, ratio_max, mc_lo):
-    """Smallest ``Mc`` that can carry ``fdot`` with ``|r| <= ratio_max``.
+    r"""Smallest ``Mc`` that can carry ``fdot`` with ``|r| <= ratio_max``.
 
     ``1 + r = fdot / fdot_gr(f0, Mc)`` and ``fdot_gr`` grows with ``Mc``,
     so a large ``|fdot|`` needs a large ``Mc``. The binding constraint is
-    ``|1 + r| <= c``, with ``c = 1 + M`` when ``fdot > 0`` (the ``1 - M``
-    side is slack once ``M > 1``) and ``c = M - 1`` when ``fdot < 0``:
+    ``|1 + r| <= c``, with ``c = 1 + M`` when ``fdot >= 0`` (the ``1 - M``
+    side is slack once ``M > 1``) and ``c = |M - 1|`` when ``fdot < 0``:
 
-        Mc_min = ( |fdot| / (c * FDOT_K * f0**(11/3)) )**(3/5)
+    .. math::
 
-    floored at ``mc_lo``. ``fdot = 0`` gives ``r = -1`` for any ``Mc``, so
-    the floor is just ``mc_lo``.
+        M_{c,\min} = \max\!\left[\left(\frac{|\dot f|}{c\,K f_0^{11/3}}\right)^{3/5},
+            \; m_{c,\rm lo}\right]
+
+    with ``K = FDOT_K``. ``fdot = 0`` gives ``r = -1`` for any ``Mc``, so the floor is just
+    ``mc_lo``.
 
     This is derived independently of the ``|r| <= M`` check, and
     ``Mc >= mc_floor`` must be EXACTLY that condition -- pinned by
     ``test_the_mc_floor_is_exactly_the_r_in_range_condition``. If the two
     ever disagree, one of the derivations is wrong.
+
+    Callers: :meth:`lisatools.sampling.fstat_proposal.FdotAxisBirth.rvs` /
+    ``logpdf`` (the feasible ``Mc`` interval of a birth) and
+    :func:`lisatools.sampling.fstat_gridfit.enumerate_center_nodes`.
+
+    Args:
+        fdot (float or xp.ndarray): ``fdot`` in Hz/s, per row.
+        f0_hz (float or xp.ndarray): ``f0`` in Hz, per row (broadcast against
+            ``fdot``).
+        ratio_max (float): Ratio half-width ``M``.
+        mc_lo (float): Chirp-mass prior floor (Msun).
+
+    Returns:
+        xp.ndarray: float64 ``Mc`` floor (Msun) on the array module of ``fdot``,
+        shaped like the broadcast inputs.
     """
     xp = get_array_module(fdot)
     fd = xp.asarray(fdot, dtype=xp.float64)
@@ -395,7 +530,20 @@ def mc_floor_for_fdot(fdot, f0_hz, ratio_max, mc_lo):
 
 
 def r_from_fdot(fdot, f0_hz, mc):
-    """``r = fdot / fdot_gr(f0, Mc) - 1``, the fiber conversion."""
+    """``r = fdot / fdot_gr(f0, Mc) - 1``, the fiber conversion.
+
+    Used by :meth:`lisatools.sampling.fstat_proposal.FdotAxisBirth.rvs` to turn
+    a drawn ``(fdot, Mc)`` into the sampled ratio column.
+
+    Args:
+        fdot (float or xp.ndarray): ``fdot`` in Hz/s.
+        f0_hz (float or xp.ndarray): ``f0`` in Hz.
+        mc (float or xp.ndarray): Chirp mass in Msun.
+
+    Returns:
+        xp.ndarray: float64 ``fdot_astro_ratio`` on the array module of ``fdot``
+        (``fdot_gr`` is floored at ``1e-300`` before the division).
+    """
     xp = get_array_module(fdot)
     g = fdot_gr(xp.asarray(f0_hz, dtype=xp.float64),
                 xp.asarray(mc, dtype=xp.float64))
@@ -437,6 +585,47 @@ def gb_observable_step_scales(snr, tobs, *, extrinsic_scales, mc_step,
     value for value; ``extrinsic_scales`` supplies the pass-through columns
     the layout actually carries, in order, and ``mc_step`` is consumed only
     by a layout that HAS an ``Mc`` column.
+
+    Per column, before ``jump`` and ``axis_mult`` (``rho`` = clipped ``|snr|``,
+    ``T`` = ``tobs``):
+
+    * ``lnA``: ``STEP_C_LNA / rho``;
+    * ``f_mid``: ``(STEP_C_FMID / rho) / T`` (Hz);
+    * ``fdot``: ``(STEP_C_FDOT / rho) / T**2`` (Hz/s);
+    * ``Mc``: ``mc_step``;
+    * every other name: the next column of ``extrinsic_scales``.
+
+    Called per in-model propose by the observable proposal of
+    ``GBSpecialStretchMove`` / ``VGBSpecialStretchMove``
+    (:mod:`lisatools.globalfit.moves.gbspecialstretch`), which passes
+    ``mc_step = GB_INMODEL_OBSERVABLE_MC_STEP`` x the Mc prior width and
+    ``jump = GB_INMODEL_OBSERVABLE_JUMP`` (or ``VGB_INMODEL_OBSERVABLE_JUMP``).
+
+    Args:
+        snr (xp.ndarray): ``(n,)`` per-row SNR; ``|snr|`` is clipped to
+            ``snr_clip``.
+        tobs (float): Observation span in seconds.
+        extrinsic_scales (xp.ndarray): ``(n, n_pass)`` or ``(n_pass,)`` step
+            scales of the pass-through columns, in the order ``internal_basis``
+            carries them.
+        mc_step (float): Absolute ``Mc`` step (Msun); read only when the layout
+            has an ``Mc`` column.
+        jump (float, optional): Global multiplier. Default ``1.0``.
+        snr_clip (tuple[float, float], optional): ``(lo, hi)`` clip on ``|snr|``.
+            Default ``(1.0, 1.0e4)``.
+        internal_basis (tuple[str, ...], optional): Column names of the
+            internal layout. Default :data:`GB_INTERNAL_BASIS`.
+        axis_mult (array_like, optional): ``(n, n_z)`` per-row per-column
+            multiplier, or ``None`` (the production value: no move defines the
+            table yet). Default ``None``.
+
+    Returns:
+        xp.ndarray: ``(n, n_z)`` float64 step scales on the array module of
+        ``snr``.
+
+    Raises:
+        ValueError: ``extrinsic_scales`` does not supply exactly one column per
+            pass-through name, or ``axis_mult`` does not have shape ``(n, n_z)``.
     """
     xp = get_array_module(snr)
     rho = xp.clip(xp.abs(xp.asarray(snr, dtype=xp.float64)),
@@ -485,18 +674,67 @@ class GBObservableFiberBasis:
     :class:`lisatools.sampling.ridge_fiber.McRatioDistFiber`); an ineligible
     basis raises at construction rather than mis-indexing at run time.
 
+    The internal layout is DERIVED from the basis: ``lnA``, then ``f_mid`` (only
+    when ``f0`` is sampled), ``fdot``, the pass-through extrinsics the basis
+    carries (canonical order ``phi0, cos_iota, psi, alpha, sin_delta``), then
+    ``Mc`` (only when sampled). For the full GB basis that is
+    :data:`GB_INTERNAL_BASIS` with ``FIBER_INDEX = 8``. Units of ``z``: ``lnA``
+    natural log of the strain amplitude, ``f_mid`` Hz, ``fdot`` Hz/s, ``Mc`` Msun
+    (or ``ln Msun`` for ``fiber_coord="lnMc"``); the sampling side keeps ``f0``
+    in mHz and ``dist`` in kpc.
+
+    Built (and cached) by ``GBSpecialBase._observable_map`` in
+    :mod:`lisatools.globalfit.moves.gbspecialstretch` with ``Tobs = 1/df``,
+    ``shear = GB_INMODEL_OBSERVABLE_SHEAR`` (launchers 0.5) and
+    ``fiber_coord="Mc"``, and by :func:`lisatools.globalfit.warmstart.basis.build_map`.
+
     Args:
-        transform_container: supplies ``input_basis``.
-        Tobs: observation span in seconds. **Required, no default** -- a wrong
-            value is efficiency-only by the determinant result, but a silently
-            defaulted one is untraceable. Callers must pass ``1.0 / self.df``,
-            NOT ``basis_settings.Tobs``: the latter does not exist on
-            ``FDSettings`` and an unconditional read has already broken every
-            FD-domain GB flow once.
-        shear: coefficient as a fraction of ``Tobs`` (0.5 -> ``f_mid``).
-        fiber_coord: ``"Mc"`` (linear) or ``"lnMc"``. Explicit because a
-            silent mix-up tilts the ``Mc`` marginal by ``Mc**-1``, which reads
-            as "the sampler prefers low Mc" and gets rationalised as physics.
+        transform_container: supplies ``input_basis`` (and, for the VGB
+            subclass, the per-leaf ``original_fill_dict``).
+        Tobs (float): observation span in seconds. **Required, no default** -- a
+            wrong value is efficiency-only by the determinant result, but a
+            silently defaulted one is untraceable. Callers must pass
+            ``1.0 / self.df``, NOT ``basis_settings.Tobs``: the latter does not
+            exist on ``FDSettings`` and an unconditional read has already broken
+            every FD-domain GB flow once.
+        shear (float, optional): coefficient as a fraction of ``Tobs``
+            (0.5 -> ``f_mid``). Default ``0.5``.
+        fiber_coord (str, optional): ``"Mc"`` (linear) or ``"lnMc"``. Explicit
+            because a silent mix-up tilts the ``Mc`` marginal by ``Mc**-1``,
+            which reads as "the sampler prefers low Mc" and gets rationalised as
+            physics. Default ``"Mc"``.
+
+    Raises:
+        ValueError: A required column (``dist, f0, Mc, fdot_astro_ratio`` for
+            GB) is missing, ``fiber_coord`` is not ``"Mc"``/``"lnMc"``, ``Tobs``
+            is not finite and positive, or (VGB) a pinned constant has no
+            per-leaf fill value.
+
+    Attributes:
+        input_basis (list[str]): Sampling-basis column names.
+        INTERNAL_BASIS (tuple[str, ...]): Derived internal column names.
+        dist_index (int): Sampling column of ``dist``.
+        f0_index (int or None): Sampling column of ``f0``; ``None`` = pinned per
+            leaf (VGB).
+        mc_index (int or None): Sampling column of ``Mc``; ``None`` = pinned per
+            leaf.
+        ratio_index (int): Sampling column of ``fdot_astro_ratio``.
+        Tobs (float): Observation span (s).
+        shear (float): Shear fraction ``s``; ``c_t = s * Tobs``.
+        fiber_coord (str): ``"Mc"`` or ``"lnMc"``.
+
+    Example:
+        >>> from types import SimpleNamespace
+        >>> import numpy as np
+        >>> from lisatools.sampling.gb_observable_basis import GBObservableFiberBasis
+        >>> tc = SimpleNamespace(input_basis=["dist", "f0", "Mc", "phi0", "cos_iota",
+        ...                                   "psi", "alpha", "sin_delta",
+        ...                                   "fdot_astro_ratio"])
+        >>> m = GBObservableFiberBasis(tc, Tobs=3.15e7)
+        >>> y = np.array([[8.0, 3.0, 0.3, 1.0, 0.2, 0.5, 1.0, 0.1, 0.4]])
+        >>> z = m.to_internal(y)
+        >>> bool(np.allclose(m.from_internal(z), y))
+        True
     """
 
     _REQUIRED = ("dist", "f0", "Mc", "fdot_astro_ratio")
@@ -550,8 +788,8 @@ class GBObservableFiberBasis:
             names.append("Mc")              # the fiber coordinate
         self.INTERNAL_BASIS = tuple(names)
         self._z = {n: i for i, n in enumerate(self.INTERNAL_BASIS)}
-        #: ``None`` when the layout has no fiber (``Mc`` pinned): the
-        #: consumer then uses the generic no-fiber eigen set.
+        #: Index of ``Mc`` in ``z`` (int); ``None`` when the layout has no fiber
+        #: (``Mc`` pinned): the consumer then uses the generic no-fiber eigen set.
         self.FIBER_INDEX = self._z.get("Mc")
 
     def _read_pinned(self, transform_container):
@@ -563,6 +801,19 @@ class GBObservableFiberBasis:
         the container's per-leaf ``fill_dict`` list, which is the single
         source of those constants; rows are selected by ``leaf_inds`` at
         call time exactly as ``TransformContainer.fill_values`` selects them.
+
+        Args:
+            transform_container: The container; its ``original_fill_dict``
+                (a dict or a per-leaf list of dicts) is read only when a
+                ``_PINNED`` name is not a sampled column.
+
+        Returns:
+            dict[str, np.ndarray]: ``{name: (nleaves,) float}``; empty when
+            nothing is pinned.
+
+        Raises:
+            ValueError: A pinned name is needed but the container has no
+                fill dict, or the fill dict lacks the key.
         """
         need = [k for k in self._PINNED if k not in self.input_basis]
         if not need:
@@ -595,10 +846,26 @@ class GBObservableFiberBasis:
 
     @property
     def _c_t(self):
+        """Shear coefficient ``c_t = shear * Tobs`` in seconds."""
         return self.shear * self.Tobs
 
     def _pinned_row(self, key, coords, leaf_inds):
-        """Per-ROW value of a pinned constant, selected by leaf index."""
+        """Per-ROW value of a pinned constant, selected by leaf index.
+
+        Args:
+            key (str): Pinned name (``"f0"`` in mHz or ``"Mc"`` in Msun).
+            coords (xp.ndarray): ``(n, ...)`` rows (only ``shape[0]`` and the
+                array module are used).
+            leaf_inds (array_like or None): ``(n,)`` leaf index per row; ``None``
+                is allowed only when exactly one leaf is pinned.
+
+        Returns:
+            xp.ndarray: ``(n,)`` pinned values.
+
+        Raises:
+            ValueError: ``leaf_inds`` is ``None`` and more than one leaf is
+                pinned.
+        """
         xp = get_array_module(coords)
         vals = self._pinned[key]
         if leaf_inds is None:
@@ -630,6 +897,17 @@ class GBObservableFiberBasis:
 
         ``leaf_inds`` is required only when the map pins a per-leaf constant
         (the VGB restriction); the GB map ignores it.
+
+        Args:
+            coords (xp.ndarray): ``(n, ndim)`` sampling rows (``f0`` in mHz,
+                ``dist`` in kpc).
+            leaf_inds (array_like, optional): ``(n,)`` leaf index per row (VGB
+                only). Default ``None``.
+
+        Returns:
+            xp.ndarray: ``(n, n_z)`` float64 rows in :attr:`INTERNAL_BASIS`
+            order (``f_mid`` in Hz, ``fdot`` in Hz/s), on the array module of
+            ``coords``.
         """
         xp = get_array_module(coords)
         f0 = self._f0_hz(coords, leaf_inds)
@@ -650,7 +928,23 @@ class GBObservableFiberBasis:
         return z
 
     def from_internal(self, z, template=None, leaf_inds=None):
-        """``(n, n_z)`` internal -> ``(n, ndim)`` sampling."""
+        """``(n, n_z)`` internal -> ``(n, ndim)`` sampling.
+
+        Inverts :meth:`to_internal`: ``f0 = f_mid - c_t fdot``,
+        ``r = fdot / fdot_gr(f0, Mc) - 1`` and ``dist = A(f0, Mc, 1 kpc) / A``.
+
+        Args:
+            z (xp.ndarray): ``(n, n_z)`` internal rows.
+            template (xp.ndarray, optional): ``(n, ndim)`` rows copied first;
+                every column the map owns is then overwritten, so only columns
+                outside the map would carry through. ``None`` starts from
+                zeros. Default ``None``.
+            leaf_inds (array_like, optional): ``(n,)`` leaf index per row (VGB
+                only). Default ``None``.
+
+        Returns:
+            xp.ndarray: ``(n, ndim)`` float64 sampling rows (``f0`` in mHz).
+        """
         xp = get_array_module(z)
         ndim = len(self.input_basis)
         out = (xp.zeros((z.shape[0], ndim), dtype=xp.float64)
@@ -691,6 +985,15 @@ class GBObservableFiberBasis:
         is unchanged. The ``fdot_gr`` term is a per-leaf constant there, so
         it cancels in :meth:`factors` -- correctly, and without a second
         formula.
+
+        Args:
+            coords (xp.ndarray): ``(n, ndim)`` sampling rows.
+            leaf_inds (array_like, optional): ``(n,)`` leaf index per row (VGB
+                only). Default ``None``.
+
+        Returns:
+            xp.ndarray: ``(n,)`` log Jacobian; non-positive ``dist``/``Mc`` give
+            ``nan``/``-inf`` (numpy warnings suppressed).
         """
         xp = get_array_module(coords)
         f0 = self._f0_hz(coords, leaf_inds)
@@ -713,6 +1016,16 @@ class GBObservableFiberBasis:
         non-positive ``dist``/``Mc`` is reachable, and ``nan`` comparison
         semantics need not agree between the NumPy accept path and the CUDA
         kernel. A finite ``-1e300`` is rejected identically by both.
+
+        Args:
+            old_coords (xp.ndarray): ``(n, ndim)`` current sampling rows.
+            new_coords (xp.ndarray): ``(n, ndim)`` proposed sampling rows.
+            leaf_inds (array_like, optional): ``(n,)`` leaf index per row (VGB
+                only). Default ``None``.
+
+        Returns:
+            xp.ndarray: ``(n,)`` ``log_jacobian(new) - log_jacobian(old)``, with
+            non-finite entries replaced by ``-1e300``.
         """
         xp = get_array_module(new_coords)
         f = (self.log_jacobian(new_coords, leaf_inds)
@@ -722,7 +1035,19 @@ class GBObservableFiberBasis:
     # ---- internals -----------------------------------------------------
     @staticmethod
     def _amp(f0_hz, mc, dist_kpc):
-        """``A`` through the installed helper, so the constant set matches."""
+        """``A`` through the installed helper, so the constant set matches.
+
+        Calls :func:`gbgpu.utils.utility.get_amplitude` with equal component
+        masses ``m = Mc * 2**(1/5)`` (whose chirp mass is ``Mc``).
+
+        Args:
+            f0_hz (xp.ndarray): Frequency (Hz).
+            mc (xp.ndarray): Chirp mass (Msun).
+            dist_kpc (float or xp.ndarray): Distance (kpc).
+
+        Returns:
+            xp.ndarray: Strain amplitude ``A``.
+        """
         from gbgpu.utils.utility import get_amplitude
         m = mc * _TWO_POW_1_5
         return get_amplitude(m, m, f0_hz, dist_kpc)
@@ -757,6 +1082,24 @@ class VGBObservableBasis(GBObservableFiberBasis):
     the fix; the other half is asking the engine for the physical ``fdot``
     slot in the first place (see ``_infomat_phys_inds`` in
     ``globalfit/moves/gbspecialstretch.py``).
+
+    Constructor arguments are those of :class:`GBObservableFiberBasis`
+    (``shear`` is accepted and never consulted). The required sampled columns
+    are ``dist`` and ``fdot_astro_ratio``; ``f0`` (mHz) and ``Mc`` (Msun) come
+    from the per-leaf fills unless sampled. Used by the ``vgb_pe`` in-model
+    proposal (``VGB_INMODEL_PROPOSAL=observable``); under
+    ``VGB_CHIRP_MASS_BASIS=1`` (the 9mo/12mo launcher value) ``Mc`` is sampled,
+    so the derived layout is ``[lnA, fdot, phi0, cos_iota, psi, Mc]`` with
+    ``FIBER_INDEX = 5``.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.sampling.gb_observable_basis import VGBObservableBasis
+
+            m = VGBObservableBasis(vgb_transform_container, Tobs=1.0 / df)
+            z = m.to_internal(coords, leaf_inds=leaf_inds)
+            back = m.from_internal(z, leaf_inds=leaf_inds)
     """
 
     #: ``f0`` is pinned, so it is NOT required in the sampling basis (the

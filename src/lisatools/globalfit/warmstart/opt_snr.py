@@ -17,14 +17,34 @@ gate itself.
 Pipeline slot: fit -> **snr gate** -> referee -> apply. The output keeps
 the exact fitter writer schema (plus an ``opt_snr`` column and gate
 provenance in meta), so the referee, the apply step and
-``WarmStartComponents.from_npz`` consume it unchanged.
+``WarmStartComponents.from_npz`` consume it unchanged. That slot is
+OPTIONAL and by hand only: neither the automatic build
+(:func:`.build.ensure_warm_start_components`), the self refit nor the
+9mo / 12mo launchers run the gate. The one function on the launchers' path
+is :func:`best_logl_noise`, which :mod:`.noise_pin` uses for the noise pin.
 
 Laptop rules: OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1
-OPENBLAS_NUM_THREADS=1; peak RSS ~1 GB (orbit + waveform batches).
+OPENBLAS_NUM_THREADS=1 (set as defaults at import); peak RSS ~1 GB (orbit +
+waveform batches).
 
-Usage:
-  python warmstart_opt_snr.py --fit <components.npz> --store <h5>
-      --out <gated.npz> [--limit 8] [--batch 20000]
+Warning:
+    The gate's SNRs are not computed on the production sky. Its templates
+    use :class:`~lisatools.detector.DefaultOrbits` on the CPU with
+    ``frame="icrs"`` -- the packaged EQUAL-ARM orbit file, whose positions
+    are SSB ECLIPTIC although the object is labelled ICRS -- and are fed the
+    run's ICRS ``alpha`` / ``sin_delta``; GBGPU reads the sky angles in the
+    frame of the orbit positions, so every component is evaluated at a sky
+    rotated by the obliquity (and with equal-arm orbits, not the run's
+    unequal-arm L1 orbits). See :func:`component_opt_snr`.
+
+Example:
+    By hand (needs the LAT source checkout for
+    ``scripts/diagnostics/build_truth.py``):
+
+    .. code-block:: bash
+
+        python -m lisatools.globalfit.warmstart.opt_snr --fit fit.npz \\
+            --store prev_run.h5 --out gated.npz --limit 8 --batch 20000
 """
 from __future__ import annotations
 
@@ -42,6 +62,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 import h5py
 import numpy as np
 
+# TODO check: keep/remove/document -- opt-SNR gate helper; no build step or launcher runs the gate
 def _build_truth_path() -> Path:
     """scripts/diagnostics/build_truth.py, resolved from the repo checkout
     (this module moved into the installed package 2026-09-14, so
@@ -62,7 +83,9 @@ def _build_truth_path() -> Path:
 _BT = None  # resolved lazily by _build_truth()
 
 
+# TODO check: keep/remove/document -- opt-SNR gate helper; no build step or launcher runs the gate
 def _build_truth():
+    """Load ``scripts/diagnostics/build_truth.py`` (a shim of the monitor one) as a module."""
     spec = importlib.util.spec_from_file_location(
         "build_truth", _build_truth_path())
     mod = importlib.util.module_from_spec(spec)
@@ -75,8 +98,25 @@ def best_logl_noise(store: str) -> dict:
 
     Valid = log_like written AND the gb coord slab nonzero (the
     keep-window/torn-tail guards of the fitter, applied to the row this
-    gate reads its noise from). Raises on all-zero params — the
-    build_truth unwritten-row trap surfaces loudly here."""
+    gate reads its noise from); only the newest 8 written rows are tried.
+    Raises on all-zero params — the build_truth unwritten-row trap surfaces
+    loudly here. The noise pin of the 9mo / 12mo launchers
+    (:func:`.noise_pin.noise_pin_from_store`) is this point.
+
+    Args:
+        store: The store h5. Needs the gf_format_version-2 layout (a
+            ``global_fit`` group with an nsamplers axis; sampler 0, rung 0,
+            leaf 0 of the ``psd`` / ``galfor`` chains are read).
+
+    Returns:
+        dict: ``psd_params`` / ``galfor_params`` (lists, in the SOURCE run's
+        sampling basis, possibly log), ``iteration`` (the stored row),
+        ``walker`` and its cold ``log_like``.
+
+    Raises:
+        RuntimeError: When none of the newest 8 written rows has a nonzero
+            gb slab, or the psd parameters are zero / non-finite.
+    """
     with h5py.File(store, "r") as f:
         g = f["global_fit"]
         llv = g["log_like"][:, 0, 0, :]
@@ -100,6 +140,7 @@ def best_logl_noise(store: str) -> dict:
                 iteration=row, walker=w, log_like=float(llv[row, w]))
 
 
+# TODO check: keep/remove/document -- opt-SNR gate only (CLI, tests); no build/launcher runs it
 def boxed_means(means: np.ndarray, meta: dict) -> np.ndarray:
     """Clip bounded columns to their meta box before waveform transforms.
 
@@ -116,9 +157,20 @@ def boxed_means(means: np.ndarray, meta: dict) -> np.ndarray:
     return out
 
 
+# TODO check: keep/remove/document -- opt-SNR gate only; no build step or launcher runs it
 def component_opt_snr(means: np.ndarray, store: str, noise: dict,
                       batch: int = 20000) -> np.ndarray:
-    """Optimal SNR of each component mean under the fitted sensitivity."""
+    """Optimal SNR of each component mean under the fitted sensitivity.
+
+    Warning:
+        The orbits are :class:`~lisatools.detector.DefaultOrbits` (the
+        packaged equal-arm file) built with ``frame="icrs"``, but that
+        file's positions are SSB ecliptic; GBGPU reads the sky in the frame
+        of the positions, so the ICRS ``alpha`` / ``sin_delta`` of the means
+        are evaluated as ecliptic angles. The returned SNRs are therefore
+        those of a sky rotated by the obliquity (with equal-arm, not the
+        run's unequal-arm L1, orbits), not of the components' true sky.
+    """
     bt = _build_truth()
     from gbgpu.gbgpu import GBGPU
     from lisatools import detector as lisa_models
@@ -142,6 +194,7 @@ def component_opt_snr(means: np.ndarray, store: str, noise: dict,
     return bt.opt_snr(phys, sa, se, gbw, df, tobs, nw, batch=batch)
 
 
+# TODO check: keep/remove/document -- opt-SNR gate helper; no build step or launcher runs the gate
 def _gate_observable(arrs, snr, keep):
     """Gate a MIXTURE set: drop components, renormalise, drop empty clusters.
 
@@ -177,6 +230,7 @@ def _gate_observable(arrs, snr, keep):
     return out
 
 
+# TODO check: keep/remove/document -- opt-SNR gate only; no build step or launcher runs it
 def gate(fit_npz: str, out: str, limit: float, snr: np.ndarray,
          noise: dict) -> str:
     """Write the gated npz: opt_snr column + comps below ``limit`` dropped."""
@@ -213,7 +267,9 @@ def gate(fit_npz: str, out: str, limit: float, snr: np.ndarray,
     return out
 
 
+# TODO check: keep/remove/document -- by-hand gate CLI (+ scripts/gb shim); no launcher runs it
 def main(argv=None):
+    """CLI of the optional opt-SNR gate (see the module docstring and its Warning)."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--fit", required=True, help="fitter components npz")
     ap.add_argument("--store", required=True, help="run store h5 (noise "

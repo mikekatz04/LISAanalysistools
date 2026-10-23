@@ -1,24 +1,36 @@
 """Stock Erebor VGB (verification galactic binary) branch.
 
 Verification binaries are KNOWN sources: their frequency and sky location
-are fixed per leaf, so the branch samples only the 5 remaining parameters
-``[lnA, fdot, phi0, cos_iota, psi]``. The branch is fixed-dimensional
-(``nleaves_min == nleaves_max``, NO RJ) and leaf ``i`` is the same physical
-source at every walker and temperature.
+are fixed per leaf, so the branch samples only the remaining parameters.
+Three sampled bases (:func:`vgb_sampled_basis`):
 
-The fixed per-leaf ``f0``/``alpha``/``sin_delta`` live in the transform
-container's per-leaf ``fill_dict`` (Eryn per-leaf fills, selected by
-``leaf_inds`` at transform time) — built through
-:func:`~.transforms.make_gb_transform_container`, the single source of the
-GB basis conventions (phi0 sign included). Values are stored in SAMPLING
-units (f0 in mHz, ``sin_delta``); the container's registered transforms
-convert the filled columns to physical (Hz, delta) exactly like sampled
-ones.
+* legacy (``VGB_SAMPLE_DISTANCE=0``): ``[lnA, fdot, phi0, cos_iota, psi]``;
+* distance (default, ``sample_distance``): ``[dist, phi0, cos_iota, psi,
+  fdot_astro_ratio]`` with ``Mc`` a per-leaf fill;
+* chirp-mass distance (``VGB_CHIRP_MASS_BASIS=1``, the production 9mo /
+  12mo basis): ``[dist, phi0, cos_iota, psi, Mc, fdot_astro_ratio]``.
+
+The branch is fixed-dimensional (``nleaves_min == nleaves_max``, NO RJ) and
+leaf ``i`` is the same physical source at every walker and temperature.
+
+The fixed per-leaf ``f0``/``alpha``/``sin_delta`` (plus ``Mc`` in the plain
+distance basis) live in the transform container's per-leaf ``fill_dict``
+(Eryn per-leaf fills, selected by ``leaf_inds`` at transform time) — built
+through :func:`~.transforms.make_gb_transform_container`, the single source
+of the GB basis conventions (phi0 sign included). Values are stored in
+SAMPLING units (f0 in mHz, ``sin_delta``); the container's registered
+transforms convert the filled columns to physical (Hz, delta) exactly like
+sampled ones.
 
 The move is :class:`~lisatools.globalfit.moves.VGBSpecialStretchMove`
-(plain same-leaf stretch; no group-stretch friends, no info-matrix
-proposal, no phase maximization) built by
-:func:`lisatools.globalfit.recipe.build_vgb_moves`.
+(``vgb_pe``; no RJ, no phase maximization) built by
+:func:`lisatools.globalfit.recipe.build_vgb_moves`; its in-model proposal is
+selected by ``VGB_INMODEL_PROPOSAL`` (``observable`` by default and in
+production, ``eigen`` and ``stretch`` the escapes), scored with the sig-het
+engine when ``sighet_inmodel`` is on (production ``VGB_SIGHET_INMODEL=1``).
+With the chirp basis the recipe also composes ``vgb_ridge_gibbs``.
+Production knobs: ``VGB_NTEMPS=8``, ``VGB_CHIRP_MASS_BASIS=1``,
+``VGB_BAND_LAYERS=8``, ``VGB_START_FACTOR=0`` and the shared ``SIGHET_*``.
 """
 
 from __future__ import annotations
@@ -82,7 +94,16 @@ VGB_FIXED_BASIS_CHIRP = ["f0", "alpha", "sin_delta"]
 
 
 def vgb_sampled_basis(settings) -> list:
-    """The active VGB sampled-parameter names (single source of the choice)."""
+    """The active VGB sampled-parameter names (single source of the choice).
+
+    Args:
+        settings (VGBSettings): Reads ``sample_distance`` and
+            ``chirp_mass_basis``.
+
+    Returns:
+        list[str]: :data:`VGB_SAMPLED_BASIS` (legacy),
+        :data:`VGB_SAMPLED_BASIS_DIST` or :data:`VGB_SAMPLED_BASIS_CHIRP`.
+    """
     if not getattr(settings, "sample_distance", False):
         return list(VGB_SAMPLED_BASIS)
     if getattr(settings, "chirp_mass_basis", False):
@@ -91,7 +112,16 @@ def vgb_sampled_basis(settings) -> list:
 
 
 def vgb_fixed_basis(settings) -> list:
-    """The active VGB per-leaf fixed-parameter names."""
+    """The active VGB per-leaf fixed-parameter names.
+
+    Args:
+        settings (VGBSettings): Reads ``sample_distance`` and
+            ``chirp_mass_basis``.
+
+    Returns:
+        list[str]: :data:`VGB_FIXED_BASIS`, :data:`VGB_FIXED_BASIS_DIST`
+        (adds ``Mc``) or :data:`VGB_FIXED_BASIS_CHIRP`.
+    """
     if not getattr(settings, "sample_distance", False):
         return list(VGB_FIXED_BASIS)
     if getattr(settings, "chirp_mass_basis", False):
@@ -109,6 +139,7 @@ def _vgb_ndim_default() -> int:
     )
 
 
+# TODO check: keep/remove/document -- only reachable with VGB_BAND_EDGES_MODE=preset (no launcher)
 def vgb_preset_band_edges(
     f0_hz,
     Tobs: float,
@@ -451,6 +482,108 @@ class VGBSettings(GBSettings):
     through the variant); the sampling-facing fields below override the GB
     defaults. ``fixed_params`` / ``injection`` / ``nleaves_max`` are resolved
     from the mojito VGB catalogue in :func:`prepare_vgb_branch`.
+
+    Reached as ``fit.vgb``. Fields not listed below are inherited from
+    :class:`~lisatools.globalfit.stock.erebor.gb.GBSettings` with the GB
+    env names (so ``GB_SUBBAND_DIVISOR``, ``GB_BAND_UNIT_STRIDE``, ...
+    shape the VGB grid too); the inherited ``dist_lims``,
+    ``fdot_astro_ratio_max`` and ``m_chirp_lims`` set the VGB prior boxes.
+    The sig-het / lookup fields read the SAME env names as the GB block.
+
+    Attributes:
+        ndim: Sampled dimension: 5 (legacy / distance bases) or 6
+            (``chirp_mass_basis``); defaults from ``VGB_CHIRP_MASS_BASIS`` and
+            is re-resolved by :func:`prepare_vgb_branch`.
+        ntemps: VGB ladder rungs. Env ``VGB_NTEMPS``. Default 12; launchers 8.
+        cap_divisor: Pinned to 1 (no leaf caps on a fixed-dimensional branch).
+        cap_stagger: Pinned to ``False``.
+        nleaves_min: Catalogue source count (resolved at prep).
+        nleaves_max: Catalogue source count (resolved at prep).
+        use_chirp_mass: ``False`` (the VGB transform is built explicitly from
+            ``sample_distance`` / ``chirp_mass_basis``).
+        use_astrophysical_f0_mc_prior: ``False``.
+        sample_distance: Distance basis: slot 0 = distance (kpc), amplitude
+            derived from ``(f0, Mc, dist)``, ``fdot_astro_ratio`` sampled. Env
+            ``VGB_SAMPLE_DISTANCE``. Default ``True``.
+        chirp_mass_basis: Move ``Mc`` from the per-leaf fills to the sampled
+            side (6-dim basis; needs ``sample_distance``; a store written in
+            the other basis refuses to resume). Env ``VGB_CHIRP_MASS_BASIS``.
+            Default ``False``; launchers 1.
+        ratio_init_width: Chirp basis: additive walker-init width of the
+            ``fdot_astro_ratio`` column, as a fraction of
+            ``fdot_astro_ratio_max`` (scaled by ``VGB_START_FACTOR``). Env
+            ``VGB_RATIO_INIT_WIDTH``. Default 0.02.
+        additive_start_widths: ``{column: width}`` additive init widths for the
+            run's injection seeding; filled by :func:`prepare_vgb_branch`.
+        num_repeat_proposals: Red-blue sweeps per iteration (a cost knob). Env
+            ``VGB_NUM_REPEAT_PROPOSALS``. Default 1.
+        nt_sub: Chunked-het sub-chunk length. Env ``CHUNKED_NT_SUB``. Default
+            256.
+        n_pad: Chunked-het padding. Env ``CHUNKED_N_PAD``. Default 32.
+        n_sparse: Chunked-het heterodyne length. Env ``CHUNKED_N_SPARSE``.
+            Default 256.
+        n_cp_sig: Chunked-het signal spline nodes. Env ``CHUNKED_N_CP_SIG``.
+            Default 48.
+        n_cp_orbit: Chunked-het orbit spline nodes. Env
+            ``CHUNKED_N_CP_ORBIT``. Default 32.
+        sighet_inmodel: Score in-model proposals with the sig-het engine.
+            ``VGB_SIGHET_INMODEL`` (wins when set) > ``GB_SIGHET_INMODEL`` >
+            ``True``; launchers ``VGB_SIGHET_INMODEL=1``.
+        sighet_nt_layer: Sig-het sparse time-grid size (snapped by GBGPU to a
+            divisor of ``Nt``; -1 = auto from ``Tobs``). Env
+            ``SIGHET_NT_LAYER``. Default 64; launchers 180 (9mo) / 240 (12mo).
+        sighet_n_sparse_fd: Env ``SIGHET_N_SPARSE_FD``. Default 1024.
+        sighet_max_r: Heterodyne-ratio clip (0 = off; diagnostic only). Env
+            ``SIGHET_MAX_R``. Default 0.0.
+        sighet_n_cp: Sig-het spline control points (-1 = auto, 0 = direct).
+            Env ``SIGHET_N_CP``. Default -1; launchers 256.
+        sighet_v3_nodes: V3 ratio-spline nodes (0 = off, -1 = adaptive). Env
+            ``SIGHET_V3_NODES``. Default 64.
+        sighet_v4_knots: V4 fixed-knot count (0 = off). Env
+            ``SIGHET_V4_KNOTS``. Default 128.
+        sighet_v4_band: V4 cardinal-weight half-band (0 = PCR solve). Env
+            ``SIGHET_V4_BAND``. Default 16.
+        sighet_v5: V5 kernel (1 = on, 2 = control arm, 0 = off). Env
+            ``SIGHET_V5``. Default 1.
+        sighet_tukey_alpha: Sig-het reference Tukey alpha (whole observation).
+            Env ``SIGHET_TUKEY_ALPHA``. Default 0.01; launchers 0.01.
+        sighet_ref_build: Carrier reference source, ``"fd"`` or ``"lookup"``.
+            Env ``SIGHET_REF_BUILD``. Default ``"fd"``; launchers ``lookup``.
+        sighet_anchor_engine: Anchor likelihood, ``"chunked"`` or ``"lookup"``
+            (needs the lookup reference). Env ``SIGHET_ANCHOR_ENGINE``. Default
+            ``"chunked"``; launchers ``lookup``.
+        lookup_table_path: GB lookup table file. Env ``GB_LOOKUP_TABLE_PATH``.
+        lookup_table_dir: GB lookup table directory. Env
+            ``GB_LOOKUP_TABLE_DIR``.
+        lookup_n_nodes: Lookup nodes (<= 0 = auto). Env ``GB_LOOKUP_N_NODES``.
+        lookup_k_coarse: Env ``GB_LOOKUP_K_COARSE``. Default ``True``.
+        fixed_params: ``(nleaves, len(fixed basis))`` per-leaf fixed values in
+            sampling units (``f0`` mHz); filled by :func:`prepare_vgb_branch`.
+        injection: ``(nleaves, ndim)`` sampling-basis truth rows (the
+            fixed-leaf start); filled by :func:`prepare_vgb_branch`.
+        band_layers: Merge this many consecutive GB-grid sub-bands into one
+            VGB band (``L`` WDM layers per band only at
+            ``GB_SUBBAND_DIVISOR=1``; production 8 x 1/8-layer sub-bands = one
+            layer per band). Env ``VGB_BAND_LAYERS``. Default 1; launchers 8.
+        band_edges_mode: ``"uniform"``, ``"get_n"`` or ``"preset"`` (VGB's own
+            knob, independent of the GB mode). Env ``VGB_BAND_EDGES_MODE``.
+            Default ``"uniform"``.
+        preset_width_cap_layers: ``"preset"``: band width cap (WDM layers). Env
+            ``VGB_PRESET_WIDTH_CAP_LAYERS``. Default 8.0.
+        preset_support_margin: ``"preset"``: source-support multiplier. Env
+            ``VGB_PRESET_SUPPORT_MARGIN``. Default 1.0.
+        band_target_count: ``"get_n"`` coarsening target. Env
+            ``VGB_BAND_TARGET_COUNT``. Default 0.
+        band_min_layers: Deprecated (ignored). Env ``VGB_BAND_MIN_LAYERS``.
+            Default 1.0.
+
+    Example:
+        .. code-block:: python
+
+            fit = erebor.all_sources(nwalkers=4)
+            fit.vgb.chirp_mass_basis = True   # env VGB_CHIRP_MASS_BASIS=1
+            fit.vgb.ndim = 6                  # re-resolved at branch prep anyway
+            fit.vgb.band_layers = 8
     """
 
     # 5 for both legacy bases; 6 when chirp_mass_basis is on. The default
@@ -471,9 +604,11 @@ class VGBSettings(GBSettings):
     # which tripped the resume guard with a leaf-cap grid mismatch on a
     # FRESH run. Pinning 1 here keeps both sites on the band grid.
     cap_divisor: int = 1
-    # Same story for the staggered cap grid (GB_CAP_STAGGER): meaningless
-    # at divisor 1 (both make_cap_edges and the move force it off there),
-    # but pin it so no future inherited-env surprise re-runs this movie.
+    # Same story for the staggered cap grid (GB_CAP_STAGGER): with no leaf
+    # caps on this branch it has no role -- and at divisor 1 make_cap_edges
+    # would NOT ignore it (stagger there builds the midpoint-to-midpoint
+    # grid, the GB production setting) -- so pin it off and no inherited-env
+    # surprise re-runs this movie.
     cap_stagger: bool = False
     # resolved to the catalogue source count at prepare time
     nleaves_min: typing.Optional[int] = None
@@ -713,12 +848,26 @@ class VGBSetup(GBSetup):
     """:class:`Setup` for verification galactic binaries.
 
     Reuses the GB band structure / waveform kwargs / state-backend init;
-    only the sampling info differs: a 5-name input basis with the fixed
-    per-leaf parameters as Eryn per-leaf fills, 5D priors/periodic keyed
-    ``"vgb"``.
+    only the sampling info differs: the active VGB input basis (5 or 6
+    names, :func:`vgb_sampled_basis`) with the fixed per-leaf parameters as
+    Eryn per-leaf fills, priors / periodic keyed ``"vgb"``.
+
+    Args:
+        gb_settings: The :class:`VGBSettings` block completed by
+            :func:`prepare_vgb_branch` (``fixed_params`` required).
     """
 
     def init_band_structure(self):
+        """GB band structure, then the VGB coarsening (or the preset grid).
+
+        ``"preset"`` mode builds the source-anchored grid
+        (:meth:`_init_preset_band_structure`); otherwise
+        :meth:`GBSetup.init_band_structure
+        <lisatools.globalfit.stock.erebor.gb.GBSetup.init_band_structure>` runs
+        and ``band_layers > 1`` keeps every ``band_layers``-th edge
+        (recomputing ``band_N_vals``, ``f0_lims``, ``num_sub_bands``). An
+        explicitly set ``fdot_lims`` (the catalogue-derived VGB box) survives.
+        """
         # GBSetup's band init derives fdot_lims from the top band edge; the
         # VGB fdot prior is catalogue-derived in prepare_vgb_branch, so an
         # explicitly-set range survives.
@@ -869,6 +1018,24 @@ class VGBSetup(GBSetup):
         )
 
     def init_sampling_info(self):
+        """Per-leaf-fill transform, VGB priors and periodicity, then the GB tail.
+
+        Distance bases: global uniforms over ``dist`` (``dist_lims``, kpc),
+        ``phi0``, ``cos_iota``, ``psi``, (chirp basis) ``Mc``
+        (``m_chirp_lims`` or ``(0.001, 1.0)``) and ``fdot_astro_ratio``
+        (``U[-fdot_astro_ratio_max, fdot_astro_ratio_max]``); the legacy basis
+        uses ``ln A`` / ``fdot`` boxes. The catalogue truths are checked to lie
+        inside every box. ``super().init_sampling_info()`` then fills the
+        shared pieces (``betas`` is already set by the branch prep).
+
+        Raises:
+            ValueError: Missing ``fixed_params``, a prior box that does not
+                cover the catalogue values.
+            NotImplementedError: A joint ``sky_dist_distribution`` with the
+                distance basis.
+            AssertionError: ``fixed_params`` / ``ndim`` / ``nleaves_max``
+                inconsistent with the active basis.
+        """
         if self.fixed_params is None:
             raise ValueError(
                 "VGBSetup needs per-leaf fixed_params (nleaves, 3) "
@@ -1058,7 +1225,18 @@ def load_vgb_catalogue_file(mojito_data_path: str) -> dict:
     The catalogue lives in ``catalogues/`` separately from the (large) L1
     data bricks, so it is available without any data transfer -- this is
     what lets ``data_mode="synthetic"`` build a catalogue-faithful VGB run
-    fully in-process.
+    fully in-process. Also read by the monitor page builder.
+
+    Args:
+        mojito_data_path (str): Brick-cache root; the file is
+            ``<root>/catalogues/vgb_cat_mojito_lite_processed.hdf5``.
+
+    Returns:
+        dict: ``{"vgb": {column: np.ndarray}}`` from the file's ``Binaries``
+        group.
+
+    Raises:
+        FileNotFoundError: When the catalogue file is missing.
     """
     import h5py
 
@@ -1093,6 +1271,33 @@ def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *,
     (small) catalogue file — no L1 data needed — and the phase/frequency
     reference epoch is the synthetic stream start, matching the in-process
     injection built by the variant's synthetic processor.
+
+    Also fills, when unset, the ``A_lims`` / ``fdot_lims`` / ``phi0_lims`` /
+    ``iota_lims`` / ``psi_lims`` boxes around the catalogue, ``t0`` (``None``
+    or 0.0 -> ``MOJITO_REFERENCE_TIME`` on mojito data) and ``betas``
+    (``make_ladder(ndim, ntemps)``, ``VGB_NTEMPS`` rungs; a resumed store's
+    ``band_temps`` later wins in ``build_vgb_moves``); always sets
+    ``tdi_setup`` / ``use_tdi2``, ``initialize_kwargs``, the chirp-basis
+    ``additive_start_widths``, and resets ``gb_wdm_comp`` to ``None``. The band runs
+    from one guard band below the lowest catalogue ``f0`` to one above the
+    highest. Called by ``all_sources`` / the ``vgb`` variant before
+    :class:`VGBSetup` is built.
+
+    Args:
+        vgb: The fit-level block copy (mutated in place).
+        general_setup: The built general setup (``catalogue["VGB"]``,
+            ``domain_settings``, ``tdi_chan``, band edges, ``Tobs``).
+        data_mode: ``"mojito"`` or ``"synthetic"``.
+        synthetic_t_start: Synthetic stream start (s); ``None`` -> 10000.0.
+
+    Returns:
+        VGBSettings: ``vgb``.
+
+    Raises:
+        ValueError: Another ``data_mode``, ``chirp_mass_basis`` without
+            ``sample_distance``, no VGB catalogue, a catalogue whose
+            ``(f0, Mc, dist)`` does not reproduce its amplitudes, or a guard
+            band that does not fit inside the data band.
     """
     if data_mode not in ("mojito", "synthetic"):
         raise ValueError(

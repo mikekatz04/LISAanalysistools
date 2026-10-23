@@ -1,19 +1,30 @@
 """Stage 2.5 of the warm-start pipeline: apply the match referee's verdict.
 
-Consumes the fitter npz (``warmstart_fit_from_store.py``) and the referee
-npz (``warmstart_match_referee.py``) and writes the REFEREED components
-npz that production arms via ``GB_WARM_START_COMPONENTS``
+Consumes the fitter npz (:mod:`.fit_from_store`) and the referee npz
+(:mod:`.match_referee`) and writes the REFEREED components npz that
+production arms via ``GB_WARM_START_COMPONENTS``
 (docs/6mo-run-prep.md: "point GB_WARM_START_COMPONENTS at a refereed
-final-store npz"). Thresholds are the 2026-08-24 referee-verdict rulings:
+final-store npz"). Run in-process by
+:func:`.build.ensure_warm_start_components` (output to a temporary name,
+then moved onto ``GB_WARM_START_COMPONENTS``) and by every self-refit
+epoch (``self_refereed.npz``), always with the default thresholds.
+Thresholds are the 2026-08-24 referee-verdict rulings:
 
 * AUTO-MERGE same-island pairs with centroid cross-match > ``merge_cut``
-  (0.9) — split artifacts of one source. Moment-matched Gaussian merge
-  with weights ~ p; circular columns (phi0/psi/alpha) merged via the
-  minimal image around the highest-p member; merged
-  ``p = min(1, sum p_i)`` (fragments of one source occupy different
-  posterior samples), members summed, mult p-weighted.
-* FLAG BLENDS: refereed comps with ``p > blend_p`` (0.5) and coherence
-  ``med_ratio < blend_ratio`` (0.5) — mosaics absorbing >1 real source.
+  (0.9) — split artifacts of one source. Merges are union-find over
+  CLUSTERS and only across clusters (the components of one cluster's
+  mixture are never merged with each other). Observable (mixture) set:
+  the merged clusters' mixtures are CONCATENATED, weights rescaled by
+  their ``p`` (:func:`_apply_observable`). Legacy sampling set:
+  moment-matched Gaussian merge with weights ~ p; circular columns
+  (phi0/psi/alpha) merged via the minimal image around the highest-p
+  member (:func:`_merge_group`). Either way merged ``p = min(1, sum p_i)``
+  (fragments of one source occupy different posterior samples), members
+  summed, mult p-weighted.
+* FLAG BLENDS: clusters with ``p > blend_p`` (0.5) and ANY of coherence
+  ``med_ratio < blend_ratio`` (0.5), ``mult > blend_mult`` (2.0) or raw
+  ``med_match < blend_match`` (0.6) (a NaN, un-refereed diagnostic never
+  fires) — mosaics absorbing >1 real source.
   KEPT by default (they still seed births near real power; the new run's
   RJ resolves them); ``--drop-blends`` removes them. The ``blend`` bool
   column rides in the output either way.
@@ -24,9 +35,18 @@ The output keeps the exact fitter writer schema (plus ``blend``,
 ``med_match``, ``med_ratio`` diagnostic columns and a ``referee_apply``
 meta block), so ``WarmStartComponents.from_npz`` loads it unchanged.
 
-Usage:
-  python warmstart_referee_apply.py --fit <components.npz>
-      --referee <referee.npz> --out <refereed.npz> [--drop-blends]
+Example:
+    The call the build makes (the referee npz is ``<fit stem>_referee.npz``):
+
+    .. code-block:: bash
+
+        python -m lisatools.globalfit.warmstart.referee_apply \\
+            --fit gf_prod_6mo_v9_4gpu_refereed_fit.npz \\
+            --referee gf_prod_6mo_v9_4gpu_refereed_fit_referee.npz \\
+            --out gf_prod_6mo_v9_4gpu_refereed.npz
+
+    Options: ``[--merge-cut 0.9] [--blend-p 0.5] [--blend-ratio 0.5]
+    [--blend-mult 2.0] [--blend-match 0.6] [--drop-blends]``.
 """
 from __future__ import annotations
 
@@ -69,6 +89,16 @@ def merge_candidate_pairs(gmm_ncomp, island_id, pairs=None):
     ``pairs`` filters an EXISTING pair list (what production does with the
     referee's own pairs, O(len(pairs))); omitted, every eligible pair is
     enumerated, which is O(n^2) and only appropriate for small sets.
+
+    Args:
+        gmm_ncomp (array-like): ``(n_clusters,)`` component counts.
+        island_id (array-like): Island per cluster (``(n_clusters,)``) or per
+            flat component.
+        pairs (array-like, optional): ``(P, 2)`` flat component pairs to
+            filter. Default ``None`` = enumerate.
+
+    Returns:
+        list[tuple[int, int]]: The eligible flat component pairs.
     """
     ncomp = np.asarray(gmm_ncomp, dtype=int)
     cluster_of = np.repeat(np.arange(len(ncomp)), ncomp)
@@ -85,6 +115,7 @@ def merge_candidate_pairs(gmm_ncomp, island_id, pairs=None):
 
 
 def _find(parent, a):
+    """Union-find root of ``a`` (path halving, updates ``parent`` in place)."""
     while parent[a] != a:
         parent[a] = parent[parent[a]]
         a = parent[a]
@@ -92,7 +123,15 @@ def _find(parent, a):
 
 
 def _merge_group(idx, means, covs, p, mult, n_members):
-    """Moment-matched Gaussian merge of components ``idx`` (weights ~ p)."""
+    """Moment-matched Gaussian merge of components ``idx`` (weights ~ p); the sampling-basis path.
+
+    Circular means are taken at their minimal image around the highest-p
+    member before averaging and wrapped back afterwards.
+
+    Returns:
+        tuple: ``(mean (9,), cov (9, 9), p = min(1, sum p), p-weighted mult,
+        summed n_members, index of the highest-p member)``.
+    """
     w = p[idx] / p[idx].sum()
     base = idx[int(np.argmax(p[idx]))]
     mu_shift = means[idx].copy()
@@ -129,6 +168,12 @@ def _apply_observable(gmm, roots, p, mult, n_members, island_id,
     Concatenating keeps the lobes and simply relabels them as one source,
     which is what the merge verdict actually asserts. Legacy sets keep the
     moment-matched merge untouched.
+
+    ``roots`` is the per-cluster union-find root (clusters sharing a root
+    merge); a merged cluster's box is the union of its members' boxes, its
+    blend diagnostics (``med_ratio`` / ``med_match``) those of its
+    highest-p member's FIRST component. Clusters are written in ascending
+    mixture-mean ``f_mid`` order. Writes ``out`` and returns it.
     """
     ncomp = np.asarray(gmm["gmm_ncomp"], dtype=int)
     splits = np.cumsum(ncomp)[:-1]
@@ -225,6 +270,34 @@ def apply(fit_npz: str, referee_npz: str, out: str,
           blend_ratio: float = BLEND_RATIO, blend_mult: float = BLEND_MULT,
           blend_match: float = BLEND_MATCH,
           drop_blends: bool = False) -> str:
+    """Apply the referee verdict to a fitter npz and write the refereed npz.
+
+    Auto-merges same-island, across-cluster pairs with ``cross_match >
+    merge_cut`` (union-find over clusters), then flags blends (see the
+    module docstring) and writes the fitter schema plus ``blend``,
+    ``med_match``, ``med_ratio`` and ``meta["referee_apply"]``. The
+    observable (mixture) format goes through :func:`_apply_observable`, the
+    legacy sampling format through :func:`_merge_group`.
+
+    Args:
+        fit_npz: The :mod:`.fit_from_store` npz.
+        referee_npz: Its :mod:`.match_referee` npz (``pairs``,
+            ``cross_match``, ``med_ratio``, ``med_match``).
+        out: Output npz path.
+        merge_cut: Default ``MERGE_CUT`` (0.9).
+        blend_p: Default ``BLEND_P`` (0.5).
+        blend_ratio: Default ``BLEND_RATIO`` (0.5).
+        blend_mult: Default ``BLEND_MULT`` (2.0).
+        blend_match: Default ``BLEND_MATCH`` (0.6).
+        drop_blends: Remove flagged blends. Default ``False`` (kept).
+
+    Returns:
+        str: ``out``.
+
+    Raises:
+        ValueError: When the referee's per-component arrays do not match the
+            fit's component count (a referee npz of a different fit).
+    """
     with np.load(fit_npz, allow_pickle=False) as d:
         meta = json.loads(str(d["meta"]))
         basis = str(meta.get("basis", "sampling"))
@@ -344,6 +417,11 @@ def apply(fit_npz: str, referee_npz: str, out: str,
 
 
 def main(argv=None):
+    """CLI: parse ``argv`` and run :func:`apply` (description = the module docstring's first line).
+
+    Args:
+        argv (list of str, optional): Arguments; ``None`` = ``sys.argv[1:]``.
+    """
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--fit", required=True, help="fitter components npz")
     ap.add_argument("--referee", required=True, help="referee verdict npz")

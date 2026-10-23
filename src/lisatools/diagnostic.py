@@ -1,4 +1,22 @@
-"""Inner products, likelihood terms, and information-matrix / covariance diagnostics."""
+"""Inner products, likelihood terms, and information-matrix / covariance diagnostics.
+
+Entry points:
+
+- :func:`inner_product` (and :func:`snr`): the noise-weighted inner product on any domain
+  (FD, WDM, ...) with a :class:`~lisatools.sensitivity.SensitivityMatrixBase` weighting.
+  The global-fit GB, MBH, and EMRI moves call it for their ``<d|h>`` / ``<h|h>`` terms, and
+  :class:`~lisatools.analysiscontainer.AnalysisContainer` builds its likelihoods on it.
+- Likelihood terms: :func:`residual_source_likelihood_term`, :func:`noise_likelihood_term`,
+  :func:`residual_full_source_and_noise_likelihood`, their data/signal variants
+  :func:`data_signal_source_likelihood_term` /
+  :func:`data_signal_full_source_and_noise_likelihood`, and the walker-batched
+  :func:`batched_residual_full_source_and_noise_likelihoods` used by the global-fit noise
+  (PSD / galactic foreground) move (debug validation via ``PSD_DEBUG_CHECKS``).
+- Information matrix and covariance: :func:`h_var_p_eps`, :func:`dh_dlambda`,
+  :func:`info_matrix`, :func:`covariance`, :func:`get_eigeninfo`,
+  :func:`cutler_vallisneri_bias`, the plotting helpers :func:`plot_covariance_corner` /
+  :func:`plot_covariance_contour`, and :func:`scale_to_snr`.
+"""
 
 from __future__ import annotations
 
@@ -41,44 +59,90 @@ def inner_product(
     normalize: Optional[bool | str] = False,
     complex: Optional[bool] = False,
 ) -> float | complex:
-    r"""Compute the inner product between two signals weighted by a psd.
+    r"""Compute the inner product between two signals weighted by a sensitivity matrix.
 
-    The inner product between time series :math:`a(t)` and :math:`b(t)` is
+    For one channel the inner product between time series :math:`a(t)` and :math:`b(t)` is
 
     .. math::
 
-        \langle a | b \\rangle = 2\int_{f_\\text{min}}^{f_\\text{max}} \\frac{\\tilde{a}(f)^*\\tilde{b}(f) + \\tilde{a}(f)\\tilde{b}(f)^*}{S_n(f)} df\ \ ,
+        \langle a | b \rangle = 2\int_{f_\text{min}}^{f_\text{max}}
+            \frac{\tilde{a}(f)^*\tilde{b}(f) + \tilde{a}(f)\tilde{b}(f)^*}{S_n(f)}\, df,
 
-    where :math:`\\tilde{a}(f)` is the Fourier transform of :math:`a(t)` and :math:`S_n(f)` is the one-sided Power Spectral Density of the noise.
+    where :math:`\tilde{a}(f)` is the Fourier transform of :math:`a(t)` and :math:`S_n(f)` is
+    the one-sided power spectral density of the noise. The implementation is the discrete,
+    domain-agnostic form
 
-    The inner product can be left complex using the ``complex`` kwarg.
+    .. math::
 
-    **GPU Capability**: Pass CuPy arrays rather than NumPy arrays.
+        \langle a | b \rangle = 4\, \mathrm{Re} \sum_{i,j} \sum_{k}
+            a_{i,k}^* \, (C^{-1})_{ij,k} \, b_{j,k} \; \Delta,
+
+    summed over every basis pixel :math:`k` (FD bins, WDM layer x time cells, ...) and over
+    all channel pairs :math:`(i, j)` for a full ``(nch, nch, ...)`` matrix, or only
+    :math:`i = j` for a diagonal ``(nch, ...)`` one; :math:`\Delta` is the domain's
+    ``differential_component`` and :math:`C^{-1}` is ``psd.invC``. A first basis slice
+    whose ``invC`` contains NaN (the ``f = 0`` bin) is dropped, and WDM signals carrying a
+    ``frequency_layer_mask`` are masked (both masks must agree).
+
+    Either signal may be batched (leading source axis): the result is then one value per
+    batch entry. The inner product can be left complex using the ``complex`` kwarg.
+
+    **GPU Capability**: Pass CuPy arrays (or CuPy-backed signals) rather than NumPy
+    arrays. JAX arrays pass through without concretization, so the function can be
+    differentiated.
 
     Args:
-        sig1: First signal to use for the inner product.
-            Can be time-domain or frequency-domain.
-            Must be 1D ``np.ndarray``, list of 1D ``np.ndarray``s, or 2D ``np.ndarray``
-            across channels with shape ``(nchannels, data length)``.
-        sig2: Second signal to use for the inner product.
-            Can be time-domain or frequency-domain.
-            Must be 1D ``np.ndarray``, list of 1D ``np.ndarray``s, or 2D ``np.ndarray``
-            across channels with shape ``(nchannels, data length)``.
+        sig1: First signal. Either a :class:`~lisatools.domains.DomainBase` (e.g.
+            :class:`~lisatools.domains.FDSignal`, :class:`~lisatools.domains.WDMSignal`;
+            the preferred form), a legacy
+            :class:`~lisatools.datacontainer.DataResidualArray`, or a raw array /
+            per-channel list of arrays laid out as the domain's signals
+            (``(nchannels, *basis_shape_active)``, optionally with a leading batch axis),
+            which requires ``basis_settings``.
+        sig2: Second signal, same forms and the same ``data_shape`` and channel count as
+            ``sig1``.
         basis_settings: :class:`~lisatools.domains.DomainSettingsBase` describing the
-            domain of ``sig1`` / ``sig2`` (only consulted when raw arrays are passed
-            instead of :class:`~lisatools.datacontainer.DataResidualArray` objects).
-        psd: Indicator of what psd to use. If a ``str``, this will be passed as the ``sens_fn`` kwarg to :func:`get_sensitivity`.
-            If ``None``, it will be an array of ones. Or, you can pass a 1D ``np.ndarray`` of psd values that must be the same length
-            as the frequency domain signals.
-        psd_args: Arguments to pass to the psd function if ``type(psd) == str``.
-        psd_kwargs: Keyword arguments to pass to the psd function if ``type(psd) == str``.
-        normalize: Normalize the inner product. If ``True``, it will normalize the square root of the product of individual signal inner products.
-            You can also pass ``"sig1"`` or ``"sig2"`` to normalize with respect to one signal.
-        complex: If ``True``, return the complex value of the inner product rather than just its real-valued part.
+            domain of raw-array ``sig1`` / ``sig2`` (ignored for
+            :class:`~lisatools.domains.DomainBase` inputs).
+        psd: Noise weighting. A :class:`~lisatools.sensitivity.SensitivityMatrixBase`
+            (any subclass, including the backend-built matrices) is used directly; it
+            must be on the same basis and have ``nchannels`` channels. Anything else is
+            wrapped as ``SensitivityMatrix(basis, [psd], *psd_args, **psd_kwargs)``:
+            a ``str`` or :class:`~lisatools.sensitivity.Sensitivity` class is evaluated
+            with :func:`~lisatools.sensitivity.get_sensitivity`, a 1D array is used as the
+            PSD values. Default ``"LISASens"``.
+        psd_args: Positional arguments for the wrapped PSD (non-matrix ``psd`` only).
+        psd_kwargs: Keyword arguments for the wrapped PSD (non-matrix ``psd`` only).
+        normalize: ``False`` (default): no normalization. ``True``: divide by
+            ``sqrt(<sig1|sig1> <sig2|sig2>)``. ``"sig1"`` / ``"sig2"``: divide by
+            ``<sig1|sig1>`` / ``<sig2|sig2>`` (not its square root).
+        complex: If ``True``, return the complex value of the inner product rather than
+            just its real-valued part. Default ``False``.
 
     Returns:
-        Inner product value.
+        float | complex | xp.ndarray: The inner product: a Python ``float`` (or
+        ``np.complex128`` with ``complex=True``) for unbatched inputs; a ``(nbatch,)``
+        array on the inputs' backend when either signal is batched; a JAX array for JAX
+        inputs.
 
+    Raises:
+        ValueError: Raw arrays without ``basis_settings``, mismatched channel counts,
+            mixed array modules, mismatched ``data_shape``, a ``psd`` matrix on a
+            different basis or with a different channel count, a ``psd`` matrix whose
+            channel layout is neither 1D nor 2D, mismatched frequency-layer masks, or an
+            invalid ``normalize``.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.domains import FDSettings, FDSignal
+        >>> from lisatools.diagnostic import inner_product
+        >>> from lisatools.sensitivity import XYZ2SensitivityMatrix
+        >>> fd = FDSettings(N=1001, df=1e-5, min_freq=1e-4, force_backend="cpu")
+        >>> h = FDSignal(np.full((3, fd.N_active), 1e-21 + 0j), fd)
+        >>> sens = XYZ2SensitivityMatrix(fd, model="sangria")
+        >>> hh = inner_product(h, h, psd=sens)
+        >>> hh > 0
+        True
     """
     # initial input checks and setup -- accept DomainBase directly to avoid
     # the DataResidualArray deprecation chatter; only wrap raw arrays.
@@ -394,21 +458,25 @@ def inner_product(
 def residual_source_likelihood_term(
     data_res_arr: DataResidualArray, **kwargs: dict
 ) -> float | complex:
-    """Calculate the source term in the Likelihood for a data residual (d - h).
+    r"""Calculate the source term in the likelihood for a data residual :math:`d - h`.
 
-    The source term in the likelihood is given by,
+    The source term in the likelihood is given by
 
     .. math::
 
-        \\log{\\mathcal{L}}_\\text{src} = -\\frac{1}{2}\\langle \\vec{d} - \\vec{h} | \\vec{d} - \\vec{h}\\rangle.
+        \log{\mathcal{L}}_\text{src}
+            = -\frac{1}{2}\langle \vec{d} - \vec{h} | \vec{d} - \vec{h}\rangle.
 
     Args:
-        data_res_arr: Data residual.
-        **kwargs: Keyword arguments to pass to :func:`inner_product`.
+        data_res_arr: Data residual (a :class:`~lisatools.domains.DomainBase`, a legacy
+            :class:`~lisatools.datacontainer.DataResidualArray`, or a raw array with
+            ``basis_settings`` in ``kwargs``).
+        **kwargs: Keyword arguments for :func:`inner_product` (``psd``, ``basis_settings``,
+            ...); ``normalize`` is forced to ``False``.
 
     Returns:
-        Source term Likelihood value.
-
+        float | complex | xp.ndarray: ``-1/2 <r|r>`` (per batch entry for a batched
+        residual).
     """
     kwargs["normalize"] = False
     ip_val = inner_product(data_res_arr, data_res_arr, **kwargs)
@@ -416,26 +484,33 @@ def residual_source_likelihood_term(
 
 
 def noise_likelihood_term(psd: SensitivityMatrixBase) -> float:
-    """Calculate the noise term in the Likelihood.
+    r"""Calculate the noise (log-determinant) term in the likelihood.
 
-    The noise term in the likelihood is given by,
+    The noise term in the likelihood is given by
 
     .. math::
 
-        \\log{\\mathcal{L}}_n = -\\kappa \\sum \\log{\\vec{S}_n},
+        \log{\mathcal{L}}_n = -\kappa \sum_k \log{\left|\det{C_k}\right|},
 
-    where :math:`\\kappa` is the domain's
+    summed over the basis pixels :math:`k` whose ``psd.detC`` is finite and non-zero,
+    where :math:`\kappa` is the domain's
     :attr:`~lisatools.domains.DomainSettingsBase.logdet_factor`: ``1.0`` in the
     one-sided complex (FD / Whittle) convention and ``0.5`` for real-basis
     domains (TD, WDM), where each real coefficient contributes
-    :math:`-\\frac{1}{2}\\log{\\det{C}}` to the Gaussian density.
+    :math:`-\frac{1}{2}\log{\det{C}}` to the Gaussian density. For a diagonal matrix
+    ``detC`` is the product of the channel PSDs, so this is :math:`-\kappa \sum \log S_n`.
 
     Args:
-        psd: Sensitivity information.
+        psd: Sensitivity matrix (its ``detC`` and covariance are read).
 
     Returns:
-        Noise term Likelihood value.
+        float: The noise term (an ``xp.sum`` result: a numpy scalar on CPU, a 0-d cupy
+        array on GPU).
 
+    Raises:
+        AssertionError: The covariance has non-finite entries other than exactly
+            ``prod(psd.shape[:-1])`` of them (one per trailing-axis line, e.g. the
+            ``f = 0`` bin).
     """
     # Backend-generic (numpy / cupy): the detC / psd arrays follow the domain's
     # array module, so resolve xp from them rather than hardcoding numpy.
@@ -461,20 +536,28 @@ def residual_full_source_and_noise_likelihood(
     psd: str | None | np.ndarray | SensitivityMatrixBase,
     **kwargs: dict,
 ) -> float | complex:
-    """Calculate the full Likelihood including noise and source terms.
+    """Calculate the full likelihood of a residual: noise term plus source term.
 
     The noise term is calculated with :func:`noise_likelihood_term`.
 
-    The source term is calcualted with :func:`residual_source_likelihood_term`.
+    The source term is calculated with :func:`residual_source_likelihood_term`.
+    :meth:`~lisatools.analysiscontainer.AnalysisContainer.likelihood` calls this for its
+    default (source + noise) likelihood.
 
     Args:
-        data_res_arr: Data residual.
-        psd: Sensitivity information.
-        **kwargs: Keyword arguments to pass to :func:`inner_product`.
+        data_res_arr: Data residual (a :class:`~lisatools.domains.DomainBase` or a legacy
+            :class:`~lisatools.datacontainer.DataResidualArray`; a raw array works only
+            when ``psd`` is already a matrix and ``basis_settings`` is in ``kwargs``).
+        psd: Sensitivity information. A
+            :class:`~lisatools.sensitivity.SensitivityMatrixBase` is used directly;
+            anything else is wrapped as ``SensitivityMatrix(basis, [psd], **kwargs)`` on
+            the residual's basis.
+        **kwargs: Keyword arguments to pass to :func:`inner_product` (and, when ``psd``
+            is not a matrix, to the :class:`~lisatools.sensitivity.SensitivityMatrix`
+            constructor). ``psd``, ``psd_args`` and ``psd_kwargs`` keys are dropped.
 
     Returns:
-       Full Likelihood value.
-
+        float | xp.ndarray: The log-likelihood (per batch entry for a batched residual).
     """
     if not isinstance(psd, SensitivityMatrixBase):
         # TODO: maybe adjust so it can take a list just like Sensitivity matrix
@@ -496,10 +579,13 @@ def psd_debug_checks_enabled() -> bool:
     """Whether the batched-noise-likelihood debug validation is switched on.
 
     Controlled by the ``PSD_DEBUG_CHECKS`` environment variable, default
-    ``"0"`` (off). Set ``PSD_DEBUG_CHECKS=1`` to restore the all-or-nothing
-    non-finite-covariance validation in
+    ``"0"`` (off; the production launchers do not set it). Set ``PSD_DEBUG_CHECKS=1`` to
+    restore the all-or-nothing non-finite-covariance validation in
     :func:`batched_residual_full_source_and_noise_likelihoods` (see there for
     why it is off by default). Read per call so it can be flipped at runtime.
+
+    Returns:
+        bool: ``bool(int(os.environ.get("PSD_DEBUG_CHECKS", "0")))``.
     """
     return bool(int(os.environ.get("PSD_DEBUG_CHECKS", "0")))
 
@@ -538,12 +624,20 @@ def batched_residual_full_source_and_noise_likelihoods(
             can release the covariance stack before this call.
         invC_batch: Inverse covariance, shape ``(nch, nch, nw, *basis)``.
         detC_batch: Determinant, shape ``(nw, *basis)``.
-        settings: Domain settings providing ``differential_component`` and
-            (optionally) ``logdet_factor``.
+        settings (DomainSettingsBase): Domain settings providing
+            ``differential_component`` and (optionally) ``logdet_factor``.
 
     Returns:
-        ``(nw,)`` per-walker log-likelihoods (same array module as the
+        xp.ndarray: ``(nw,)`` per-walker log-likelihoods (same array module as the
         inputs).
+
+    Raises:
+        AssertionError: With ``PSD_DEBUG_CHECKS=1``, a walker's covariance has a
+            non-finite count other than ``0`` or one per trailing-axis line.
+
+    Note:
+        Called by :class:`~lisatools.globalfit.moves.psdmove.PSDMove` to score the
+        noise proposals of every walker at once.
     """
     xp = get_array_module(detC_batch)
     nw, nch = res_batch.shape[:2]
@@ -600,22 +694,23 @@ def batched_residual_full_source_and_noise_likelihoods(
 def data_signal_source_likelihood_term(
     data_arr: DataResidualArray, sig_arr: DataResidualArray, **kwargs: dict
 ) -> float | complex:
-    r"""Calculate the source term in the Likelihood for separate signal and data.
+    r"""Calculate the source term in the likelihood for separate signal and data.
 
-    The source term in the likelihood is given by,
+    The source term in the likelihood is given by
 
     .. math::
 
-        \\log{\\mathcal{L}}_\\text{src} = -\\frac{1}{2}\\left(\\langle \\vec{d} | \\vec{d}\\rangle + \\langle \\vec{h} | \\vec{h}\\rangle - 2\\langle \\vec{d} | \\vec{h}\\rangle \\right)\ \ .
+        \log{\mathcal{L}}_\text{src} = -\frac{1}{2}\left(\langle \vec{d} | \vec{d}\rangle
+            + \langle \vec{h} | \vec{h}\rangle - 2\langle \vec{d} | \vec{h}\rangle \right).
 
     Args:
-        data_arr: Data.
-        sig_arr: Signal.
-        **kwargs: Keyword arguments to pass to :func:`inner_product`.
+        data_arr: Data (same accepted forms as in :func:`inner_product`).
+        sig_arr: Signal template, same domain and shape as ``data_arr``.
+        **kwargs: Keyword arguments for :func:`inner_product` (``psd``, ...);
+            ``normalize`` is forced to ``False``.
 
     Returns:
-        Source term Likelihood value.
-
+        float | complex | xp.ndarray: The source term (three inner products).
     """
     kwargs["normalize"] = False
     d_h = inner_product(data_arr, sig_arr, **kwargs)
@@ -630,23 +725,26 @@ def data_signal_full_source_and_noise_likelihood(
     psd: str | None | np.ndarray | SensitivityMatrixBase,
     **kwargs: dict,
 ) -> float | complex:
-    """Calculate the full Likelihood including noise and source terms.
-
-    Here, the signal is treated separate from the data.
+    """Calculate the full likelihood (noise plus source terms) for separate data and signal.
 
     The noise term is calculated with :func:`noise_likelihood_term`.
 
-    The source term is calcualted with :func:`data_signal_source_likelihood_term`.
+    The source term is calculated with :func:`data_signal_source_likelihood_term`.
 
     Args:
-        data_arr: Data.
-        sig_arr: Signal.
-        psd: Sensitivity information.
-        **kwargs: Keyword arguments to pass to :func:`inner_product`.
+        data_arr: Data (a :class:`~lisatools.domains.DomainBase` or a legacy
+            :class:`~lisatools.datacontainer.DataResidualArray`).
+        sig_arr: Signal template, same domain and shape as ``data_arr``.
+        psd: Sensitivity information. A
+            :class:`~lisatools.sensitivity.SensitivityMatrixBase` is used directly;
+            anything else is wrapped as ``SensitivityMatrix(basis, [psd], **kwargs)`` on
+            the data's basis.
+        **kwargs: Keyword arguments to pass to :func:`inner_product` (and, when ``psd``
+            is not a matrix, to the :class:`~lisatools.sensitivity.SensitivityMatrix`
+            constructor). ``psd``, ``psd_args`` and ``psd_kwargs`` keys are dropped.
 
     Returns:
-       Full Likelihood value.
-
+        float | xp.ndarray: The log-likelihood.
     """
     if not isinstance(psd, SensitivityMatrixBase):
         # TODO: maybe adjust so it can take a list just like Sensitivity matrix
@@ -671,27 +769,36 @@ def snr(
     data: Optional[np.ndarray | list | DataResidualArray] = None,
     **kwargs: Any,
 ) -> float:
-    """Compute the snr between two signals weighted by a psd.
+    r"""Compute the optimal or detected SNR of a signal.
 
-    The signal-to-noise ratio of a signal is :math:`\\sqrt{\\langle a|a\\rangle}`.
-
-    This will be the optimal SNR if ``data==None``. If a data array is given, it will be the observed
-    SNR: :math:`\\langle d|a\\rangle/\\sqrt{\\langle a|a\\rangle}`.
+    The optimal signal-to-noise ratio of a signal is :math:`\sqrt{\langle a|a\rangle}`
+    (``data=None``). If data are given, it is the detected SNR
+    :math:`\mathrm{Re}\langle a|d\rangle/\sqrt{\langle a|a\rangle}`.
 
     **GPU Capability**: Pass CuPy arrays rather than NumPy arrays.
 
     Args:
-        sig1: Signal to use as the templatefor the SNR.
-            Can be time-domain or frequency-domain.
-            Must be 1D ``np.ndarray``, list of 1D ``np.ndarray``s, or 2D ``np.ndarray``
-            across channels with shape ``(nchannels, data length)``.
-        *args: Arguments to pass to :func:`inner_product`.
-        data: Data becomes the ``sig2`` argument to :func:`inner_product`.
-        **kwargs: Keyword arguments to pass to :func:`inner_product`.
+        sig1: Signal to use as the template for the SNR (same accepted forms as
+            ``sig1`` of :func:`inner_product`).
+        *args: Positional arguments of :func:`inner_product` after ``sig2``
+            (``basis_settings``, ``psd``, ...).
+        data: Data, passed as ``sig2`` of :func:`inner_product`. Default ``None``
+            (optimal SNR).
+        **kwargs: Keyword arguments to pass to :func:`inner_product` (``psd``,
+            ``basis_settings``, ...).
 
     Returns:
-        Optimal or detected SNR value (depending on ``data`` kwarg).
+        float | xp.ndarray: Optimal or detected SNR (per batch entry for batched input).
 
+    Example:
+        .. code-block:: python
+
+            from lisatools.diagnostic import snr
+            from lisatools.sensitivity import XYZ2SensitivityMatrix
+
+            sens = XYZ2SensitivityMatrix(fd_settings, model="sangria")
+            rho_opt = snr(h, psd=sens)            # h: an FDSignal on fd_settings
+            rho_det = snr(h, data=d, psd=sens)    # d: the data, same domain
     """
 
     # get optimal SNR
@@ -714,21 +821,29 @@ def h_var_p_eps(
     waveform_args: Optional[tuple] = (),
     waveform_kwargs: Optional[dict] = {},
 ) -> np.ndarray:  # TODO: check this
-    """Calculate the waveform with a perturbation step of the variable V[i].
+    """Generate the waveform with parameter ``params[index]`` shifted by ``step``.
+
+    The shifted parameter vector (a copy) is mapped through ``parameter_transforms`` (if
+    given) and passed as ``waveform_model(*params, *waveform_args, **waveform_kwargs)``.
 
     Args:
-        waveform_model: Callable function to the waveform generator with signature ``(*params, **waveform_kwargs)``.
-        params: Source parameters that are over derivatives (not in fill dict of parameter transforms)
-        step: Absolute step size for variable of interest.
-        index: Index to parameter of interest.
-        parameter_transforms: `TransformContainer <https://lisa-analysis-tools.github.io/Eryn/user/utils.html#eryn.utils.TransformContainer>`_ object to transform from the derivative parameter basis
-            to the waveform parameter basis. This class can also fill in fixed parameters where the derivatives are not being taken.
-        waveform_args: args (beyond parameters) for the waveform generator.
-        waveform_kwargs: kwargs for the waveform generation.
+        step: Absolute step added to ``params[index]``.
+        waveform_model: Callable waveform generator with signature
+            ``(*params, *waveform_args, **waveform_kwargs)``, returning a 1D array, a 2D
+            ``(nchannels, N)`` array, or a per-channel list of 1D arrays.
+        params: Source parameters in the derivative basis (not including those filled
+            by ``parameter_transforms``); an ``np.ndarray`` when ``parameter_transforms``
+            is given.
+        index: Index of the parameter to shift.
+        parameter_transforms: :class:`~eryn.utils.TransformContainer` mapping the
+            derivative basis to the waveform basis (``transform_base_parameters``); it can
+            also fill in fixed parameters. Default ``None``: no transform.
+        waveform_args: Extra positional arguments for the waveform generator. Default ``()``.
+        waveform_kwargs: Keyword arguments for the waveform generator. Default ``{}``.
 
     Returns:
-        Perturbation to the waveform in the given parameter. Will always be 2D array with shape ``(num channels, data length)``
-
+        np.ndarray: The perturbed waveform; a 1D array output or a list output is
+        returned as a 2D ``(nchannels, N)`` array, any other output unchanged.
     """
     params_p_eps = params.copy()
     params_p_eps[index] += step
@@ -759,21 +874,24 @@ def dh_dlambda(
     more_accurate: Optional[bool] = True,
     **kwargs: dict,
 ) -> np.ndarray:
-    """Derivative of the waveform.
+    """Numerical derivative of the waveform with respect to one parameter.
 
-    Calculate the derivative of the waveform with precision of order (step^4)
-    with respect to the variable V in the i direction.
+    With ``more_accurate=True`` (default) the five-point central difference
+    ``(-h(+2e) + h(-2e) + 8 (h(+e) - h(-e))) / (12 e)``, error ``O(eps^4)``; otherwise the
+    two-point central difference ``(h(+e) - h(-e)) / (2 e)``. The waveforms are trimmed to
+    their common length along axis 1.
 
     Args:
         eps: Absolute **derivative** step size for variable of interest.
-        *args: Arguments passed to :func:`h_var_p_eps`.
-        more_accurate: If ``True``, run a more accurate derivate requiring 2x more waveform generations.
-        **kwargs: Keyword arguments passed to :func:`h_var_p_eps`.
+        *args: Positional arguments of :func:`h_var_p_eps` after ``step``:
+            ``(waveform_model, params, index)``.
+        more_accurate: If ``True``, use the five-point stencil (4 waveform generations
+            instead of 2). Default ``True``.
+        **kwargs: Keyword arguments passed to :func:`h_var_p_eps`
+            (``parameter_transforms``, ``waveform_args``, ``waveform_kwargs``).
 
     Returns:
-        Numerical derivative of the waveform with respect to a varibale of interest. Will be 2D array
-        with shape ``(num channels, data length)``.
-
+        np.ndarray: The derivative, 2D array with shape ``(num channels, data length)``.
     """
     if more_accurate:
         # Derivative of the Waveform
@@ -826,34 +944,59 @@ def info_matrix(
     return_derivs: Optional[bool] = False,
     **kwargs: dict,
 ) -> np.ndarray | Tuple[np.ndarray, list]:
-    """Calculate Information Matrix.
+    r"""Calculate the information matrix of a waveform model at a parameter point.
 
-    This calculates the information matrix for a given waveform model at a given set of parameters.
-    The inverse of the information matrix gives the covariance matrix.
-
-    This is also referred to as the Fisher information matrix, but @MichaelKatz has chosen to leave out the name because of `this <https://www.newstatesman.com/long-reads/2020/07/ra-fisher-and-science-hatred>`_. That is why this codebase says "information matrix" throughout.
+    The inverse of the information matrix gives the covariance matrix. This is also
+    referred to as the Fisher information matrix, but @MichaelKatz has chosen to leave out
+    the name because of `this
+    <https://www.newstatesman.com/long-reads/2020/07/ra-fisher-and-science-hatred>`_. That
+    is why this codebase says "information matrix" throughout.
 
     The info matrix is given by:
 
     .. math::
 
-        M_{ij} = \\langle h_i | h_j \\rangle \\text{ with } h_i = \\frac{\\partial h}{\\partial \\lambda_i}.
+        M_{ij} = \langle h_i | h_j \rangle \text{ with }
+            h_i = \frac{\partial h}{\partial \lambda_i},
+
+    with the derivatives from :func:`dh_dlambda` and the inner products from
+    :func:`inner_product` (only the upper triangle is computed). The global-fit eigen
+    tables build their Gram-form information matrices with it
+    (:func:`~lisatools.globalfit.moves.eigen_refresh.eigen_table_from_waveform`).
 
     Args:
-        eps: Absolute **derivative** step size for variable of interest. Can be provided as a ``float`` value that applies
-            to all variables or an array, one for each parameter being evaluated in the information matrix.
-        waveform_model: Callable function to the waveform generator with signature ``(*params, **waveform_kwargs)``.
-        params: Source parameters.
-        deriv_inds: Subset of parameters of interest for which to calculate the information matrix, by index.
-            If ``None``, it will be ``np.arange(len(params))``.
-        inner_product_kwargs: Keyword arguments for the inner product function.
+        eps: Absolute **derivative** step size. A ``float`` applies to every parameter;
+            an array is paired positionally with ``deriv_inds`` (``eps[k]`` is the step
+            of parameter ``deriv_inds[k]``).
+        waveform_model: Callable waveform generator with signature
+            ``(*params, *waveform_args, **waveform_kwargs)`` (see :func:`h_var_p_eps`).
+        params: Source parameters (``np.ndarray``).
+        deriv_inds: Subset of parameters of interest for which to calculate the
+            information matrix, by index. If ``None``, it will be
+            ``np.arange(len(params))``.
+        inner_product_kwargs: Keyword arguments for :func:`inner_product`; must include
+            ``basis_settings`` (the derivatives are raw per-channel arrays) and normally
+            ``psd``. Default ``{}``.
         return_derivs: If ``True``, also returns computed numerical derivatives.
-        **kwargs: Keyword arguments passed to :func:`dh_dlambda`.
+        **kwargs: Keyword arguments passed to :func:`dh_dlambda` (``more_accurate``) and
+            on to :func:`h_var_p_eps` (``parameter_transforms``, ``waveform_args``,
+            ``waveform_kwargs``).
 
     Returns:
-        If ``not return_derivs``, this will be the information matrix as a numpy array. If ``return_derivs is True``,
-        it will be a tuple with the first entry as the information matrix and the second entry as the partial derivatives.
+        np.ndarray | tuple[np.ndarray, list]: The ``(len(deriv_inds), len(deriv_inds))``
+        information matrix, or ``(info, dh)`` with the list of derivative arrays when
+        ``return_derivs`` is ``True``.
 
+    Example:
+        .. code-block:: python
+
+            from lisatools.diagnostic import covariance, info_matrix
+
+            info = info_matrix(
+                1e-9, waveform_fn, params,
+                inner_product_kwargs=dict(basis_settings=fd_settings, psd=sens),
+            )
+            cov = covariance(info_mat=info)
     """
 
     # setup initial information
@@ -899,21 +1042,36 @@ def covariance(
     precision: Optional[bool] = False,
     **info_mat_kwargs: dict,
 ) -> np.ndarray | list:
-    """Calculate covariance matrix for a set of EMRI parameters, computing the information matrix if not supplied.
+    """Calculate the covariance matrix, computing the information matrix if not supplied.
+
+    The covariance is the pseudo-inverse of the information matrix (``np.linalg.pinv``, or
+    a 500-digit ``mpmath`` SVD pseudo-inverse with ``precision=True``).
 
     Args:
-        *info_mat_args: Set of arguments to pass to :func:`info_matrix`. Not required if ``info_mat`` is not ``None``.
-        info_mat: Pre-computed information matrix. If supplied, this matrix will be inverted.
-        diagonalize: If ``True``, diagonalizes the covariance matrix.
-        return_info_mat: If ``True``, also returns the computed information matrix.
-        precision: If ``True``, uses 500-dps precision to compute the information matrix inverse (requires `mpmath <https://mpmath.org>`_). This is typically a good idea as the information matrix can be highly ill-conditioned.
+        *info_mat_args: Positional arguments for :func:`info_matrix`. Not required if
+            ``info_mat`` is not ``None``.
+        info_mat: Pre-computed information matrix. If supplied, this matrix will be
+            inverted.
+        diagonalize: If ``True``, rotate the covariance into its eigenbasis
+            (``V^T cov V`` with the eigenvectors from :func:`get_eigeninfo`). Default
+            ``False``.
+        return_info_mat: If ``True``, also returns the information matrix. Default
+            ``False``.
+        precision: If ``True``, uses 500-dps precision to compute the information matrix
+            inverse (requires `mpmath <https://mpmath.org>`_; falls back to NumPy with a
+            printed message when it is missing). This is typically a good idea as the
+            information matrix can be highly ill-conditioned. Default ``False``.
         **info_mat_kwargs: Keyword arguments to pass to :func:`info_matrix`.
 
     Returns:
-        Covariance matrix. If ``return_info_mat is True``. A list will be returned with the covariance as the first
-        entry and the information matrix as the second entry. If ``return_derivs is True`` (keyword argument to :func:`info_matrix`),
-        then another entry will be added to the list for the derivatives.
+        np.ndarray | list: The covariance matrix, or, when ``return_info_mat`` or
+        ``return_derivs`` (an :func:`info_matrix` keyword) is set, the list
+        ``[cov, info_mat (if return_info_mat), dh (if return_derivs)]``.
 
+    Warning:
+        ``return_derivs=True`` expects the information matrix to be computed here: with an
+        ``info_mat`` supplied as well, that matrix is unpacked as if it were the
+        ``(info, dh)`` pair.
     """
 
     if info_mat is None:
@@ -980,18 +1138,25 @@ def plot_covariance_corner(
 ) -> plt.Figure:
     """Construct a corner plot for a given covariance matrix.
 
-    The `corner <https://corner.readthedocs.io/en/latest/>`_ module is required for this.
+    Draws ``nsamp`` samples from the Gaussian ``N(params, cov)`` and plots them with
+    ``corner.corner``. The `corner <https://corner.readthedocs.io/en/latest/>`_ module is
+    required for this.
 
     Args:
-        params: The set of parameters used for the event (the mean vector of the covariance matrix).
+        params: The set of parameters used for the event (the mean vector of the
+            covariance matrix).
         cov: Covariance matrix from which to construct the corner plot.
-        nsamp: Number of samples to draw from the multivariate distribution.
-        fig: Matplotlib :class:`plt.Figure` object. Use this if passing an existing corner plot figure.
-        **kwargs: Keyword arguments for the corner plot - see the module documentation for more info.
+        nsamp: Number of samples to draw from the multivariate distribution. Default
+            ``25000``.
+        fig: Ignored: the figure is always created by ``corner.corner`` (being a named
+            parameter, ``fig`` does not reach it through ``kwargs`` either).
+        **kwargs: Keyword arguments for ``corner.corner``.
 
     Returns:
-        The corner plot figure.
+        plt.Figure: The corner plot figure.
 
+    Raises:
+        ValueError: ``corner`` is not installed.
     """
 
     # TODO: add capability for ChainConsumer?
@@ -1017,23 +1182,31 @@ def plot_covariance_contour(
     ax: Optional[plt.Axes] = None,
     **kwargs: dict,
 ) -> plt.Axes | Tuple[plt.Figure, plt.Axes]:
-    """Construct a contour plot for a given covariance matrix on a single axis object.
+    """Construct a 2D contour plot for two parameters of a covariance matrix on one Axes.
 
-    The `corner <https://corner.readthedocs.io/en/latest/>`_ module is required for this.
+    Draws ``nsamp`` samples from ``N(params, cov)`` and plots the
+    ``(horizontal_index, vertical_index)`` pair with ``corner.hist2d``. The `corner
+    <https://corner.readthedocs.io/en/latest/>`_ module is required for this.
 
     Args:
-        params: The set of parameters used for the event (the mean vector of the covariance matrix).
-        cov: Covariance matrix from which to construct the corner plot.
-        horizontal_index: Parameter index to plot along the horizontal axis of the contour plot.
-        vertical_index: Parameter index to plot along the vertical axis of the contour plot.
-        nsamp: Number of samples to draw from the multivariate distribution.
-        fig: Matplotlib :class:`plt.Figure` object. Use this if passing an existing corner plot figure.
-        **kwargs: Keyword arguments for the corner plot - see the module documentation for more info.
+        params: The set of parameters used for the event (the mean vector of the
+            covariance matrix).
+        cov: Covariance matrix from which to draw the samples.
+        horizontal_index: Parameter index to plot along the horizontal axis of the
+            contour plot.
+        vertical_index: Parameter index to plot along the vertical axis of the contour
+            plot.
+        nsamp: Number of samples to draw from the multivariate distribution. Default
+            ``25000``.
+        ax: Matplotlib Axes to draw on. Default ``None`` creates a new figure.
+        **kwargs: Keyword arguments for ``corner.hist2d``.
 
     Returns:
-        If ``ax`` is provided, the return will be that ax object. If it is not provided, then a
-        Matplotlib Figure and Axes obejct is created and returned as a tuple: ``(plt.Figure, plt.Axes)``.
+        plt.Axes | tuple[plt.Figure, plt.Axes]: The given ``ax``, or ``(fig, ax)`` when
+        the function created them.
 
+    Raises:
+        ModuleNotFoundError: ``corner`` is not installed.
     """
 
     # TODO: add capability for ChainConsumer?
@@ -1067,16 +1240,19 @@ def plot_covariance_contour(
 def get_eigeninfo(
     arr: np.ndarray, high_precision: Optional[bool] = False
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Performs eigenvalue decomposition and returns the eigenvalues and right-eigenvectors for the supplied information/covariance matrix.
+    """Eigenvalues and right eigenvectors of an information or covariance matrix.
 
     Args:
         arr: Input matrix for which to perform eigenvalue decomposition.
-        high_precision: If ``True``, use 500-dps precision to ensure accurate eigenvalue decomposition
-            (requires `mpmath <https://mpmath.org>`_ to be installed). Defaults to False.
+        high_precision: If ``True``, use 500-dps ``mpmath.eig`` for an accurate
+            decomposition (requires `mpmath <https://mpmath.org>`_; falls back to
+            ``np.linalg.eig`` with a printed message when it is missing). Defaults to
+            ``False``.
 
     Returns:
-        Tuple containing Eigenvalues and right-Eigenvectors for the supplied array, constructed such that evects[:,k] corresponds to evals[k].
-
+        tuple[np.ndarray, np.ndarray]: ``(evals, evects)`` with ``evects[:, k]`` the
+        eigenvector of ``evals[k]`` (``np.linalg.eig`` may return complex values for a
+        non-symmetric input).
     """
 
     if high_precision:
@@ -1121,33 +1297,53 @@ def cutler_vallisneri_bias(
     waveform_approx_kwargs: Optional[dict] = {},
     inner_product_kwargs: Optional[dict] = {},
 ) -> list:
-    """Calculate the Cutler-Vallisneri bias.
+    r"""Calculate the Cutler-Vallisneri parameter bias from waveform-model error.
 
-    # TODO: add basic math
+    .. math::
+
+        \Delta\lambda^i = (\Gamma^{-1})^{ij}\,
+            \langle \partial_j h \,|\, h_\text{true} - h_\text{approx} \rangle,
+
+    with :math:`\Gamma^{-1}` the covariance (:func:`covariance`), the derivatives of the
+    **true** model from :func:`dh_dlambda`, and both waveforms evaluated at the transformed
+    ``params``.
 
     Args:
-        waveform_model_true: Callable function to the **true** waveform generator with signature ``(*params, **waveform_kwargs)``.
-        waveform_model_approx: Callable function to the **approximate** waveform generator with signature ``(*params, **waveform_kwargs)``.
-        params: Source parameters.
+        waveform_model_true: Callable **true** waveform generator with signature
+            ``(*params, *waveform_true_args, **waveform_true_kwargs)``.
+        waveform_model_approx: Callable **approximate** waveform generator with signature
+            ``(*params, *waveform_approx_args, **waveform_approx_kwargs)``.
+        params: Source parameters (``np.ndarray``, derivative basis).
         eps: Absolute **derivative** step size. See :func:`info_matrix`.
-        input_diagnostics: Dictionary including the diagnostic information if it is precomputed. Dictionary must include
-            keys ``"cov"`` (covariance matrix, output of :func:`covariance`), ``"h_true"`` (the **true** waveform),
-            and ``"dh"`` (derivatives of the waveforms, list of outputs from :func:`dh_dlambda`).
-        info_mat: Pre-computed information matrix. If supplied, this matrix will be inverted to find the covariance.
+        input_diagnostics: Dictionary including the diagnostic information if it is
+            precomputed. Dictionary must include keys ``"cov"`` (covariance matrix, output
+            of :func:`covariance`), ``"h_true"`` (the **true** waveform), and ``"dh"``
+            (derivatives of the waveforms, list of outputs from :func:`dh_dlambda`).
+        info_mat: Pre-computed information matrix (ignored, with a warning, when
+            ``input_diagnostics`` is given).
         deriv_inds: Subset of parameters of interest. See :func:`info_matrix`.
         return_derivs: If ``True``, also returns computed numerical derivatives.
         return_cov: If ``True``, also returns computed covariance matrix.
-        parameter_transforms: `TransformContainer <https://lisa-analysis-tools.github.io/Eryn/user/utils.html#eryn.utils.TransformContainer>`_ object. See :func:`info_matrix`.
+        parameter_transforms: :class:`~eryn.utils.TransformContainer` from the derivative
+            basis to the waveform basis. See :func:`info_matrix`. Although it defaults to
+            ``None``, it is required: ``params`` is always passed through its
+            ``transform_base_parameters``.
         waveform_true_args: Arguments for the **true** waveform generator.
         waveform_true_kwargs: Keyword arguments for the **true** waveform generator.
         waveform_approx_args: Arguments for the **approximate** waveform generator.
-        waveform_approx_kwargs: Keyword arguments for the **approximate** waveform generator.
-        inner_product_kwargs: Keyword arguments for the inner product function.
+        waveform_approx_kwargs: Keyword arguments for the **approximate** waveform
+            generator.
+        inner_product_kwargs: Keyword arguments for :func:`inner_product` (must include
+            ``basis_settings``; the waveforms are raw arrays).
 
     Returns:
-        List of return information. By default, it is ``[systematic error, bias]``.
-        If ``return_derivs`` or ``return_cov`` are ``True``, they will be added to the list with derivs added before covs.
+        list: ``[syst_vec, bias]``, where ``syst_vec[k] = <dh_k | h_true - h_approx>``
+        and ``bias = cov @ syst_vec``; followed by ``cov`` if ``return_cov`` and then
+        ``dh`` if ``return_derivs``.
 
+    Warning:
+        When ``info_mat`` is given without ``input_diagnostics``, :func:`covariance` is
+        called with both ``info_mat`` and ``return_derivs=True``; see the warning there.
     """
 
     if deriv_inds is None:
@@ -1241,22 +1437,25 @@ def scale_to_snr(
     return_orig_snr: Optional[bool] = False,
     **snr_kwargs: dict,
 ) -> np.ndarray | list | Tuple[np.ndarray | list, float]:
-    """Calculate the SNR and scale a signal.
+    """Rescale a signal to a target optimal SNR.
+
+    Computes the optimal SNR with :func:`snr` and multiplies the signal by
+    ``target_snr / snr``.
 
     Args:
         target_snr: Desired SNR value for the injected signal.
-        sig: Signal to adjust. A copy will be made.
-            Can be time-domain or frequency-domain.
-            Must be 1D ``np.ndarray``, list of 1D ``np.ndarray``s, or 2D ``np.ndarray``
-            across channels with shape ``(nchannels, data length)``.
-        *snr_args: Arguments to pass to :func:`snr`.
-        return_orig_snr: If ``True``, return the original SNR in addition to the adjusted data.
-        **snr_kwargs: Keyword arguments to pass to :func:`snr`.
+        sig: Signal to adjust (not modified; a scaled copy is returned): a 1D array, a
+            per-channel list of 1D arrays, or a 2D ``(nchannels, N)`` array, laid out on
+            the basis given to :func:`snr` (``basis_settings`` in ``snr_kwargs``).
+        *snr_args: Positional arguments for :func:`snr` (and so :func:`inner_product`).
+        return_orig_snr: If ``True``, return the original SNR in addition to the adjusted
+            data. Default ``False``.
+        **snr_kwargs: Keyword arguments for :func:`snr` (``basis_settings``, ``psd``, ...).
 
     Returns:
-        Returns the copied input signal adjusted to the target SNR. If ``return_orig_snr is True``, the original
-        SNR is added as the second entry of a tuple with the adjusted signal (as the first entry in the tuple).
-
+        np.ndarray | list | tuple: The scaled signal in the input's form (a 2D input
+        comes back as ``np.asarray`` of the scaled rows); ``(scaled, original_snr)`` when
+        ``return_orig_snr`` is ``True``.
     """
     # get the snr and adjustment factor
     snr_out = snr(sig, *snr_args, **snr_kwargs)

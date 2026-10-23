@@ -72,6 +72,35 @@ class BlankGeneralSettings(EreborGeneralSettings):
     """General block for the blank fit (small smoke-friendly WDM grid).
 
     ``Tobs == nf*nt*dt`` exactly (256*256*5 s ~ 3.8 d), 0.3-8 mHz band.
+
+    Subclass of :class:`~lisatools.globalfit.stock.erebor.fit.EreborGeneralSettings`
+    (inherited fields documented there).
+
+    Attributes:
+        dt: Sample spacing [s]. Default ``5.0``.
+        nf: WDM frequency layers. Default ``256``.
+        nt: WDM time layers. Default ``256``.
+        min_freq: Data-band floor [Hz]. Default ``3e-4``.
+        max_freq: Data-band ceiling [Hz]. Default ``8e-3``.
+        window_tukey_alpha: Default ``0.0``.
+        edge_crop_wavelets: Default ``0``.
+        nwalkers: Env ``NWALKERS``. Default ``4``.
+        ntemps: Engine ladder rungs (meaningful here: simple-API branches
+            temper on the engine ladder). Env ``NTEMPS``. Default ``2``.
+        file_store_dir: Env ``FILE_STORE_DIR``. Default
+            ``"./gf_output_blank/"``.
+        base_file_name: Env ``BASE_FILE_NAME``. Default ``"blank_fit"``.
+        source_types: Default ``()``.
+        data_mode: Only ``"synthetic"``. Env ``DATA_MODE``. Default
+            ``"synthetic"``.
+        include_noise: Draw a synthetic instrument-noise realization from
+            ``fixed_psd_params`` instead of all-zero data. Env
+            ``INCLUDE_NOISE``. Default ``False``.
+        noise_seed: Env ``NOISE_SEED``. Default ``0``.
+        t_start: Data start [s]. Default ``0.0``.
+        fixed_psd_params: ``[Soms_d, Sa_a]`` of the fixed sensitivity (and
+            the noise draw). Default :data:`PSD_INJECTION`.
+        likelihood_source_only: Default ``True``.
     """
 
     dt: float = 5.0
@@ -126,6 +155,31 @@ class BlankGlobalFit(EreborFit):
     move keeps the sampler ticking, so ``for model, state in fit.sample():``
     works with nothing configured at all — adjust the residual/state inside
     the loop and do your own storage there.
+
+    Default recipe: one empty PE stage ``"main"`` (``add_move`` /
+    ``add_branch(..., moves=[...])`` land there). Data: all zeros, or a
+    synthetic noise draw with ``include_noise``; any other data through an
+    explicit ``data_processor_class``. Not part of the production runs
+    (used by the LATW tutorials).
+
+    Attributes:
+        option_name: ``"blank"``.
+        setup_classes: ``{}`` (branches come from :meth:`add_branch`).
+
+    Example:
+        .. code-block:: python
+
+            from eryn.prior import uniform_dist
+            from lisatools.globalfit.stock import erebor
+
+            def nudge(model, state):
+                return state, None
+
+            fit = erebor.blank(nwalkers=4, ntemps=2, include_noise=True)
+            fit.add_branch("line", ndim=1, priors={0: uniform_dist(0.0, 1.0)},
+                           moves=[nudge])
+            for model, state in fit.sample(iterations=3, store=False):
+                print(state.log_like.shape)
     """
 
     option_name = "blank"
@@ -139,13 +193,23 @@ class BlankGlobalFit(EreborFit):
     setup_classes: typing.ClassVar[typing.Dict[str, type]] = {}
 
     def default_branches(self) -> typing.Dict[str, Settings]:
+        """No branches."""
         return {}
 
     def default_recipe(self) -> Recipe:
+        """One empty PE stage ``"main"``."""
         # One empty PE stage: add_move / add_branch(moves=...) land here.
         return Recipe([Stage("main", kind="pe")])
 
     def build(self, force: bool = False) -> "BlankGlobalFit":
+        """Build; a bare canvas first gets the hidden ``idle`` branch + :func:`idle_move`.
+
+        Args:
+            force: Rebuild even when built. Default ``False``.
+
+        Returns:
+            BlankGlobalFit: ``self``.
+        """
         if not self._branch_names and not self.built:
             # Bare canvas: the engine needs at least one branch and the recipe
             # at least one move — inject the hidden no-op pair so the
@@ -158,10 +222,16 @@ class BlankGlobalFit(EreborFit):
         return super().build(force=force)
 
     def default_preprocess_kwargs(self) -> dict:
+        """No highpass / trim / normalize."""
         # The synthetic WDM draw needs no highpass/trim/normalize.
         return dict(highpass_kwargs=None, trim_kwargs=None, Tobs=None, normalize=False)
 
     def set_default_processor(self, gs: BlankGeneralSettings) -> None:
+        """``ZeroDataProcessingStep``, or ``SyntheticNoiseProcessingStep`` with ``include_noise``.
+
+        Raises:
+            ValueError: When ``data_mode`` is not ``"synthetic"``.
+        """
         if gs.data_mode != "synthetic":
             raise ValueError(
                 f"blank data_mode={gs.data_mode!r}; the blank fit is synthetic-only. "

@@ -4,7 +4,8 @@
 The table (:class:`lisatools.domains.WDMLookupTable`, build kinds ``n_ref_only`` /
 ``n_ref_complex``) stores the WDM response at one reference pixel ``(m_ref, n_ref)`` of a unit
 linear chirp as a function of the carrier's offset inside its layer (``f_vals_norm``, uniform,
-support ``[-k, k+1)`` layers) and its chirp rate (``fdot_vals``, uniform). This module evaluates
+support ``[-(k+1), k+1)`` layers for ``num_layers_diff = k``) and its chirp rate (``fdot_vals``,
+uniform). This module evaluates
 that table for arrays of pixels in one shot -- the vectorized twin of
 ``WDMLookupTable.get_wdm_coeffs`` (whose per-layer Python loop and scipy interpolators are the
 EMRI reference path, docs/emri-direct-wdm.md) -- with the same evaluation rule
@@ -27,6 +28,10 @@ with array-module gathers so the same code runs on numpy and cupy. Linear interp
 the table's peaked response left a 2.5e-4 amplitude deficit on the EMRI; on the SOBBH 6-month
 gate the B-spline is equal to or better than Keys (two of six sources halve their mismatch).
 Entries outside the table support are zero (and flagged).
+
+Used by the SOBBH direct-to-WDM lookup likelihood (:mod:`lisatools.sources.sobbh.wdm_direct`,
+``SOBBH_LIKELIHOOD=lookup`` on the 9-month / 12-month runs) and the GB lookup engine
+(``gbgpu.gblookupcomputations``).
 """
 
 from __future__ import annotations
@@ -86,7 +91,35 @@ class WDMLookupEvaluator:
             mirror boundaries == ``WDMLookupTable`` ``INTERP_METHOD = "spline"``),
             ``"cubic"`` (Keys cubic convolution) or ``"linear"`` (bilinear).
         force_backend: backend NAME the table arrays are placed on (``"cpu"``, ``"cuda12x"``,
-            ...); ``None`` keeps the table's own backend. Chosen here, never per call.
+            ...); ``None`` keeps the table's own backend. Chosen here, never per call. A
+            backend object is also accepted (its name is used).
+
+    Raises:
+        ValueError: For another table kind, an unknown ``interp``, or a non-uniform table
+            axis.
+
+    Attributes:
+        layer_df (float): Layer spacing of the table grid (Hz).
+        layer_dt (float): Pixel duration of the table grid (s).
+        m_ref (int): Reference layer of the table build.
+        n_ref (int): Reference pixel of the table build.
+        f_min, f_max, df (float): The offset axis (Hz).
+        fdot_min, fdot_max, dfdot (float): The fdot axis (Hz/s; ``dfdot = 1`` for a
+            one-node axis).
+        tab_cos, tab_sin: The cos / seam-continuous sin tables on the backend (B-spline
+            coefficients for ``"spline"``).
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.domains import WDMLookupTable
+            from lisatools.wdm_lookup_eval import WDMLookupEvaluator
+
+            ev = WDMLookupEvaluator(WDMLookupTable.from_file(path), interp="spline",
+                                    force_backend="cpu")
+            m = ev.layers_for(f, num_m_layers=2)              # (..., 5) target layers
+            w, ok = ev.coeffs(amp[..., None], phi[..., None], f[..., None],
+                              fdot[..., None], n[..., None], m)
     """
 
     INTERPS = ("linear", "cubic", "spline")
@@ -163,12 +196,14 @@ class WDMLookupEvaluator:
 
     @property
     def backend(self):
+        """The lisatools backend the tables live on (resolved from its name on each access)."""
         import lisatools
 
         return lisatools.get_backend(self._backend_name)
 
     @property
     def xp(self):
+        """Array module of :attr:`backend` (numpy or cupy)."""
         return self.backend.xp
 
     def layers_for(self, f_ref, num_m_layers):
@@ -177,6 +212,13 @@ class WDMLookupEvaluator:
         Purely geometric: for ``f_ref < k * layer_df`` this can return negative layers. The
         caller owns the valid layer-range mask for its own grid (this evaluator is built from
         one table and has no notion of any particular caller's ``Nf``).
+
+        Args:
+            f_ref: Reference frequencies (Hz), any shape.
+            num_m_layers: ``k``, layers on each side.
+
+        Returns:
+            ``xp.ndarray``: int64 layers of shape ``f_ref.shape + (2k + 1,)``.
         """
         xp = self.xp
         k = int(num_m_layers)
@@ -184,7 +226,11 @@ class WDMLookupEvaluator:
         return m0[..., None] + xp.arange(-k, k + 1, dtype=xp.int64)
 
     def _interp(self, tab, u, v):
-        """Interpolate ``tab[j, i]`` at fractional indices ``(v, u)`` (fdot, f_norm)."""
+        """Interpolate ``tab[j, i]`` at fractional indices ``(v, u)`` (fdot, f_norm).
+
+        Bilinear (clipped), uniform cubic B-spline on mirrored indices, or Keys cubic
+        (clipped indices), per :attr:`interp`.
+        """
         xp = self.xp
         nf, nfd = self.nf, self.nfdot
         i0 = xp.floor(u).astype(xp.int64)
@@ -242,6 +288,17 @@ class WDMLookupEvaluator:
         fdot axis, ``fdot`` inside that axis). ``ok`` does not check that ``m`` itself is a
         valid layer on any particular grid (e.g. ``0 <= m < Nf``) -- this evaluator does not
         know the calling grid's ``Nf``, so that mask is the caller's responsibility.
+
+        Args:
+            amp: Carrier amplitudes.
+            phi: Carrier phases at the pixel times ``n * layer_dt`` (rad).
+            f: Instantaneous frequencies (Hz).
+            fdot: Frequency derivatives (Hz/s).
+            n: Absolute time-pixel indices.
+            m: Absolute layer indices (e.g. from :meth:`layers_for`).
+
+        Returns:
+            tuple: ``(w, ok)``, broadcast shape; ``w`` float, ``ok`` bool.
         """
         xp = self.xp
         amp, phi, f, fdot, n, m = xp.broadcast_arrays(

@@ -1,4 +1,27 @@
-"""Backend definitions and method tables for the LISA Analysis Tools native modules."""
+"""Backend definitions and method tables for the LISA Analysis Tools native modules.
+
+Holds the backend classes ``lisatools/__init__.py`` registers with the ``gpubackendtools``
+registry, and the method table they fill:
+
+- :class:`LISAToolsBackendMethods`: dataclass listing every native (C++/CUDA) symbol a
+  backend exposes (orbits, sensitivity, response, domain wraps, global-fit kernels).
+- :class:`LISAToolsBackend`: mixin that copies the table's fields onto the backend.
+- :class:`LISAToolsCpuBackend`, :class:`LISAToolsCuda11xBackend`,
+  :class:`LISAToolsCuda12xBackend`, :class:`LISAToolsCuda13xBackend`: the concrete backends,
+  registered as ``lisatools_cpu`` / ``lisatools_cuda11x`` / ``lisatools_cuda12x`` /
+  ``lisatools_cuda13x``. Each loads ``lisatools_backend_<name>.pycppdetector`` (the nanobind
+  module built from ``binding_detector.cxx``) plus GBT's ``gbt_backend_<name>.interp`` (the
+  single registrant of ``CubicSplineWrap``).
+
+Adding a native function: add a keyword-only, ``None``-defaulted field to
+:class:`LISAToolsBackendMethods` (see its Warning), an attribute on
+:class:`LISAToolsBackend`, and the entry in every concrete backend's loader. Code reaches the
+symbols as ``self.backend.<name>`` from any
+:class:`~lisatools.utils.parallelbase.LISAToolsParallelModule`.
+
+The ``cutils`` directory also holds the C++/CUDA sources and public headers
+(:func:`lisatools.get_include`).
+"""
 
 from __future__ import annotations
 
@@ -25,50 +48,83 @@ from ..utils.exceptions import *
 class LISAToolsBackendMethods(BackendMethods):
     """Container of native (C++/CUDA) symbols exposed by a LISA Analysis Tools backend.
 
-    Extends :class:`gpubackendtools.gpubackendtools.BackendMethods` with the
-    LISA-specific entries that each backend module must provide. When adding a
-    new C++/CUDA function to the package, add a field here and populate it from
-    every backend's ``*_module_loader``.
-
-    .. warning::
-
-       **A new field MUST be keyword-only with a ``None`` default.** Declare
-       it at the END of the field list as::
-
-           new_symbol: typing.Optional[typing.Callable[(...), None]] = (
-               dataclasses.field(default=None, kw_only=True)
-           )
-
-       This dataclass is SUBCLASSED by downstream packages -- GBGPU's
-       ``gbgpu.cutils.GBGPUBackendMethods``, and the same pattern in BBHx /
-       FEW -- which add their own REQUIRED fields and construct the subclass
-       from their OWN module loaders. Those loaders cannot know about a
-       field LAT added yesterday, so a REQUIRED field here breaks every
-       downstream backend load at import time. That is exactly what commit
-       ``0f0fc73a`` did with ``gb_inmodel_gate_compact`` /
-       ``gb_inmodel_accept_apply``: cluster job 354 (2026-08-28) died with
-       ``TypeError: GBGPUBackendMethods.__init__() missing 2 required
-       positional arguments``.
-
-       ``kw_only=True`` is load-bearing, not decoration: a plain ``= None``
-       default would place a defaulted field ahead of the subclass's
-       required ones and fail at CLASS-DEFINITION time with "non-default
-       argument follows default argument". Keyword-only fields are exempt
-       from that ordering rule.
-
-       ``None`` is also the honest value: it means "this backend module does
-       not carry the symbol", which is the same state a stale ``.so``
-       produces via the loaders' ``getattr(_lat_pd, name, None)``. Every
-       consumer must already handle it. Same lesson as ``ddbe414`` -- the
-       compile/import-time contract is the one that bites in production,
-       and it bites in the OTHER repo.
+    Extends :class:`gpubackendtools.gpubackendtools.BackendMethods` (which carries ``xp``)
+    with the LISA-specific entries each backend module provides. Every concrete backend's
+    loader (:meth:`LISAToolsCpuBackend.cpu_methods_loader`,
+    :meth:`LISAToolsCuda12xBackend.cuda12x_module_loader`, ...) builds one instance from its
+    ``pycppdetector`` module; :class:`LISAToolsBackend` then copies the fields onto the
+    backend object. The CPU loader fills the ``*CPU`` class variants, the CUDA loaders the
+    ``*GPU`` variants (distinct C++ type names per build, see ``docs/conventions.md``).
 
     Attributes:
-        OrbitsWrap: Native ``OrbitsWrap`` class (CPU or GPU variant) used as the
-            low-level wrapper around an ``Orbits`` instance.
-        Orbits: Native ``Orbits`` class providing detector geometry on the
-            backend device.
-        check_orbits: Native function used to validate orbit data.
+        xp (types.ModuleType): Array module, ``numpy`` (CPU), ``cupy`` (CUDA) or
+            ``jax.numpy`` (the JAX backend, :mod:`lisatools.jax.backend`). Inherited.
+        OrbitsWrap (type): Native ``OrbitsWrap`` class, the low-level wrapper around an
+            ``Orbits`` instance that kernels receive (see :class:`~lisatools.detector.Orbits`).
+        Orbits (type): Native ``Orbits`` class (detector geometry on the backend device).
+        SensitivityMatrixWrap (type): Native ``XYZSensitivityMatrixWrap`` (XYZ sensitivity
+            backend: galactic grid, FD time-averaged transfer functions, ``run_async``).
+        GalacticGridSetup (type): Native galactic-grid setup class.
+        GalacticGridWrap (type): Native galactic-grid wrapper class.
+        STFTDomainWrap (type): Native STFT time-frequency domain wrapper.
+        FDDomainForStftWrap (type): Native FD domain wrapper of the STFT code (the stft
+            ``FDDomainWrap``, renamed so it does not collide with :attr:`FDDomainWrap`).
+        STFTFresnelWrap (type): Native STFT Fresnel wrapper.
+        check_orbits (Callable): Native orbit check function.
+        psd_likelihood (Callable): Legacy native PSD likelihood kernel.
+        compute_logpdf (Callable): Legacy native log-pdf kernel.
+        TDSplineTDIWaveformWrap (type): Native TD spline-fed TDI-on-the-fly waveform wrapper.
+        FDSplineTDIWaveformWrap (type): Native FD spline-fed TDI-on-the-fly waveform wrapper.
+        LISAResponseWrap (type): Native LISA arm-projection / TDI response wrapper.
+        LISAResponse (type): Native LISA response class.
+        TDIConfigWrap (type): Native TDI configuration wrapper.
+        TDIConfig (type): Native TDI configuration class.
+        CubicSplineWrap (type): Cubic-spline wrapper, taken from GBT's
+            ``gbt_backend_<name>.interp`` (GBT is its single registrant).
+        WDMSettingsWrap (type): Native WDM settings descriptor wrapper.
+        WDMDomainWrap (type): Native WDM domain descriptor wrapper.
+        FDDomainWrap (type): Native FD domain descriptor wrapper (chunked-het path).
+        TDITypeDict (dict): ``{"XYZ": TDI_XYZ, "AET": TDI_AET, "AE": TDI_AE}``, the native
+            TDI flavour ints. Pass these values to kernels, never literals.
+        sobbh_lookup (Callable or None): Fused SOBBH direct-to-WDM lookup kernel. Keyword-only,
+            default ``None``.
+        gb_inmodel_gate_compact (Callable or None): Fused GB in-model pre-score gate /
+            compaction kernel, used only with ``GB_INMODEL_ACCEPT_KERNEL=1`` (default off).
+            Keyword-only, default ``None``.
+        gb_inmodel_accept_apply (Callable or None): Fused GB in-model post-score accept /
+            bookkeeping kernel. Keyword-only, default ``None``.
+        TDDenseTDIWaveformWrap (type or None): Template-batched TD TDI-on-the-fly wrapper with
+            exact dense-output phases (EMRI). Keyword-only, default ``None``.
+        wdm_lookup_sum (Callable or None): Fused sparse-response to WDM lookup sum (EMRI
+            direct-to-WDM). Keyword-only, default ``None``.
+
+    Warning:
+        **A new field MUST be keyword-only with a ``None`` default.** Declare it at the END of
+        the field list as::
+
+            new_symbol: typing.Optional[typing.Callable[(...), None]] = (
+                dataclasses.field(default=None, kw_only=True)
+            )
+
+        This dataclass is SUBCLASSED by downstream packages -- GBGPU's
+        ``gbgpu.cutils.GBGPUBackendMethods``, and the same pattern in BBHx / FEW -- which add
+        their own REQUIRED fields and construct the subclass from their OWN module loaders.
+        Those loaders cannot know about a field LAT added yesterday, so a REQUIRED field here
+        breaks every downstream backend load at import time. That is exactly what commit
+        ``0f0fc73a`` did with ``gb_inmodel_gate_compact`` / ``gb_inmodel_accept_apply``:
+        cluster job 354 (2026-08-28) died with ``TypeError: GBGPUBackendMethods.__init__()
+        missing 2 required positional arguments``.
+
+        ``kw_only=True`` is load-bearing, not decoration: a plain ``= None`` default would
+        place a defaulted field ahead of the subclass's required ones and fail at
+        CLASS-DEFINITION time with "non-default argument follows default argument".
+        Keyword-only fields are exempt from that ordering rule.
+
+        ``None`` is also the honest value: it means "this backend module does not carry the
+        symbol", which is the same state a stale ``.so`` produces via the loaders'
+        ``getattr(_lat_pd, name, None)``. Every consumer must already handle it. Same lesson
+        as ``ddbe414`` -- the compile/import-time contract is the one that bites in
+        production, and it bites in the OTHER repo.
     """
 
     OrbitsWrap: object
@@ -146,15 +202,20 @@ class LISAToolsBackendMethods(BackendMethods):
 class LISAToolsBackend:
     """Mixin attaching LISA-specific native symbols to a backend class.
 
-    Concrete CPU/CUDA backends combine this mixin with the matching
-    :class:`gpubackendtools` backend base (e.g. ``CpuBackend``,
-    ``Cuda12xBackend``) to expose both the generic ``xp`` array module and the
-    LISA-specific native classes (``OrbitsWrap``, ``Orbits``, ``check_orbits``).
+    Concrete CPU/CUDA backends combine this mixin with the matching ``gpubackendtools``
+    backend base (``CpuBackend``, ``Cuda12xBackend``, ...) to expose both the generic ``xp``
+    array module and every LISA-specific native symbol listed in
+    :class:`LISAToolsBackendMethods` (``OrbitsWrap``, ``WDMSettingsWrap``, ``TDITypeDict``,
+    ...) as plain attributes.
 
     Args:
-        lisatools_backend_methods: The :class:`LISAToolsBackendMethods` instance
-            produced by the backend's module loader. Its fields are copied onto
-            ``self`` so they are available as plain attributes.
+        lisatools_backend_methods (LISAToolsBackendMethods): The table produced by the
+            backend's module loader. Each LISA field is copied onto ``self`` (``xp`` is set by
+            the ``gpubackendtools`` base instead).
+
+    Raises:
+        AssertionError: When ``lisatools_backend_methods`` is not a
+            :class:`LISAToolsBackendMethods`.
     """
 
     # TODO: not ClassVar?
@@ -231,7 +292,17 @@ class LISAToolsBackend:
 
 
 class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
-    """CPU backend, backed by the ``lisatools_backend_cpu`` native module."""
+    """CPU backend, backed by the ``lisatools_backend_cpu`` native module.
+
+    Registered as ``lisatools_cpu``; reach it with ``lisatools.get_backend("cpu")`` or
+    ``force_backend="cpu"`` on any LISA Analysis Tools class. ``xp`` is ``numpy``. The
+    registry constructs it without arguments.
+
+    Args:
+        *args: Forwarded to ``gpubackendtools.gpubackendtools.CpuBackend.__init__`` (which
+            takes none).
+        **kwargs: Forwarded likewise.
+    """
 
     _backend_name = "lisatools_backend_cpu"
     _name = "lisatools_cpu"
@@ -244,9 +315,19 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
     def cpu_methods_loader() -> LISAToolsBackendMethods:
         """Load CPU native symbols and return a populated :class:`LISAToolsBackendMethods`.
 
+        Imports ``gbt_backend_cpu.interp`` (for ``CubicSplineWrap``) and
+        ``lisatools_backend_cpu.pycppdetector``, and fills the table with the ``*CPU`` class
+        variants. Optional symbols missing from an older build are set to ``None``.
+
+        Returns:
+            LISAToolsBackendMethods: The CPU method table, ``xp=numpy``.
+
         Raises:
-            BackendUnavailableException: If ``lisatools_backend_cpu`` cannot be
-                imported (e.g. the CPU extension was not built).
+            BackendUnavailableException: If either native module cannot be imported (e.g. the
+                CPU extension was not built). This is the ``gpubackendtools.exceptions``
+                class, not the ``gpubackendtools.gpubackendtools`` one the backend registry
+                catches, so it propagates out of ``get_backend`` / ``has_backend`` instead of
+                marking the backend unavailable (the CUDA loaders behave the same way).
         """
         try:
             import gbt_backend_cpu.interp
@@ -299,7 +380,17 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
 
 
 class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
-    """CUDA 11.x backend, backed by ``lisatools_backend_cuda11x``."""
+    """CUDA 11.x backend, backed by ``lisatools_backend_cuda11x``.
+
+    Registered as ``lisatools_cuda11x`` (``lisatools.get_backend("cuda11x")``). ``xp`` is
+    ``cupy``. The ``gpubackendtools`` base (``check_cuda_backend``) imports the plugin
+    module and checks CuPy before calling :meth:`cuda11x_module_loader`.
+
+    Args:
+        *args: Forwarded to ``gpubackendtools.gpubackendtools.Cuda11xBackend.__init__``
+            (which takes none).
+        **kwargs: Forwarded likewise.
+    """
 
     _backend_name: str = "lisatools_backend_cuda11x"
     _name = "lisatools_cuda11x"
@@ -312,11 +403,18 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
     def cuda11x_module_loader():
         """Load CUDA 11.x native symbols and return a :class:`LISAToolsBackendMethods`.
 
+        Imports ``gbt_backend_cuda11x.interp`` and ``lisatools_backend_cuda11x.pycppdetector``
+        and fills the table with the ``*GPU`` class variants. Optional symbols missing from
+        an older build are set to ``None``.
+
+        Returns:
+            LISAToolsBackendMethods: The CUDA 11.x method table, ``xp=cupy``.
+
         Raises:
-            BackendUnavailableException: If ``lisatools_backend_cuda11x`` is not
-                available.
-            MissingDependencies: If ``cupy`` (specifically ``cupy-cuda11x``) is
-                not installed.
+            BackendUnavailableException: If either native module cannot be imported.
+            NameError: If ``cupy`` cannot be imported: the loader then reaches
+                ``raise MissingDependencies(...)``, a name this module does not import.
+                Normally pre-empted by the base class's CuPy check.
         """
         try:
             import gbt_backend_cuda11x.interp
@@ -375,7 +473,17 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
 
 
 class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
-    """CUDA 12.x backend, backed by ``lisatools_backend_cuda12x``."""
+    """CUDA 12.x backend, backed by ``lisatools_backend_cuda12x``.
+
+    Registered as ``lisatools_cuda12x`` (``lisatools.get_backend("cuda12x")``). ``xp`` is
+    ``cupy``. The ``gpubackendtools`` base (``check_cuda_backend``) imports the plugin
+    module and checks CuPy before calling :meth:`cuda12x_module_loader`.
+
+    Args:
+        *args: Forwarded to ``gpubackendtools.gpubackendtools.Cuda12xBackend.__init__``
+            (which takes none).
+        **kwargs: Forwarded likewise.
+    """
 
     _backend_name: str = "lisatools_backend_cuda12x"
     _name = "lisatools_cuda12x"
@@ -388,11 +496,18 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
     def cuda12x_module_loader():
         """Load CUDA 12.x native symbols and return a :class:`LISAToolsBackendMethods`.
 
+        Imports ``gbt_backend_cuda12x.interp`` and ``lisatools_backend_cuda12x.pycppdetector``
+        and fills the table with the ``*GPU`` class variants. Optional symbols missing from
+        an older build are set to ``None``.
+
+        Returns:
+            LISAToolsBackendMethods: The CUDA 12.x method table, ``xp=cupy``.
+
         Raises:
-            BackendUnavailableException: If ``lisatools_backend_cuda12x`` is not
-                available.
-            MissingDependencies: If ``cupy`` (specifically ``cupy-cuda12x``) is
-                not installed.
+            BackendUnavailableException: If either native module cannot be imported.
+            NameError: If ``cupy`` cannot be imported: the loader then reaches
+                ``raise MissingDependencies(...)``, a name this module does not import.
+                Normally pre-empted by the base class's CuPy check.
         """
         try:
             import gbt_backend_cuda12x.interp
@@ -448,7 +563,18 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
         )
     
 class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
-    """CUDA 13.x backend, backed by ``lisatools_backend_cuda13x``."""
+    """CUDA 13.x backend, backed by ``lisatools_backend_cuda13x``.
+
+    Registered as ``lisatools_cuda13x`` (``lisatools.get_backend("cuda13x")``; the backend
+    the production runs launch with, ``GPU_BACKEND=cuda13x``). ``xp`` is ``cupy``. The
+    ``gpubackendtools`` base (``check_cuda_backend``) imports the plugin module and checks
+    CuPy before calling :meth:`cuda13x_module_loader`.
+
+    Args:
+        *args: Forwarded to ``gpubackendtools.gpubackendtools.Cuda13xBackend.__init__``
+            (which takes none).
+        **kwargs: Forwarded likewise.
+    """
 
     _backend_name: str = "lisatools_backend_cuda13x"
     _name = "lisatools_cuda13x"
@@ -461,11 +587,18 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
     def cuda13x_module_loader():
         """Load CUDA 13.x native symbols and return a :class:`LISAToolsBackendMethods`.
 
+        Imports ``gbt_backend_cuda13x.interp`` and ``lisatools_backend_cuda13x.pycppdetector``
+        and fills the table with the ``*GPU`` class variants. Optional symbols missing from
+        an older build are set to ``None``.
+
+        Returns:
+            LISAToolsBackendMethods: The CUDA 13.x method table, ``xp=cupy``.
+
         Raises:
-            BackendUnavailableException: If ``lisatools_backend_cuda13x`` is not
-                available.
-            MissingDependencies: If ``cupy`` (specifically ``cupy-cuda13x``) is
-                not installed.
+            BackendUnavailableException: If either native module cannot be imported.
+            NameError: If ``cupy`` cannot be imported: the loader then reaches
+                ``raise MissingDependencies(...)``, a name this module does not import.
+                Normally pre-empted by the base class's CuPy check.
         """
         try:
             import gbt_backend_cuda13x.interp

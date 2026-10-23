@@ -1,3 +1,35 @@
+r"""TDI on the fly: the LISA response evaluated directly from a source's amplitude and phase.
+
+Instead of projecting a sampled :math:`h_+, h_\times` time series
+(:mod:`lisatools.response.directresponse`), these generators evaluate the
+link projections and the TDI combination (:class:`~lisatools.response.tdiconfig.TDIConfig`)
+point-wise from the source's slowly varying amplitude and phase, on a
+(sparse) grid of evaluation times, in the C++/CUDA ``*TDIWaveformWrap``
+kernels. The output is an amplitude / phase representation per channel
+(:class:`TDIOutput`), with ``X = Xamp exp(-i (Xphase + phase_ref))``.
+
+Classes:
+
+- :class:`TDIonTheFly`: the base (backend, orbits, TDI configuration).
+- :class:`TDTDIonTheFly`: time-domain amplitude / phase splines (BBHx MBH and
+  SOBBH TDI-on-the-fly paths; :class:`~lisatools.sources.waveformbase.TDTDIOnFlyWaveformBase`).
+- :class:`FDTDIonTheFly`: frequency-domain amplitude / frequency splines.
+- :class:`GBTDIonTheFly`: the galactic-binary kernel (``gbgpu`` backend); GBGPU's
+  lookup and signal-heterodyne engines take its ``wave_gen`` handle.
+- :class:`GBFDTDIonTheFly`: heterodyned frequency-domain GB TDI (``gbgpu`` backend).
+- :class:`SOBBHTDIonTheFly`: the SOBBH PN kernel (``bbhx`` backend).
+- :class:`TDDenseTDIonTheFly`: template-batched multi-harmonic EMRI TDI with exact
+  dense-output phases (the ``EMRI_DIRECT_RESPONSE=dense`` production path,
+  :class:`~lisatools.sources.emri.wdm_direct.EMRIDirectWDM`).
+- :class:`TDIOutput`, :class:`TDTDIOutput`, :class:`FDTDIOutput`: the outputs.
+
+Sky angles are consumed in the orbits' frame (ICRS in the global fit: ``lam``
+= RA, ``beta`` = Dec); ``convert_to_ra_dec=True`` is deprecated. Orbits are
+configured once per identity and shared (``LISATOOLS_ORBITS_CACHE``; see
+:func:`_get_configured_orbits`). Choose the backend per object with
+``force_backend=``.
+"""
+
 from __future__ import annotations
 import numpy as np
 from typing import Optional, List
@@ -40,13 +72,22 @@ _ORBITS_CONFIGURED_CACHE: dict = {}
 
 
 def _orbits_cache_key(orbits) -> Optional[tuple]:
-    """Identity of everything ``Orbits._configure`` depends on, or None.
+    """Return the identity of everything ``Orbits._configure`` depends on, or None.
 
     Includes the BACKEND and the current DEVICE: the configured tables are arrays of the
     orbits' own backend, allocated on the device current at configuration. Without them a
     process that builds the same orbits on two backends (TDDenseGPUParityTest: cpu, then
     gpu) handed the numpy tables to ``OrbitsWrapGPU``, and a multi-GPU process would serve
-    one device's tables to another."""
+    one device's tables to another.
+
+    Args:
+        orbits (Orbits): The (unconfigured) orbits.
+
+    Returns:
+        tuple or None: Hashable key (class, backend, device, frame, armlength, ``t0``,
+        filename and the ``_configure_kwargs``, arrays hashed by content); ``None`` when
+        anything is unhashable (then no caching).
+    """
     from ..utils.device import current_device
 
     try:
@@ -74,7 +115,19 @@ def _orbits_cache_key(orbits) -> Optional[tuple]:
 
 
 def _get_configured_orbits(orbits):
-    """Return a configured Orbits for ``orbits``, reusing an identical one."""
+    """Return a configured Orbits for ``orbits``, reusing an identical one.
+
+    Order: ``LISATOOLS_ORBITS_CACHE=0`` -> a configured deepcopy (old
+    behaviour); an already-configured ``orbits`` -> itself; no cache key ->
+    a configured deepcopy; otherwise the shared cached instance for the key
+    (configured once, then reused by every caller, so treat it as read-only).
+
+    Args:
+        orbits (Orbits): The orbits passed to a generator.
+
+    Returns:
+        Orbits: A configured orbits object.
+    """
     import os
 
     if os.environ.get("LISATOOLS_ORBITS_CACHE", "1") == "0":
@@ -112,7 +165,9 @@ from .tdiconfig import TDIConfig
 from ..utils.constants import YRSID_SI  # lisaconstants ASTRONOMICAL_YEAR
 
 
+# TODO check: keep/remove/document -- no callers (a copy of directresponse.get_factorial)
 def get_factorial(n):
+    """Return ``n!`` by repeated multiplication."""
     fact = 1
 
     for i in range(1, n + 1):
@@ -131,34 +186,53 @@ C_inv = 1.0 / _C_SI  # 3.3356409519815204e-09, the C side's C_inv
 
 
 class CubicSpline:
-    """Alias to cubic spline cython class."""
+    """Empty placeholder type, used only in annotations.
+
+    Stands in for the retired cython spline class; the splines used here are
+    :class:`gpubackendtools.interpolate.CubicSplineInterpolant`.
+    """
     pass
 
 class TDIonTheFly(LISAToolsParallelModule):
-    """Class container for LISA TDI on the fly.
+    """Base class for LISA TDI on the fly (backend, orbits and TDI configuration).
 
-    This class is also GPU-accelerated, which is very helpful for Bayesian inference
-    methods.
+    Holds the backend, the configured orbits (``cpp_orbits``, a backend
+    ``OrbitsWrap``) and the TDI configuration (``cpp_tdi_config``, a backend
+    ``TDIConfigWrap``) that every subclass's C++ waveform wrap takes. The
+    subclasses add the evaluation grid (``t_arr``, ``N``) and the
+    ``wave_gen`` kernel handle that :meth:`__call__` runs. Runs on CPU or GPU
+    (and ``jax`` for the subclasses that support it).
 
     Args:
-        tdi_config (str or list, optional): TDI setup. Currently, the stock options are
-            :code:`'1st generation'` and :code:`'2nd generation'`. Or the user can provide
-            a list of tdi_combinations of the form
-            :code:`{"link": 12, "links_for_delay": [21, 13, 31], "sign": 1, "type": "delay"}`.
-            :code:`'link'` (`int`) the link index (12, 21, 13, 31, 23, 32) for the projection (:math:`y_{ij}`).
-            :code:`'links_for_delay'` (`list`) are the link indexes as a list used for delays
-            applied to the link projections.
-            ``'sign'`` is the sign in front of the contribution to the TDI observable. It takes the value of `+1` or `-1`.
-            ``type`` is either ``"delay"`` or ``"advance"``. It is optional and defaults to ``"delay"``.
-            (default: ``"1st generation"``)
-        orbits (:class:`Orbits`, optional): Orbits class from LISA Analysis Tools. Works with LISA Orbits 
-            outputs: ``lisa-simulation.pages.in2p3.fr/orbits/``.
-            (default: :class:`EqualArmlengthOrbits`)
-        tdi_chan (str, optional): Which TDI channel combination to return. Choices are :code:`'XYZ'`,
-            :code:`AET`, or :code:`AE`. (default: :code:`'XYZ'`)
-        force_backend (str, optional): If given, run this class on the requested backend. 
-            Options are ``"cpu"``, ``"cuda11x"``, ``"cuda12x"``. (default: ``None``)
-        
+        sampling_frequency (float): Sampling frequency in Hz; ``dt = 1 / sampling_frequency``
+            (subclasses overwrite ``dt`` from their time grid).
+        num_sub (int): Number of sources (sub-waveforms) per call.
+        n_params (int, optional): Parameters per source in the kernel's flat
+            parameter array. Default ``4`` (``inc, psi, lam, beta``).
+        tdi_config: A :class:`~lisatools.response.tdiconfig.TDIConfig`, a
+            generation string (``"1st generation"`` / ``"2nd generation"``,
+            built with the default backend), or ``None`` for
+            ``TDIConfig("1st generation")``.
+        orbits: An :class:`~lisatools.detector.Orbits` instance, an
+            ``Orbits`` subclass (instantiated with its defaults), or ``None``
+            (:class:`~lisatools.detector.EqualArmlengthOrbits`). Default the
+            :class:`~lisatools.detector.EqualArmlengthOrbits` class; the global
+            fit passes the unequal-arm mojito orbits.
+        tdi_chan (str, optional): Stored as ``tdi_chan`` only; the channels
+            returned are always the configuration's X, Y, Z. Default ``"XYZ"``.
+        force_backend (str, optional): Backend name (``"cpu"``,
+            ``"cuda12x"``, ``"cuda13x"``, ``"jax"``, ...). Default ``None``
+            (first available of :meth:`supported_backends`).
+
+    Raises:
+        ValueError: ``tdi_config`` is neither ``None``, a string nor a
+            :class:`~lisatools.response.tdiconfig.TDIConfig`.
+
+    Attributes:
+        cpp_orbits (object): Backend ``OrbitsWrap`` of the configured orbits.
+        cpp_tdi_config (object): Backend ``TDIConfigWrap``.
+        num_sub (int): Sources per call.
+        n_params (int): Parameters per source.
     """
 
     def __init__(
@@ -191,6 +265,7 @@ class TDIonTheFly(LISAToolsParallelModule):
         
     @property
     def tdi_config(self) -> TDIConfig:
+        """The TDI configuration; setting it also rebuilds ``cpp_tdi_config``."""
         return self._tdi_config
     
     @tdi_config.setter
@@ -207,15 +282,17 @@ class TDIonTheFly(LISAToolsParallelModule):
        
     @property
     def xp(self) -> object:
+        """The backend's array module (numpy, cupy or jax.numpy)."""
         return self.backend.xp
     
     @property
     def orbits(self) -> object:
+        """The configured orbits (shared through :func:`_get_configured_orbits`)."""
         return self._orbits
 
     @orbits.setter
     def orbits(self, orbits: Orbits) -> None:
-        """Set response orbits."""
+        """Set the orbits (instance, ``Orbits`` subclass or ``None``) and rebuild ``cpp_orbits``."""
         if orbits is None:
             orbits = EqualArmlengthOrbits()
         
@@ -237,7 +314,7 @@ class TDIonTheFly(LISAToolsParallelModule):
     
     @property
     def citation(self):
-        """Get citations for use of this code"""
+        """str: Citations for this code (currently a placeholder string)."""
 
         return """
         # TODO add
@@ -245,12 +322,38 @@ class TDIonTheFly(LISAToolsParallelModule):
     
     @classmethod
     def supported_backends(cls):
+        """Return ``"<prefix>_<tag>"`` for ``cuda13x``, ``cuda12x``, ``cuda11x``, ``cpu``, ``jax``.
+
+        Returns:
+            list[str]: Backend names in preference order (``<prefix>`` is the
+            class's ``_BACKEND_PREFIX``: ``lisatools``, ``gbgpu`` or ``bbhx``).
+        """
         # GPU_RECOMMENDED_WITH_JAX includes 'jax' so that GBTDIonTheFly and
         # SOBBHTDIonTheFly (which inherit this) can dispatch to the pure
         # JAX backend in fastlisaresponse.jax via force_backend='jax'.
         return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED_WITH_JAX()]
 
     def __call__(self, inc, psi, lam, beta, return_spline: bool =False) -> TDIOutput:
+        """Run the subclass kernel (``wave_gen``) for ``num_sub`` sources.
+
+        Used by the subclasses whose only per-call parameters are the four
+        extrinsic angles (:class:`TDTDIonTheFly`, :class:`FDTDIonTheFly`);
+        needs the subclass's ``t_arr``, ``N`` and ``wave_gen``.
+
+        Args:
+            inc (array-like): Inclination [rad], length ``num_sub``.
+            psi (array-like): Polarization angle [rad], length ``num_sub``.
+            lam (array-like): Sky longitude [rad] in the orbits' frame (RA for
+                ICRS orbits), length ``num_sub``.
+            beta (array-like): Sky latitude [rad] in the orbits' frame (Dec for
+                ICRS orbits), length ``num_sub``.
+            return_spline: Build the output's amplitude / phase splines.
+
+        Returns:
+            TDIOutput: The subclass's :meth:`from_tdi_output` of the raw output,
+            ``tdi_amp`` / ``tdi_phase`` of shape ``(num_sub, nchannels, N)`` and
+            ``phase_ref`` of shape ``(num_sub, N)``.
+        """
         
         params = self.xp.asarray([inc, psi, lam, beta]).T.flatten().copy()
 
@@ -288,18 +391,64 @@ class TDIonTheFly(LISAToolsParallelModule):
         ), fill_splines=return_spline)
     
     def _timed_from_tdi_output(self, tdi_output, fill_splines=False):
+        """:meth:`from_tdi_output` inside the ``4c_from_tdi_output_splines`` stage timer."""
         with _stage("4c_from_tdi_output_splines", self.xp):
             return self.from_tdi_output(tdi_output, fill_splines=fill_splines)
 
     def from_tdi_output(self, tdi_output: TDIOutput, fill_splines: Optional[bool] = False) -> FDTDIOutput:
+        """Convert the raw kernel output; the base returns it unchanged (subclasses override)."""
         return tdi_output
 
 
+# Knot-spacing codes of the C++ cubic splines (``FDTDIonTheFly.spline_type``).
 CUBIC_SPLINE_LINEAR_SPACING = 1
 CUBIC_SPLINE_LOG10_SPACING = 2
 CUBIC_SPLINE_GENERAL_SPACING = 3
 
 class TDTDIonTheFly(TDIonTheFly):
+    """TDI on the fly from time-domain amplitude and phase splines.
+
+    The source is given as amplitude and phase samples on the input times
+    ``t_input``; they are splined with
+    :class:`~gpubackendtools.interpolate.CubicSplineInterpolant` on the
+    generator's backend, and the backend ``TDSplineTDIWaveformWrap`` kernel
+    evaluates the TDI channels at the evaluation times ``t``. Calls take the
+    four extrinsic angles (:meth:`TDIonTheFly.__call__`) and return a
+    :class:`TDTDIOutput`. Used by the BBHx MBH / SOBBH TDI-on-the-fly
+    generators (``mbhtdionfly``, ``sobbhtdionfly``) and
+    :class:`~lisatools.sources.waveformbase.TDTDIOnFlyWaveformBase`.
+
+    Args:
+        t: Evaluation times [s], ``(N,)`` (shared, repeated over
+            ``num_sub``) or ``(num_sub, N)``; numpy or cupy matching ``amp``.
+        amp: Amplitude samples, ``(num_sub, n_in)`` (or 1-D for one source),
+            numpy or cupy. A scipy ``CubicSpline`` or a ``CubicSplineInterpolant``
+            raises ``NotImplementedError``.
+        phase: Phase samples [rad], same layout as ``amp``.
+        *args: Forwarded to :class:`TDIonTheFly` (``sampling_frequency``,
+            ``num_sub``, ...).
+        t_input: Times of the ``amp`` / ``phase`` samples, ``(n_in,)`` or
+            ``(num_sub, n_in)``; required for array input.
+        **kwargs: Forwarded to :class:`TDIonTheFly` (``tdi_config``,
+            ``orbits``, ``force_backend``, ...).
+
+    Raises:
+        AssertionError: Mixed numpy / cupy inputs, or a missing ``t_input``.
+        NotImplementedError: Spline-object inputs.
+        ValueError: Any other input type.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.response.tdionfly import TDTDIonTheFly
+
+            gen = TDTDIonTheFly(
+                t_eval, amp, phase, sampling_frequency=0.2, num_sub=1,
+                t_input=t_samples, tdi_config="2nd generation", orbits=orbits,
+                force_backend="cpu",
+            )
+            out = gen(inc, psi, lam, beta)  # TDTDIOutput; out.X, out.Y, out.Z
+    """
     def __init__(self, 
         t: np.ndarray,
         amp: np.ndarray | CubicSpline_scipy | CubicSpline,
@@ -391,6 +540,7 @@ class TDTDIonTheFly(TDIonTheFly):
         # time.sleep(1.0)
     @property
     def wave_gen(self) -> callable:
+        """A new backend ``TDSplineTDIWaveformWrap`` over the amp / phase splines (per access)."""
         with _stage("4a_wave_gen_wrap_build", self.xp):
             self.cpp_amp = self.backend.CubicSplineWrap(*self.amp.cpp_class_args)
             self.cpp_phase = self.backend.CubicSplineWrap(*self.phase.cpp_class_args)
@@ -398,6 +548,15 @@ class TDTDIonTheFly(TDIonTheFly):
         return self._wave_gen
     
     def from_tdi_output(self, tdi_output: TDIOutput, fill_splines: Optional[bool] = False) -> FDTDIOutput:
+        """Wrap the raw output as a :class:`TDTDIOutput` on the evaluation times.
+
+        Args:
+            tdi_output (TDIOutput): Raw kernel output (its ``x`` must equal ``t_arr``).
+            fill_splines: Build the output's splines.
+
+        Returns:
+            TDTDIOutput: The time-domain output on the output's backend.
+        """
         assert self.xp.allclose(tdi_output.x, self.t_arr)
         return TDTDIOutput(
             tdi_output.x, tdi_output.tdi_amp, tdi_output.tdi_phase, tdi_output.phase_ref,
@@ -406,6 +565,27 @@ class TDTDIonTheFly(TDIonTheFly):
     
 
 class TDIOutput(LISAToolsParallelModule):
+    """Amplitude / phase representation of TDI-on-the-fly channels.
+
+    Channel ``c`` of source ``b`` is
+    ``tdi_amp[b, c] * exp(-i (tdi_phase[b, c] + phase_ref[b]))`` on the grid
+    ``x`` (times for :class:`TDTDIOutput`, frequencies for
+    :class:`FDTDIOutput`); :attr:`X`, :attr:`Y` and :attr:`Z` return it for
+    channels 0, 1, 2. With ``fill_splines``, setting ``tdi_amp`` /
+    ``tdi_phase`` / ``phase_ref`` also builds a
+    :class:`~gpubackendtools.interpolate.CubicSplineInterpolant` over ``x``
+    for each, used by :meth:`eval_spline_vals`.
+
+    Args:
+        x (xp.ndarray): Grid, ``(num_sub, N)``.
+        tdi_amp (xp.ndarray): ``(num_sub, nchannels, N)`` amplitudes.
+        tdi_phase (xp.ndarray): ``(num_sub, nchannels, N)`` channel phases [rad].
+        phase_ref (xp.ndarray): ``(num_sub, N)`` reference (carrier) phase [rad].
+        fill_splines (bool, optional): Build the splines. Default ``True``.
+        **kwargs: Forwarded to
+            :class:`~lisatools.utils.parallelbase.LISAToolsParallelModule`
+            (``force_backend``).
+    """
     def __init__(self, x, tdi_amp, tdi_phase, phase_ref, fill_splines=True, **kwargs):
         
         self.x = x
@@ -421,14 +601,25 @@ class TDIOutput(LISAToolsParallelModule):
        
         
     def _get_spl(self, key: str) -> CubicSpline:
+        """Return the spline stored under ``key`` (requires ``fill_splines``)."""
         assert self.fill_splines
         return self._splines[key]
     
     @property
     def phase_ref_spl(self) -> CubicSpline:
+        """Spline of ``phase_ref`` over ``x``."""
         return self._get_spl("phase_ref")
     
     def build_spline(self, x, y, **kwargs) -> CubicSplineInterpolant:
+        """Build a cubic spline of ``y`` over ``x`` on this object's backend.
+
+        A 2-D ``x`` with a 3-D ``y`` is repeated over ``y``'s channel axis.
+
+        Args:
+            x (xp.ndarray): ``(num_sub, N)`` grid.
+            y (xp.ndarray): ``(num_sub, N)`` or ``(num_sub, nchannels, N)`` values.
+            **kwargs: Forwarded to ``CubicSplineInterpolant``.
+        """
         if x.ndim == 2 and y.ndim == 3:
             x_in =  self.xp.repeat(x[:, None, :], y.shape[1], axis=1)
         else:
@@ -438,6 +629,7 @@ class TDIOutput(LISAToolsParallelModule):
     
     @property
     def num_bin(self) -> int:
+        """Number of sources (``tdi_amp.shape[0]`` for 3-D, 1 for 2-D ``tdi_amp``)."""
         if self.tdi_amp.ndim == 3:
             return self.tdi_amp.shape[0]
         elif self.tdi_amp.ndim == 2:
@@ -445,38 +637,49 @@ class TDIOutput(LISAToolsParallelModule):
 
     @classmethod
     def supported_backends(cls) -> list:
+        """Return ``lisatools_<tag>`` for ``cuda13x``/``cuda12x``/``cuda11x``/``cpu``/``jax``."""
         return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED_WITH_JAX()]
 
     @property
     def X(self) -> np.ndarray:
+        """Complex X channel, ``Xamp exp(-i (Xphase + phase_ref))``, ``(num_sub, N)``."""
         return self.Xamp * self.xp.exp(-1j * (self.Xphase + self.phase_ref))
     @property
     def Y(self) -> np.ndarray:
+        """Complex Y channel (as :attr:`X` for channel 1)."""
         return self.Yamp * self.xp.exp(-1j * (self.Yphase + self.phase_ref))
     @property
     def Z(self) -> np.ndarray:
+        """Complex Z channel (as :attr:`X` for channel 2)."""
         return self.Zamp * self.xp.exp(-1j * (self.Zphase + self.phase_ref))
     @property
     def Xamp(self) -> np.ndarray:
+        """``tdi_amp[:, 0]``."""
         return self.tdi_amp[:, 0]
     @property
     def Yamp(self) -> np.ndarray:
+        """``tdi_amp[:, 1]``."""
         return self.tdi_amp[:, 1]
     @property
     def Zamp(self) -> np.ndarray:
+        """``tdi_amp[:, 2]``."""
         return self.tdi_amp[:, 2]
     @property
     def Xphase(self) -> np.ndarray:
+        """``tdi_phase[:, 0]``."""
         return self.tdi_phase[:, 0]
     @property
     def Yphase(self) -> np.ndarray:
+        """``tdi_phase[:, 1]``."""
         return self.tdi_phase[:, 1]
     @property
     def Zphase(self) -> np.ndarray:
+        """``tdi_phase[:, 2]``."""
         return self.tdi_phase[:, 2]
     
     @property
     def tdi_amp(self) -> np.ndarray:
+        """``(num_sub, nchannels, N)`` channel amplitudes (setting rebuilds the spline)."""
         return self._tdi_amp
     
     @tdi_amp.setter
@@ -488,6 +691,7 @@ class TDIOutput(LISAToolsParallelModule):
 
     @property
     def tdi_phase(self) -> np.ndarray:
+        """``(num_sub, nchannels, N)`` channel phases [rad] (setting rebuilds the spline)."""
         return self._tdi_phase
     
     @tdi_phase.setter
@@ -499,6 +703,7 @@ class TDIOutput(LISAToolsParallelModule):
 
     @property
     def phase_ref(self) -> np.ndarray:
+        """``(num_sub, N)`` reference (carrier) phase [rad] (setting rebuilds the spline)."""
         return self._phase_ref
     
     @phase_ref.setter
@@ -510,32 +715,53 @@ class TDIOutput(LISAToolsParallelModule):
     
     @property
     def tdi_amp_spl(self):
+        """Spline of ``tdi_amp`` over ``x``."""
         return self._get_spl("tdi_amp")
     
     @property
     def tdi_phase_spl(self):
+        """Spline of ``tdi_phase`` over ``x``."""
         return self._get_spl("tdi_phase")
     
     @property
     def Aamp(self):
+        """Not implemented (A/E/T channels are not provided); raises ``NotImplementedError``."""
         raise NotImplementedError
     @property
     def Aphase(self):
+        """Not implemented; raises ``NotImplementedError``."""
         raise NotImplementedError
     @property
     def Eamp(self):
+        """Not implemented; raises ``NotImplementedError``."""
         raise NotImplementedError
     @property
     def Ephase(self):
+        """Not implemented; raises ``NotImplementedError``."""
         raise NotImplementedError
     @property
     def Tamp(self):
+        """Not implemented; raises ``NotImplementedError``."""
         raise NotImplementedError
     @property
     def Tphase(self):
+        """Not implemented; raises ``NotImplementedError``."""
         raise NotImplementedError
     
     def eval_spline_vals(self, x_new: np.ndarray, **kwargs) -> np.ndarray:
+        """Evaluate the amplitude, phase and reference-phase splines at ``x_new``.
+
+        Requires ``fill_splines``.
+
+        Args:
+            x_new: New grid, ``(M,)`` (shared by every source) or ``(num_sub, M)``.
+            **kwargs: Forwarded to the spline calls.
+
+        Returns:
+            tuple[xp.ndarray, xp.ndarray, xp.ndarray]: ``(tdi_amp, tdi_phase,
+            phase_ref)`` at ``x_new``: ``(num_sub, 3, M)``, ``(num_sub, 3, M)``
+            and ``(num_sub, M)``.
+        """
 
         if x_new.ndim == 1:
             t_amp_phase = self.xp.tile(x_new, (self.num_bin, 3, 1))
@@ -550,39 +776,100 @@ class TDIOutput(LISAToolsParallelModule):
         return (tdi_amp_new, tdi_phase_new, phase_ref_new)
     
     def eval_tdi(self, x_new: np.ndarray, **kwargs) -> np.ndarray:
+        """Evaluate the channels at ``x_new`` (implemented by the TD / FD subclasses)."""
         raise NotImplementedError
     
 class TDTDIOutput(TDIOutput):
+    """Time-domain :class:`TDIOutput`: ``x`` is the time grid [s].
+
+    The physical channel is the real part of the complex representation;
+    :meth:`eval_tdi` returns that real part on a new time grid, while
+    :attr:`X` / :attr:`Y` / :attr:`Z` stay complex.
+    """
 
     def from_tdi_output(self, tdi_output: TDIOutput, fill_splines: Optional[bool] = False) -> TDTDIOutput:
+        """Build a :class:`TDTDIOutput` from any :class:`TDIOutput` (same arrays and backend)."""
         return TDTDIOutput(
             tdi_output.x, tdi_output.tdi_amp, tdi_output.tdi_phase, tdi_output.phase_ref, fill_splines=fill_splines, force_backend=tdi_output.backend.name.split("_")[-1]
         )
 
     def eval_tdi(self, t_new: np.ndarray, **kwargs) -> np.ndarray:
+        """Evaluate the real TDI channels at new times through the splines.
+
+        Args:
+            t_new: Times [s], ``(M,)`` or ``(num_sub, M)``.
+            **kwargs: Forwarded to the spline calls.
+
+        Returns:
+            xp.ndarray: ``Re[amp exp(-i (phase + phase_ref))]``, ``(num_sub, 3, M)``.
+        """
         tdi_amp_new, tdi_phase_new, phase_ref_new = self.eval_spline_vals(t_new, **kwargs)
         tdi_output = self.xp.real(tdi_amp_new * self.xp.exp(-1j * (tdi_phase_new + phase_ref_new[:, None, :])))
         return tdi_output
     
     @property
     def t_arr(self) -> np.ndarray:
+        """The time grid (alias of ``x``)."""
         return self.x
         
     
 class FDTDIOutput(TDIOutput):
+    """Frequency-domain :class:`TDIOutput`: ``x`` is the frequency grid [Hz], channels complex."""
+
     def eval_tdi(self, f_new: np.ndarray, **kwargs) -> np.ndarray:
+        """Evaluate the complex TDI channels at new frequencies through the splines.
+
+        Args:
+            f_new: Frequencies [Hz], ``(M,)`` or ``(num_sub, M)``.
+            **kwargs: Forwarded to the spline calls.
+
+        Returns:
+            xp.ndarray: ``amp exp(-i (phase + phase_ref))``, ``(num_sub, 3, M)``.
+        """
         tdi_amp_new, tdi_phase_new, phase_ref_new = self.eval_spline_vals(f_new, **kwargs)
         tdi_output = tdi_amp_new * self.xp.exp(-1j * (tdi_phase_new + phase_ref_new[:, None, :]))
         return tdi_output
     
     @property
     def f_arr(self) -> np.ndarray:
+        """The frequency grid (alias of ``x``)."""
         return self.x
 
 
 # TODO: make it log spaced in frequency?
 
 class FDTDIonTheFly(TDIonTheFly):
+    """TDI on the fly for a frequency-domain source given by amplitude and frequency tracks.
+
+    The source's amplitude and instantaneous frequency are given versus time
+    (``t_input``) and splined; the backend ``FDSplineTDIWaveformWrap`` kernel
+    evaluates the TDI channels at the times ``t``, and :meth:`from_tdi_output`
+    maps those times to frequencies through the frequency spline, returning
+    an :class:`FDTDIOutput`. Calls take the four extrinsic angles
+    (:meth:`TDIonTheFly.__call__`). Not used by the global-fit runs.
+
+    Args:
+        t: Evaluation times [s], ``(N,)`` or ``(num_sub, N)``.
+        amp: Amplitude samples ``(num_sub, n_in)`` (numpy or cupy, splined
+            here) or a prebuilt
+            :class:`~gpubackendtools.interpolate.CubicSplineInterpolant`; a
+            scipy ``CubicSpline`` raises ``NotImplementedError``.
+        freq: Frequency samples [Hz], same layout as ``amp``.
+        phase_ref: Stored as ``phase_ref`` only (not passed to the kernel).
+        *args: Forwarded to :class:`TDIonTheFly` (``sampling_frequency``,
+            ``num_sub``, ...).
+        t_input: Times of the samples, required for array input.
+        spline_type: Accepted but not applied (``spline_type`` keeps no
+            value unless set afterwards). Default
+            ``CUBIC_SPLINE_GENERAL_SPACING``.
+        force_backend: Backend name; default ``None``.
+        **kwargs: Forwarded to :class:`TDIonTheFly`.
+
+    Raises:
+        AssertionError: Mixed numpy / cupy inputs or a missing ``t_input``.
+        NotImplementedError: scipy ``CubicSpline`` inputs.
+        ValueError: Any other input type.
+    """
     def __init__(self, 
         t: np.ndarray,
         amp: np.ndarray | CubicSpline_scipy | CubicSplineInterpolant,
@@ -665,6 +952,7 @@ class FDTDIonTheFly(TDIonTheFly):
 
     @property
     def wave_gen(self) -> callable:
+        """A new backend ``FDSplineTDIWaveformWrap`` over the amp / freq splines (per access)."""
         self.cpp_amp = self.backend.CubicSplineWrap(*self.amp.cpp_class_args)
         self.cpp_freq = self.backend.CubicSplineWrap(*self.freq.cpp_class_args)
         self._wave_gen = self.backend.FDSplineTDIWaveformWrap(self.cpp_orbits, self.cpp_tdi_config, self.cpp_amp, self.cpp_freq)
@@ -672,6 +960,7 @@ class FDTDIonTheFly(TDIonTheFly):
     
     @property
     def spline_type(self) -> int:
+        """int: One of the ``CUBIC_SPLINE_*_SPACING`` codes (validated on set)."""
         return self._spline_type
     
     @spline_type.setter
@@ -681,6 +970,7 @@ class FDTDIonTheFly(TDIonTheFly):
         self._spline_type = spline_type
     
     def from_tdi_output(self, tdi_output: TDIOutput, fill_splines: Optional[bool] = False) -> FDTDIOutput:
+        """Wrap the raw output as an :class:`FDTDIOutput` on ``freq(t)``, the frequency grid."""
         # TODO: remove the freq spline?
         return FDTDIOutput(
             self.freq(tdi_output.x), tdi_output.tdi_amp, tdi_output.tdi_phase, tdi_output.phase_ref, fill_splines=fill_splines, force_backend=tdi_output.backend.name.split("_")[-1]
@@ -698,19 +988,30 @@ class GBFDTDIonTheFly(LISAToolsParallelModule):
     at the same time, FFTs them in place, and returns
     ``X_het[bin, channel, m]`` together with ``k_f0[bin]`` and
     ``f0_grid[bin]`` mapping each FFT bin back to the dense rfft grid:
-    bin ``m`` (FFT order) lands on dense rfft bin ``k_f0 + m``.
+    bin ``m`` (FFT order) lands on dense rfft bin ``k_f0 + m``. Needs a
+    ``gbgpu`` backend (``GBTDIonTheFlyWrap``); the orbits and TDI handles
+    come from an internal :class:`GBTDIonTheFly`. Not used by the global-fit
+    runs.
 
     Args:
-        T (float): Observation duration in seconds. The dense rfft grid is
+        T: Observation duration in seconds. The dense rfft grid is
             implicitly ``df = 1/T``.
-        t_ref (float): GB phase reference time. Must equal ``t_start``
-            (asserted in __call__) so the heterodyne phase factor at the
-            time origin is unity.
-        N_sparse (int): Length of the sparse time grid. Must be a power of
-            two. The sparse Nyquist is ``N_sparse / (2 * T)``.
-        nchannels (int): 1, 2 or 3 -- usually 3 for XYZ.
-        tdi_config, orbits, tdi_chan, force_backend: as in
-            :class:`GBTDIonTheFly`.
+        t_ref: GB phase reference time. Must equal ``t_start`` (checked in
+            :meth:`__call__`) so the heterodyne phase factor at the time
+            origin is unity.
+        N_sparse: Length of the sparse time grid. Must be a power of two.
+            The sparse Nyquist is ``N_sparse / (2 * T)``.
+        num_sub: Number of sources per call.
+        nchannels: 1, 2 or 3 -- usually 3 for XYZ. Default ``3``.
+        tdi_config: As in :class:`TDIonTheFly`. Default ``None``.
+        orbits: As in :class:`TDIonTheFly`. Default the
+            :class:`~lisatools.detector.EqualArmlengthOrbits` class.
+        tdi_chan: As in :class:`TDIonTheFly`. Default ``"XYZ"``.
+        force_backend: ``gbgpu`` backend flavor (``"cpu"``, ``"cuda12x"``,
+            ...). Default ``None``.
+
+    Raises:
+        ValueError: ``N_sparse`` is not a power of two.
     """
 
     def __init__(
@@ -752,10 +1053,12 @@ class GBFDTDIonTheFly(LISAToolsParallelModule):
 
     @property
     def xp(self):
+        """The backend's array module."""
         return self.backend.xp
 
     @classmethod
     def supported_backends(cls):
+        """Return ``gbgpu_<tag>`` for the GPU-recommended tags (no ``jax``)."""
         return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def __call__(
@@ -766,24 +1069,37 @@ class GBFDTDIonTheFly(LISAToolsParallelModule):
     ):
         """Generate the heterodyne FD GB TDI for ``num_sub`` sources.
 
+        The nine source parameters are arrays of length ``num_sub``, in the
+        kernel's order ``(amp, f0, fdot0, fddot0, phi0, inc, psi, lam, beta)``.
+
         Args:
-            amp, f0, fdot0, fddot0, phi0, inc, psi, lam, beta: arrays of
-                length ``num_sub``.
-            t_start (float): Start of the sparse observation window in
-                seconds. Must equal ``t_ref`` -- the prototype assumes a
-                local time origin at the first sparse sample.
-            convert_to_ra_dec (bool, optional): **Deprecated.** Sky
-                coordinates are consumed in the orbits frame directly
-                (default ``None`` = no conversion). ``True`` still applies
-                the legacy ecliptic -> ICRS conversion but emits a
-                ``DeprecationWarning``.
+            amp (array-like): Strain amplitudes.
+            f0 (array-like): Initial GW frequencies [Hz].
+            fdot0 (array-like): Frequency derivatives [Hz/s].
+            fddot0 (array-like): Second frequency derivatives [Hz/s^2].
+            phi0 (array-like): Initial phases [rad].
+            inc (array-like): Inclinations [rad].
+            psi (array-like): Polarization angles [rad].
+            lam (array-like): Sky longitudes [rad] in the orbits' frame.
+            beta (array-like): Sky latitudes [rad] in the orbits' frame.
+            t_start: Start of the sparse observation window in seconds. Must
+                equal ``t_ref`` -- the prototype assumes a local time origin at
+                the first sparse sample.
+            convert_to_ra_dec: **Deprecated.** Sky coordinates are consumed in
+                the orbits frame directly (default ``None`` = no conversion).
+                ``True`` still applies the legacy ecliptic -> ICRS conversion
+                but emits a ``DeprecationWarning``.
 
         Returns:
-            X_het (xp.ndarray): complex shape ``(num_sub, nchannels, N_sparse)``,
-                values are ``0.5 * dt_sparse * FFT[s_c]`` in FFT order.
-            k_f0  (xp.ndarray): int  shape ``(num_sub,)``, dense rfft bin.
-            f0_grid (xp.ndarray): double shape ``(num_sub,)``, snapped
-                carrier ``k_f0 * df`` in Hz.
+            tuple[xp.ndarray, xp.ndarray, xp.ndarray]: ``(X_het, k_f0, f0_grid)``:
+            complex ``(num_sub, nchannels, N_sparse)`` values
+            ``0.5 * dt_sparse * FFT[s_c]`` in FFT order; int32 ``(num_sub,)``
+            dense rfft bin of the carrier; float ``(num_sub,)`` snapped
+            carrier ``k_f0 * df`` [Hz].
+
+        Raises:
+            ValueError: ``t_start != t_ref``, or the parameter count does not
+                match ``num_sub``.
         """
         if abs(float(t_start) - self.t_ref) > 1e-9:
             raise ValueError(
@@ -820,6 +1136,38 @@ class GBFDTDIonTheFly(LISAToolsParallelModule):
 
 
 class GBTDIonTheFly(TDIonTheFly):
+    """Galactic-binary TDI on the fly (``gbgpu`` backend kernel ``GBTDIonTheFlyWrap``).
+
+    Evaluates the GB amplitude and phase analytically (9 parameters per
+    source, see :meth:`__call__`) and projects them through the LISA TDI on
+    the time grid ``t``, returning a :class:`TDTDIOutput`. In the global fit
+    GBGPU's lookup and signal-heterodyne engines
+    (``gbgpu.gblookupcomputations``, ``gbgpu.gbsignalhetcomputations``)
+    construct one on a 16384-point grid and keep only its :attr:`wave_gen`
+    handle for their own kernels. Supports the ``jax`` backend (functional
+    ``run_wave_tdi``).
+
+    Args:
+        t: Evaluation times [s], ``(N,)`` or ``(num_sub, N)``.
+        T: Observation duration [s].
+        t_ref: GB phase reference time [s].
+        *args: Forwarded to :class:`TDIonTheFly` (``sampling_frequency``,
+            ``num_sub``); ``n_params`` is fixed to 9.
+        **kwargs: Forwarded to :class:`TDIonTheFly` (``tdi_config``,
+            ``orbits``, ``tdi_chan``, ``force_backend``: a ``gbgpu`` flavor).
+
+    Example:
+        .. code-block:: python
+
+            import numpy as np
+            from lisatools.response.tdionfly import GBTDIonTheFly
+
+            t = np.linspace(t0, t0 + Tobs, 16384)
+            gen = GBTDIonTheFly(t, Tobs, t_ref, 1.0 / dt, 1, tdi_config=tdi_config,
+                                orbits=orbits, tdi_chan="XYZ", force_backend="cpu")
+            out = gen(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta)  # TDTDIOutput
+    """
+
     # Phase 3L.7k: needs gbgpu_<flavor> backend (carries GBTDIonTheFlyWrap).
     _BACKEND_PREFIX = "gbgpu"
     def __init__(self,
@@ -841,8 +1189,12 @@ class GBTDIonTheFly(TDIonTheFly):
 
         self.dt = self.t_arr[:, 1] - self.t_arr[:, 0]
         
+    # NOTE: this property / setter pair is shadowed by the second ``wave_gen``
+    # property below (the later class-body definition wins), so assigning
+    # ``wave_gen`` on a GBTDIonTheFly raises AttributeError.
     @property
     def wave_gen(self) -> callable:
+        """Shadowed (see the note above); the effective property is defined below."""
         return self._wave_gen
     
     @wave_gen.setter
@@ -850,6 +1202,7 @@ class GBTDIonTheFly(TDIonTheFly):
         self._wave_gen = wave_gen
     
     def from_tdi_output(self, tdi_output: TDIOutput, fill_splines: Optional[bool] = False) -> FDTDIOutput:
+        """Wrap the raw output as a :class:`TDTDIOutput` (its ``x`` must equal ``t_arr``)."""
         assert self.xp.allclose(tdi_output.x, self.t_arr)
         return TDTDIOutput(
             tdi_output.x, tdi_output.tdi_amp, tdi_output.tdi_phase, tdi_output.phase_ref, fill_splines=fill_splines, force_backend=tdi_output.backend.name.split("_")[-1]
@@ -857,10 +1210,41 @@ class GBTDIonTheFly(TDIonTheFly):
     
     @property
     def wave_gen(self) -> callable:
+        """A new backend ``GBTDIonTheFlyWrap`` over the orbits, TDI config, ``T`` and ``t_ref``.
+
+        Built on every access. GBGPU's lookup / signal-heterodyne engines keep
+        this handle for their kernels.
+        """
         self._wave_gen = self.backend.GBTDIonTheFlyWrap(self.cpp_orbits, self.cpp_tdi_config, self.T, self.t_ref)
         return self._wave_gen
     
     def __call__(self, amp, f0, fdot0, fddot0, phi0, inc, psi, lam, beta, convert_to_ra_dec: Optional[bool] = None, return_spline: bool = False) -> TDIOutput:
+        """Generate the GB TDI for ``num_sub`` sources (arrays of length ``num_sub``).
+
+        On the ``jax`` backend the functional ``run_wave_tdi`` is used (no
+        in-place buffers, differentiable); the C++ backends fill buffers in
+        place with ``run_wave_tdi_wrap``.
+
+        Args:
+            amp (array-like): Strain amplitude.
+            f0 (array-like): Initial GW frequency [Hz].
+            fdot0 (array-like): Frequency derivative [Hz/s].
+            fddot0 (array-like): Second frequency derivative [Hz/s^2].
+            phi0 (array-like): Initial phase [rad].
+            inc (array-like): Inclination [rad].
+            psi (array-like): Polarization angle [rad].
+            lam (array-like): Sky longitude [rad] in the orbits' frame (RA for
+                ICRS orbits).
+            beta (array-like): Sky latitude [rad] in the orbits' frame (Dec for
+                ICRS orbits).
+            convert_to_ra_dec: **Deprecated**; ``True`` converts ecliptic
+                ``(lam, beta)`` to ICRS first, with a ``DeprecationWarning``.
+            return_spline: Build the output's splines (unsupported on ``jax``).
+
+        Returns:
+            TDTDIOutput: ``tdi_amp`` / ``tdi_phase`` ``(num_sub, nchannels, N)``,
+            ``phase_ref`` ``(num_sub, N)``.
+        """
 
         if convert_to_ra_dec:
             warn_deprecated_frame_conversion()
@@ -921,27 +1305,29 @@ class GBTDIonTheFly(TDIonTheFly):
 
 
 class SOBBHTDIonTheFly(TDIonTheFly):
+    """Stellar-origin black-hole binary TDI on the fly (``bbhx`` backend).
+
+    Mirrors :class:`GBTDIonTheFly`. The underlying C++ kernel
+    (``SOBBHTDIonTheFlyWrap``) evaluates the SOBBH amplitude and phase
+    point-wise from the PN intrinsic-quantity expressions and feeds them
+    through the shared LISA TDI projection; see :meth:`__call__` for the 11
+    parameters. Supports the ``jax`` backend. Not used by the global-fit
+    runs (BBHx's SOBBH TDI-on-the-fly generator ``bbhx.sobbhtdionfly`` uses
+    :class:`TDTDIonTheFly`).
+
+    Args:
+        t: Evaluation times [s], ``(N,)`` or ``(num_sub, N)``.
+        T: Observation duration [s].
+        t_ref: Reference time of ``f_low`` / ``phi_c`` [s].
+        *args: Forwarded to :class:`TDIonTheFly` (``sampling_frequency``,
+            ``num_sub``); ``n_params`` is fixed to 11.
+        **kwargs: Forwarded to :class:`TDIonTheFly` (``tdi_config``,
+            ``orbits``, ``force_backend``: a ``bbhx`` flavor).
+    """
+
     # Phase 3L.7k: needs bbhx_<flavor> backend (carries SOBBHTDIonTheFlyWrap).
     _BACKEND_PREFIX = "bbhx"
-    """Stellar-origin black-hole binary TDI on the fly.
-
-    Mirrors :class:`GBTDIonTheFly`. The underlying C++ kernel evaluates the
-    SOBBH amplitude and phase point-wise from the PN intrinsic-quantity
-    expressions and feeds them through the shared LISA TDI projection.
-
-    Parameter order on ``__call__`` (length-``num_sub`` arrays each):
-        ``m1``       -- primary mass [solar masses]
-        ``m2``       -- secondary mass [solar masses]
-        ``s1``       -- primary aligned spin [dimensionless]
-        ``s2``       -- secondary aligned spin [dimensionless]
-        ``distance`` -- luminosity distance [parsecs]
-        ``f_low``    -- GW frequency at ``t_ref`` [Hz]
-        ``phi_c``    -- reference orbital phase [rad]
-        ``inc``      -- inclination [rad]
-        ``psi``      -- polarization [rad]
-        ``lam``      -- ecliptic longitude [rad]
-        ``beta``     -- ecliptic latitude [rad]
-    """
+    """str: Backend namespace; the ``bbhx_<flavor>`` backends carry ``SOBBHTDIonTheFlyWrap``."""
 
     def __init__(self,
         t: np.ndarray,
@@ -964,10 +1350,12 @@ class SOBBHTDIonTheFly(TDIonTheFly):
 
     @property
     def wave_gen(self) -> callable:
+        """A new backend ``SOBBHTDIonTheFlyWrap`` (built per access)."""
         self._wave_gen = self.backend.SOBBHTDIonTheFlyWrap(self.cpp_orbits, self.cpp_tdi_config, self.T, self.t_ref)
         return self._wave_gen
 
     def from_tdi_output(self, tdi_output: TDIOutput, fill_splines: Optional[bool] = False) -> FDTDIOutput:
+        """Wrap the raw output as a :class:`TDTDIOutput` (its ``x`` must equal ``t_arr``)."""
         assert self.xp.allclose(tdi_output.x, self.t_arr)
         return TDTDIOutput(
             tdi_output.x, tdi_output.tdi_amp, tdi_output.tdi_phase, tdi_output.phase_ref, fill_splines=fill_splines, force_backend=tdi_output.backend.name.split("_")[-1]
@@ -975,6 +1363,30 @@ class SOBBHTDIonTheFly(TDIonTheFly):
 
     def __call__(self, m1, m2, s1, s2, distance, f_low, phi_c, inc, psi, lam, beta,
                  convert_to_ra_dec: Optional[bool] = None, return_spline: bool = False) -> TDIOutput:
+        """Generate the SOBBH TDI for ``num_sub`` sources (arrays of length ``num_sub``).
+
+        Args:
+            m1 (array-like): Primary mass [solar masses].
+            m2 (array-like): Secondary mass [solar masses].
+            s1 (array-like): Primary aligned spin [dimensionless].
+            s2 (array-like): Secondary aligned spin [dimensionless].
+            distance (array-like): Luminosity distance [parsecs].
+            f_low (array-like): GW frequency at ``t_ref`` [Hz].
+            phi_c (array-like): Reference orbital phase [rad].
+            inc (array-like): Inclination [rad].
+            psi (array-like): Polarization [rad].
+            lam (array-like): Sky longitude [rad] in the orbits' frame (RA for
+                ICRS orbits).
+            beta (array-like): Sky latitude [rad] in the orbits' frame (Dec for
+                ICRS orbits).
+            convert_to_ra_dec: **Deprecated**; ``True`` converts ecliptic
+                ``(lam, beta)`` to ICRS first, with a ``DeprecationWarning``.
+            return_spline: Build the output's splines (not on ``jax``).
+
+        Returns:
+            TDTDIOutput: ``tdi_amp`` / ``tdi_phase`` ``(num_sub, nchannels, N)``,
+            ``phase_ref`` ``(num_sub, N)``.
+        """
 
         if convert_to_ra_dec:
             warn_deprecated_frame_conversion()
@@ -1024,8 +1436,10 @@ class SOBBHTDIonTheFly(TDIonTheFly):
         ), fill_splines=return_spline)
 
 class TDDenseTDIonTheFly(TDIonTheFly):
-    """Template-batched TD TDI-on-the-fly for multi-harmonic sources sharing one trajectory
-    (EMRIs), with EXACT phases from the integrator's 8th-order dense output.
+    """Template-batched TD TDI on the fly for multi-harmonic sources (EMRIs), exact phases.
+
+    For multi-harmonic sources sharing one trajectory (EMRIs), with EXACT
+    phases from the integrator's 8th-order dense output.
 
     Per template ``b``: the evaluation times ``t[b]`` (one common length ``N``), the
     integrator knots ``t_knots[b, :n_knots[b]]`` and DOPR853 phase coefficients
@@ -1038,6 +1452,33 @@ class TDDenseTDIonTheFly(TDIonTheFly):
     The kernel computes the link geometry once per (template, time) and reuses it for every
     harmonic; the output is a :class:`TDTDIOutput` over all harmonics (``phase_ref`` = the pure
     carrier ``Phi_s`` at spacecraft-1 time; the amplitude's phase lands in ``tdi_phase``).
+
+    Production: the ``EMRI_DIRECT_RESPONSE=dense`` path of
+    :class:`~lisatools.sources.emri.wdm_direct.EMRIDirectWDM` (both launchers), on a
+    sparse time grid. All arrays are held on the instance because the backend
+    ``TDDenseTDIWaveformWrap`` keeps raw pointers to them.
+
+    Args:
+        t (array-like): ``(n_temp, N)`` evaluation times [s].
+        sub_offsets (array-like): ``(n_temp + 1,)`` int harmonic offsets; template
+            ``b`` owns harmonics ``sub_offsets[b]:sub_offsets[b + 1]``, ``num_sub =
+            sub_offsets[-1]`` (numpy or cupy).
+        sub_mkn (array-like): ``(num_sub, 3)`` int ``(m, k, n)`` per harmonic.
+        t_knots (array-like): ``(n_temp, K)`` integrator knot times [s].
+        n_knots (array-like): ``(n_temp,)`` int valid knots per template.
+        phase_coeffs (array-like): ``(n_temp, K - 1, 3, 8)`` DOPR853 dense-output
+            coefficients of the three phases.
+        amp_re (array-like): ``(num_sub, K - 1, 4)`` monomial cubic coefficients of
+            the amplitude's real part.
+        amp_im (array-like): Same for the imaginary part.
+        amp_factor (float, optional): Overall amplitude factor. Default ``1.0``.
+        tdi_config (optional): As in :class:`TDIonTheFly`. Default ``None``.
+        orbits (optional): As in :class:`TDIonTheFly`. Default ``None``
+            (equal-arm; the global fit passes its unequal-arm orbits).
+        force_backend (str, optional): ``lisatools`` backend flavor.
+
+    Raises:
+        RuntimeError: The backend module has no ``TDDenseTDIWaveformWrap``.
     """
 
     def __init__(self, t, sub_offsets, sub_mkn, t_knots, n_knots, phase_coeffs, amp_re, amp_im,
@@ -1069,6 +1510,11 @@ class TDDenseTDIonTheFly(TDIonTheFly):
             self.phase_coeffs.ravel(), self.amp_re.ravel(), self.amp_im.ravel())
 
     def _run(self, params):
+        """Run the full kernel; return flat ``(chans, amp, phase, phi_ref)`` buffers.
+
+        ``params`` is reshaped to ``(n_temp, 4)`` = ``(inc, psi, lam, beta)``. The buffers
+        are ``num_sub * nchannels * N`` long (``phi_ref``: ``num_sub * N``).
+        """
         xp = self.xp
         params = xp.ascontiguousarray(xp.asarray(params, dtype=xp.float64).reshape(self.n_temp, 4))
         nch = self.tdi_config.nchannels
@@ -1082,17 +1528,32 @@ class TDDenseTDIonTheFly(TDIonTheFly):
         return chans, amp, phase, phi_ref
 
     def channels(self, params, sum_subs=False, stop_taper=0.0):
-        """The raw complex TDI channels at the evaluation times, ``(num_sub, nch, N)`` or, with
-        ``sum_subs``, summed over each template's harmonics ``(n_temp, nch, N)``: the exact
-        channel is the real part (no amplitude/phase representation, so a signal that stops --
-        an in-window plunge -- keeps the TDI combination's own structure). Runs the channel
-        kernel only (no amplitude/phase extraction).
+        """Return the raw complex TDI channels at the evaluation times.
+
+        The exact channel is the real part (no amplitude/phase representation, so a signal
+        that stops -- an in-window plunge -- keeps the TDI combination's own structure). Runs
+        the channel kernel only (no amplitude/phase extraction); a backend module without
+        ``run_channels_wrap`` falls back to the full kernel.
 
         ``stop_taper`` [s] > 0 weights every delay term by a sin^2 window on its EMISSION time that
         falls to 0 at the last knot over that span: the same window for every term, so the TDI
         cancellation holds through the stop, and each term is smooth there. Without it, a sampled
         channel keeps a net area from the terms' abrupt cuts falling between samples, which
-        aliases into the lowest frequencies (``tests/test_tdi_dense.py``)."""
+        aliases into the lowest frequencies (``tests/test_tdi_dense.py``).
+
+        Args:
+            params (array-like): ``(n_temp, 4)`` = ``(inc, psi, lam, beta)`` per template.
+            sum_subs (bool, optional): Sum each template's harmonics. Default ``False``.
+            stop_taper (float, optional): Taper span [s]; ``0`` (default) is off.
+
+        Returns:
+            xp.ndarray: Complex ``(num_sub, nch, N)``, or ``(n_temp, nch, N)`` with
+            ``sum_subs``.
+
+        Raises:
+            RuntimeError: ``stop_taper > 0`` on a module without ``run_channels_wrap``, or
+                a compiled ``run_channels_wrap`` that predates ``stop_taper``.
+        """
         xp = self.xp
         nch = self.tdi_config.nchannels
         if not hasattr(self.wave_gen, "run_channels_wrap"):          # an older module
@@ -1116,7 +1577,17 @@ class TDDenseTDIonTheFly(TDIonTheFly):
         return chans.reshape(rows, nch, self.N)
 
     def __call__(self, params, return_spline: bool = True) -> "TDTDIOutput":
-        """``params``: (n_temp, 4) = (inc, psi, lam, beta) per template."""
+        """Run the kernel and return the amplitude / phase output of every harmonic.
+
+        Args:
+            params (array-like): ``(n_temp, 4)`` = ``(inc, psi, lam, beta)`` per template
+                (sky in the orbits' frame).
+            return_spline: Build the output's splines. Default ``True``.
+
+        Returns:
+            TDTDIOutput: On the per-harmonic time grid ``t[sub_temp]`` ``(num_sub, N)``,
+            ``tdi_amp`` / ``tdi_phase`` ``(num_sub, nch, N)``, ``phase_ref`` ``(num_sub, N)``.
+        """
         nch = self.tdi_config.nchannels
         S, N = self.num_sub, self.N
         chans, amp, phase, phi_ref = self._run(params)

@@ -29,6 +29,22 @@ The frame conversion itself is :class:`LISAFrameMap` (factored out of
 add/remove move's proposal frame (``{BRANCH}_PROPOSAL_FRAME=lisa``, MBH
 only; ``ResidualAddOneRemoveOneMove._frame_proposal``), where every inner
 move proposes in the LISA frame and the result is mapped back.
+
+Main entry points and where the 9mo / 12mo runs use them (MBH branch only):
+
+* :class:`SkyMove` -- one instance per kind with a positive weight (``which``
+  ``"both"`` / ``"lat"`` / ``"long"``, ``coord_frame="icrs"``; all three in
+  production) in the MBH inner-move stack, built by
+  :func:`~lisatools.globalfit.stock.erebor.source_runtime.make_mbh_inner_moves`
+  at draw fractions ``MBH_SKY_MOVE_{BOTH,LAT,LONG}_WEIGHT`` (launchers 0.02 /
+  0.04 / 0.02);
+* :class:`LISAFrameMap` -- the proposal-frame map of ``MBH_PROPOSAL_FRAME=lisa``
+  (launchers ``lisa``), built by
+  :func:`~lisatools.globalfit.stock.erebor.source_runtime.make_mbh_proposal_frame_map`;
+* :class:`ConstellationPhase` -- the orbit-phase table both share, read off
+  the run's orbits with ``t_offset = mbh_waveform_t0``;
+* :func:`fd_log_abs_det_jacobian` / :func:`fd_frame_jacobian` -- the
+  central-difference Jacobian of a frame map.
 """
 
 from __future__ import annotations
@@ -59,13 +75,36 @@ def fd_log_abs_det_jacobian(coords, fn, cols, steps=FRAME_FD_STEPS, periods=FRAM
     ``fn`` maps ``(n, ndim)`` rows to ``(n, ndim)`` rows; the derivative of
     output column ``cols[i]`` with respect to input column ``cols[j]`` is
     taken with step ``steps[j]``, its difference unwrapped on ``periods[i]``.
+    Costs ``2 * len(cols)`` calls of ``fn``. Used by
+    :meth:`LISAFrameMap.log_abs_det_jacobian` and
+    :meth:`SkyMove._log_abs_det_jacobian`.
+
+    Args:
+        coords (np.ndarray): ``(n, ndim)`` rows (host float array).
+        fn (Callable): Row map ``(n, ndim) -> (n, ndim)``.
+        cols (Sequence[int]): The ``k`` columns of the Jacobian block, in the
+            same order for inputs and outputs.
+        steps (Sequence[float], optional): Central-difference step per input
+            column. Default :data:`FRAME_FD_STEPS` (rad, -, rad, s).
+        periods (Sequence[float | None], optional): Wrap period of each output
+            column (``None``: not periodic). Default :data:`FRAME_FD_PERIODS`.
+
+    Returns:
+        np.ndarray: ``(n,)`` ``ln|det J|`` per row.
     """
     return np.log(np.abs(np.linalg.det(fd_frame_jacobian(coords, fn, cols, steps, periods))))
 
 
 def fd_frame_jacobian(coords, fn, cols, steps=FRAME_FD_STEPS, periods=FRAME_FD_PERIODS):
-    """The ``(n, k, k)`` central-difference Jacobian of ``fn`` on ``cols``
-    (see :func:`fd_log_abs_det_jacobian`)."""
+    """The ``(n, k, k)`` central-difference Jacobian of ``fn`` on ``cols``.
+
+    Element ``[r, i, j]`` is ``d fn(x)[cols[i]] / d x[cols[j]]`` at row ``r``.
+    Arguments as in :func:`fd_log_abs_det_jacobian`; the input rows are not
+    modified.
+
+    Returns:
+        np.ndarray: ``(n, k, k)`` float array, ``k = len(cols)``.
+    """
     n = coords.shape[0]
     k = len(cols)
     J = np.empty((n, k, k))
@@ -96,11 +135,28 @@ class ConstellationPhase:
     numpy arrays and a float).
 
     Args:
-        t_grid: Absolute times (orbit-file time axis), increasing.
-        alpha: Unwrapped constellation longitude at ``t_grid`` (radians).
+        t_grid (array_like): Absolute times (orbit-file time axis, s), 1D and
+            strictly increasing, at least 2 points.
+        alpha (array_like): Constellation ecliptic longitude at ``t_grid``
+            (radians); unwrapped on construction.
         t_offset: Added to the SAMPLING-basis time before the lookup, i.e.
             the epoch the sampled time is referenced to (the MBH branch's
             ``mbh_waveform_t0``: ``t_abs = t_plunge + mbh_waveform_t0``).
+
+    Raises:
+        ValueError: ``t_grid`` / ``alpha`` not 1D of the same length >= 2, or
+            ``t_grid`` not strictly increasing.
+
+    Attributes:
+        t_grid (np.ndarray): The time grid (s).
+        alpha (np.ndarray): The unwrapped longitude table (radians).
+        t_offset (float): See ``t_offset``.
+
+    Example:
+        >>> from lisatools.sampling.moves.skymodehop import ConstellationPhase
+        >>> phase = ConstellationPhase([0.0, 10.0], [0.0, 1.0], t_offset=5.0)
+        >>> float(phase(0.0)), float(phase(10.0))
+        (0.5, 1.5)
     """
 
     def __init__(self, t_grid, alpha, t_offset: float = 0.0):
@@ -133,13 +189,28 @@ class ConstellationPhase:
         orbit phase live in ONE ecliptic convention.
 
         Args:
-            orbits: Orbits object (CPU or GPU backend; positions are pulled
-                to the host).
+            orbits (Orbits): Configured orbits object (CPU or GPU backend;
+                positions are pulled to the host). Its time axis is
+                ``orbits.sc_t`` when present, else ``orbits.t``.
             t_offset: See the class docstring.
             step: Grid spacing in seconds (alpha is linear to ~1e-8 rad
-                over a day).
-            t_min, t_max: Grid bounds (absolute). Default: the orbits'
-                configured spacecraft time grid.
+                over a day). Default one day.
+            t_min: Lower grid bound (absolute, s). Default: the first time of
+                the orbits' configured spacecraft time grid.
+            t_max: Upper grid bound (absolute, s). Default: its last time.
+
+        Returns:
+            ConstellationPhase: A table on ``ceil((t_max - t_min) / step) + 1``
+            evenly spaced points (at least 2).
+
+        Raises:
+            ValueError: ``t_max <= t_min``.
+
+        Example:
+            .. code-block:: python
+
+                phase = ConstellationPhase.from_orbits(
+                    general_setup.orbits, t_offset=gs.mbh_waveform_t0)
         """
         sc_t = getattr(orbits, "sc_t", None)
         if sc_t is None:
@@ -163,7 +234,19 @@ class ConstellationPhase:
         return cls(t_grid, alpha, t_offset=t_offset)
 
     def __call__(self, t_sampling):
-        """``alpha`` (radians, unwrapped) at sampling-basis time(s) ``t_sampling``."""
+        """``alpha`` (radians, unwrapped) at sampling-basis time(s) ``t_sampling``.
+
+        Linear interpolation inside the grid, linear extrapolation with the
+        end slopes outside it.
+
+        Args:
+            t_sampling (float or array_like): Sampling-basis time(s) (s);
+                ``t_offset`` is added before the lookup.
+
+        Returns:
+            np.ndarray: ``alpha`` with the shape of ``t_sampling`` (a numpy
+            scalar or a 0-d array for a scalar input).
+        """
         t = np.asarray(t_sampling, dtype=float) + self.t_offset
         out = np.interp(t, self.t_grid, self.alpha)
         # linear extrapolation with the end slopes
@@ -179,6 +262,7 @@ class ConstellationPhase:
 
 
 def _to_host(x):
+    """``x`` as a host numpy array (``.get()`` for a cupy array)."""
     return x.get() if hasattr(x, "get") else np.asarray(x)
 
 
@@ -237,18 +321,57 @@ class LISAFrameMap:
 
     Picklable: the index map, two floats and the phase table.
 
+    Production (``MBH_PROPOSAL_FRAME=lisa``): built once per run by
+    :func:`~lisatools.globalfit.stock.erebor.source_runtime.make_mbh_proposal_frame_map`
+    on the stock MBH columns (``lam=8`` alpha, ``sinbeta=9`` sin_delta,
+    ``psi=7``, ``t_ref=10`` t_plunge) with ``coord_frame="icrs"`` and the
+    sky hops' :class:`ConstellationPhase`, then stamped on the MBH move as
+    ``proposal_frame_map``. The add/remove move uses :meth:`forward`,
+    :meth:`inverse` (``return_ok=True``), :meth:`log_abs_det_jacobian`,
+    :meth:`jacobian`, :meth:`proposal_widths`, :attr:`columns`,
+    :attr:`time_column` and :attr:`name`.
+
     Args:
-        ind_map: ``{"lam": col, "sinbeta": col, "psi": col, "t_ref": col,
-            ...}`` (extra keys are ignored here).
-        coord_frame: ``"icrs"``, ``"ssb_ecliptic"`` or ``"lisa"``.
-        frame_t0: Constant phase offset in years when no
-            ``constellation_phase`` is given.
-        constellation_phase: ``alpha(t) -> radians``, per row.
+        ind_map (dict): ``{"lam": col, "sinbeta": col, "psi": col, "t_ref": col,
+            ...}`` (extra keys are ignored here). All four keys are required
+            unless ``coord_frame="lisa"``.
+        coord_frame (str): ``"icrs"`` (default), ``"ssb_ecliptic"`` or
+            ``"lisa"``.
+        frame_t0 (float): Constant phase offset in years when no
+            ``constellation_phase`` is given. Default 0.0.
+        constellation_phase: ``alpha(t) -> radians``, per row. Default
+            ``None`` (the analytic phase).
         newton_steps: Chord-Newton steps of :meth:`inverse` (0 = the legacy
-            inverse).
+            inverse). Default 3.
+
+    Raises:
+        ValueError: ``ind_map`` not a dict, an unknown ``coord_frame``, a
+            missing frame column (``coord_frame != "lisa"``), or a
+            ``constellation_phase`` that is not callable.
+
+    Attributes:
+        ind_map (dict): See ``ind_map``.
+        coord_frame (str): See ``coord_frame``.
+        frame_t0 (float): See ``frame_t0``.
+        constellation_phase (Callable or None): See ``constellation_phase``.
+        newton_steps (int): See ``newton_steps``.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.sampling.moves.skymodehop import (
+                ConstellationPhase, LISAFrameMap)
+
+            phase = ConstellationPhase.from_orbits(orbits, t_offset=mbh_waveform_t0)
+            fmap = LISAFrameMap(dict(cosinc=6, psi=7, lam=8, sinbeta=9, t_ref=10),
+                                coord_frame="icrs", constellation_phase=phase)
+            y = fmap.forward(x)                     # (n, 11) ICRS rows -> LISA frame
+            x_back, ok = fmap.inverse(y, return_ok=True)
+            ldj = fmap.log_abs_det_jacobian(x)      # (n,), ~ +-5e-5
     """
 
-    #: the proposal-frame name (the add/remove move's ``{BRANCH}_PROPOSAL_FRAME``)
+    #: ``"lisa"``, the proposal-frame name the add/remove move checks against
+    #: ``{BRANCH}_PROPOSAL_FRAME``
     name = "lisa"
     _ALLOWED_FRAMES = ("lisa", "ssb_ecliptic", "icrs")
 
@@ -283,16 +406,27 @@ class LISAFrameMap:
 
     @property
     def time_column(self):
+        """The basis column of the reference time (``ind_map["t_ref"]``)."""
         return int(self.ind_map["t_ref"])
 
     def describe(self) -> str:
+        """One-line description for the log, e.g. ``LISA frame from icrs (orbit phase table)``."""
         phase = ("orbit phase table" if self.constellation_phase is not None
                  else f"analytic phase, frame_t0 {self.frame_t0:g} yr")
         return f"LISA frame from {self.coord_frame} ({phase})"
 
     def proposal_widths(self, widths):
         """The proposal-frame box widths: ``widths`` with ``lam_L`` 2 pi,
-        ``sinbeta_L`` 2, ``psi_L`` pi (``t_L`` keeps the sampling time's)."""
+        ``sinbeta_L`` 2, ``psi_L`` pi (``t_L`` keeps the sampling time's).
+
+        Args:
+            widths (array_like): ``(ndim,)`` prior-box widths in the sampling
+                basis.
+
+        Returns:
+            np.ndarray: A float copy with the three angular frame columns
+            replaced (unchanged for ``coord_frame="lisa"``).
+        """
         out = np.array(widths, dtype=float, copy=True)
         if self.coord_frame == "lisa":
             return out
@@ -302,7 +436,16 @@ class LISAFrameMap:
 
     def frame_t0_years(self, t_ref):
         """Per-row ``t0`` (years) for the bbhx transforms such that
-        ``Omega * (t_ref + t0 * YRSID_SI) == alpha(t_ref)``."""
+        ``Omega * (t_ref + t0 * YRSID_SI) == alpha(t_ref)``.
+
+        Args:
+            t_ref (float or np.ndarray): Sampling-basis time(s) (s).
+
+        Returns:
+            float or np.ndarray: :attr:`frame_t0` without a
+            ``constellation_phase``, else the per-row offsets (shape of
+            ``t_ref``).
+        """
         from bbhx.utils.constants import ConstOmega
 
         if self.constellation_phase is None:
@@ -312,7 +455,22 @@ class LISAFrameMap:
 
     # ---- the map -----------------------------------------------------------
     def forward(self, coords):
-        """``(lam, sinbeta, psi, t_ref)`` columns -> the LISA frame (a copy)."""
+        """``(lam, sinbeta, psi, t_ref)`` columns -> the LISA frame.
+
+        For ``"icrs"`` the sky and polarization are first rotated to the
+        ecliptic (:func:`lisatools.sources.utils.icrs_to_ecliptic`), then bbhx
+        ``SSB_to_LISA`` runs with each row's phase offset
+        (:meth:`frame_t0_years`). Outputs are wrapped: ``lam_L`` to
+        ``[0, 2 pi)``, ``psi_L`` to ``[0, pi)``.
+
+        Args:
+            coords (np.ndarray): ``(n, ndim)`` sampling-basis rows.
+
+        Returns:
+            np.ndarray: ``(n, ndim)`` rows with the four frame columns replaced
+            by ``(lam_L, sin beta_L, psi_L, t_L)`` (a copy; for
+            ``coord_frame="lisa"`` the input object itself).
+        """
         if self.coord_frame == "lisa":
             return coords
 
@@ -343,7 +501,18 @@ class LISAFrameMap:
 
     def inverse_approx(self, coords):
         """The legacy inverse (SkyMove's, bit for bit): bbhx ``LISA_to_SSB``
-        with the phase pinned at the LISA-frame time."""
+        with the phase pinned at the LISA-frame time.
+
+        Off by up to ~9e-4 s / 6e-6 rad on realistic MBH rows (see the class
+        docstring); :meth:`inverse` refines it.
+
+        Args:
+            coords (np.ndarray): ``(n, ndim)`` LISA-frame rows.
+
+        Returns:
+            np.ndarray: ``(n, ndim)`` sampling-basis rows (a copy; for
+            ``coord_frame="lisa"`` the input object itself).
+        """
         if self.coord_frame == "lisa":
             return coords
 
@@ -383,7 +552,15 @@ class LISAFrameMap:
         return r
 
     def valid(self, coords):
-        """Rows that lie in the LISA-frame domain: finite, ``|sinbeta_L| <= 1``."""
+        """Rows that lie in the LISA-frame domain: finite, ``|sinbeta_L| <= 1``.
+
+        Args:
+            coords (array_like): ``(..., ndim)`` LISA-frame rows.
+
+        Returns:
+            np.ndarray: Boolean mask of shape ``coords.shape[:-1]`` (only the
+            finiteness test for ``coord_frame="lisa"``).
+        """
         coords = np.asarray(coords, dtype=float)
         ok = np.all(np.isfinite(coords), axis=-1)
         if self.coord_frame != "lisa":
@@ -399,6 +576,18 @@ class LISAFrameMap:
         (:meth:`valid`); a row outside it (``|sinbeta_L| > 1``, which a
         proposal in the LISA frame can produce) has no preimage, and its
         returned row is not meaningful.
+
+        Args:
+            coords (array_like): ``(n, ndim)`` LISA-frame rows.
+            refine: Apply the chord-Newton refinement (``newton_steps > 0``).
+                Default ``True``.
+            return_ok: Also return the domain mask. Default ``False``.
+
+        Returns:
+            np.ndarray or tuple[np.ndarray, np.ndarray]: The ``(n, ndim)``
+            sampling-basis rows, or ``(rows, ok)`` with ``ok`` the ``(n,)``
+            boolean mask of :meth:`valid`. For ``coord_frame="lisa"`` the rows
+            are the input unchanged.
         """
         coords = np.asarray(coords, dtype=float)
         ok = self.valid(coords)
@@ -411,6 +600,18 @@ class LISAFrameMap:
         return (x, ok) if return_ok else x
 
     def _refine(self, x0, y, ok):
+        """Chord-Newton refinement of the first-guess preimages ``x0`` of ``y``.
+
+        One central-difference Jacobian at ``x0``, then at most
+        ``newton_steps`` steps on the frame columns; per row the iterate with
+        the smallest scaled residual (1 rad ~ 1e3 s) and ``|sinbeta| <= 1`` is
+        kept, so a row the refinement cannot improve keeps ``x0``. Only rows
+        with ``ok`` and a finite ``x0`` are refined; a singular Jacobian on any
+        refined row returns every row of ``x0`` unchanged.
+
+        Returns:
+            np.ndarray: ``(n, ndim)`` refined sampling-basis rows.
+        """
         cols = self.columns
         x = x0.copy()
         live = ok & np.all(np.isfinite(x0), axis=-1)
@@ -445,14 +646,34 @@ class LISAFrameMap:
         return x
 
     def frame_jacobian(self, coords):
-        """``(n, 4, 4)`` ``dF/dx`` on the frame columns (central differences)."""
+        """``(n, 4, 4)`` ``dF/dx`` on the frame columns (central differences).
+
+        Args:
+            coords (array_like): ``(n, ndim)`` sampling-basis rows.
+
+        Returns:
+            np.ndarray: ``(n, 4, 4)`` in :attr:`columns` order (the identity
+            for ``coord_frame="lisa"``).
+        """
         coords = np.asarray(coords, dtype=float)
         if self.coord_frame == "lisa":
             return np.broadcast_to(np.eye(4), (coords.shape[0], 4, 4)).copy()
         return fd_frame_jacobian(coords, self.forward, self.columns)
 
     def jacobian(self, coords):
-        """``(n, ndim, ndim)`` ``dF/dx``: the frame block, identity elsewhere."""
+        """``(n, ndim, ndim)`` ``dF/dx``: the frame block, identity elsewhere.
+
+        Used by the add/remove move's proposal-frame eigen tables: a custom
+        builder's sampling-basis table is pushed forward as ``J C J^T``, and
+        the frame table's ``t_plunge`` width is logged through ``J^-1``.
+
+        Args:
+            coords (array_like): ``(n, ndim)`` (or one ``(ndim,)``) sampling-basis
+                rows.
+
+        Returns:
+            np.ndarray: ``(n, ndim, ndim)`` float array.
+        """
         coords = np.atleast_2d(np.asarray(coords, dtype=float))
         n, nd = coords.shape
         J = np.broadcast_to(np.eye(nd), (n, nd, nd)).copy()
@@ -461,7 +682,18 @@ class LISAFrameMap:
         return J
 
     def log_abs_det_jacobian(self, coords):
-        """``ln|det dF/dx|`` per row (0 in the LISA frame itself)."""
+        """``ln|det dF/dx|`` per row (0 in the LISA frame itself).
+
+        The proposal-frame Metropolis term of the add/remove move is
+        ``ln|J_F(x)| - ln|J_F(x')|`` from two calls of this.
+
+        Args:
+            coords (array_like): ``(n, ndim)`` sampling-basis rows.
+
+        Returns:
+            np.ndarray: ``(n,)`` float array (central differences,
+            :func:`fd_log_abs_det_jacobian`).
+        """
         coords = np.asarray(coords, dtype=float)
         if self.coord_frame == "lisa":
             return np.zeros(coords.shape[0])
@@ -512,36 +744,68 @@ class SkyMove(MHMove):
     1e-4``). ``jacobian=True`` (default) computes it by central differences
     on the four frame columns; ``False`` neglects it (the legacy behaviour).
 
+    The frame conversion is :attr:`frame_map` (a :class:`LISAFrameMap` rebuilt
+    from the move's current attributes; the legacy inverse
+    :meth:`LISAFrameMap.inverse_approx`, never the refined one, so the
+    proposal stream is bit-identical to the pre-2026-10-19 move). Under the
+    add/remove move's ``MBH_PROPOSAL_FRAME=lisa`` a non-LISA-frame hop is left
+    in the sampling basis (:attr:`conjugates_own_frame`).
+
+    Production: the MBH inner-move stack carries one ``coord_frame="icrs"``
+    hop per kind with a positive ``MBH_SKY_MOVE_{BOTH,LAT,LONG}_WEIGHT``
+    (launchers 0.02 / 0.04 / 0.02), on the stock ICRS columns and the run's
+    :class:`ConstellationPhase`
+    (:func:`~lisatools.globalfit.stock.erebor.source_runtime.make_mbh_inner_moves`).
+
     Args:
-        ind_map: Mapping from coordinate names to their indices in the
-            coordinate array. Defaults to
+        ind_map (dict, optional): Mapping from coordinate names to their
+            indices in the coordinate array. Default ``None`` ->
             ``{"cosinc": 6, "lam": 7, "sinbeta": 8, "psi": 9, "t_ref": 10}``
             (the legacy LISA-frame MBH basis). The stock ICRS MBH basis is
             ``{"cosinc": 6, "psi": 7, "lam": 8, "sinbeta": 9, "t_ref": 10}``.
             ``"t_ref"`` is only consumed when ``coord_frame != "lisa"``.
-        which: Which transformation to apply. Must be one of ``"both"``,
-            ``"lat"``, or ``"long"``.
-        coord_frame: Frame of the sampled sky coordinates; one of
-            ``"lisa"``, ``"ssb_ecliptic"``, ``"icrs"``. (default:
-            ``"lisa"``)
-        frame_t0: Constant constellation-phase offset in **years**
+        which (str): Which transformation to apply: ``"both"`` (default; the
+            8 modes), ``"lat"`` or ``"long"``.
+        coord_frame (str): Frame of the sampled sky coordinates; one of
+            ``"lisa"`` (default), ``"ssb_ecliptic"``, ``"icrs"``.
+        frame_t0 (float): Constant constellation-phase offset in **years**
             (``alpha = Omega (t_ref + frame_t0 YRSID_SI)``), used when no
-            ``constellation_phase`` is given. (default: ``0.0``)
+            ``constellation_phase`` is given. Default ``0.0``.
         constellation_phase: Callable ``alpha(t_ref) -> radians`` giving the
             constellation's ecliptic longitude at each row's sampling-basis
             time -- normally a :class:`ConstellationPhase` built from the
-            run's orbits. Overrides ``frame_t0``. (default: ``None``)
+            run's orbits. Overrides ``frame_t0``. Default ``None``.
         jacobian: Include the frame-conversion Jacobian in the proposal
-            factors (see above). (default: ``True``)
+            factors (see above). Default ``True``.
         **kwargs: Additional keyword arguments forwarded to
             :class:`eryn.moves.MHMove`.
 
     Raises:
         ValueError: If ``ind_map`` is not a ``dict``, ``which`` is not one
             of the allowed strings, ``coord_frame`` is not one of the
-            allowed strings, or ``coord_frame != "lisa"`` while ``ind_map``
-            lacks a ``"t_ref"`` entry.
+            allowed strings, ``coord_frame != "lisa"`` while ``ind_map``
+            lacks a ``"t_ref"`` entry, or ``constellation_phase`` is not
+            callable.
 
+    Attributes:
+        ind_map (dict): See ``ind_map``.
+        which (str): See ``which``.
+        coord_frame (str): See ``coord_frame``.
+        frame_t0 (float): See ``frame_t0``.
+        constellation_phase (Callable or None): See ``constellation_phase``.
+        jacobian (bool): See ``jacobian``.
+        transform (Callable): The bound hop, :meth:`both_transform`,
+            :meth:`lat_transform` or :meth:`long_transform`.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.sampling.moves.skymodehop import ConstellationPhase, SkyMove
+
+            phase = ConstellationPhase.from_orbits(orbits, t_offset=mbh_waveform_t0)
+            hop = SkyMove(ind_map=dict(cosinc=6, psi=7, lam=8, sinbeta=9, t_ref=10),
+                          which="lat", coord_frame="icrs", constellation_phase=phase)
+            inner_moves = [(eigen_move, 0.92), (hop, 0.08)]
     """
 
     _ALLOWED_FRAMES = ("lisa", "ssb_ecliptic", "icrs")
@@ -640,6 +904,9 @@ class SkyMove(MHMove):
         """``ln|det d fn / d x|`` over the four frame columns, by central
         differences (output angles unwrapped on their periods). ``fn``
         defaults to :meth:`_to_lisa_frame`. Zero for ``coord_frame == "lisa"``.
+
+        Returns:
+            np.ndarray: ``(n,)`` per row of ``coords``.
         """
         if self.coord_frame == "lisa":
             return np.zeros(coords.shape[0])
@@ -659,11 +926,12 @@ class SkyMove(MHMove):
         :math:`\\sin\\beta`.
 
         Args:
-            coords: 2D coordinate array with shape ``(n, ndim)``.
-            random: Random state object (unused for this transform).
+            coords (np.ndarray): 2D coordinate array with shape ``(n, ndim)``.
+            random (np.random.RandomState): Random state object (unused for
+                this transform).
 
         Returns:
-            Transformed copy of ``coords``.
+            np.ndarray: Transformed copy of ``coords``.
         """
         temp = coords.copy()
 
@@ -681,12 +949,12 @@ class SkyMove(MHMove):
         wrapped into their canonical ranges.
 
         Args:
-            coords: 2D coordinate array with shape ``(n, ndim)``.
-            random: Random state with a ``randint`` method used to draw the
-                rotation amount.
+            coords (np.ndarray): 2D coordinate array with shape ``(n, ndim)``.
+            random (np.random.RandomState): Random state with a ``randint``
+                method used to draw the rotation amount.
 
         Returns:
-            Transformed copy of ``coords``.
+            np.ndarray: Transformed copy of ``coords``.
         """
         temp = coords.copy()
 
@@ -707,11 +975,13 @@ class SkyMove(MHMove):
         from the eight equivalent LISA sky modes.
 
         Args:
-            coords: 2D coordinate array with shape ``(n, ndim)``.
-            random: Random state object.
+            coords (np.ndarray): 2D coordinate array with shape ``(n, ndim)``.
+            random (np.random.RandomState): Random state object (one
+                ``randint`` draw picks the reflected rows, then
+                :meth:`long_transform` draws the rotations).
 
         Returns:
-            Transformed coordinate array.
+            np.ndarray: Transformed copy of ``coords``.
         """
         # if doing both does not assume it will cross plane, selects from 8 modes
         temp = coords.copy()
@@ -731,22 +1001,21 @@ class SkyMove(MHMove):
         or in the LISA frame, where the hop is symmetric).
 
         Args:
-            branches_coords: Keys are branch names and values are arrays of
-                shape ``(ntemps, nwalkers, nleaves_max, ndim)`` holding the
-                current walker coordinates.
-            random: Current random state object.
-            branches_inds: Keys are branch names and values are boolean
-                arrays of shape ``(ntemps, nwalkers, nleaves_max)`` selecting
-                which leaves are currently active. If ``None``, all leaves
-                are treated as active.
+            branches_coords (dict): Keys are branch names and values are
+                arrays of shape ``(ntemps, nwalkers, nleaves_max, ndim)``
+                holding the current walker coordinates.
+            random (np.random.RandomState): Current random state object.
+            branches_inds (dict, optional): Keys are branch names and values
+                are boolean arrays of shape ``(ntemps, nwalkers, nleaves_max)``
+                selecting which leaves are currently active. If ``None``, all
+                leaves are treated as active.
             **kwargs: Unused; accepted for ``eryn`` move compatibility.
 
         Returns:
-            Tuple ``(q, factors)`` where ``q`` is a dict of proposed
-            coordinates with the same shape as ``branches_coords`` and
-            ``factors`` is an array of shape ``(ntemps, nwalkers)`` of
-            log proposal-density factors.
-
+            tuple[dict, np.ndarray]: ``(q, factors)`` where ``q`` is a dict of
+            proposed coordinates with the same shape as ``branches_coords``
+            and ``factors`` is an array of shape ``(ntemps, nwalkers)`` of
+            log proposal-density factors (summed over the branches).
         """
 
         q = {}

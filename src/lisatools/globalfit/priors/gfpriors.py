@@ -1,3 +1,15 @@
+"""Generic per-source prior + transform wrapper (unused by the stock fits).
+
+:class:`BaseSourcePrior` bundles an eryn :class:`~eryn.priors.ProbDistContainer`
+and :class:`~eryn.utils.TransformContainer` per source;
+:class:`UniformSourcePrior` builds it from ``(min, max)`` boxes; and
+:class:`_GPUPriorWrapper` retries a component on the host when it rejects
+device arrays. No stock fit, script, test or tutorial instantiates any of them:
+the module is imported in production only because
+:mod:`~lisatools.globalfit.priors.gbpriors` subclasses :class:`BaseSourcePrior`.
+Importing it probes for CuPy (``_CUPY_AVAILABLE``).
+"""
+
 import warnings
 import inspect
 import numpy as np
@@ -16,6 +28,7 @@ from eryn.prior import ProbDistContainer, uniform_dist
 from eryn.utils import TransformContainer
 
 
+# TODO check: keep/remove/document -- never instantiated; sole subclass GalacticBinaryPrior unused
 class BaseSourcePrior:
     """Unified infrastructure for LISA source priors and transformations.
 
@@ -39,7 +52,6 @@ class BaseSourcePrior:
             for cases where they differ and no TransformContainer is provided.
         param_transforms (Optional[Union[Dict, TransformContainer]]): Callables or
             an already initialized TransformContainer mapping sampling to physical.
-        periodic (Optional[Dict[str, float]]): Periodic boundaries for parameters.
         use_cupy (bool): Whether to use CuPy for GPU acceleration.
         return_gpu (bool): Whether the priors should return arrays on the GPU.
         verbose (bool): If True, enables sanity check warnings.
@@ -255,6 +267,7 @@ class BaseSourcePrior:
 
 
 
+# TODO check: keep/remove/document -- never instantiated anywhere
 class UniformSourcePrior(BaseSourcePrior):
     """Convenience class for sources parameterized entirely by uniform priors.
     
@@ -321,6 +334,7 @@ class UniformSourcePrior(BaseSourcePrior):
 
 
 
+# TODO check: keep/remove/document -- only BaseSourcePrior uses it; docs/conventions.md cites it
 class _GPUPriorWrapper:
     """Wraps prior distributions to handle CPU/GPU placement transparently.
 

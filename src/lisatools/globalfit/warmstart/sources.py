@@ -49,10 +49,32 @@ seed's cold positions go on every rung (what ``START_FACTOR=0`` does with
 the injection). Every warm start is checked against THIS run's prior; a
 point outside it refuses the launch. No random numbers are consumed.
 
-Dry run on the cluster before launching::
+WHERE IT SITS. ``GlobalFit._source_warm_start`` (``run.py``) calls
+:func:`warm_start_branch` once per armed branch while a FRESH store's start
+coordinates are built (``load_info``); a resume keeps its chain and never
+calls it. The knobs are fields of the branch settings
+(``source_runtime.py``), env-seeded:
 
-    python -m lisatools.globalfit.warmstart.sources --store <6mo.h5> \\
-        --branch mbh --ids 2,5,16,18
+* ``SOURCE_WARM_START_STORE`` -- the seed store (default unset = off;
+  shared by the three branches). Launchers: ``${GF_SEED_STORE}``
+  (explicitly empty on a run without a parent).
+* ``SOURCE_WARM_START_SNR_MIN`` -- default 10.0 (launchers 10).
+* ``SOURCE_WARM_START_SNR_UNKNOWN`` -- ``refuse`` (default) / ``truth`` /
+  ``warm`` for a NaN ``<h|h>`` record (launchers: unset).
+* ``MBH_SOURCE_WARM_START_IDS`` / ``EMRI_SOURCE_WARM_START_IDS`` /
+  ``SOBBH_SOURCE_WARM_START_IDS`` -- the SEED run's id list per branch
+  (:func:`parse_id_list`; ``none`` disables the branch). Launchers: the
+  parent's lists (9mo: MBH ``2,5,16,18``, EMRI ``0,...,7``, SOBBH
+  ``0,...,5``; 12mo: MBH ``2,5,7,12,16,18``).
+
+Example:
+    Dry run on the cluster before launching (prints each id's seed SNR and
+    the warm / injection decision; ``--snr-min`` defaults to 10):
+
+    .. code-block:: bash
+
+        python -m lisatools.globalfit.warmstart.sources \\
+            --store gf_prod_6mo_testing.h5 --branch mbh --ids 2,5,16,18
 """
 
 from __future__ import annotations
@@ -102,6 +124,23 @@ def parse_id_list(raw) -> typing.Optional[tuple]:
     The ``cast`` of ``{BRANCH}_SOURCE_WARM_START_IDS`` (module level and named,
     so the settings tree pickles). ``()`` disables the branch's warm start;
     an empty env value never reaches here (``env_resolve`` treats it as unset).
+
+    Args:
+        raw (str, tuple, list or None): The id list.
+
+    Returns:
+        tuple of int or None: The ids in the given order (``None`` for
+        ``None``).
+
+    Raises:
+        ValueError: On a duplicate id or a non-integer entry.
+
+    Example:
+        >>> from lisatools.globalfit.warmstart.sources import parse_id_list
+        >>> parse_id_list("2,5,16,18")
+        (2, 5, 16, 18)
+        >>> parse_id_list("none")
+        ()
     """
     if raw is None:
         return None
@@ -118,10 +157,12 @@ def parse_id_list(raw) -> typing.Optional[tuple]:
 
 
 def _ids_text(ids) -> str:
+    """Comma-joined ids for messages."""
     return ",".join(str(int(i)) for i in ids)
 
 
 def _ids_knob(branch: str) -> str:
+    """The branch's id-list env knob name, ``{BRANCH}_SOURCE_WARM_START_IDS``."""
     return f"{branch.upper()}_SOURCE_WARM_START_IDS"
 
 
@@ -152,10 +193,12 @@ class SeedLeaves:
 
     @property
     def ntemps(self) -> int:
+        """Rungs of the seed branch ladder."""
         return int(self.coords.shape[0])
 
     @property
     def nwalkers(self) -> int:
+        """Walkers of the seed store."""
         return int(self.coords.shape[1])
 
     def snr(self) -> np.ndarray:
@@ -180,8 +223,13 @@ def _row_written(inds_row) -> bool:
 def _read_last_written(path: str, branch: str) -> typing.Optional[dict]:
     """Raw last-written-row arrays of ``branch``, or ``None`` if the store lacks it.
 
-    Raises ``OSError`` (h5py's error class for a torn/unreadable file or
-    chunk) for the caller's backup fallback.
+    Tries the last ``_ROW_LOOKBACK`` (3) rows, newest first, skipping
+    unwritten ones. Returns a dict with keys ``row``, ``coords``, ``inds``,
+    ``h_h`` (all NaN when the store has no record) and ``data_t0``.
+    Raises ``OSError`` (h5py's error class for a
+    torn/unreadable file or chunk) for the caller's backup fallback, and
+    :class:`SourceWarmStartError` for a store without rows or without a
+    written row in the lookback.
     """
     import h5py
 
@@ -225,16 +273,23 @@ def _read_last_written(path: str, branch: str) -> typing.Optional[dict]:
 def read_seed_leaves(store: str, branch: str, ids) -> typing.Optional[SeedLeaves]:
     """The seed store's last cold-chain ladder for ``branch``, labelled by catalogue id.
 
+    A torn / unreadable primary (a live run's saver mid-write, a preempted
+    job) falls back to ``<store>_running_backup_copy.h5``.
+
     Args:
         store: Seed run's global-fit h5 (``GF_SEED_STORE``).
         branch: ``mbh`` / ``emri`` / ``sobbh``.
-        ids: The seed run's catalogue id list for the branch (any order).
+        ids (str or sequence of int): The seed run's catalogue id list for
+            the branch (any order; :func:`parse_id_list` input).
 
     Returns:
-        :class:`SeedLeaves`, or ``None`` when the store has no such branch.
+        SeedLeaves or None: :class:`SeedLeaves` (ids sorted), or ``None``
+        when the store has no such branch.
 
-    A torn / unreadable primary (a live run's saver mid-write, a preempted
-    job) falls back to ``<store>_running_backup_copy.h5``.
+    Raises:
+        SourceWarmStartError: When the store does not exist, it (and its
+            backup, or it without a backup) cannot be read, it holds no
+            written row, or ``ids`` does not have one id per stored leaf.
     """
     if not os.path.exists(store):
         raise SourceWarmStartError(
@@ -318,19 +373,28 @@ def place_warm_leaves(
 
     Args:
         branch: Branch name (for messages).
-        coords: ``(nt_draw, nwalkers, nleaves, ndim)`` start block exactly as
-            today's ``START_FACTOR`` path built it; returned leaves that are
-            not warm are byte-identical to it.
-        new_ids: This run's catalogue ids in leaf order (``injection_ids``).
+        coords (np.ndarray): ``(nt_draw, nwalkers, nleaves, ndim)`` start
+            block exactly as today's ``START_FACTOR`` path built it; returned
+            leaves that are not warm are byte-identical to it.
+        new_ids (sequence of int): This run's catalogue ids in leaf order
+            (``injection_ids``).
         seed: :func:`read_seed_leaves` output.
         snr_min: Warm iff the seed SNR is STRICTLY above this.
         ntemps_branch: This run's ladder size for the branch.
         snr_unknown: ``refuse`` / ``truth`` / ``warm`` for a NaN record.
-        prior: The branch's prior container (``logpdf``); every warm start
-            on the branch ladder must be inside it.
+        prior (ProbDistContainer, optional): The branch's prior container
+            (``logpdf``); every warm start on the branch ladder must be
+            inside it. Default ``None`` = no check.
 
     Returns:
-        ``(coords, line)`` -- a new array and the one-line summary.
+        tuple[np.ndarray, str]: ``(coords, line)`` -- a new float array of
+        the input's shape and the one-line ``[SOURCE-WARM]`` summary.
+
+    Raises:
+        ValueError: For an unknown ``snr_unknown``.
+        SourceWarmStartError: On an id / leaf-count or ndim mismatch, an
+            unknown SNR under ``refuse``, a dead / non-finite seed leaf, or a
+            warm start outside ``prior``.
     """
     if snr_unknown not in SNR_UNKNOWN_CHOICES:
         raise ValueError(
@@ -466,8 +530,39 @@ def warm_start_branch(
 
     ``seed_ids=()`` (``{BRANCH}_SOURCE_WARM_START_IDS=none``) disables the
     branch; a store without the branch starts every leaf at the injection.
-    Returns ``(coords, one-line summary)``; raises
-    :class:`SourceWarmStartError` on anything it cannot honour.
+    Called by ``GlobalFit._source_warm_start`` on a fresh start only.
+
+    Args:
+        branch: ``mbh`` / ``emri`` / ``sobbh``.
+        coords (np.ndarray): ``(nt_draw, nwalkers, nleaves, ndim)`` start
+            block built by the ``START_FACTOR`` path.
+        store: The seed store (``SOURCE_WARM_START_STORE``).
+        seed_ids (sequence of int or None): The seed run's id list
+            (``{BRANCH}_SOURCE_WARM_START_IDS``); ``()`` disables; ``None``
+            is refused when the store holds the branch.
+        new_ids (sequence of int): This run's ids in leaf order
+            (``injection_ids``).
+        snr_min: Warm iff the seed SNR is strictly above this
+            (``SOURCE_WARM_START_SNR_MIN``).
+        ntemps_branch: This run's ladder size for the branch.
+        snr_unknown: ``SOURCE_WARM_START_SNR_UNKNOWN``. Default ``"refuse"``.
+        prior (ProbDistContainer, optional): The branch's prior container.
+            Default ``None`` (no prior check).
+        data_t0: This run's data start [s]; must match the seed store's
+            within 1 ms (a seed store without the record only warns).
+            Default ``None`` = no check.
+
+    Returns:
+        tuple[np.ndarray, str]: ``(coords, one-line summary)``; ``coords``
+        is the input object itself when the branch is disabled or absent
+        from the seed store, else the new array of
+        :func:`place_warm_leaves`.
+
+    Raises:
+        SourceWarmStartError: On anything it cannot honour (missing store,
+            unknown ``new_ids``, ids knob unset for a store holding the
+            branch, data-start mismatch, and every refusal of
+            :func:`read_seed_leaves` / :func:`place_warm_leaves`).
     """
     if seed_ids is not None and len(tuple(seed_ids)) == 0:
         return coords, (
@@ -529,7 +624,19 @@ def warm_start_branch(
 
 
 def main(argv=None) -> int:
-    """Dry run: print a seed store's per-leaf SNRs and the warm/injection decision."""
+    """Dry run: print a seed store's per-leaf SNRs and the warm/injection decision.
+
+    The argparse description is the module docstring's first paragraph.
+    Options: ``--store`` (seed h5), ``--branch`` (``mbh`` / ``emri`` /
+    ``sobbh``), ``--ids`` (the SEED run's id list), ``--snr-min`` (default
+    10.0).
+
+    Args:
+        argv (list of str, optional): Arguments; ``None`` = ``sys.argv[1:]``.
+
+    Returns:
+        int: 0, or 1 when the store has no such branch.
+    """
     ap = argparse.ArgumentParser(
         prog="python -m lisatools.globalfit.warmstart.sources",
         description=__doc__.split("\n\n")[0],

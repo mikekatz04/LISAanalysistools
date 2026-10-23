@@ -2,10 +2,10 @@
 
 Source classes provide the per-time-sample (amplitude, phase) functions
 that the JAX TDI-on-the-fly projection composes with the LISA arm
-geometry. The interface mirrors the C++ pattern in ``TDIonTheFly.hh``
-where ``LISATDIonTheFly`` exposes virtual ``get_amp(t, params, bin_i)``
-/ ``get_phase(t, params, bin_i)`` that source subclasses
-(``GBTDIonTheFly``, ``SOBBHTDIonTheFly``) override.
+geometry. The interface mirrors the C++ pattern in
+``lisatools/cutils/lat_tdi_on_the_fly.hh``, where ``LISATDIonTheFly``
+exposes virtual ``get_amp(t, params, bin_i)`` / ``get_phase(t, params, bin_i)``
+that source subclasses (``GBTDIonTheFly``, ``SOBBHTDIonTheFly``) override.
 
 JAX twist: the source object is *static* (configuration only). The
 per-source parameters live in a flat 1D array (``params``) -- exactly the
@@ -14,9 +14,10 @@ binary axis is the natural way to drive a batch. The source class
 declares where the sky-angle parameters live (``inc_index``, ...) so the
 shared TDI projection can pull them out in a source-agnostic way.
 
-Concrete plugins live in ``fastlisaresponse.jax.sources``:
-    - ``JaxUCBSource``  -> matches GBTDIonTheFly::ucb_*
-    - ``JaxSOBBHSource`` -> matches SOBBHTDIonTheFly::sobbh_*
+Concrete plugins live in the downstream packages:
+
+- ``gbgpu.jax.sources.ucb.JaxUCBSource``  -> matches ``GBTDIonTheFly::ucb_*``
+- ``bbhx.jax.sources.sobbh.JaxSOBBHSource`` -> matches ``SOBBHTDIonTheFly::sobbh_*``
 """
 from __future__ import annotations
 
@@ -31,8 +32,36 @@ class JaxAmpPhaseSource(abc.ABC):
 
     Concrete subclasses populate the ``n_params``, ``param_names``, and
     sky-angle index attributes and implement :meth:`amplitude` and
-    :meth:`phase`. The TDI projection consumes them via the static
-    methods :meth:`get_amp`, :meth:`get_phase`, :meth:`get_sky_indices`.
+    :meth:`phase`. The TDI projection
+    (:mod:`lisatools.jax.response.projection`) calls :meth:`amplitude`,
+    :meth:`phase` and :meth:`get_sky_indices`.
+
+    Attributes:
+        n_params (int): Number of parameters per source (length of ``params``).
+        param_names (tuple[str, ...]): Parameter names, length ``n_params``.
+        inc_index (int): Index of the inclination in ``params`` (default 5).
+        psi_index (int): Index of the polarization angle (default 6).
+        lam_index (int): Index of the sky longitude (default 7).
+        beta_index (int): Index of the sky latitude (default 8). The defaults
+            match the GB layout ``(amp, f0, fdot, fddot, phi0, inc, psi, lam,
+            beta)``.
+
+    Example:
+        .. code-block:: python
+
+            import jax.numpy as jnp
+            from lisatools.jax.response.base import JaxAmpPhaseSource
+
+            class Monochromatic(JaxAmpPhaseSource):
+                n_params = 9
+                param_names = ("amp", "f0", "fdot", "fddot", "phi0",
+                               "inc", "psi", "lam", "beta")
+
+                def amplitude(self, t, params):
+                    return params[0] * jnp.ones_like(t)
+
+                def phase(self, t, params):
+                    return 2.0 * jnp.pi * params[1] * t + params[4]
     """
 
     #: Number of parameters per source (length of ``params`` array).
@@ -51,23 +80,27 @@ class JaxAmpPhaseSource(abc.ABC):
     # ----------------------------------------------------------------
     @abc.abstractmethod
     def amplitude(self, t: jnp.ndarray, params: jnp.ndarray) -> jnp.ndarray:
-        """Scalar amplitude :math:`A(t)` for a single source.
+        """Return the amplitude :math:`A(t)` of a single source.
 
-        ``t``: scalar or array of times (seconds).
-        ``params``: 1D ``jnp.ndarray`` of length ``n_params``.
+        Args:
+            t: Scalar or array of times [s].
+            params: 1-D array of length ``n_params``.
 
-        Returns an array broadcasting with ``t``.
+        Returns:
+            jnp.ndarray: Amplitude, broadcasting with ``t``.
         """
         raise NotImplementedError
 
     @abc.abstractmethod
     def phase(self, t: jnp.ndarray, params: jnp.ndarray) -> jnp.ndarray:
-        """GW phase :math:`\\Phi(t)` (radians, unwrapped) for a single source.
+        r"""Return the GW phase :math:`\Phi(t)` (radians, unwrapped) of a single source.
 
-        ``t``: scalar or array of times (seconds).
-        ``params``: 1D ``jnp.ndarray`` of length ``n_params``.
+        Args:
+            t: Scalar or array of times [s].
+            params: 1-D array of length ``n_params``.
 
-        Returns an array broadcasting with ``t``.
+        Returns:
+            jnp.ndarray: Phase, broadcasting with ``t``.
         """
         raise NotImplementedError
 

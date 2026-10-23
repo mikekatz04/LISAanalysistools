@@ -1,28 +1,101 @@
 """F-stat birth-grid fitting: comb scan -> peak selection -> stacked grids.
 
-The compute core of the offline grid prep
-(``scripts/fstat_proposal/plot_fstat_proposal_mojito.py``), lifted into the
-library so it can run **inside** a sampler move as well as from a script.
+The compute core of the GB F-statistic RJ birth proposal, and of the offline
+grid prep (``scripts/fstat_proposal/plot_fstat_proposal_mojito.py``), lifted
+into the library so it runs **inside** a sampler move as well as from a script.
 Nothing here knows about ``gb_info`` / ``general_info`` / plotting: every
-consumer passes the handful of scalars it needs plus an injectable
+consumer passes the handful of scalars it needs plus an injectable scorer
+``call_fstat`` that maps ``(n, 9)`` physical rows
+``[A, f0 (Hz), fdot (Hz/s), fddot, phi0, iota, psi, alpha, delta]`` to the
+F-stat pieces ``N`` ``(n, 4)`` and ``M_upper`` ``(n, 10)`` (see
+:func:`lisatools.sampling.fstat_proposal.compute_fstat`). The same code serves
+the offline script (which calls ``gb_wdm_comp.get_fstat_ll_wdm`` directly) and
+the in-move fit, which scores the reference walker's residual through the
+sig-het shared-reference scorer :func:`build_sighet_call_fstat`
+(``FSTAT_USE_SIGHET`` unset = 1, routed by
+``_RoutedBandEngine.route_sighet_fstat``; the chunked
+``_RoutedBandEngine.route_fstat_ll`` is the fallback).
 
-    call_fstat(params_phys_9col) -> (N (n, 4), M_upper (n, 10))
+**The fit** (:func:`run_fstat_grid_fit`):
 
-so the same code serves the offline script (which calls
-``gb_wdm_comp.get_fstat_ll_wdm`` directly) and the in-move fit (which routes
-through ``_RoutedBandEngine.route_fstat_ll`` against the current residual).
+1. Stage A, :func:`run_comb_scan`: a comb dense in f0 (spacing ``1/(2 Tobs)``)
+   at a fixed chirp mass, maximized over an f0-adaptive golden-ratio sky
+   (:func:`sky_nodes_required`), one level per sky size
+   (:class:`CombLevelSpec`, :func:`run_comb_level`); bands shut by the valves
+   are not swept (:func:`comb_sweep_mask`).
+2. Peak selection, :func:`select_comb_peaks`: window champions plus strict
+   local maxima above the SNR floor (``F = SNR^2 / 2``), interior sub-bands
+   only, capped per band.
+3. Stage B, :func:`run_stacked_stage_b`: one 4-D box per peak (f0 clamped to
+   its sub-band; axis 1 a linear fdot axis under ``FSTAT_FDOT_AXIS=1``, else
+   Mc), grouped by node requirement (:func:`mc_ladder_levels`, adaptive sky
+   via :func:`stage_b_sky_axes`) into rectangular stacks swept by
+   :func:`run_stacked_peak_sweep` (:class:`StageBGroupSpec`,
+   :func:`run_stage_b_group`) and written by :func:`write_stacked_npz`.
+4. The birth container, :func:`build_gb_birth_distribution`: peak stack (+ comb
+   component) -> uniform floor -> RJ container; box weights from
+   :func:`peak_box_weights`.
+5. The per-epoch F-stat centre table, :func:`build_fstat_center_table`
+   (:func:`enumerate_center_nodes`, :func:`run_center_sweep`).
 
-Checkpointing: every expensive sweep funnels through
+**Pipeline position.** ``GBSpecialRJFStatGridMove`` in
+:mod:`lisatools.globalfit.moves.gbspecialstretch` (moves ``rj_fstat_search``
+in ``gb_search_1`` / ``gb_search_2``, ``rj_fstat_pe`` and
+``rj_fstat_pe_residual`` in ``full_pe``) opens a new F-stat EPOCH on its refit
+clock (``GB_FSTAT_REFIT_EVERY=2`` iterations in search, 4 in ``gb_search_2``
+through ``GB_SEARCH_2_FSTAT_REFIT_EVERY``; ``GB_FSTAT_REFIT_EVERY_PE=150`` for the
+residual PE move, ``..._PE_GB_FREE=0`` = fit once for the GB-free galaxy move;
+reference walker ``GB_FSTAT_SEARCH_REF=rotate`` in search, random in PE). Its
+``setup`` calls :func:`run_fstat_grid_fit` on the head into the epoch's cache
+directory (``epoch_NNNN``), with stage A and stage B split by contiguous node /
+box range over the compute ranks (the ``comb_runner`` / ``sweep_runner``
+arguments; the ranks call :func:`run_comb_level` / :func:`run_stage_b_group`,
+write :func:`save_comb_part` / :func:`save_stage_b_part`, and the head
+assembles with :func:`assemble_comb_level` / :func:`assemble_stage_b_group`),
+then :func:`build_gb_birth_distribution` and :func:`build_fstat_center_table`.
+
+**Caches** (per epoch directory, basename :data:`GRID_BASENAME`):
+``fstat_grid_comb.npz`` (stage A), the ``fstat_grid_peaks_stacked`` npz (stage B;
+its stamps ``grid_basis``, ``grid_c_t``, ``peak_min_F`` and ``band_edges`` are
+checked on load) and ``fstat_centers.npz`` (:data:`CENTER_TABLE_BASENAME`),
+plus the in-flight ``*_parts`` directory.
+
+**Checkpointing**: every expensive sweep funnels through
 :func:`chunked_fstat_sweep` / :func:`run_stacked_peak_sweep`, so
 checkpointing those two row cursors makes the whole ~hours-scale prep
 restartable. Rerunning the same fit resumes each unfinished sweep from its
 last saved row; a fingerprint of the sweep's actual inputs (salted with
-``fingerprint_extra``) guards against resuming across changed knobs or
-across refit epochs. Cadence: ``FSTAT_CKPT_SECS`` (default 300).
+``fingerprint_extra``: epoch, GB-free flag, reference walker, valve skip set)
+guards against resuming across changed knobs or across refit epochs.
+Cadence: ``FSTAT_CKPT_SECS`` (default 300 s).
 
-All ``FSTAT_*`` env knobs keep flowing through
-:func:`lisatools.sampling.fstat_proposal.fstat_knob`, so an in-run fit
-inherits the offline knob set unchanged.
+**Knobs** (all ``FSTAT_*``; the ones in
+:data:`~lisatools.sampling.fstat_proposal.FSTAT_KNOB_DEFAULTS` flow through
+:func:`lisatools.sampling.fstat_proposal.fstat_knob`, so an in-run fit inherits
+the offline knob set unchanged). Defaults, with the 9mo/12mo launcher value in
+brackets where it is set:
+
+* stage A: ``FSTAT_F0_SPACING_MHZ`` (half a bin), ``FSTAT_COMB_MC``
+  (midpoint of ``mc_lims``), ``FSTAT_COMB_NSKY`` (unset = adaptive),
+  ``FSTAT_COMB_NSKY_MIN`` / ``_MAX`` (16 / 512), ``FSTAT_SKY_VC`` (alias
+  ``FSTAT_COMB_SKY_VC``, 1e-4);
+* selection: the peak floor (``FSTAT_PEAK_MIN_SNR`` 8 [8.0], overridden per
+  stage by the recipe), ``FSTAT_PEAKS_PER_BAND`` 200 [200];
+* stage B: ``FSTAT_PEAK_HALF_MHZ`` 2.5e-3, ``FSTAT_PEAKS_TO_FIT`` (unset),
+  ``FSTAT_MC_MIN`` 0.01, ``FSTAT_FDOT_AXIS`` 1 [1], ``FSTAT_FDOT_RATIO_MAX``
+  (unset = the caller's ``ratio_max``) [5.0], ``FSTAT_MC_ETA`` 1.0,
+  ``FSTAT_MC_GROUPING`` 1, ``FSTAT_STAGEB_SKY_ADAPT`` 1 [1],
+  ``FSTAT_STAGEB_NSKY_MIN`` 64 [64], ``FSTAT_STAGEB_NSKY_MAX`` 0 = uncapped
+  [512], ``FSTAT_STAGEB_GROUP_MAX_GB`` 8.0 [1.0], ``FSTAT_GRID_MEM_MB`` (unset)
+  [512], ``FSTAT_N_F0`` / ``FSTAT_N_ALPHA`` / ``FSTAT_N_SINDELTA`` /
+  ``FSTAT_N_PER_AXIS`` (unset; setting a sky one pins the sky), ``FSTAT_BATCH``
+  4096;
+* weighting and container: ``FSTAT_PEAK_WEIGHTING`` (``fstat``),
+  ``FSTAT_PEAK_WEIGHT_CELLS`` 1 [1], ``FSTAT_PEAK_WEIGHT_ALPHA`` 1.0 [0.5],
+  ``FSTAT_PEAK_WEIGHT_ALPHA_LATE`` 0.25, ``FSTAT_PEAK_WEIGHT_ALPHA_AFTER_EPOCH``
+  1, ``FSTAT_FLOOR_EPS`` 0.1, ``FSTAT_COMB_WEIGHT`` 0.3;
+* sig-het scorer: ``FSTAT_SIGHET_REF_SPACING_HZ`` (default = the measured
+  margin), ``FSTAT_SIGHET_REF_BLOCK`` 512.
 """
 
 from __future__ import annotations
@@ -115,8 +188,18 @@ from lisatools.sampling.gb_observable_basis import (  # noqa: E402
 
 
 def _windowed_max(a, w, xp):
-    """Sliding max over ``[i - w, i + w]`` via O(log w) shifted-max folds
-    (xp-generic; no scipy)."""
+    """Sliding max over ``[i - w, i + w]`` via O(log w) shifted-max folds.
+
+    xp-generic (no scipy); the ends are padded with ``-inf``.
+
+    Args:
+        a (xp.ndarray): ``(n,)`` values.
+        w (int): Half window, in samples.
+        xp (module): Array module of ``a``.
+
+    Returns:
+        xp.ndarray: ``(n,)`` windowed maxima.
+    """
     n = a.shape[0]
     pad = xp.full(w, -xp.inf, dtype=a.dtype)
     b = xp.concatenate([pad, a, pad])
@@ -147,6 +230,16 @@ def ckpt_fingerprint(*arrays, extra: str = "") -> str:
     flat values)``, so a lazy provider hashes BIT-IDENTICALLY to the dense
     array it replaces -- an in-flight sweep's progress file stays valid
     across the lazy switch.
+
+    Each array contributes its shape and every ``max(1, size // 257)``-th flat
+    value to an MD5 digest seeded with ``extra``.
+
+    Args:
+        *arrays: Arrays (host or device) or lazy row providers.
+        extra: Salt string. Default ``""``.
+
+    Returns:
+        str: Hex digest.
     """
     h = hashlib.md5(extra.encode())
     for a in arrays:
@@ -173,6 +266,7 @@ _CKPT_HEADER_SUFFIX = ".progress.npz"
 
 
 def _ckpt_payload_rows(path: str) -> int:
+    """Rows (float64 values) held by a ``.progress.dat`` payload; ``-1`` if absent."""
     try:
         return os.path.getsize(path) // 8
     except OSError:
@@ -180,12 +274,23 @@ def _ckpt_payload_rows(path: str) -> int:
 
 
 def ckpt_load(ckpt: Optional[str], n: int, fingerprint: str):
-    """Returns ``(host F array or None, completed row count)``.
+    """Load a sweep's checkpoint if it matches; ``(None, 0)`` otherwise.
 
     Reads either payload layout: the append-only ``.progress.dat`` written
     by :func:`ckpt_save`, or a legacy header that still carries ``F`` inline
     (a progress file written before the incremental payload landed -- an
-    in-flight sweep must keep resuming).
+    in-flight sweep must keep resuming). A changed fingerprint or row count, a
+    short payload or an unreadable file all restart the sweep (logged).
+
+    Args:
+        ckpt: Path prefix (``<prefix>.progress.npz`` / ``.progress.dat``);
+            ``None`` or empty disables checkpointing.
+        n: Total rows of the sweep.
+        fingerprint: Expected :func:`ckpt_fingerprint` of the sweep's inputs.
+
+    Returns:
+        tuple: ``(F, done)`` -- ``F`` a host float64 array holding at least the
+        first ``done`` rows, or ``None``; ``done`` the completed row count.
     """
     if not ckpt:
         return None, 0
@@ -236,7 +341,17 @@ def ckpt_save(ckpt: Optional[str], F_rows, done: int, n: int,
     the count the header advertises.
 
     The header is written to a temp file and ``os.replace``d, so the cursor
-    only ever advances after the rows behind it are on disk.
+    only ever advances after the rows behind it are on disk. If the payload
+    holds FEWER rows than ``start`` (another process cleared it), the write is
+    skipped with a warning and the sweep continues from memory.
+
+    Args:
+        ckpt: Path prefix; ``None`` or empty is a no-op.
+        F_rows (array_like): The rows ``[start, done)`` (host).
+        done: The cursor the header will advertise.
+        n: Total rows of the sweep.
+        fingerprint: The sweep's :func:`ckpt_fingerprint`.
+        start: First row index of ``F_rows``; ``None`` = ``done - len(F_rows)``.
     """
     if not ckpt:
         return
@@ -286,6 +401,14 @@ def ckpt_resume(ckpt: Optional[str], n: int, fingerprint: str):
     Converts a legacy inline-``F`` progress file into the append-only
     payload layout on the spot, so the sweep that resumes it can append from
     its cursor like any other.
+
+    Args:
+        ckpt: Path prefix (or ``None``).
+        n: Total rows of the sweep.
+        fingerprint: Expected fingerprint.
+
+    Returns:
+        tuple: ``(F, start)`` exactly as :func:`ckpt_load`.
     """
     F_prev, start = ckpt_load(ckpt, n, fingerprint)
     if (ckpt and F_prev is not None and start > 0
@@ -295,6 +418,15 @@ def ckpt_resume(ckpt: Optional[str], n: int, fingerprint: str):
 
 
 def ckpt_clear(parts_dir: Optional[str], prefix: str) -> None:
+    """Delete the progress files (``.progress.npz/.dat/.tmp.npz``) under a prefix.
+
+    Called after a finished comb scan (prefix ``"comb_"``) and a finished stage
+    B (prefix ``"stageb"``); other files in ``parts_dir`` are left alone.
+
+    Args:
+        parts_dir: The ``*_parts`` directory; missing or ``None`` is a no-op.
+        prefix: File-name prefix to clear.
+    """
     if not parts_dir or not os.path.isdir(parts_dir):
         return
     suffixes = (_CKPT_HEADER_SUFFIX, _CKPT_PAYLOAD_SUFFIX, ".progress.tmp.npz")
@@ -307,6 +439,7 @@ def ckpt_clear(parts_dir: Optional[str], prefix: str) -> None:
 
 
 def ckpt_secs() -> float:
+    """Checkpoint cadence in seconds: ``FSTAT_CKPT_SECS`` (default 300; unset in the launchers)."""
     return float(os.environ.get("FSTAT_CKPT_SECS", "300"))
 
 
@@ -315,7 +448,7 @@ def ckpt_secs() -> float:
 # --------------------------------------------------------------------------
 
 def sighet_fstat_ref_margin_hz(n_knots: int, Tobs: float) -> float:
-    """Max safe |f0_candidate - f0_reference| for the sig-het F-stat path.
+    """Max safe ``|f0_candidate - f0_reference|`` for the sig-het F-stat path.
 
     The limiter is the knot-Nyquist ceiling of the fixed-knot COMPLEX
     resample: the residual beat ``e^{2 pi i df0 tau}`` (analytically
@@ -336,6 +469,13 @@ def sighet_fstat_ref_margin_hz(n_knots: int, Tobs: float) -> float:
     envelope (a displaced point can look fine and its neighbor be off by
     thousands), so consumers must HARD-assert every displacement against
     this margin -- never trust a lucky point.
+
+    Args:
+        n_knots: Fixed-knot count ``K`` of the sig-het scorer (``v4_knots``).
+        Tobs: Observation span (s).
+
+    Returns:
+        float: ``1.18e-6 * (K / 128) * (7.776e6 / Tobs)`` in Hz.
     """
     return 1.18e-6 * (float(n_knots) / 128.0) * (7.776e6 / float(Tobs))
 
@@ -371,8 +511,48 @@ def build_sighet_call_fstat(sighet_comp, wdm_holder, *, xp, Tobs: float,
     block, and a block rebuild only happens when the sweep crosses a block
     boundary (the comb/stage-B sweeps are f0-ordered per segment, so
     thrash is bounded). Every row is HARD-asserted to sit within the margin
-    of its bucketed reference (the kernel-side assert in
-    ``setup_fstat_references(assert_max_df0=...)``).
+    of its bucketed reference (host-side before scoring, and kernel-side
+    through the ``assert_max_df0`` argument of ``setup_fstat_references``).
+    A batch whose rows all fall in one block is scored whole (the production
+    case); otherwise the rows are scored block by block and scattered back.
+
+    Called by ``_RoutedBandEngine.route_sighet_fstat`` (and by its per-device
+    fan-out ``_sighet_fstat_multidevice``, which ``FSTAT_SIGHET_MULTIDEV=1``
+    selects only when a process holds two or more GPUs -- inert in the
+    9mo/12mo runs, one GPU per process) in
+    :mod:`lisatools.globalfit.moves.gbbands` -- the scorer of every in-run
+    F-stat epoch -- and by the para-search tool.
+
+    Args:
+        sighet_comp (object): A ``GBSignalHetComputations`` built with
+            ``v4_knots > 0`` (provides ``setup_fstat_references`` and
+            ``get_fstat_ll_wdm``).
+        wdm_holder (object): Holder of the residual / inverse-PSD rows the
+            references are built against.
+        xp (module): Array module of the scorer.
+        Tobs: Observation span (s).
+        f0_lims_hz (sequence of float): ``(lo, hi)`` f0 range the closure must
+            cover (Hz); the reference comb extends about one spacing beyond
+            each end.
+        data_index: Data slot of ``wdm_holder`` used for the references.
+            Default ``0``.
+        noise_index: Noise slot (``None`` = the comp's default).
+        spacing_hz: Reference spacing (Hz); ``None`` -> env
+            ``FSTAT_SIGHET_REF_SPACING_HZ``, else :func:`sighet_fstat_ref_margin_hz`.
+        ref_block: References per resident block; ``None`` -> env
+            ``FSTAT_SIGHET_REF_BLOCK`` (default 512).
+        fstat_mode: Forwarded to the kernel's ``get_fstat_ll_wdm``.
+
+    Returns:
+        callable: The ``call_fstat`` closure; it takes ``(n, 9)`` (or ``(9,)``)
+        physical rows and returns ``(N, M_upper)`` float64 arrays of shapes
+        ``(n, 4)`` and ``(n, 10)`` on ``xp``.
+
+    Raises:
+        ValueError: The comp has no fixed-knot scorer, or the spacing exceeds
+            twice the margin.
+        RuntimeError: (from the closure) a row lies more than half a spacing
+            from its bucketed reference.
     """
     n_knots = int(sighet_comp._g.get("v4_knots", 0))
     if n_knots <= 0:
@@ -530,7 +710,23 @@ def chunked_fstat_sweep(call_fstat: Callable, params, *, xp, label: str = "",
     The batching invariant: every F-stat computation sweeps a single
     concatenated parameter set spanning ALL sub-bands / sky points / peak
     boxes at once, in ``FSTAT_BATCH``-row calls -- never a per-band /
-    per-sky / per-peak kernel loop. Returns F on ``xp``.
+    per-sky / per-peak kernel loop. Rows stay where the caller assembled them
+    (host, for the comb) and each batch slice is converted by the scorer.
+    With ``ckpt`` the sweep resumes from a matching checkpoint, saves every
+    :func:`ckpt_secs` seconds and on any exception (then re-raises), and logs
+    progress every 30 s. Called by :func:`run_comb_level`.
+
+    Args:
+        call_fstat: The scorer (physical ``(m, 9)`` rows -> ``(N, M_upper)``).
+        params (array_like): ``(n, 9)`` physical rows, or a lazy provider with
+            ``shape`` and row slicing (:class:`_CombRows`).
+        xp (module): Array module for the output.
+        label: Log / fingerprint label. Default ``""``.
+        ckpt: Checkpoint path prefix; ``None`` disables checkpointing.
+        fingerprint_extra: Fingerprint salt. Default ``""``.
+
+    Returns:
+        xp.ndarray: ``(n,)`` float64 F values.
     """
     from lisatools.sampling.fstat_proposal import compute_fstat, fstat_knob
 
@@ -608,6 +804,12 @@ def comb_peak_window(spacing) -> int:
     one node. ONE function because :func:`comb_sweep_mask` has to widen the
     swept set by exactly the window peak selection reads -- two spellings
     could drift and the edge of every kept band would grow spurious peaks.
+
+    Args:
+        spacing (float): Comb node spacing (mHz).
+
+    Returns:
+        int: ``max(1, round(3e-3 / spacing))``.
     """
     return max(1, int(round(3e-3 / spacing)))
 
@@ -633,6 +835,18 @@ def comb_sweep_mask(f0_nodes, band_edges_hz, band_skip, spacing):
     :func:`select_comb_peaks` uses, so the sweep and the peak mask can never
     disagree about which band a node belongs to. A node outside the band
     grid is never skipped.
+
+    Args:
+        f0_nodes (array_like): ``(n_nodes,)`` comb nodes (mHz).
+        band_edges_hz (array_like): ``(num_sub_bands + 1,)`` band edges (Hz).
+        band_skip (array_like or None): ``(num_sub_bands,)`` bool skip set.
+        spacing (float): Node spacing (mHz).
+
+    Returns:
+        np.ndarray or None: ``(n_nodes,)`` bool sweep mask, or ``None``.
+
+    Raises:
+        ValueError: ``band_skip`` does not cover the band grid.
     """
     keep = _comb_keep_mask(f0_nodes, band_edges_hz, band_skip)
     if keep is None or keep.all() or not keep.any():
@@ -642,8 +856,14 @@ def comb_sweep_mask(f0_nodes, band_edges_hz, band_skip, spacing):
 
 
 def _comb_keep_mask(f0_nodes, band_edges_hz, band_skip):
-    """Nodes whose OWN band is not skipped (``None`` for no skip set):
-    :func:`comb_sweep_mask` before the peak-window margin is added."""
+    """Nodes whose OWN band is not skipped: :func:`comb_sweep_mask` before the margin.
+
+    Returns ``None`` when ``band_skip`` is ``None``, else a host ``(n_nodes,)`` bool
+    array (nodes outside the band grid are kept).
+
+    Raises:
+        ValueError: ``band_skip`` does not cover the band grid.
+    """
     if band_skip is None:
         return None
     f0 = np.asarray(f0_nodes, dtype=float)
@@ -685,8 +905,28 @@ def select_comb_peaks(f0_nodes, F_max, band_edges_hz, spacing, xp,
     ``FSTAT_PEAKS_PER_BAND``: in a band already at that cap, which keeps
     the TOP peaks by F, loosening the floor changes nothing at all.
 
-    Returns a host ``(N, 4)`` array of ``(f0_mHz, F, node_idx, band_idx)``
-    sorted by F descending; only interior sub-bands are kept.
+    Bands in ``band_skip`` contribute no peaks. Called by :func:`run_comb_scan`
+    and, on a comb-cache reuse, by :func:`run_fstat_grid_fit`.
+
+    Args:
+        f0_nodes (array_like): ``(n_nodes,)`` comb nodes (mHz).
+        F_max (array_like): ``(n_nodes,)`` sky-maximized F per node.
+        band_edges_hz (array_like): ``(num_sub_bands + 1,)`` band edges (Hz).
+        spacing (float): Node spacing (mHz), for the tier-1 window
+            (:func:`comb_peak_window`).
+        xp (module): Array module for the selection arithmetic.
+        min_F (float or array_like, optional): Scalar or ``(num_sub_bands,)``
+            floor in F units; ``None`` -> :func:`fstat_peak_min_F`.
+        band_skip (array_like, optional): ``(num_sub_bands,)`` bool skip set.
+
+    Returns:
+        np.ndarray: Host ``(N, 4)`` array of ``(f0_mHz, F, node_idx, band_idx)``
+        sorted by F descending (``(0, 4)`` when nothing passes); only interior
+        sub-bands (``1 .. num_sub_bands - 2``) are kept.
+
+    Raises:
+        ValueError: A per-band ``min_F`` or ``band_skip`` does not cover the band
+            grid.
     """
     from lisatools.sampling.fstat_proposal import fstat_knob, fstat_peak_min_F
 
@@ -796,7 +1036,18 @@ def select_comb_peaks(f0_nodes, F_max, band_edges_hz, spacing, xp,
 
 
 def _sky_grid(n):
-    """Golden-ratio spread over the sphere -> ``(alpha, sin_delta)``."""
+    """Golden-ratio spread over the sphere -> ``(alpha, sin_delta)``.
+
+    ``alpha_k = 2 pi k phi mod 2 pi`` (``phi = 0.618...``) and
+    ``sin_delta_k = -1 + 2 (k + 1/2) / n``, ``k = 0 .. n-1``: equal-area in
+    ``sin_delta``. The stage-A comb sky.
+
+    Args:
+        n (int): Number of sky points.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``(alpha [rad], sin_delta)``, each ``(n,)``.
+    """
     ks = np.arange(n)
     return ((2.0 * np.pi * ks * 0.6180339887) % (2.0 * np.pi),
             -1.0 + 2.0 * (ks + 0.5) / n)
@@ -819,18 +1070,28 @@ def sky_nodes_required(f0_mHz, Tobs, *, vc=None, nmin=1, nmax=0):
     SQUARE of that. Hence ``n ~ (f0 * Tobs * v/c)^2`` -- 10 cells at 2 mHz,
     39 at 4 mHz, 155 at 8 mHz, ~1000 at 20 mHz. Snapping up to a power of
     two keeps the level set small so the sweep runs as a few rectangular
-    batches rather than one design per node.
+    batches rather than one design per node. Exactly:
+    ``n = clip(2**ceil(log2(max(ceil((f0 * Tobs * vc)**2), 1))), nmin, nmax)``
+    with ``f0`` in Hz.
+
+    In the 9mo/12mo runs stage A uses ``nmin, nmax = 16, 512``
+    (``FSTAT_COMB_NSKY_MIN`` / ``_MAX`` defaults) and stage B ``64, 512``
+    (``FSTAT_STAGEB_NSKY_MIN=64``, ``FSTAT_STAGEB_NSKY_MAX=512`` in the
+    launchers). Also used by the para-search tool.
 
     Args:
-        f0_mHz: carrier frequency/frequencies [mHz]. Scalar or array.
-        Tobs: observation time [s].
-        vc: orbital speed in units of c (``FSTAT_SKY_VC``, default 1e-4).
-        nmin: floor. Stage A uses 16; stage B uses 64 so the adaptive
-            grid is never COARSER than the historical fixed 8x8.
-        nmax: cap, or ``0``/``None`` for uncapped.
+        f0_mHz (float or array_like): carrier frequency/frequencies [mHz].
+        Tobs (float): observation time [s].
+        vc (float, optional): orbital speed in units of c; ``None`` -> env
+            ``FSTAT_SKY_VC`` (alias ``FSTAT_COMB_SKY_VC``), default ``1e-4``.
+        nmin (int, optional): floor. Stage A uses 16; stage B uses 64 so the
+            adaptive grid is never COARSER than the historical fixed 8x8.
+            Default ``1``.
+        nmax (int, optional): cap, or ``0``/``None`` for uncapped. Default ``0``.
 
     Returns:
-        ``int`` array (or scalar) of node counts, same shape as ``f0_mHz``.
+        int or np.ndarray: node counts, same shape as ``f0_mHz`` (a Python
+        ``int`` for scalar input).
     """
     if vc is None:
         vc = float(os.environ.get("FSTAT_SKY_VC",
@@ -889,10 +1150,19 @@ def stage_b_sky_axes(n_target):
     directions and a 95th-percentile miss of 0.368 rad, against 44 and 0.399
     for the historical grid.
 
+    Concretely ``n_sd = max(4, round(sqrt(n / STAGEB_SKY_ASPECT)))`` and
+    ``n_alpha = max(4, round(n / n_sd))`` with ``n = max(n_target, 9)``;
+    ``alpha`` uses ``n_alpha`` half-open steps over ``[0, 2 pi)``, ``sin_delta``
+    ``n_sd`` closed steps over ``[-1, 1]``.
+
+    Args:
+        n_target (int): Requested node budget (from :func:`sky_nodes_required`).
+
     Returns:
-        ``(alpha_ax, sd_ax)``, both float64 and uniformly spaced -- the
-        latter is required by :class:`StackedFStatProposal4D`, which stores
-        one ``dx`` per axis.
+        tuple[np.ndarray, np.ndarray]: ``(alpha_ax, sd_ax)``, both float64 and
+        uniformly spaced -- the latter is required by
+        :class:`~lisatools.sampling.fstat_proposal.StackedFStatProposal4D`,
+        which stores one ``dx`` per axis.
     """
     n = max(int(n_target), 9)
     n_sd = max(4, int(round(np.sqrt(n / STAGEB_SKY_ASPECT))))
@@ -945,6 +1215,13 @@ class _CombRows:
         return self.shape[0]
 
     def _rows(self, idx):
+        """Physical ``(len(idx), 9)`` host rows for flat row indices ``idx``.
+
+        Amplitude 1e-22, ``iota`` pi/2, ``fdot`` from
+        :func:`gbgpu.utils.utility.get_fdot` at the fixed comb chirp mass, sky
+        from the level's grid (node-major: the node is ``idx`` floor-divided by
+        ``lv``, the sky point ``idx`` modulo ``lv``).
+        """
         from gbgpu.utils.utility import get_fdot
 
         idx = np.asarray(idx)
@@ -965,6 +1242,7 @@ class _CombRows:
         return self._rows(np.asarray(key))
 
     def _ckpt_flat_sample(self):
+        """``(shape, values)``: the flat subsample :func:`ckpt_fingerprint` would take."""
         size = self.shape[0] * self.shape[1]
         flat = np.arange(0, size, max(1, size // 257))
         rows, cols = np.divmod(flat, self.shape[1])
@@ -993,6 +1271,25 @@ class CombLevelSpec:
     different physical template while reporting the same node -- the same
     invariant that keeps ``StageBGroupSpec``'s Mc/alpha/sin-delta axes
     whole.
+
+    Built by :func:`run_comb_scan` (one per sky level); under the multi-rank fit
+    the GB move slices it with :meth:`sub_range` and ships each rank its part.
+
+    Attributes:
+        li (int): Level index (its partial-file name; independent of the skip
+            set).
+        n_levels (int): Number of sky levels in the scan.
+        lv (int): Sky points per node at this level.
+        a (int): First node (absolute index into the level's node list).
+        b (int): One past the last node.
+        f0_nodes (np.ndarray): ``(b - a,)`` the nodes of this range (mHz).
+        alpha (np.ndarray): ``(lv,)`` sky RA (rad).
+        sin_delta (np.ndarray): ``(lv,)`` sky sin(dec).
+        mc_fix (float): Fixed comb chirp mass (Msun).
+        label (str): Sweep label (logs, fingerprint).
+        ckpt_name (str or None): Checkpoint file stem inside ``parts_dir``.
+        parts_dir (str or None): The ``*_parts`` directory.
+        fingerprint_extra (str): Fingerprint salt.
     """
 
     li: int
@@ -1011,6 +1308,7 @@ class CombLevelSpec:
 
     @property
     def n_nodes(self) -> int:
+        """Number of nodes in this range, ``b - a``."""
         return int(self.b) - int(self.a)
 
     def sub_range(self, a2, b2, *, ckpt_name=None,
@@ -1021,6 +1319,18 @@ class CombLevelSpec:
         the SLICED rows (:meth:`_CombRows._ckpt_flat_sample`) plus the
         label, so two ranks' checkpoints are already mutually invalid -- but
         they must not collide on one path.
+
+        Args:
+            a2 (int): First absolute node.
+            b2 (int): One past the last absolute node.
+            ckpt_name (str, optional): Replacement checkpoint stem.
+            label (str, optional): Replacement label.
+
+        Returns:
+            CombLevelSpec: The restricted spec (sky arrays shared, not sliced).
+
+        Raises:
+            ValueError: ``[a2, b2)`` is not inside ``[a, b)``.
         """
         a2, b2 = int(a2), int(b2)
         if not (self.a <= a2 <= b2 <= self.b):
@@ -1055,6 +1365,15 @@ def run_comb_level(spec: CombLevelSpec, call_fstat: Callable, *, xp):
     An EMPTY range (more ranks than nodes) short-circuits: the sweep's
     checkpoint layer is not defined at ``n_total == 0``, and there is
     nothing to score.
+
+    Args:
+        spec: The level (or a rank's sub-range of it).
+        call_fstat: The scorer.
+        xp (module): Array module of the sweep.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray, np.ndarray]: Host ``(F_max, best_alpha,
+        best_sin_delta)``, each ``(spec.n_nodes,)``.
     """
     nn = spec.n_nodes
     if nn == 0:
@@ -1080,6 +1399,14 @@ def comb_part_path(parts_dir, li, rank) -> str:
     suffixes, so these finished partials are cleared by
     :func:`clear_comb_parts` per level instead -- as soon as the head has
     assembled them, rather than at the end of the whole scan.
+
+    Args:
+        parts_dir (str): The ``*_parts`` directory.
+        li (int): Level index.
+        rank (int): Compute-rank index.
+
+    Returns:
+        str: The partial's path.
     """
     return os.path.join(parts_dir, f"comb_l{int(li)}_r{int(rank)}.npy")
 
@@ -1096,6 +1423,21 @@ def save_comb_part(parts_dir, li, rank, F_max, best_alpha, best_sin_delta):
     the reasons :func:`save_stage_b_part` spells out: this is a cross-NODE
     data path (a worker writes, replies, and the HEAD reads from another
     node), so the barrier is what NFS close-to-open semantics need.
+
+    Called on each compute rank by the GB move's comb-level fan-out handler.
+
+    Args:
+        parts_dir (str): The ``*_parts`` directory (created if missing).
+        li (int): Level index.
+        rank (int): Compute-rank index.
+        F_max (array_like): ``(n,)`` per-node maxima.
+        best_alpha (array_like): ``(n,)`` per-node best RA.
+        best_sin_delta (array_like): ``(n,)`` per-node best sin(dec).
+
+    Returns:
+        tuple[str, int, str]: ``(path, n, sha1)`` -- ``sha1`` is the first 16
+        hex characters of the SHA-1 of the ``(3, n)`` float64 block, which the
+        head re-checks in :func:`assemble_comb_level`.
     """
     os.makedirs(parts_dir, exist_ok=True)
     arr = np.ascontiguousarray(
@@ -1113,6 +1455,16 @@ def save_comb_part(parts_dir, li, rank, F_max, best_alpha, best_sin_delta):
 
 
 def load_comb_part(parts_dir, li, rank):
+    """Load one rank's ``(3, n)`` comb partial (see :func:`save_comb_part`).
+
+    Args:
+        parts_dir (str): The ``*_parts`` directory.
+        li (int): Level index.
+        rank (int): Compute-rank index.
+
+    Returns:
+        np.ndarray: ``(3, n)`` float64 ``[F_max, best_alpha, best_sin_delta]``.
+    """
     return np.load(comb_part_path(parts_dir, li, rank), allow_pickle=False)
 
 
@@ -1127,7 +1479,23 @@ def assemble_comb_level(parts_dir, li, n_parts, n_nodes, *, sha1s=None):
     reply and the read is a filesystem fault, and silently fitting on it
     would corrupt the epoch with no symptom.
 
-    Returns ``(F_max, best_alpha, best_sin_delta)``, each ``(n_nodes,)``.
+    Called on the head by the GB move's multi-rank comb runner.
+
+    Args:
+        parts_dir (str): The ``*_parts`` directory.
+        li (int): Level index.
+        n_parts (int): Number of rank partials.
+        n_nodes (int): Expected total node count of the level.
+        sha1s (dict[int, str], optional): Rank -> reported digest; when given,
+            every rank must have one.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray, np.ndarray]: ``(F_max, best_alpha,
+        best_sin_delta)``, each ``(n_nodes,)`` host float64.
+
+    Raises:
+        RuntimeError: A digest is missing or differs, a partial does not fit,
+            or the assembled count is not ``n_nodes``.
     """
     n_nodes = int(n_nodes)
     if sha1s is not None:
@@ -1163,7 +1531,13 @@ def assemble_comb_level(parts_dir, li, n_parts, n_nodes, *, sha1s=None):
 
 
 def clear_comb_parts(parts_dir, li, n_parts) -> None:
-    """Remove one level's partials (and any leftover temp files)."""
+    """Remove one level's partials (and any leftover temp files).
+
+    Args:
+        parts_dir (str): The ``*_parts`` directory.
+        li (int): Level index.
+        n_parts (int): Number of rank partials.
+    """
     for r in range(int(n_parts)):
         for path in (comb_part_path(parts_dir, li, r),
                      comb_part_path(parts_dir, li, r) + ".tmp"):
@@ -1208,7 +1582,41 @@ def run_comb_scan(call_fstat: Callable, *, xp, Tobs: float, band_edges_hz,
     swept node is never dispatched. ``None`` -- and an all-False set --
     sweeps every node through the identical calls.
 
-    Returns ``(f0_nodes_mHz, F_max, peaks, extras)``.
+    Grid: nodes ``arange(f0_lo, f0_hi + spacing/2, spacing)`` over
+    ``f0_lims_hz`` with ``spacing = FSTAT_F0_SPACING_MHZ`` (mHz; default half a
+    frequency bin, ``0.5 / Tobs`` Hz), chirp mass
+    ``FSTAT_COMB_MC`` (default the midpoint of ``mc_lims``), sky
+    ``FSTAT_COMB_NSKY`` points per node if set, else
+    :func:`sky_nodes_required` within ``FSTAT_COMB_NSKY_MIN`` /
+    ``FSTAT_COMB_NSKY_MAX`` (16 / 512). With ``cache_path`` the result is
+    written to ``<cache>_comb.npz`` (stamped with ``fingerprint_extra`` and,
+    when nodes were dropped, ``node_swept``) and the per-level progress files
+    are cleared. Called by :func:`run_fstat_grid_fit`.
+
+    Args:
+        call_fstat: The scorer.
+        xp (module): Array module of the sweeps.
+        Tobs: Observation span (s).
+        band_edges_hz (array_like): ``(num_sub_bands + 1,)`` band edges (Hz).
+        f0_lims_hz (sequence of float): ``(lo, hi)`` comb range (Hz) -- the
+            interior band span in the GB move.
+        mc_lims (sequence of float): Chirp-mass prior box (Msun); ``None`` ->
+            ``[0.001, 1.0]``.
+        cache_path: ``<epoch>/fstat_grid.npz``; ``None`` disables caching and
+            checkpoints.
+        fingerprint_extra: Checkpoint / cache stamp salt.
+        comb_runner (callable, optional): Per-level runner; ``None`` ->
+            :func:`run_comb_level`.
+        band_min_F (float or array_like, optional): Peak floor for
+            :func:`select_comb_peaks`.
+        band_skip (array_like, optional): ``(num_sub_bands,)`` bool skip set.
+
+    Returns:
+        tuple: ``(f0_nodes_mHz, F_max, peaks, extras)`` -- host
+        ``(n_nodes,)`` nodes and maxima (0 at unswept nodes), the
+        :func:`select_comb_peaks` array, and a dict with ``sky_alpha``,
+        ``sky_sin_delta``, ``F_all``, ``best_alpha``, ``best_sin_delta``,
+        ``mc_fix``, ``spacing``, ``nsky_per_node``, ``n_nodes_dropped``.
     """
     f0_lo = float(f0_lims_hz[0]) * 1e3
     f0_hi = float(f0_lims_hz[-1]) * 1e3
@@ -1394,7 +1802,32 @@ def run_stacked_peak_sweep(call_fstat: Callable, f0_los, f0_dxs, mc_ax,
       free axis and ``c_t`` a constant, that is an EXACT unit-determinant
       shear -- it decorrelates the ``(f0, fdot)`` metric at zero cost to
       the measure, which is what licenses the coarser aligned node
-      spacing (see :func:`fdot_coherence_width`).
+      spacing (see
+      :func:`~lisatools.sampling.gb_observable_basis.fdot_coherence_width`).
+
+    Row layout (box slowest, sin_delta fastest): node ``(k, i0, i1, i2, i3)``
+    scores ``f0_los[k] + i0 * f0_dxs[k]`` (mHz) on axis 0, ``mc_ax[i1]`` on axis
+    1, ``alpha_ax[i2]`` and ``arcsin(sd_ax[i3])``, with amplitude 1e-22 and
+    ``iota`` pi/2. Checkpointing as in :func:`chunked_fstat_sweep`, with
+    ``node_shape``, ``fdot_axis`` and ``c_t`` in the fingerprint. Called by
+    :func:`run_stage_b_group`.
+
+    Args:
+        call_fstat: The scorer.
+        f0_los (array_like): ``(K,)`` per-box axis-0 starts (mHz).
+        f0_dxs (array_like): ``(K,)`` per-box axis-0 spacings (mHz).
+        mc_ax (array_like): ``(n_1,)`` axis-1 nodes (Msun, or Hz/s).
+        alpha_ax (array_like): ``(n_alpha,)`` RA nodes (rad).
+        sd_ax (array_like): ``(n_sd,)`` sin(dec) nodes.
+        node_shape (tuple[int, ...]): ``(K, n_f0, n_1, n_alpha, n_sd)``.
+        xp (module): Array module of the sweep.
+        ckpt: Checkpoint path prefix; ``None`` disables checkpointing.
+        fingerprint_extra: Fingerprint salt.
+        fdot_axis: Axis-1 meaning (see above). Default ``False``.
+        c_t: Shear coefficient (s) for the fdot axis. Default ``0.0``.
+
+    Returns:
+        xp.ndarray: ``node_shape`` float64 F grid (``beta = 1``).
     """
     from gbgpu.utils.utility import get_fdot
 
@@ -1496,6 +1929,26 @@ class StageBGroupSpec:
     and is NEVER sliced: the Mc/alpha/sin-delta axes, the basis flag and the
     shear coefficient define what a row MEANS, and a rank that sliced them
     would score a different physical template while reporting the same box.
+
+    Built by :func:`run_stacked_stage_b` (one per group); under the multi-rank
+    fit the GB move slices it with :meth:`sub_range` per compute rank.
+
+    Attributes:
+        gi (int): Group index.
+        n_groups (int): Number of groups in the fit.
+        a (int): First absolute box index.
+        b (int): One past the last box.
+        f0_los (np.ndarray): ``(b - a,)`` axis-0 starts (mHz).
+        f0_dxs (np.ndarray): ``(b - a,)`` axis-0 spacings (mHz).
+        mc_ax (np.ndarray): Axis-1 nodes (Msun, or fdot in Hz/s).
+        alpha_ax (np.ndarray): RA nodes (rad).
+        sd_ax (np.ndarray): sin(dec) nodes.
+        node_shape (tuple): ``(b - a, n_f0, n_1, n_alpha, n_sd)``.
+        ckpt_name (str or None): Checkpoint stem inside ``parts_dir``.
+        parts_dir (str or None): The ``*_parts`` directory.
+        fingerprint_extra (str): Fingerprint salt.
+        fdot_axis (bool): Axis 1 is fdot (and axis 0 ``f_mid``).
+        c_t (float): Shear coefficient (s), ``Tobs / 2``.
     """
 
     gi: int
@@ -1516,6 +1969,7 @@ class StageBGroupSpec:
 
     @property
     def n_boxes(self) -> int:
+        """Number of boxes in this range, ``b - a``."""
         return int(self.b) - int(self.a)
 
     def sub_range(self, a2, b2, *, ckpt_name=None) -> "StageBGroupSpec":
@@ -1524,6 +1978,17 @@ class StageBGroupSpec:
         ``ckpt_name`` must differ per rank: the sweep's fingerprint hashes
         the SLICED inputs plus ``node_shape``, so two ranks' checkpoints are
         already mutually invalid -- but they must not collide on one path.
+
+        Args:
+            a2 (int): First absolute box.
+            b2 (int): One past the last absolute box.
+            ckpt_name (str, optional): Replacement checkpoint stem.
+
+        Returns:
+            StageBGroupSpec: The restricted spec.
+
+        Raises:
+            ValueError: ``[a2, b2)`` is not inside ``[a, b)``.
         """
         a2, b2 = int(a2), int(b2)
         if not (self.a <= a2 <= b2 <= self.b):
@@ -1550,6 +2015,14 @@ def run_stage_b_group(spec: StageBGroupSpec, call_fstat: Callable, *, xp):
     EMPTY range (more ranks than boxes) short-circuits: the sweep's
     checkpoint layer is not defined at ``n_total == 0``, and there is
     nothing to score.
+
+    Args:
+        spec: The group (or a rank's sub-range of it).
+        call_fstat: The scorer.
+        xp (module): Array module of the sweep.
+
+    Returns:
+        xp.ndarray: ``spec.node_shape`` float64 F grid.
     """
     if int(spec.node_shape[0]) == 0:
         return xp.empty(tuple(spec.node_shape), dtype=xp.float64)
@@ -1588,6 +2061,38 @@ def write_stacked_npz(stacked_path, *, grids_g, mc_ax_g, f0_los, f0_dxs,
     write a cache whose box axis silently disagrees with ``f0_los[a:b]`` --
     wrong templates proposed forever, with no error anywhere. Validate the
     shapes before touching disk.
+
+    Keys written (besides the grids): ``f0_los``, ``f0_dxs``, ``alpha_ax``,
+    ``sin_delta_ax``, ``grid_basis``, ``grid_c_t``, ``peak_min_F`` (the floor in
+    force now, :func:`_peak_min_F_now`), ``peak_f0_mHz``, ``peak_F``,
+    ``band_idx``, ``band_f0_lo``, ``band_f0_hi``, ``band_edges``. The legacy
+    layout adds ``logp_grids`` / ``mc_ax``; the grouped one ``group_sizes`` plus
+    ``logp_grids_g{gi}`` / ``mc_ax_g{gi}`` (and the per-group sky keys when the
+    groups' skies differ). No box weights are stored: the weighting is
+    applied when a proposal is built from the cache.
+
+    Args:
+        stacked_path (str): Output npz path (directory created if missing).
+        grids_g (sequence of xp.ndarray): Per-group node grids, each
+            ``(K_g, n_f0, n_1, n_alpha, n_sd)`` (host or device).
+        mc_ax_g (sequence of np.ndarray): Per-group axis-1 nodes.
+        f0_los (np.ndarray): ``(K,)`` global axis-0 starts (mHz).
+        f0_dxs (np.ndarray): ``(K,)`` global axis-0 spacings (mHz).
+        alpha_ax (np.ndarray): Group 0's RA axis (the flat key).
+        sd_ax (np.ndarray): Group 0's sin(dec) axis (the flat key).
+        grid_basis (str): ``"fdot"`` or ``"Mc"``.
+        grid_c_t (float): Shear coefficient (s); 0 for the Mc basis.
+        peaks (np.ndarray): ``(K, 4)`` selected peaks in box order.
+        band_idx (np.ndarray): ``(K,)`` sub-band of each box.
+        band_edges_mHz (np.ndarray): Band edges (mHz).
+        band_edges_hz (array_like): Band edges (Hz), stored as ``band_edges``.
+        group_sizes (array_like, optional): Boxes per group; ``None`` -> the
+            legacy single-group keys.
+        alpha_ax_g (sequence of np.ndarray, optional): Per-group RA axes.
+        sd_ax_g (sequence of np.ndarray, optional): Per-group sin(dec) axes.
+
+    Raises:
+        ValueError: The grids, axes, group sizes and per-box arrays disagree.
     """
     if len(grids_g) != len(mc_ax_g):
         raise ValueError(
@@ -1688,6 +2193,7 @@ def write_stacked_npz(stacked_path, *, grids_g, mc_ax_g, f0_los, f0_dxs,
              **common, **group_arrays)
 
 
+# TODO check: keep/remove/document -- not reached by the 9mo/12mo runs (multi-walker F-stat union never wired; GB_FSTAT_FIT_WALKERS unset); only callers tests/test_fstat_multiwalker_plan.py, tests/test_fstat_adaptive_sky.py
 def union_stacked_npz(slot_paths, out_path):
     """Union several walkers' stage-B grids into ONE birth cache.
 
@@ -1817,6 +2323,7 @@ def union_stacked_npz(slot_paths, out_path):
             f.close()
 
 
+# TODO check: keep/remove/document -- not reached by the 9mo/12mo runs (multi-walker F-stat union never wired); only caller tests/test_fstat_multiwalker_plan.py
 def union_cell_keys(band_idx, peak_f0_mHz):
     """Exact ``(band, node)`` keys for the union's peaks -- NOT f0 proximity.
 
@@ -1865,6 +2372,26 @@ def split_box_range(a, b, n_parts):
     The first ``(b - a) % n_parts`` ranges get one extra box. With fewer
     boxes than parts the tail ranges come back EMPTY (zero width), which
     :func:`run_stage_b_group` short-circuits.
+
+    Used by the GB move's multi-rank runners for both the stage-B box split and
+    the comb node split (and by the unwired multi-walker ``fstat_fit_plan``).
+
+    Args:
+        a (int): First index.
+        b (int): One past the last index.
+        n_parts (int): Number of ranges, ``> 0``.
+
+    Returns:
+        list[tuple[int, int]]: ``n_parts`` half-open ``(start, stop)`` ranges
+        covering ``[a, b)`` in order.
+
+    Raises:
+        ValueError: ``n_parts <= 0``.
+
+    Example:
+        >>> from lisatools.sampling.fstat_gridfit import split_box_range
+        >>> split_box_range(0, 10, 3)
+        [(0, 4), (4, 7), (7, 10)]
     """
     a, b, n = int(a), int(b), int(n_parts)
     if n <= 0:
@@ -1886,6 +2413,14 @@ def stage_b_part_path(parts_dir, gi, rank) -> str:
     ``ckpt_clear(_parts, "stageb")`` at the end of a successful stage B
     already removes the per-rank PROGRESS files by prefix, and these
     partials are cleared by :func:`clear_stage_b_parts` alongside them.
+
+    Args:
+        parts_dir (str): The ``*_parts`` directory.
+        gi (int): Group index.
+        rank (int): Compute-rank index.
+
+    Returns:
+        str: The partial's path.
     """
     return os.path.join(parts_dir, f"stageb_g{int(gi)}_r{int(rank)}.npy")
 
@@ -1905,6 +2440,19 @@ def save_stage_b_part(parts_dir, gi, rank, grid):
     loud rather than silent (a short file raises out of ``np.load``, stale
     content is caught by the sha1 ``assemble_stage_b_group`` re-checks), but
     what it costs is a discarded stage-B wall, and the barrier is two lines.
+
+    Called on each compute rank by the GB move's stage-B fan-out handler.
+
+    Args:
+        parts_dir (str): The ``*_parts`` directory (created if missing).
+        gi (int): Group index.
+        rank (int): Compute-rank index.
+        grid (xp.ndarray): The rank's ``(n_boxes, n_f0, n_1, n_alpha, n_sd)``
+            slice (host or device; copied to host float64).
+
+    Returns:
+        tuple[str, int, str]: ``(path, n_rows, sha1)`` -- ``n_rows`` boxes and
+        the first 16 hex characters of the SHA-1 of the bytes.
     """
     os.makedirs(parts_dir, exist_ok=True)
     arr = np.ascontiguousarray(_to_host(grid), dtype=np.float64)
@@ -1919,6 +2467,16 @@ def save_stage_b_part(parts_dir, gi, rank, grid):
 
 
 def load_stage_b_part(parts_dir, gi, rank):
+    """Load one rank's stage-B partial (see :func:`save_stage_b_part`).
+
+    Args:
+        parts_dir (str): The ``*_parts`` directory.
+        gi (int): Group index.
+        rank (int): Compute-rank index.
+
+    Returns:
+        np.ndarray: The rank's float64 grid slice.
+    """
     return np.load(stage_b_part_path(parts_dir, gi, rank), allow_pickle=False)
 
 
@@ -1945,6 +2503,23 @@ def assemble_stage_b_group(parts_dir, gi, n_parts, node_shape, *, xp,
     group twice on the host at the moment of the concat -- ~1.3 GB transient
     for the 653 MB production group 1, on top of the device copy -- for no
     gain: the destination is contiguous and the order is known up front.
+
+    Called on the head by the GB move's multi-rank stage-B runner.
+
+    Args:
+        parts_dir (str): The ``*_parts`` directory.
+        gi (int): Group index.
+        n_parts (int): Number of rank partials.
+        node_shape (tuple[int, ...]): The group's full node shape.
+        xp (module): Array module of the returned grid.
+        sha1s (dict[int, str], optional): Rank -> reported digest.
+
+    Returns:
+        xp.ndarray: The assembled ``node_shape`` float64 grid.
+
+    Raises:
+        RuntimeError: A digest is missing or differs, a partial does not fit,
+            or the assembled box count is not ``node_shape[0]``.
     """
     node_shape = tuple(int(v) for v in node_shape)
     if sha1s is not None:
@@ -1980,7 +2555,13 @@ def assemble_stage_b_group(parts_dir, gi, n_parts, node_shape, *, xp,
 
 
 def clear_stage_b_parts(parts_dir, gi, n_parts) -> None:
-    """Remove one group's partials (and any leftover temp files)."""
+    """Remove one group's partials (and any leftover temp files).
+
+    Args:
+        parts_dir (str): The ``*_parts`` directory.
+        gi (int): Group index.
+        n_parts (int): Number of rank partials.
+    """
     for r in range(int(n_parts)):
         for path in (stage_b_part_path(parts_dir, gi, r),
                      stage_b_part_path(parts_dir, gi, r) + ".tmp"):
@@ -2000,7 +2581,22 @@ def mc_ladder_levels(n_req):
     density is its max RAW requirement, so a single-group fit reproduces
     the historical single-stack node count exactly, and per-box waste is
     bounded by the ladder ratio (< 2x) instead of the full-band f0^{11/3}
-    span (~30x at 22 mHz over the low band).
+    span (~30x at 22 mHz over the low band). The requirement is the Mc node
+    count (:func:`~lisatools.sampling.fstat_proposal.fstat_n_mc`) on the legacy
+    axis and the fdot node count
+    (:func:`~lisatools.sampling.gb_observable_basis.n_fdot_nodes`) on the
+    production fdot axis.
+
+    Args:
+        n_req (array_like): ``(K,)`` per-box node requirements, f0-sorted.
+
+    Returns:
+        np.ndarray: ``(K,)`` int ladder levels, non-decreasing, capped at 96.
+
+    Example:
+        >>> from lisatools.sampling.fstat_gridfit import mc_ladder_levels
+        >>> mc_ladder_levels([3, 5, 4, 30, 96]).tolist()
+        [3, 6, 6, 48, 96]
     """
     out = np.empty(len(n_req), dtype=int)
     prev = 0
@@ -2041,7 +2637,49 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
     partials -- box is the SLOWEST axis, so concatenation on axis 0 in box
     order reproduces the whole-group sweep exactly.
 
-    Returns the live proposal (or ``None`` if no peaks).
+    Box design, per peak: axis 0 spans ``f0 +- FSTAT_PEAK_HALF_MHZ`` clamped to
+    the peak's sub-band with :func:`~lisatools.sampling.fstat_proposal.fstat_n_f0`
+    nodes; on the fdot axis (``FSTAT_FDOT_AXIS=1``, the 9mo/12mo value) axis 1
+    is a linear fdot axis over the INTERSECTION of the group's boxes'
+    :func:`~lisatools.sampling.gb_observable_basis.fdot_axis_bounds` (at
+    ``mc_hi`` and ``ratio_max``, ``FSTAT_FDOT_RATIO_MAX`` winning over the
+    argument), sized by
+    :func:`~lisatools.sampling.gb_observable_basis.n_fdot_nodes` and sheared
+    by ``c_t = Tobs / 2``; otherwise an Mc axis over
+    ``[max(mc_lo, FSTAT_MC_MIN), mc_hi]``. Groups are the runs of equal
+    (node-ladder level, sky level) in f0 order; with
+    ``FSTAT_STAGEB_SKY_ADAPT=1`` and no pinned sky each group's sky is
+    :func:`sky_nodes_required` (``FSTAT_STAGEB_NSKY_MIN`` / ``_MAX``) halved
+    until the group's float64 grid fits ``FSTAT_STAGEB_GROUP_MAX_GB`` (never
+    below 64 nodes). Box weights come from :func:`peak_box_weights` with the
+    epoch's alpha, so the live proposal equals a later cache reload. With
+    ``cache_path`` the grids are written by :func:`write_stacked_npz` to
+    ``<cache>_peaks_stacked.npz`` and the stage-B progress files cleared.
+
+    Args:
+        call_fstat: The scorer.
+        peaks (np.ndarray): ``(N, 4)`` peaks ``(f0_mHz, F, node_idx, band_idx)``
+            from :func:`select_comb_peaks`.
+        xp (module): Array module of the sweeps.
+        Tobs: Observation span (s).
+        band_edges_hz (array_like): ``(num_sub_bands + 1,)`` band edges (Hz).
+        mc_lims (sequence of float): Chirp-mass prior box (Msun); ``None`` ->
+            ``[0.001, 1.0]``.
+        ratio_max (float, optional): ``fdot_astro_ratio`` half-width (needed on
+            the fdot axis unless ``FSTAT_FDOT_RATIO_MAX`` is set).
+        cache_path: ``<epoch>/fstat_grid.npz``; ``None`` disables caching.
+        fingerprint_extra: Checkpoint salt.
+        epoch (int, optional): F-stat epoch, for the weighting tilt only.
+        sweep_runner (callable, optional): Per-group runner; ``None`` ->
+            :func:`run_stage_b_group`.
+
+    Returns:
+        StackedFStatProposal4D or GroupedStackedFStatProposal or None: The live
+        proposal (one group -> the former), or ``None`` if no peaks / every box
+        was degenerate.
+
+    Raises:
+        ValueError: The fdot axis is on and no ratio half-width is available.
     """
     from lisatools.sampling.fstat_proposal import (
         GroupedStackedFStatProposal,
@@ -2406,6 +3044,20 @@ def comb_cache_usable(comb_cache: str, fingerprint_extra: str, *,
     set also changes the stamp (``fingerprint_extra`` carries
     ``|bandskip=``), so either test refuses it there; this one is what
     guards a caller whose fingerprint does not carry the skip set.
+
+    Args:
+        comb_cache: Path of ``fstat_grid_comb.npz``.
+        fingerprint_extra: This fit's stamp (``|epoch=..|gbfree=..|wref=..``
+            plus the stage fingerprint, in the GB move).
+        band_edges_hz (array_like, optional): Band edges (Hz) for the coverage
+            check; ``None`` -> the cached edges.
+        band_skip (array_like, optional): This fit's ``(num_sub_bands,)`` skip
+            set.
+
+    Returns:
+        bool: ``True`` when the comb may be reused (also for an unstamped
+        legacy cache, with a warning); ``False`` when it is unreadable, misses
+        needed nodes, or was stamped for a different reference.
     """
     uncovered = 0
     try:
@@ -2460,6 +3112,12 @@ def stacked_grid_path(cache_dir: str) -> str:
     Spelled exactly as every writer spells it -- ``os.path.join(cache_dir,
     GRID_BASENAME)`` with the suffix swapped -- so a caller's pre-check can
     never name a different file from the one the orchestrator tests.
+
+    Args:
+        cache_dir: The epoch's cache directory.
+
+    Returns:
+        str: ``<cache_dir>/fstat_grid_peaks_stacked.npz``.
     """
     return os.path.join(cache_dir, GRID_BASENAME).replace(
         ".npz", "_peaks_stacked.npz")
@@ -2478,6 +3136,12 @@ def stage_b_complete(cache_dir: str) -> bool:
     Says nothing about a ZERO-PEAK epoch, for which no npz is ever written;
     that is the manifest's job (``_epoch_complete`` /
     ``_epoch_missing_for_ranks`` in the GB move).
+
+    Args:
+        cache_dir: The epoch's cache directory.
+
+    Returns:
+        bool: Whether :func:`stacked_grid_path` exists.
     """
     return os.path.exists(stacked_grid_path(cache_dir))
 
@@ -2523,6 +3187,19 @@ def stacked_cache_at_floor(d, min_F: float):
     Raising the floor only: a cache selected at a STRICTER floor than
     ``min_F`` cannot gain the peaks between the two, and is returned as is
     (the caller says so).
+
+    In the 9mo/12mo ``full_pe`` stage this cuts the ``rj_fstat_pe`` galaxy
+    epoch to its own floor (SNR 6.5) at load time; the only caller is
+    :func:`build_gb_birth_distribution` (its ``peak_min_F`` argument).
+
+    Args:
+        d (Mapping): A stage-B cache (``np.load`` NpzFile or a mapping).
+        min_F: Floor in F units.
+
+    Returns:
+        tuple: ``(cache, n_kept, n_total)`` -- ``cache`` is ``d``, ``None`` or a
+        :class:`_FloorCutStackedCache`; for a cache without ``peak_F`` the
+        result is ``(d, None, None)``.
     """
     keys = list(getattr(d, "files", None) or list(d))
     if "peak_F" not in keys:
@@ -2550,7 +3227,17 @@ class _FloorCutStackedCache:
     build (the 9mo PE epoch: 32,715 boxes, ~43 GB resident per card once on
     device). The small per-box arrays, the renumbered group table and the
     raised stamp are computed once here. Reads like the npz: ``files``,
-    ``in``, iteration, ``[key]``.
+    ``in``, iteration, ``[key]``. Groups that lose every box are dropped and
+    the rest renumbered; ``peak_min_F`` is raised to ``max(stamp, min_F)``.
+
+    Args:
+        d (Mapping): The source cache.
+        keys (list[str]): Its key list.
+        keep (np.ndarray): ``(K,)`` bool box mask.
+        min_F (float): The floor applied (F units).
+
+    Raises:
+        ValueError: The cache's ``group_sizes`` do not sum to its box count.
     """
 
     _GROUP_PREFIXES = ("logp_grids_g", "mc_ax_g", "alpha_ax_g", "sin_delta_ax_g")
@@ -2611,6 +3298,7 @@ class _FloorCutStackedCache:
 
     @property
     def files(self):
+        """The view's key list (``NpzFile.files`` duck type)."""
         return list(self._keys)
 
     def __contains__(self, key):
@@ -2659,7 +3347,40 @@ def run_fstat_grid_fit(call_fstat: Callable, *, xp, Tobs: float,
       re-select peaks (cheap, deterministic), run only stage B.
     * otherwise -> run both stages.
 
-    Returns ``(stacked_or_None, n_peaks)``.
+    On the first branch the cached peak floor is checked against the current
+    one (:func:`_check_cached_peak_threshold`) and the proposal is rebuilt with
+    the same box weighting the other two paths apply. Called by
+    ``GBSpecialRJFStatGridMove._run_fstat_fit`` (head) once per F-stat epoch.
+
+    Args:
+        call_fstat: The scorer (never called on the completed-epoch branch).
+        xp (module): Array module of the sweeps.
+        Tobs: Observation span (s); the GB move passes ``1/df``.
+        band_edges_hz (array_like): ``(num_sub_bands + 1,)`` band edges (Hz).
+        f0_lims_hz (sequence of float): Comb range (Hz); the GB move passes the
+            interior span ``(band_edges[1], band_edges[-2])``.
+        mc_lims (sequence of float): Chirp-mass prior box (Msun).
+        cache_dir (str): The epoch's cache directory (created if missing).
+        fingerprint_extra: Checkpoint / comb stamp salt.
+        epoch (int, optional): F-stat epoch (weighting tilt only).
+        ratio_max (float, optional): ``fdot_astro_ratio`` half-width for the
+            fdot axis.
+        sweep_runner (callable, optional): Stage-B per-group runner.
+        comb_runner (callable, optional): Stage-A per-level runner.
+        band_min_F (float or array_like, optional): Peak floor override
+            (``None`` in production: the per-walker stage table is off).
+        band_skip (array_like, optional): ``(num_sub_bands,)`` bool skip set
+            from the valves (search stages only).
+
+    Returns:
+        tuple: ``(stacked_or_None, n_peaks)`` -- the peak proposal
+        (:class:`~lisatools.sampling.fstat_proposal.StackedFStatProposal4D` or
+        :class:`~lisatools.sampling.fstat_proposal.GroupedStackedFStatProposal`)
+        and the number of selected peaks.
+
+    Raises:
+        ValueError: A completed cache was selected at a different peak floor,
+            or its grid basis disagrees with ``FSTAT_FDOT_AXIS``.
     """
     from lisatools.sampling.fstat_proposal import stacked_from_cache
 
@@ -2785,6 +3506,16 @@ def _check_cached_peak_threshold(d, stacked_cache: str, comb_cache: str) -> None
 
     A cache with no stamp is legacy: warn rather than refuse, since every
     cache written before this stamp existed would otherwise become unusable.
+
+    Args:
+        d (Mapping): The loaded stage-B cache.
+        stacked_cache: Its path (for messages).
+        comb_cache: The epoch's comb-cache path (for messages).
+
+    Raises:
+        ValueError: The stamped floor differs from
+            :func:`~lisatools.sampling.fstat_proposal.fstat_peak_min_F` (relative
+            tolerance 1e-9).
     """
     from lisatools.sampling.fstat_proposal import fstat_peak_min_F
 
@@ -2823,7 +3554,17 @@ def check_cached_band_grid(cache_dir: str, expected_band_edges) -> None:
     :class:`ValueError` loudly when the cached edges differ from
     ``expected_band_edges`` (shape or values), or when a cache exists but
     carries no band metadata at all (unverifiable legacy cache). A missing
-    cache passes (nothing to be stale).
+    cache passes (nothing to be stale). Called by
+    :func:`build_gb_birth_distribution` on every npz load and by the GB move's
+    epoch staleness check.
+
+    Args:
+        cache_dir: The epoch's cache directory.
+        expected_band_edges (array_like): The run's band edges (Hz).
+
+    Raises:
+        ValueError: A cache's ``band_edges`` are missing or differ (compared
+            with ``np.allclose``).
     """
     expected = np.asarray(expected_band_edges, dtype=float)
     cache_path = os.path.join(cache_dir, GRID_BASENAME)
@@ -2858,7 +3599,11 @@ def peak_box_weights(peak_F, peak_f0_mHz=None, band_edges=None,
                      alpha=1.0, cells=0, equal=False):
     """Mixture weights for the stacked F-stat peak boxes.
 
-    Two schemes, both returned as FLAT per-box weights:
+    Two schemes, both returned as FLAT per-box weights (the scheme in force is
+    chosen by the caller through ``cells``; the production callers pass
+    :func:`peak_weight_cells_env` = 1 and :func:`peak_weight_alpha_env`, i.e.
+    one stratum per sub-band with alpha 0.5 at epoch 0 and 0.25 after it in the
+    9mo/12mo runs):
 
     * ``cells = K >= 1`` -- the HIERARCHICAL scheme and the DEFAULT: draw a
       SUB-BAND STRATUM uniformly, then draw within it with ``w ~ F**alpha``.
@@ -2908,6 +3653,23 @@ def peak_box_weights(peak_F, peak_f0_mHz=None, band_edges=None,
 
     Returns ``None`` when the weights would be flat anyway, which is what
     ``StackedFStatProposal4D`` expects for "no weighting".
+
+    Args:
+        peak_F (array_like): ``(K,)`` per-box peak F (clipped at 0).
+        peak_f0_mHz (array_like, optional): ``(K,)`` peak frequencies (mHz);
+            required by the stratified scheme.
+        band_edges (array_like, optional): Sub-band edges (Hz); required by the
+            stratified scheme.
+        alpha (float, optional): Exponent of ``F``. Default ``1.0``.
+        cells (int, optional): Strata per sub-band (``<= 0`` = the global
+            mixture). Default ``0``.
+        equal (bool, optional): Force flat weights (``None``). Default ``False``.
+
+    Returns:
+        np.ndarray or None: ``(K,)`` non-negative weights (the stratified ones
+        sum to 1), or ``None`` for flat. Falls back to the global mixture (with
+        a warning) when the stratified scheme lacks ``peak_f0_mHz`` /
+        ``band_edges``.
     """
     F = np.clip(np.asarray(peak_F, dtype=float).ravel(), 0.0, None)
     cells = int(cells or 0)
@@ -3018,7 +3780,10 @@ def peak_weight_cells_env():
 
     ``0`` falls back to the historical global ``w ~ F**alpha`` mixture; an
     explicit integer ``K > 1`` sub-divides each sub-band into K strata of
-    its own width.
+    its own width. The 9mo/12mo launchers export ``FSTAT_PEAK_WEIGHT_CELLS=1``.
+
+    Returns:
+        int: ``K >= 0`` (an unparsable value logs a warning and returns 1).
     """
     raw = os.environ.get("FSTAT_PEAK_WEIGHT_CELLS", "").strip()
     if not raw:
@@ -3059,6 +3824,17 @@ def peak_weight_alpha_env(epoch=None):
     same share as a real one. The heavy lifting is done by the refit itself
     -- a found source is subtracted, so its peak collapses -- and this is a
     second-order tilt on top of that.
+
+    The 9mo/12mo launchers export ``FSTAT_PEAK_WEIGHT_ALPHA=0.5`` and leave the
+    LATE / AFTER_EPOCH knobs unset, so epoch 0 uses 0.5 and every later epoch
+    0.25 (the GB move passes the epoch number). An empty
+    ``FSTAT_PEAK_WEIGHT_ALPHA_LATE`` keeps the early value for all epochs.
+
+    Args:
+        epoch (int, optional): The F-stat epoch; ``None`` -> the early value.
+
+    Returns:
+        float: The exponent ``alpha``.
     """
     early = float(os.environ.get("FSTAT_PEAK_WEIGHT_ALPHA", "1.0"))
     if epoch is None:
@@ -3113,7 +3889,52 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
     different band count/edges raises instead of silently mis-labeling
     ``band_idx``.
 
-    Returns ``None`` when no grid source is available.
+    Assembly: ``base`` = the peak stack (``stacked_live``, or the cache rebuilt
+    by :func:`~lisatools.sampling.fstat_proposal.stacked_from_cache` with
+    :func:`peak_box_weights` at the epoch's alpha), mixed with a
+    :class:`~lisatools.sampling.fstat_proposal.CombIntrinsicProposal` at weight
+    ``comb_weight`` when the epoch has a comb cache (``fdot_conditional`` under
+    ``FSTAT_FDOT_AXIS=1``); then
+    :class:`~lisatools.sampling.fstat_proposal.UniformFloorMixture` over the
+    box ``[interior f0 span] x [axis-1 range] x [0, 2 pi] x [-1, 1]`` (axis 1:
+    the fitted fdot axes' span on an fdot grid, else ``mc_lims``); then
+    :func:`~lisatools.sampling.fstat_proposal.make_gb_rj_birth_container`;
+    finally one :func:`~lisatools.sampling.fstat_proposal.reseed_birth_tree`.
+    Called by ``GBSpecialRJFStatGridMove._install`` on every new or loaded
+    epoch (head and ranks).
+
+    Args:
+        cache_dir: The epoch's cache directory.
+        mc_lims (sequence of float): Chirp-mass prior box (Msun); ``None`` ->
+            ``[0.001, 1.0]``.
+        A_lims (sequence of float): Amplitude prior box (used when
+            ``dist_lims`` is ``None``).
+        dist_lims (sequence of float, optional): Distance box (kpc); the
+            distance basis of the 9mo/12mo runs.
+        fdot_astro_ratio_max (float, optional): Ratio half-width ``M`` (9-column
+            basis; launchers 5.0).
+        use_cupy: Build the grids on the GPU. Default ``False``.
+        gpu: Accepted for API compatibility; not used by this function.
+        floor_eps: Floor weight; ``None`` -> ``FSTAT_FLOOR_EPS`` (0.1).
+        comb_weight: Comb weight; ``None`` -> ``FSTAT_COMB_WEIGHT`` (0.3).
+        stacked_live (object, optional): A peak proposal fitted in this process
+            (skips the npz reload and the band-grid check).
+        expected_band_edges (array_like, optional): The run's band edges (Hz).
+        epoch (int, optional): F-stat epoch, for the weighting tilt.
+        ratio_tight (dict, optional):
+            :class:`~lisatools.sampling.fstat_proposal.RatioTightenedBirth`
+            arguments (legacy axis only).
+        tobs (float, optional): Observation span (s); required on the fdot axis.
+        seed: One integer for the whole container (``None`` = entropy).
+        peak_min_F: The loading move's own floor (F units), see above.
+
+    Returns:
+        eryn.priors.ProbDistContainer or RatioTightenedBirth or None: The RJ
+        birth container, or ``None`` when no grid source is available.
+
+    Raises:
+        ValueError: A stale band grid, a grid-basis mismatch, or the fdot axis
+            without ``fdot_astro_ratio_max`` / ``tobs``.
     """
     from lisatools.sampling.fstat_proposal import (
         CombIntrinsicProposal,
@@ -3376,6 +4197,32 @@ def enumerate_center_nodes(cache_dir: str, *, mc_lims=None,
     provenance counts). ``max_nodes`` (when the union exceeds it) thins the
     COMB nodes by a uniform stride and keeps every peak node -- peak nodes
     are where the birth mass actually is.
+
+    On an fdot-basis cache (``grid_basis="fdot"``, the 9mo/12mo grids) the
+    argmax's axis-1 value is an fdot: the node's f0 is sheared back from
+    ``f_mid`` with ``grid_c_t``, and ``mc`` is the midpoint of the feasible
+    interval, from the
+    :func:`~lisatools.sampling.gb_observable_basis.mc_floor_for_fdot` floor (at
+    the node's fdot and sheared f0, ratio half-width ``FSTAT_FDOT_RATIO_MAX``,
+    default 5.0, and the ``mc_lims`` floor) up to ``mc_hi``, clipped to
+    ``mc_lims``. Comb nodes use
+    ``FSTAT_COMB_MC`` (default the ``mc_lims`` midpoint) and the comb's
+    per-node best sky.
+
+    Args:
+        cache_dir: The epoch's cache directory.
+        mc_lims (sequence of float, optional): Chirp-mass prior box (Msun);
+            ``None`` -> ``[0.001, 1.0]``.
+        max_nodes: Cap on the total node count (the GB move passes
+            ``GB_FSTAT_CTR_MAX_NODES``, default 1,000,000).
+
+    Returns:
+        dict: Host arrays ``f0_mHz``, ``mc``, ``alpha``, ``sin_delta`` (sorted by
+        f0) and ints ``n_peak_nodes``, ``n_comb_nodes``; empty arrays when the
+        epoch has neither cache.
+
+    Raises:
+        ValueError: A group's sky axes disagree with its grid shape.
     """
     cache_path = os.path.join(cache_dir, GRID_BASENAME)
     stacked_cache = cache_path.replace(".npz", "_peaks_stacked.npz")
@@ -3549,7 +4396,27 @@ def run_center_sweep(call_fstat: Callable, nodes: dict, *, xp,
 
     Returns host arrays ``ln_A_max``, ``phi0``, ``iota``, ``psi``,
     ``ln_snr`` and ``sigma_base`` (``= 1/SNR``, the UNSMEARED proposal
-    width), one entry per node.
+    width), one entry per node. Rows are scored at ``fdot = fdot_gr(f0, mc)``
+    of the node's representative chirp mass; ``ln_snr = 0.5 ln max(2F, 1)``.
+
+    Args:
+        call_fstat: The scorer.
+        nodes (dict): :func:`enumerate_center_nodes` output (``f0_mHz``, ``mc``,
+            ``alpha``, ``sin_delta``).
+        xp (module): Array module handed to the inversion.
+        batch: Rows per scorer call; ``None`` -> ``FSTAT_BATCH`` (4096).
+
+    Returns:
+        dict[str, np.ndarray]: The six ``(n_nodes,)`` host float64 arrays above.
+
+    Warning:
+        ``iota`` is the uncorrected ``iota_max`` of
+        :func:`~lisatools.sampling.fstat_proposal.fstat_maximized_extrinsics`,
+        i.e. ``pi - iota`` of the source in the sampling convention (the
+        DORMANT cos(iota) sign defect, not fixed by ruling; repro
+        ``scripts/diagnostics/xcheck_fstat_cos_iota.py``). Its only consumers
+        (the F-stat distance birth and the replace moves) are off in the
+        9mo/12mo runs.
     """
     from gbgpu.utils.utility import get_fdot
 
@@ -3619,6 +4486,24 @@ def build_fstat_center_table(call_fstat: Optional[Callable], *, cache_dir: str,
     ``sigma_base``), or ``None`` when the epoch has no drawable support at
     all (no grids and no comb -> the birth container fell back to the prior)
     or when a rebuild is needed but no ``call_fstat`` was supplied.
+
+    Called by ``GBSpecialRJFStatGridMove._install_ctr_table`` on every epoch
+    under ``GB_FSTAT_CTR_MODE=epoch`` (the 9mo/12mo value). The table is built
+    and installed in production, but its consumers (the F-stat distance birth,
+    ``GB_RJ_FSTAT_DIST_BIRTH=0``, and the replace moves) are dormant there; see
+    the cos(iota) warning in :func:`run_center_sweep`. A failed write is
+    logged, never fatal.
+
+    Args:
+        call_fstat: The scorer (``None`` = load only).
+        cache_dir: The epoch's cache directory.
+        xp (module): Array module for the sweep.
+        mc_lims (sequence of float, optional): Chirp-mass prior box (Msun).
+        max_nodes: Node cap forwarded to :func:`enumerate_center_nodes`.
+        rebuild: Ignore an existing table and rebuild it. Default ``False``.
+
+    Returns:
+        dict or None: The table (host float arrays), or ``None`` (see above).
     """
     path = os.path.join(cache_dir, CENTER_TABLE_BASENAME)
     if os.path.exists(path) and not rebuild:

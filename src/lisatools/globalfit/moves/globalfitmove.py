@@ -1,10 +1,36 @@
-"""Base mix-in tying ``eryn`` moves to global-fit MPI/GPU bookkeeping.
+"""Global-fit move base classes and the per-stage combine move.
 
-Also home of the declarative :class:`Move` base — the single user-facing
+Home of the declarative :class:`Move` base — the single user-facing
 "move" concept of the global-fit recipe layer (a move is a proposal; the
 words are synonymous). A ``Move`` is cheap to construct and picklable; the
 heavy work happens in its required ``setup(ctx)`` hook, run once at recipe
 materialization with a :class:`MoveBuildContext`.
+
+Contents, in pipeline order:
+
+* :class:`Move` / :class:`MoveBuildContext` (and the private ``_RuntimeMove``
+  wrapper): what a recipe :class:`~lisatools.globalfit.recipe.Stage` holds and
+  what ``Stage.setup`` hands each move at materialization.
+* :class:`GlobalFitMove`: the mixin every runtime global-fit move carries
+  (GB / VGB, noise, sources). It provides the sub-state helpers
+  (``_work_branch``, ``_sync_cold_row``, ``_check_substate_consistency``), the
+  fan-out ``gf_serve`` hook and the uniform ``set_debug``.
+* :class:`GFCombineMove`: ``Stage.setup`` wraps each stage's runtime moves in ONE
+  of these; eryn calls its ``propose`` exactly once per global-fit iteration.
+  It owns the iteration counter, the sub-state guards, the search legs
+  (``GB_SEARCH_LEGS``), the PE draw-one RJ plan (``GB_PE_RJ_DRAW_ONE``), the
+  per-move cadence (``Move.every``) and the ``[GF_TIMING]`` instrumentation.
+* :class:`MaxLogLCombineMove`: the plateau-terminated joint search used by the
+  production ``source_search`` stage and by ``gb_search_2``'s cycle-end noise
+  search (driver ``JointMaxLogLSearch``).
+
+Env knobs read here (all at call time): ``GF_MOVE_TIMING`` / ``GF_MOVE_TIMING_SYNC``
+(default ``0``; launchers ``1`` / ``0``), ``GF_SUBSTATE_CHECK`` (default ``1``),
+``GB_PE_RJ_DRAW_ONE`` (default ``0``; launchers ``1``), ``GB_PE_RJ_FSTAT_FRACTION``
+(``0.8``; launchers ``0.45``), ``GB_PE_RJ_FSTAT_RESIDUAL_SPLIT`` (``0.5``; launchers
+``0.9``), ``GB_PE_RJ_WARM_FRACTION`` (``0``; launchers ``0.4``),
+``GB_PE_RJ_PARA_FRACTION`` (``0``), and the ``MAXLOGL_*`` knobs of
+:class:`MaxLogLCombineMove`.
 """
 
 import dataclasses
@@ -36,6 +62,20 @@ def ensure_fine_noise_covariance_current(acs, coarse_runtime) -> None:
     Everything needed is derived from the runtime itself
     (``coarse_settings.fine_settings`` is the run's fine domain), so the
     caller only needs the shared ``acs`` and any move's ``coarse_runtime``.
+
+    Called by :meth:`GFCombineMove._gf_precondition` before every non-noise
+    sub-move when a wrapped noise move carries an active sidecar. Not reached
+    on the 9mo / 12mo runs (``COARSE_GPU_MODE=off``, ``COARSE_Q=1``).
+
+    Args:
+        acs: The run's :class:`~lisatools.analysiscontainer.AnalysisContainerArray`.
+        coarse_runtime: A ``CoarseWDMRuntime`` (``mode``, ``coarse_settings``) or
+            ``None``; ``None`` or mode ``"off"`` makes this a no-op.
+
+    Raises:
+        AssertionError: A container's sensitivity matrix is on the coarse
+            settings, is not on the run's fine settings, or does not end in the
+            fine active shape.
     """
     runtime = coarse_runtime
     if runtime is None or getattr(runtime, "mode", "off") == "off":
@@ -77,6 +117,32 @@ class MoveBuildContext:
     ``stock_moves`` name lookup, the sampler shape (``ntemps`` / ``nwalkers``),
     the multi-rank ``layout`` / ``fanout`` / ``rank`` and the head-side
     ``state_local`` slice (all ``None`` in a single-process run).
+
+    Built by the variant's ``setup_recipe`` (e.g. ``all_sources.setup_recipe``) and
+    passed to :meth:`Recipe.setup <lisatools.globalfit.recipe.Recipe.setup>`, which
+    hands it to every :meth:`Move.setup`. ``__post_init__`` fills ``layout`` /
+    ``fanout`` / ``rank`` from ``curr`` when not given and, on a multi-rank layout,
+    slices ``state_local`` (coords / inds only, no sub-states) to this rank's
+    walker block.
+
+    Attributes:
+        recipe: The runtime :class:`~lisatools.globalfit.recipe.Recipe`.
+        engine_info: The engine / branch metadata (``branch_names``, ``ndims``, ...).
+        curr: The built :class:`~lisatools.globalfit.run.GlobalFitSetup`.
+        acs: The shared
+            :class:`~lisatools.analysiscontainer.AnalysisContainerArray`.
+        priors (dict): Branch name -> prior container.
+        state: The initial :class:`~lisatools.globalfit.state.GFState`.
+        stock_moves (dict): Stock-move name -> built runtime move (the base
+            :meth:`Move.setup` looks names up here).
+        ntemps (int or None): Engine temperature count (the engine runs the cold
+            chain only, so 1 on stock runs).
+        nwalkers (int or None): Engine walker count.
+        layout: ``curr.rank_layout`` (walker-block layout) or ``None``.
+        fanout: ``curr.fanout`` (the walker fan-out) or ``None``.
+        rank (int or None): This process's rank (``curr.rank``).
+        state_local: This rank's walker-block slice of ``state`` on a multi-rank
+            layout, else ``None``.
     """
 
     recipe: typing.Any
@@ -88,9 +154,10 @@ class MoveBuildContext:
     stock_moves: dict = dataclasses.field(default_factory=dict)
     ntemps: typing.Optional[int] = None
     nwalkers: typing.Optional[int] = None
-    #: multi-rank context (Plan 2 populates ``curr.rank_layout`` / ``curr.fanout``
-    #: / ``curr.rank``; ``state_local`` is the head-side walker slice a
-    #: builder reads when it must act on this rank's block only)
+    # multi-rank context (Plan 2 populates ``curr.rank_layout`` / ``curr.fanout``
+    # / ``curr.rank``; ``state_local`` is the head-side walker slice a
+    # builder reads when it must act on this rank's block only); documented in
+    # the class docstring's Attributes section
     layout: typing.Any = None
     fanout: typing.Any = None
     rank: typing.Optional[int] = None
@@ -136,8 +203,13 @@ class Move:
       ``add_move`` — it is wrapped in a
       :class:`~lisatools.globalfit.moves.functionmove.FunctionMove`.
 
+    The same stock name may sit in several stages (uniqueness is per stage);
+    every stage resolves it to the SAME shared runtime object, which is why
+    stage-dependent state (kind, name, iteration, cadence) lives on each stage's
+    :class:`GFCombineMove`, not on the move.
+
     Args:
-        name: Unique (per recipe) move name. For the base class this is the
+        name: Unique (per stage) move name. For the base class this is the
             stock-move name to look up (``"rj_prior"``, ``"psd_pe"``, ...).
         branch: Branch this move samples (validated against enabled branches
             at materialization).
@@ -146,6 +218,41 @@ class Move:
             ``True``/``False`` force it, a dict passes options
             (``plot_dir``/``plot_walker``/``plot_leaf``/``plot_band``/
             ``every``). Wins over the stage-level ``Stage.debug``.
+        every: Run this move only on every ``every``-th iteration of ITS stage
+            (user ruling 2026-09-15). Default 1 (every iteration). The counter
+            is the stage combine's, so the same shared runtime move stays
+            uncadenced in a stage that declares 1; a skipped iteration leaves
+            the branch as it was. Applied as the combine's ``move_every``.
+
+    Raises:
+        ValueError: ``name`` is not a non-empty string, or ``every < 1``.
+
+    Attributes:
+        name (str): See ``name``.
+        branch (str or None): See ``branch``.
+        debug (bool, dict or None): See ``debug``.
+        every (int): See ``every``.
+
+    Example:
+        >>> from lisatools.globalfit import Move
+        >>> Move("rj_prior_pe", branch="gb")
+        Move('rj_prior_pe', branch='gb')
+        >>> Move("mbh_pe", branch="mbh", every=10)
+        Move('mbh_pe', branch='mbh', every=10)
+
+        A custom move builds its runtime move in ``setup`` from the live context
+        and is added like any other (``docs/stock-stages-and-moves.md``):
+
+        .. code-block:: python
+
+            from eryn.moves import StretchMove
+            from lisatools.globalfit import Move
+
+            class MyStretch(Move):
+                def setup(self, ctx):
+                    return StretchMove(live_dangerously=True)
+
+            fit.add_move(MyStretch("my_stretch", branch="line"), stage="main")
     """
 
     def __init__(
@@ -192,6 +299,11 @@ class Move:
         nothing. Returning a name that the variant does not provide fails at
         materialization with the available list, which is the intended
         behaviour (better than a silent no-op).
+
+        Returns:
+            list[str]: Stock-move names; ``[]`` in the base class. (The
+            production driver's ``JointMaxLogLSearch`` returns its wrapped
+            names here.)
         """
         return []
 
@@ -201,6 +313,17 @@ class Move:
         Default implementation: stock lookup — resolve
         ``ctx.stock_moves[self.name]``, the move the variant's setup function
         built under this name.
+
+        Args:
+            ctx: The build context.
+
+        Returns:
+            The runtime move (an eryn move, normally a :class:`GlobalFitMove`), or
+            ``None`` from a subclass whose instance is itself the runtime move.
+
+        Raises:
+            ValueError: No stock move under ``self.name`` (the message lists the
+                available names).
         """
         try:
             return ctx.stock_moves[self.name]
@@ -212,7 +335,13 @@ class Move:
             ) from None
 
     def materialize(self, ctx: MoveBuildContext):
-        """Framework entry point: run :meth:`setup` and record the runtime move."""
+        """Framework entry point: run :meth:`setup` and record the runtime move.
+
+        Called by ``Stage.setup``. A ``None`` from :meth:`setup` means ``self``.
+
+        Returns:
+            The runtime move, also stored on :attr:`runtime`.
+        """
         runtime = self.setup(ctx)
         if runtime is None:
             runtime = self
@@ -244,6 +373,15 @@ class _RuntimeMove(Move):
     constructed moves often hold arrays or device state — a fit configured
     with one may not be picklable (deliberately not dropped on pickle,
     matching the historical ``instance`` caveat).
+
+    Args:
+        move: The constructed eryn move; :meth:`setup` returns it unchanged.
+        name (str, optional): Recipe name; defaults to ``move.name``.
+        branch (str, optional): Branch the move samples.
+        debug (bool or dict, optional): Debug override (see :class:`Move`).
+
+    Raises:
+        ValueError: Neither ``name`` nor ``move.name`` is set.
     """
 
     def __init__(self, move, *, name=None, branch=None, debug=None):
@@ -257,22 +395,47 @@ class _RuntimeMove(Move):
         self.move = move
 
     def setup(self, ctx: MoveBuildContext):
+        """Return the wrapped constructed move unchanged."""
         return self.move
 
 
 class GlobalFitMove:
-    """Mix-in providing MPI rank / GPU bookkeeping for global-fit moves.
+    """Mix-in of the runtime global-fit moves (GB / VGB, noise, sources, combines).
 
-    Subclasses combine this mix-in with an ``eryn`` move to expose the extra
-    state the global-fit driver needs (assigned MPI ranks, GPU device list,
-    likelihood-comparison cadence, and buffer-reset cadence).
+    Subclasses combine this mix-in with an ``eryn`` move (the ridge-Gibbs moves
+    ``gb_ridge_gibbs`` / ``vgb_ridge_gibbs`` are plain eryn moves without it).
+    What it provides:
+
+    * the sub-state helpers of the cold-chain storage model
+      (``docs/conventions.md``): a branch's full tempered ensemble lives in
+      ``state.sub_states[branch]`` and the main (engine) state carries only its
+      cold row. :meth:`_work_branch` returns the tempered ensemble a move
+      samples, :meth:`_sync_cold_row` mirrors the sub-state's row 0 back into
+      the main state after a write, and :meth:`_check_substate_consistency`
+      verifies the two agree (``GF_SUBSTATE_CHECK``);
+    * :meth:`gf_serve`, the multi-rank fan-out hook (the base raises; the
+      walker fan-out mixin and the GB moves override it);
+    * :meth:`set_debug`, the uniform move / stage debug switch.
+
+    The ``propose(model, state)`` contract a subclass implements is eryn's: return
+    ``(new_state, accepted)`` with ``new_state`` the input state or a new
+    :class:`~lisatools.globalfit.state.GFState` (never a plain eryn ``State``:
+    :meth:`GFCombineMove.propose` raises when the sub-states are lost), every
+    written branch's sub-state updated and its cold row mirrored.
 
     Args:
-        name: Required identifier used in logging and bookkeeping.
-        iters_compare_likelihood: Iteration cadence at which the move should
-            cross-check likelihoods between worker ranks. ``-1`` disables.
-        iters_reset_buffers: Iteration cadence at which auxiliary buffers
-            should be reset. ``-1`` disables.
+        *args: Ignored (accepted for cooperative construction).
+        name: Required identifier used in logging and bookkeeping
+            (``AssertionError`` when ``None``).
+        iters_compare_likelihood (int): Stored cadence; ``-1`` (default) disables.
+            Nothing in the package reads it.
+        iters_reset_buffers (int): Stored cadence; ``-1`` (default) disables.
+            Nothing in the package reads it.
+        **kwargs: Ignored.
+
+    Note:
+        ``comm`` and ``gpus`` are vestigial (the move -> rank assignment was
+        removed, parallel-resources plan P3); no move sets or reads them.
     """
 
     def _work_branch(self, state, branch_name=None):
@@ -282,6 +445,15 @@ class GlobalFitMove:
         coords/inds (the module owns its full ladder; the main state carries
         only the engine's cold chain). Falls back to the main state's branch
         when no tempered sub-state exists (e.g. simple-API branches).
+
+        Args:
+            state: A :class:`~lisatools.globalfit.state.GFState`.
+            branch_name (str, optional): Branch; default ``self.branch_name``.
+
+        Returns:
+            eryn.state.Branch: For a tempered sub-state, coords shaped
+            ``(ntemps_module, nwalkers, nleaves_max, ndim)``; else the main
+            state's branch.
         """
         name = branch_name if branch_name is not None else self.branch_name
         sub_states = getattr(state, "sub_states", None) or {}
@@ -291,7 +463,18 @@ class GlobalFitMove:
         return state.branches[name]
 
     def _sync_cold_row(self, state, branch_name=None):
-        """Mirror the sub-state's cold row into the main (engine) state."""
+        """Mirror the sub-state's cold row into the main (engine) state.
+
+        Delegates to :meth:`ModuleSubState.sync_cold_row
+        <lisatools.globalfit.state.ModuleSubState.sync_cold_row>` for a
+        tempered-initialized sub-state; a no-op otherwise. Every move that
+        writes a branch's sub-state calls this before returning, so the
+        stage-entry check (:meth:`_check_substate_consistency`) holds.
+
+        Args:
+            state: The :class:`~lisatools.globalfit.state.GFState` being returned.
+            branch_name (str, optional): Branch; default ``self.branch_name``.
+        """
         name = branch_name if branch_name is not None else self.branch_name
         sub_states = getattr(state, "sub_states", None) or {}
         sub = sub_states.get(name)
@@ -303,7 +486,17 @@ class GlobalFitMove:
 
         Delegates to :meth:`ModuleSubState.check_cold_row` for every
         tempered-initialized sub-state (or just ``branch_names``). No-op when
-        ``GF_SUBSTATE_CHECK=0`` or the state carries no sub-states.
+        ``GF_SUBSTATE_CHECK=0`` or the state carries no sub-states. Called at
+        every stage entry (:meth:`GFCombineMove.propose`) and at the top of the
+        noise and source moves' proposes.
+
+        Args:
+            state: The :class:`~lisatools.globalfit.state.GFState` to check.
+            branch_names (list[str], optional): Branches to check; default all.
+
+        Raises:
+            ValueError: From ``check_cold_row``, when a branch's main-state cold
+                row and sub-state row 0 differ.
         """
         if not substate_check_enabled():
             return
@@ -323,6 +516,16 @@ class GlobalFitMove:
         The multi-rank moves override this (GB: ``gb_run_proposal`` /
         ``gb_run_tempering`` / ``gb_finish``; addremove and PSD: ``propose``).
         ``model`` is this rank's ``GlobalFitInfo`` (local ACA, map, rank RNG).
+
+        Args:
+            op (str): The fan-out command name.
+            payload: The command payload shipped by the head.
+            clock: The head's clock values for this command.
+            model: This rank's ``GlobalFitInfo``.
+
+        Raises:
+            NotImplementedError: Always, in the base (a move without fan-out
+                support; ``run.py`` refuses such moves on a multi-rank run).
         """
         raise NotImplementedError(
             f"move {getattr(self, 'gf_move_name', getattr(self, 'name', type(self).__name__))!r} "
@@ -367,7 +570,7 @@ class GlobalFitMove:
 
     @property
     def comm(self):
-        """The MPI communicator object owned by this move."""
+        """Vestigial MPI communicator slot (``AttributeError`` until set; nothing sets it)."""
         return self._comm
 
     @comm.setter
@@ -407,8 +610,24 @@ class GlobalFitMove:
 
         Applied by ``Stage.setup`` from the ``debug`` field on a
         :class:`Move`/``Stage``, or callable directly on a built move.
-        Moves without debug hooks (e.g. ``PSDMove``) simply carry the flag
-        inertly.
+        Moves without a matching hook simply carry the flag inertly
+        (``PSDMove`` has its own ``{PSD,GALFOR,SGWB}_DEBUG`` plot hook, which
+        reads ``debug`` / ``debug_plot_dir`` / ``debug_plot_walker`` /
+        ``debug_every``).
+
+        Args:
+            enabled: Turn debug on / off. Default ``True``.
+            plot_dir (str, optional): Plot folder; when debug ends up on with
+                no folder, ``./gf_output/debug/`` is used.
+            plot_walker (int, optional): Walker to plot.
+            plot_leaf (int, optional): Leaf to plot (moves with
+                ``debug_plot_leaf`` only).
+            plot_band (int, optional): Band to plot (moves with
+                ``debug_plot_band`` only).
+            every (int, optional): Plot every N-th propose (floored at 1;
+                moves with ``debug_every`` only).
+            log (bool, optional): Log-scale plots (moves with ``debug_log``
+                only).
         """
         self.debug = bool(enabled)
         if plot_dir is not None:
@@ -428,7 +647,7 @@ class GlobalFitMove:
 
     @property
     def gpus(self):
-        """List of GPU device indices assigned to this move (default empty)."""
+        """Vestigial list of GPU indices assigned to this move (default empty; nothing sets it)."""
         if not hasattr(self, "_gpus"):
             return []
         return self._gpus
@@ -467,16 +686,21 @@ def substate_check_enabled() -> bool:
     """Whether the cold-chain sub-state consistency check is armed.
 
     Always on; disable with ``GF_SUBSTATE_CHECK=0`` (read at call time).
+
+    Returns:
+        bool: ``False`` only when ``GF_SUBSTATE_CHECK`` is exactly ``"0"``.
     """
     return os.environ.get("GF_SUBSTATE_CHECK", "1") != "0"
 
 
 def pe_rj_fstat_residual_split() -> float:
-    """``GB_PE_RJ_FSTAT_RESIDUAL_SPLIT``: the share of the PE draw's F-stat
-    fraction that goes to ``rj_fstat_pe_residual``; ``rj_fstat_pe`` (the
-    GB-free galaxy grid) takes the rest. Default ``0.5`` (user ruling
-    2026-10-12: "two fstat moves that will split their share of the total
-    moves"). In [0, 1]; read at call time.
+    """Resolve ``GB_PE_RJ_FSTAT_RESIDUAL_SPLIT`` (read at call time).
+
+    The share of the PE draw's F-stat fraction that goes to
+    ``rj_fstat_pe_residual``; ``rj_fstat_pe`` (the GB-free galaxy grid) takes
+    the rest. Default ``0.5`` (user ruling 2026-10-12: "two fstat moves that
+    will split their share of the total moves"); the 9mo / 12mo launchers set
+    ``0.9``. Unset or blank means the default.
 
     The ONE resolver for both consumers: the PE draw
     (:meth:`GFCombineMove._pe_rj_draw_one_config`) and the driver's stage
@@ -484,6 +708,12 @@ def pe_rj_fstat_residual_split() -> float:
     share (a split of exactly 0 or 1) out of the PE stage altogether -- so
     the draw and the composition can never disagree about which F-stat moves
     a PE stage carries.
+
+    Returns:
+        float: The split, in ``[0, 1]``.
+
+    Raises:
+        ValueError: The value is not finite or lies outside ``[0, 1]``.
     """
     raw = os.environ.get("GB_PE_RJ_FSTAT_RESIDUAL_SPLIT", "").strip() or "0.5"
     s = float(raw)
@@ -496,11 +726,36 @@ def pe_rj_fstat_residual_split() -> float:
 
 
 class GFCombineMove(CombineMove, GlobalFitMove):
-    """An ``eryn`` :class:`CombineMove` that participates in global-fit bookkeeping.
+    """The per-stage combine move: runs one recipe stage's moves each iteration.
 
-    Inheriting both :class:`~eryn.moves.CombineMove` and :class:`GlobalFitMove`
-    lets a sequence of moves share rank/GPU state and likelihood-comparison
-    cadence with the rest of the global fit.
+    ``Stage.setup`` wraps each stage's runtime moves in ONE of these (its
+    ``combine_kwargs`` are this constructor's keywords), stamps
+    ``gf_stage_name`` / ``gf_stage_kind`` / ``gf_is_stage_combine`` (true) on it,
+    and hands it to the stage's ``RecipeStep``; eryn then calls :meth:`propose`
+    exactly once per global-fit iteration. Nested combines (e.g. the driver's
+    ``JointMaxLogLSearch`` -> :class:`MaxLogLCombineMove`) are wrapped moves like
+    any other.
+
+    The ``propose(model, state)`` contract: mint the iteration counter
+    (``gf_iteration``, stage combine only), check every branch's cold row
+    against its sub-state (``GF_SUBSTATE_CHECK``), run the wrapped moves through
+    :meth:`_propose_moves`, and refuse a returned plain eryn ``State``. Before each
+    sub-move :meth:`_gf_precondition` re-stamps the stage kind, name and
+    iteration on it (stock moves are shared between stages). Which moves run,
+    in this order of precedence:
+
+    * search LEGS (``leg_ends``; ``GB_SEARCH_LEGS=1`` sets it to ``"auto"`` on
+      the production ``gb_search_*`` stages): one propose runs from the leg
+      cursor to the next ``in_model*`` move and the row is saved after it
+      (:meth:`_propose_leg`, :mod:`lisatools.globalfit.legs`);
+    * the PE draw-one RJ plan (``GB_PE_RJ_DRAW_ONE=1``, kind ``"pe"`` stages:
+      the production ``full_pe``): one of the RJ members per iteration
+      (:meth:`_pe_rj_draw_one_plan`), every other move once in fixed order;
+    * the per-move cadence (``move_every``, from each :attr:`Move.every`);
+    * ``weighted_cycle`` / ``random_choice`` (below);
+    * the fixed sequential order: eryn's ``CombineMove.propose``, or
+      :meth:`_run_sequence` when timing, a mid-iteration checkpoint or a coarse
+      sidecar is armed (``GF_MOVE_TIMING=1`` on the production runs).
 
     ``GF_MOVE_TIMING=1`` arms per-move instrumentation in :meth:`propose`:
     one ``[GF_TIMING]`` line per wrapped move per iteration (wall time, peak
@@ -526,7 +781,64 @@ class GFCombineMove(CombineMove, GlobalFitMove):
     moves, weighted by ``move_weights`` (default equal weights). The draw
     comes from ``model.random`` so a fixed seed reproduces the run. When
     both flags are set, ``weighted_cycle`` governs. Search stages pass
-    neither flag and keep the fixed sequential order.
+    neither flag and keep the fixed sequential order. (The production driver
+    turns ``weighted_cycle`` on for ``full_pe`` via ``FULL_PE_WEIGHTED_CYCLE``,
+    default ``1``, but with ``GB_PE_RJ_DRAW_ONE=1`` the draw-one plan returns
+    first, so the weighted cycle does not run there.)
+
+    Args:
+        *args: Forwarded to :class:`eryn.moves.CombineMove`; the first is the list
+            of wrapped moves (or ``(move, weight)`` tuples).
+        random_choice: See above. Default ``False``.
+        weighted_cycle: See above. Default ``False``.
+        move_weights (array-like, optional): Weights of the ``weighted_cycle``
+            draw, one per wrapped move (normalized; ``None`` = equal).
+        move_every (list[int], optional): Per-move cadence aligned with the
+            wrapped moves; all-ones collapses to ``None``. Fixed sequential path
+            and legs only.
+        leg_ends (str or list[str], optional): ``"auto"`` (every ``in_model*``
+            move ends a leg) or explicit move names; ``None`` = one propose runs
+            the whole cycle. Incompatible with ``random_choice`` /
+            ``weighted_cycle``.
+        **kwargs: Forwarded to :class:`eryn.moves.CombineMove` (``verbose``,
+            ``share_temperature_control``, eryn ``Move`` keywords).
+
+    Raises:
+        ValueError: ``leg_ends`` or ``move_every`` combined with
+            ``random_choice`` / ``weighted_cycle``, or a malformed
+            ``move_weights`` / ``move_every``.
+
+    Attributes:
+        gf_legs: The :class:`~lisatools.globalfit.legs.LegCursor`, or ``None``.
+        gf_move_every (list[int] or None): The validated cadence.
+        gf_iteration (int): Iteration counter, advanced by the stage combine's
+            :meth:`propose` (starts at 0 on the first call).
+
+    Note:
+        Cross-repo dependency on ``eryn.moves.CombineMove.accepted``. Its getter
+        reads an ``_accepted`` attribute the combine never sets (the setter copies
+        the array onto every wrapped move instead), so reading ``accepted`` on a
+        combine raises ``AttributeError``. ``Stage.setup`` in
+        :mod:`lisatools.globalfit.recipe` relies on exactly that: it tests
+        ``hasattr`` on the new combine and then sets the counters. The same
+        getter is read by :meth:`_propose_moves` when every wrapped move is
+        cadenced off in one iteration (it returns zeros shaped like
+        ``self.accepted``), so that branch raises ``AttributeError`` instead of
+        returning. It is unreachable on the 9mo / 12mo runs (every ``every`` is
+        1, so ``move_every`` is ``None``). Changing eryn's getter changes both.
+
+    Example:
+        Built by ``Stage.setup``; a stage's ``combine_kwargs`` are these keywords:
+
+        .. code-block:: python
+
+            from lisatools.globalfit import Move, Stage
+
+            fit.recipe.add_stage(Stage(
+                "my_pe", kind="pe",
+                moves=[Move("psd_pe", branch="psd"), Move("mbh_pe", branch="mbh", every=5)],
+                combine_kwargs=dict(random_choice=False, verbose=False),
+            ))
     """
 
     update_comm_special = True
@@ -571,6 +883,11 @@ class GFCombineMove(CombineMove, GlobalFitMove):
         self._gf_cadence_idx = 0
 
     def _validate_move_every(self, move_every):
+        """Normalize ``move_every`` to a per-move int list, or ``None`` for all-ones.
+
+        Raises ``ValueError`` on a length mismatch, an entry below 1, or a
+        cadence > 1 together with ``random_choice`` / ``weighted_cycle``.
+        """
         if move_every is None:
             return None
         ev = [int(e) for e in move_every]
@@ -638,6 +955,27 @@ class GFCombineMove(CombineMove, GlobalFitMove):
         return w / total
 
     def propose(self, model, state):
+        """Run this stage's moves for one global-fit iteration.
+
+        On the stage combine (``gf_is_stage_combine``) advance ``gf_iteration``;
+        when the state carries a module sub-state, check every branch's cold
+        row first (:meth:`GlobalFitMove._check_substate_consistency`); then
+        :meth:`_propose_moves` (see the class docstring for the dispatch order).
+
+        Args:
+            model (eryn.model.Model): The eryn model (``analysis_container_arr``,
+                ``random``, ...).
+            state (GFState): The current :class:`~lisatools.globalfit.state.GFState`.
+
+        Returns:
+            tuple: ``(state, accepted)``; ``accepted`` is the element-wise sum of
+            the sub-moves' acceptance arrays (``None`` when nothing ran in a leg).
+
+        Raises:
+            ValueError: A wrapped move returned a state without ``sub_states``
+                although the input carried them (a plain eryn ``State``), or a
+                sub-state check failed.
+        """
         # Simple-API branches (sub_states all None, e.g. erebor.blank) temper
         # on the engine ladder through plain eryn moves, which legitimately
         # rebuild the State -- only arm the guards when a real module
@@ -703,7 +1041,8 @@ class GFCombineMove(CombineMove, GlobalFitMove):
         the PE stage -- the kind cannot be a static attribute, and is
         re-stamped here immediately before each propose. Nested combines
         inherit it and pass it down the same way, so a move always sees the
-        stage actually running it.
+        stage actually running it. The stage name and the iteration counter are
+        re-stamped the same way (attribute errors on exotic moves are ignored).
 
         (2) Coarse-sidecar guard (plan-2 §6.4), before every SOURCE sub-move.
 
@@ -782,11 +1121,23 @@ class GFCombineMove(CombineMove, GlobalFitMove):
         GB-free galaxy grid) and ``rj_fstat_pe_residual`` (the live-residual
         grid) by ``GB_PE_RJ_FSTAT_RESIDUAL_SPLIT`` (the residual move's
         share, default ``0.5``; see :func:`pe_rj_fstat_residual_split`);
-        ``GB_PE_RJ_WARM_FRACTION`` (default ``0``) is P(rj_warm_pe) and
-        ``rj_prior_pe`` takes the remainder. Fractions in [0, 1], the two
+        ``GB_PE_RJ_WARM_FRACTION`` (default ``0``) is P(rj_warm_pe),
+        ``GB_PE_RJ_PARA_FRACTION`` (default ``0``) is P(rj_para_search_pe), and
+        ``rj_prior_pe`` takes the remainder. Fractions in [0, 1], the three
         absolute ones summing to at most 1. Read per call like
         ``GF_MOVE_TIMING`` so a resumed run takes the runbook's value with no
-        code change.
+        code change. Production (launchers 0.45 / 0.9 / 0.4 / 0): P(rj_fstat_pe)
+        0.045, P(rj_fstat_pe_residual) 0.405, P(rj_prior_pe) 0.15,
+        P(rj_warm_pe) 0.4.
+
+        Returns:
+            tuple[bool, dict or None]: ``(False, None)`` when the mode is off,
+            else ``(True, {member name: probability})`` for all five members.
+
+        Raises:
+            ValueError: A fraction outside ``[0, 1]`` or non-finite, or the three
+                absolute fractions summing above 1 (and see
+                :func:`pe_rj_fstat_residual_split`).
         """
         if os.environ.get("GB_PE_RJ_DRAW_ONE", "0") != "1":
             return False, None
@@ -817,17 +1168,26 @@ class GFCombineMove(CombineMove, GlobalFitMove):
         """Sub-move sequence for THIS propose under the PE-only exclusive
         RJ draw, or ``None`` when the mode does not apply.
 
-        In a stage of kind ``"pe"`` whose wrapped moves include BOTH
-        ``rj_fstat_pe`` and ``rj_prior_pe``, exactly ONE of the two runs per
-        iteration, drawn from ``model.random`` with
-        P(rj_fstat_pe) = ``GB_PE_RJ_FSTAT_FRACTION`` (so a fixed seed
-        reproduces the draws). Every other wrapped move runs once per
+        In a stage of kind ``"pe"`` whose wrapped moves include
+        ``rj_prior_pe`` and at least one F-stat member (``rj_fstat_pe``,
+        ``rj_fstat_pe_residual``), exactly ONE draw member runs per iteration,
+        drawn from ``model.random`` with the probabilities of
+        :meth:`_pe_rj_draw_one_config` (so a fixed seed reproduces the
+        draws). ``rj_warm_pe`` / ``rj_para_search_pe`` are members only when
+        given probability mass. Every other wrapped move runs once per
         iteration in its fixed order; the drawn RJ move takes the slot of
-        the first RJ member (``rj_warm_pe`` still precedes it,
-        ``gb_ridge_gibbs`` still follows). Search / rj stages are never
-        touched (kind gate), nor is a PE stage carrying only one of the
-        pair -- both fall through to the stage's configured mode
-        (``weighted_cycle`` / ``random_choice`` / sequential).
+        the first member present (``gb_ridge_gibbs`` still follows). Search /
+        rj stages are never touched (kind gate), nor is a PE stage without
+        the required pair -- both fall through to the stage's configured mode
+        (``weighted_cycle`` / ``random_choice`` / sequential). Logs one
+        ``[GB_PE_RJ_DRAW_ONE]`` line per stage and, with ``GF_MOVE_TIMING=1``,
+        a ``[GF_TIMING] ... pe_rj_draw_one`` line per draw.
+
+        The original two-member form (``rj_fstat_pe`` vs ``rj_prior_pe``, with
+        P(rj_fstat_pe) = ``GB_PE_RJ_FSTAT_FRACTION``) is what a stage carrying
+        only those two still draws with the warm / para fractions at 0 (a
+        fraction given to a member the stage lacks is redistributed over the
+        others in proportion).
 
         TWO F-STAT MOVES (user ruling 2026-10-12): ``rj_fstat_pe_residual``
         is a member beside ``rj_fstat_pe`` and either one stands in for the
@@ -904,6 +1264,30 @@ class GFCombineMove(CombineMove, GlobalFitMove):
         return plan
 
     def _propose_moves(self, model, state):
+        """Dispatch one iteration over the wrapped moves (the body of :meth:`propose`).
+
+        Order of precedence: search legs (:meth:`_propose_leg`), the PE draw-one
+        plan (:meth:`_pe_rj_draw_one_plan`, then the cadence over the plan),
+        the per-move cadence (``gf_move_every``), ``weighted_cycle``,
+        ``random_choice``, and finally the fixed sequence (eryn's
+        ``CombineMove.propose`` unless ``GF_MOVE_TIMING=1``, a mid-iteration
+        checkpoint or a coarse sidecar routes it through :meth:`_run_sequence`).
+        With ``GF_MOVE_TIMING=1`` every branch also prints its ``[GF_TIMING]``
+        selection / cadence-skip lines.
+
+        Returns:
+            tuple: ``(state, accepted)``.
+
+        Note:
+            When the cadence skips EVERY wrapped move in one iteration this
+            returns zeros shaped like ``self.accepted``. On a combine, eryn's
+            ``CombineMove.accepted`` getter raises ``AttributeError`` (the
+            combine's own ``_accepted`` is never set; the setter writes the
+            wrapped moves' counters), so that branch raises instead of
+            returning. ``recipe.Stage.setup`` depends on the same getter
+            raising (its ``hasattr`` test before it initializes the
+            counters). Not reached on the 9mo / 12mo runs (no cadence).
+        """
         # search LEGS first: the cursor owns the plan AND the cadence (in
         # cycle units), so neither the PE draw-one plan nor the per-propose
         # cadence plan below may run ahead of it
@@ -1011,6 +1395,16 @@ class GFCombineMove(CombineMove, GlobalFitMove):
 
         The leg-ender itself is never gated: it is what the row is saved
         after, and a leg with no row would break the resume-by-name contract.
+
+        Moves run one at a time, so a move that sets ``gf_leg_end_now`` ends
+        the leg early after itself, and an F-stat RJ move with a zero-peak
+        epoch (``gf_skip_partner_once``) skips its in-model partner once
+        (:meth:`_gf_is_inmodel_partner`). The returned state is tagged with
+        ``gf_saved_after`` (the resume position), ``gf_move_order`` and
+        ``gf_stage_name`` for the saver; one ``[LEG ...]`` log line per leg.
+
+        Returns:
+            tuple: ``(state, accepted)`` (``accepted`` ``None`` when no move ran).
         """
         cur = self.gf_legs
         idx, end_name, _last = cur.plan()
@@ -1126,6 +1520,15 @@ class GFCombineMove(CombineMove, GlobalFitMove):
         state -- cold rows synced -- so every boundary is a resume point).
         ``moves`` is normally ``self.moves``; the PE-only exclusive RJ draw
         passes its per-iteration plan instead.
+
+        With ``GF_MOVE_TIMING=1`` prints one ``[GF_TIMING] stage=... move=...``
+        line per move (wall time, peak RSS, cupy pool) and a ``move=__total__``
+        line; ``GF_MOVE_TIMING_SYNC=1`` also synchronizes the cupy stream after
+        each move. ``midit_checkpoint.maybe_write`` runs after each move (a
+        no-op unless the run armed it; launchers ``MIDIT_CHECKPOINT=0``).
+
+        Returns:
+            tuple: ``(state, accepted)``, ``accepted`` summed over the moves.
         """
         timing = os.environ.get("GF_MOVE_TIMING", "0") == "1"
         self._gf_timing_iter = getattr(self, "_gf_timing_iter", 0) + 1
@@ -1192,11 +1595,12 @@ class MaxLogLCombineMove(GFCombineMove):
     ``logl`` over repeated iterations of psd AND galfor together.
 
     Wrap the ``*_pe`` moves, not the ``*_search`` ones. ``max_logl_mode`` is
-    consulted in exactly one place (``psdmove.py:918``) -- it only chooses
-    between the plateau loop and a single ``run_move_for_loop`` -- so the pe
-    move IS the search move minus its private loop, which is precisely the
-    inner behaviour wanted here. Wrapping the search moves would nest two
-    plateau loops.
+    consulted in exactly one place (:meth:`PSDMove.propose_local
+    <lisatools.globalfit.moves.psdmove.PSDMove.propose_local>`) -- it only
+    chooses the plateau loop over the ensemble search / a single
+    ``run_move_for_loop`` -- so the pe move IS the search move minus its
+    private loop, which is precisely the inner behaviour wanted here.
+    Wrapping the search moves would nest two plateau loops.
 
     The plateau rule mirrors ``PSDMove.run_move_max_likelihood`` -- exit
     after ``num_checks`` consecutive non-improving iterations, counting only
@@ -1209,6 +1613,65 @@ class MaxLogLCombineMove(GFCombineMove):
     indefinitely. Sub-``tol`` gains do NOT advance the baseline either, so a
     slow accumulated climb (more than ``tol`` per ``num_checks`` window)
     still registers as progress and keeps the stage alive.
+
+    The plateau is PER WALKER by default (``MAXLOGL_PER_WALKER``, default ``1``):
+    each cold walker keeps its own baseline and flat counter, and the move is
+    done only when the laggard has plateaued. The loop is CHUNKED: at most
+    ``iters_per_step`` inner passes per :meth:`propose` call, with the
+    bookkeeping kept on the instance across calls, so the engine saves between
+    chunks; ``SearchRecipeStep`` reads :attr:`maxlogl_plateau_done` to advance a
+    search stage.
+
+    Production (9mo / 12mo): the driver's ``JointMaxLogLSearch`` builds one for
+    ``source_search`` (``[sobbh_pe, mbh_pe, emri_pe]``, ``SOURCE_SEARCH_CHECKS=10``,
+    ``SOURCE_SEARCH_TOL=10``, ``SOURCE_SEARCH_MAX_ROUNDS=200``) and one for ``gb_search_2``'s
+    ``noise_cycle_end_search`` (``[psd_pe, galfor_pe]``,
+    ``restart_each_propose`` on, ``NOISE_SEARCH_CHECKS`` default 5).
+
+    Args:
+        *args: Forwarded to :class:`GFCombineMove` (the first is the list of
+            wrapped moves).
+        num_checks: Consecutive non-improving inner passes that end the loop.
+            Default 5.
+        max_iter: Hard ceiling on inner passes, counted over the instance's
+            life (across chunked calls; 0 = unbounded). Default 0;
+            ``MAXLOGL_MAX_ITER`` overrides it when set (the env var WINS over the
+            keyword; the driver's ``JointMaxLogLSearch`` sets a per-instance
+            ``max_iter`` afterwards for ``source_search``,
+            ``SOURCE_SEARCH_MAX_ROUNDS``).
+        tol: Improvement (lnL units) a pass must beat the baseline by to count.
+            Default 5.0; ``MAXLOGL_TOL`` overrides it when set (the env var WINS
+            over the keyword; the driver's ``apply_release_tol`` sets a
+            per-instance value afterwards, e.g. ``SOURCE_SEARCH_TOL``). Launchers
+            ``MAXLOGL_TOL=20``.
+        iters_per_step (int, optional): Inner passes per :meth:`propose` call;
+            ``None`` reads ``MAXLOGL_ITERS_PER_STEP`` (default 10).
+        restart_each_propose: Forget the previous call's verdict at every
+            propose, i.e. converge from scratch on the current residual.
+            Default ``False``.
+        **kwargs: Forwarded to :class:`GFCombineMove`.
+
+    Attributes:
+        maxlogl_plateau_done (bool): Whether the last call ended on a plateau
+            (or on ``max_iter``).
+
+    Note:
+        Other env knobs, read per call: ``MAXLOGL_LOG_EVERY`` (default ``1``;
+        one ``[MAXLOGL]`` line per inner pass, ``0`` silences) and
+        ``MAXLOGL_FREEZE_CONVERGED`` (default ``0``; ``1`` freezes a converged
+        walker's columns, main state and sub-states, in search-kind stages only;
+        that path has not been exercised on a real tempered state).
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.moves.globalfitmove import MaxLogLCombineMove
+
+            joint = MaxLogLCombineMove(
+                [stock_moves["psd_pe"], stock_moves["galfor_pe"]],
+                num_checks=5, share_temperature_control=False,
+                restart_each_propose=True,
+            )
     """
 
     def __init__(
@@ -1248,6 +1711,16 @@ class MaxLogLCombineMove(GFCombineMove):
         self.max_iter = int(os.environ.get("MAXLOGL_MAX_ITER", max_iter))
 
     def _propose_moves(self, model, state):
+        """One chunk of the joint plateau loop (see the class docstring).
+
+        Repeats :meth:`GFCombineMove._propose_moves_once` until every walker's
+        flat counter reaches ``num_checks`` (or ``max_iter``), at most
+        ``iters_per_step`` passes this call; sets :attr:`maxlogl_plateau_done`
+        and prints ``[MAXLOGL]`` progress / done / chunk-break lines.
+
+        Returns:
+            tuple: ``(state, accepted)`` of the last pass.
+        """
         # CHUNKED plateau loop (2026-08-12): at most MAXLOGL_ITERS_PER_STEP
         # inner iterations per propose() call, with the plateau bookkeeping
         # persisted on the instance across calls. The engine saves the
@@ -1462,6 +1935,12 @@ class MaxLogLCombineMove(GFCombineMove):
     # mismatch ... 1 of 2 alive leaves differ").
     @staticmethod
     def _snapshot_walkers(state, mask):
+        """Copy the masked walkers' columns: coords / inds of branches and sub-states, lnL, lnP.
+
+        Returns the snapshot dict, or ``None`` for a layout it does not
+        understand (nothing is then frozen). Used only with
+        ``MAXLOGL_FREEZE_CONVERGED=1``.
+        """
         w = np.flatnonzero(np.asarray(mask))
         snap = {"w": w, "branches": {}, "subs": {},
                 "log_like": None, "log_prior": None}
@@ -1496,6 +1975,7 @@ class MaxLogLCombineMove(GFCombineMove):
 
     @classmethod
     def _restore_walkers(cls, state, snap):
+        """Write a :meth:`_snapshot_walkers` snapshot back into ``state`` in place; return it."""
         if snap is None:
             return state
         w = snap["w"]
@@ -1513,6 +1993,7 @@ class MaxLogLCombineMove(GFCombineMove):
 
     @staticmethod
     def _restore_cols(holder, entry, w):
+        """Restore walker columns ``w`` of each array in ``entry`` on ``holder`` (shape-checked)."""
         if holder is None:
             return
         for attr, arr in entry.items():

@@ -1,7 +1,49 @@
-"""
-Preprocessing module for loading and handling Mojito L1 files.
+"""Data in: load, condition and pour the global-fit input data.
 
-Credits for most of the signal processing functions to Ollie Burke and Martina Muratore for the repository: https://github.com/OllieBurke/mojito-noise-sprint/blob/main/Mojito_Sprint/
+The data layer of the global fit. A *data processor* class (a
+:class:`BaseProcessingStep` subclass) is set as
+``GeneralSettings.data_processor_class`` with its constructor kwargs in
+``processor_init_kwargs``; :meth:`~lisatools.globalfit.engine.GeneralSetup.init_data_information`
+constructs it (which loads the data), calls :meth:`BaseProcessingStep.process`
+with ``preprocess_kwargs`` (merged over the engine defaults: 2e-5 Hz high-pass,
+200 h edge trim, ``Tobs`` trim) and then :meth:`BaseProcessingStep.pour` onto
+the analysis domain. ``general.data_mode`` (env ``DATA_MODE``) picks the
+processor in the stock fits:
+
+- ``"mojito"`` (default): :class:`L1ProcessingStep` / :class:`L1DataLoader`
+  on a mojito L1 brick cache (``general.mojito_data_path``). The production
+  9mo/12mo runs (``erebor.all_sources``) use the subclass
+  :class:`~lisatools.globalfit.stock.erebor.injections.L1ProcessingStepWithSyntheticNoise`
+  with ``source_types=["COMBINED", "GB", "VGB", "MBHB", "EMRI", "SOBHB"]``:
+  the data is the pre-summed ``COMBINED`` stream (:func:`find_combined_file`),
+  the other classes contribute catalogue rows only, the loader keeps ``Tobs``
+  seconds at load, and ``all_sources`` disables the engine's filter / trim
+  steps, so :meth:`BaseProcessingStep.process` only builds ``td_signal``.
+- ``"sangria"``: :class:`SangriaProcessingStep` on an LDC Sangria HDF5 file.
+- ``"synthetic"``: in-process streams; the stock fits use the processors of
+  :mod:`lisatools.globalfit.stock.erebor.injections`. The generic
+  :class:`SyntheticDataProcessor`, :class:`SyntheticSourceProcessingStep`
+  and :func:`build_synthetic_source_streams` here are not used by the stock
+  fits; the first and the last share their names with different objects of
+  that module.
+
+Mojito L1 layout read here (``L1_folder``)::
+
+    <L1_folder>/data/COMBINED/L1/<one>.h5        pre-summed stream (MOJITO_COMBINED_FILE)
+    <L1_folder>/data/INSTRUMENT/L1/NOISE_..._source0_....h5
+    <L1_folder>/data/GALFOR/L1/<one>.h5          foreground stream (MOJITO_GALFOR_FILE)
+    <L1_folder>/data/<TYPE>/L1/<TYPE>_..._source<id>_....h5   per-class bricks
+    <L1_folder>/catalogues/<catalogue>.hdf5     group "Binaries" (see L1DataLoader.catalogues_map)
+
+Each brick's ``tdis.xyz_doppler`` (dimensionless TDI X, Y, Z) and
+``tdis.time_sampling`` (times in s) are read; the orbits come from the first
+brick read, as ``orbits_class(file_path, **orbits_kwargs)`` (the stock fits
+pass :class:`~lisatools.detector.L1Orbits` with ``frame="icrs"``, the run
+frame). Data arrays are ``(n_channels, n_times)`` NumPy arrays.
+
+Credits for most of the signal processing functions to Ollie Burke and Martina
+Muratore for the repository:
+https://github.com/OllieBurke/mojito-noise-sprint/blob/main/Mojito_Sprint/
 """
 
 import dataclasses
@@ -52,20 +94,34 @@ ALLOWED_SOURCES = ["NOISE", "COMBINED", "GALFOR", "GB", "VGB", "MBHB", "EMRI", "
 
 
 def find_file(folder: str, source_type: str, source_id: int) -> str:
-    """
-    Find the Mojito L1 file for a given source type and ID in the specified folder.
-    It avoids passing through all the symbols in the name (for example, NOISE_731d_2.5s_L1_source0_0_20251206T220508924302Z.h5)
+    """Find the Mojito L1 brick of one source in ``folder``.
+
+    Matches on the ``{source_type}_`` prefix and the ``source{source_id}_``
+    infix only, so the rest of the name (duration, cadence, timestamp, e.g.
+    ``NOISE_731d_2.5s_L1_source0_0_20251206T220508924302Z.h5``) does not need to
+    be known. The first match in ``os.listdir`` order is returned. Used for
+    the per-class bricks and the ``NOISE`` brick by :meth:`L1DataLoader.load_data`,
+    and by the stock noise-file resolver, the monitor and the warm-start
+    referee.
 
     Args:
-        folder (str): The folder where Mojito L1 files are stored.
-        source_type (str): The type of the source (e.g., 'GB' 'MBHB', etc.).
-        source_id (int): The identifier of the source.
+        folder: Folder holding the bricks (e.g. ``<L1_folder>/data/MBHB/L1``).
+        source_type: Source type prefix (``"NOISE"``, ``"GB"``, ``"MBHB"``,
+            ...).
+        source_id: Source index in the brick name.
 
     Returns:
-        str: The path to the found Mojito L1 file.
+        str: Path of the matching file.
 
     Raises:
         FileNotFoundError: If no matching file is found.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.preprocessing import find_file
+
+            path = find_file("/data/mojito_light/data/MBHB/L1", "MBHB", 5)
     """
     for filename in os.listdir(folder):
         if filename.startswith(f"{source_type}_") and f"source{source_id}_" in filename:
@@ -88,6 +144,26 @@ def find_stream_file(folder: str, label: str, env_var: str) -> str:
 
     ``env_var`` names an environment override with an explicit path
     (absolute, or a basename inside ``folder``) for when one does hold more.
+    Used for ``GALFOR`` (``MOJITO_GALFOR_FILE``) by
+    :meth:`L1DataLoader.load_data`; not reached by the production runs, which
+    read ``COMBINED`` through :func:`find_combined_file`.
+
+    Args:
+        folder: Folder holding the stream (e.g. ``<L1_folder>/data/GALFOR/L1``).
+        label: Stream name, used in error messages and as the preferred
+            ``{label}_`` file prefix when several ``.h5`` files exist.
+        env_var: Name of the override environment variable.
+
+    Returns:
+        str: Path of the stream file: the override if set, else the single
+        ``.h5`` file of ``folder`` (hidden files ignored), else the single
+        one named ``{label}_...``.
+
+    Raises:
+        FileNotFoundError: The override path does not exist, ``folder`` is not
+            a directory, or it holds no ``.h5`` file.
+        ValueError: Several ``.h5`` files and not exactly one ``{label}_``
+            match.
     """
     override = os.environ.get(env_var, "").strip()
     if override:
@@ -132,6 +208,24 @@ def find_combined_file(folder: str) -> str:
 
     ``MOJITO_COMBINED_FILE`` overrides with an explicit path (absolute, or a
     basename inside ``folder``) when a folder does hold more than one.
+
+    The production data source: :meth:`L1DataLoader.load_data` calls it on
+    ``<L1_folder>/data/COMBINED/L1`` when ``COMBINED`` is in ``source_types``
+    (the 9mo/12mo runs); the monitor and the warm-start referee use it too.
+
+    Args:
+        folder: The combined-stream folder.
+
+    Returns:
+        str: Path of the combined brick: the override if set, else the single
+        ``.h5`` file (hidden files ignored), else the single ``COMBINED_...``
+        one.
+
+    Raises:
+        FileNotFoundError: The override path does not exist, ``folder`` is not
+            a directory, or it holds no ``.h5`` file.
+        ValueError: Several ``.h5`` files and not exactly one ``COMBINED_``
+            match.
     """
     override = os.environ.get("MOJITO_COMBINED_FILE", "").strip()
     if override:
@@ -169,9 +263,23 @@ def normalize_source_ids(d: dict) -> dict:
     """Coerce a per-class source-id mapping to lists.
 
     Each value is normalized so ``None -> []``, a scalar ``v -> [v]``, and a
-    list/tuple is returned as a ``list``. Used by settings recipes to build a
-    uniform ``{source_type: [ids...]}`` mapping from user-edited literals /
-    environment overrides.
+    list/tuple is returned as a ``list``. Used by
+    :func:`~lisatools.globalfit.stock.erebor.source_runtime.default_source_ids`
+    to build a uniform ``{source_type: [ids...]}`` mapping from user-edited
+    literals / environment overrides (``MBHB_IDS``, ``EMRI_IDS``,
+    ``SOBHB_IDS``).
+
+    Args:
+        d: ``{source_type: ids}`` with each value ``None``, a scalar, a list
+            or a tuple.
+
+    Returns:
+        dict: New mapping with the same keys and ``list`` values.
+
+    Example:
+        >>> from lisatools.globalfit.preprocessing import normalize_source_ids
+        >>> normalize_source_ids({"MBHB": 3, "EMRI": None, "SOBHB": (1, 2)})
+        {'MBHB': [3], 'EMRI': [], 'SOBHB': [1, 2]}
     """
     out = {}
     for k, v in d.items():
@@ -185,25 +293,68 @@ def normalize_source_ids(d: dict) -> dict:
 
 
 class L1DataLoader:
-    """
-    Class to load L1 files.
+    """Mojito L1 brick loader: data stream, orbits and catalogue rows.
 
-    Parameters
-    ----------
-    L1_folder : str
-        Path to the folder containing Mojito L1 files. Downloading the files from the brickmarket, the folder should contain two subfolders: 'data' and 'catalogues'.
-    source_types : list
-        List of source types to load (e.g., ['NOISE', 'GB']).
-    source_ids : dict
-        Dictionary mapping source types to lists of source IDs to load.
-    orbits_class : Orbits, optional
-        Class to use for orbits. Default is L1Orbits.
-    orbits_kwargs : dict, optional
-        Additional keyword arguments for the orbits class.
-    verbose : bool, optional
-        Verbosity flag. Default is True.
-    store_individual_timeseries : bool, optional
-        Whether to store individual timeseries for each source type and ID. Default is False.
+    Base of :class:`L1ProcessingStep` (it does no I/O at construction; the
+    subclass calls :meth:`load_data`). The streams and catalogues it reads are
+    laid out as in the module docstring. Types and their roles:
+
+    - ``COMBINED``: the pre-summed L1 stream (noise + every source class). It
+      sets the data, times and orbits; every other listed class then
+      contributes CATALOGUE rows only (their signal is already in it).
+      Cannot be combined with ``NOISE`` or ``GALFOR``. The production
+      setting.
+    - ``NOISE``: the instrument-noise brick (``data/INSTRUMENT/L1``).
+    - ``GALFOR``: the galactic-confusion stream, summed into the data.
+    - ``GB``, ``VGB``: one brick each (``source0``); the catalogue entry holds
+      the whole catalogue columns.
+    - ``MBHB``, ``EMRI``, ``SOBHB``: one brick and one catalogue row per id in
+      ``source_ids``; the bricks are summed.
+
+    Args:
+        L1_folder: Path to the mojito L1 brick cache (as downloaded from the
+            brick market): it holds the ``data`` and ``catalogues``
+            subfolders.
+        source_types: Source types to load, case-insensitive; each must be
+            in :data:`ALLOWED_SOURCES`.
+        source_ids: ``{type: [ids]}`` for the per-class types (keys are
+            upper-cased). Required for ``MBHB`` / ``EMRI`` / ``SOBHB``;
+            ignored for ``GB`` / ``VGB`` (always id 0). Default ``None``.
+        orbits_class: Orbits class constructed on the first brick read as
+            ``orbits_class(file_path, **orbits_kwargs)``. Default
+            :class:`~lisatools.detector.L1Orbits`.
+        orbits_kwargs: Keyword arguments of ``orbits_class`` (the stock fits
+            pass ``force_backend`` and ``frame="icrs"``). Default ``None``.
+        verbose: Log progress at INFO. Default ``True``.
+        store_individual_timeseries: Keep every stream read (and the NOISE
+            brick's noise-covariance estimate) in
+            :attr:`individual_timeseries`. Default ``False``.
+        allow_missing_bricks: HYBRID fill: a missing per-class brick (any
+            of ``GB``, ``VGB``, ``MBHB``, ``EMRI``, ``SOBHB``; the erebor
+            fill synthesizes MBHB / EMRI / SOBHB) is recorded in
+            :attr:`missing_source_bricks` (its catalogue row is still
+            loaded) instead of raising; the caller must synthesize those
+            streams. Default ``False``.
+
+    Raises:
+        ValueError: A source type outside :data:`ALLOWED_SOURCES`.
+
+    Attributes:
+        data_folder (str): ``<L1_folder>/data``.
+        catalogues_folder (str): ``<L1_folder>/catalogues``.
+        catalogue (dict): ``{type: {id: {column: value}}}`` filled by
+            :meth:`load_data`.
+        source_types (list[str]): Upper-cased types still to load
+            (:meth:`load_data` removes ``COMBINED`` / ``NOISE`` / ``GALFOR``
+            from it as it reads them).
+        source_ids (dict | None): Upper-cased ``source_ids``.
+        missing_source_bricks (list[tuple[str, int]]): ``(type, id)`` of the
+            bricks skipped under ``allow_missing_bricks``.
+        orbits_class (type): Constructor argument.
+        orbits_kwargs (dict | None): Constructor argument.
+        verbose (bool): Constructor argument.
+        store_individual_timeseries (bool): Constructor argument.
+        allow_missing_bricks (bool): Constructor argument.
     """
 
     def __init__(
@@ -261,11 +412,14 @@ class L1DataLoader:
 
     @property
     def catalogues_map(self) -> dict:
-        """
-        Property to get the mapping of source types to their catalogue file names.
+        """Catalogue file name (under ``<L1_folder>/catalogues``) per source type.
+
+        The mojito-light processed catalogues; each holds a ``Binaries``
+        group of per-parameter datasets.
 
         Returns:
-            dict: Mapping of source types to catalogue file names.
+            dict: ``{"GB": ..., "VGB": ..., "MBHB": ..., "EMRI": ...,
+            "SOBHB": ...}`` file names.
         """
         return {
             "GB": "wdwd_cat_mojito_lite_processed.hdf5",
@@ -276,15 +430,20 @@ class L1DataLoader:
         }
 
     def load_single_binary(self, group: h5py.Group, binary_id: int, source_type: str) -> dict:
-        """
-        Load a single binary source from the given HDF5 group.
+        """Read one source's catalogue parameters from a ``Binaries`` group.
 
         Args:
-            group (h5py.Group): The HDF5 group containing binary sources.
-            binary_id (int): The identifier of the binary source to load.
+            group: The catalogue's ``Binaries`` group (one dataset per
+                parameter).
+            binary_id: Row index of the source (the catalogue id).
+            source_type: Upper-case type. For ``"GB"`` / ``"VGB"`` the WHOLE
+                column of every dataset is returned (``binary_id`` is
+                ignored).
 
         Returns:
-            dict: A dictionary containing the parameters of the binary source.
+            dict: ``{dataset name: value}``, with the catalogue's own names
+            and units (a scalar per parameter, or the full column for GB /
+            VGB).
         """
         params = {}
         for key in group.keys():
@@ -306,30 +465,61 @@ class L1DataLoader:
         return params
 
     def _open(self, file_path: str) -> MojitoL1File:
+        """Open a brick as a context manager; subclasses return a ``MojitoL1File``.
+
+        Raises:
+            NotImplementedError: Always, in the base class.
+        """
         raise NotImplementedError("_open method should be implemented in subclasses.")
 
     @property
     def individual_timeseries(self) -> dict | None:
-        """
-        Property to access individual timeseries for each source type and ID.
+        """Per-stream copies kept when ``store_individual_timeseries`` is set.
+
+        Keys: ``"COMBINED_DATA"``, ``"NOISE"``, ``"GALFOR"`` and
+        ``"{TYPE}_{id}"`` streams of shape ``(3, n_times)``; from the NOISE
+        brick also ``"PSD_MATRIX"`` (its ``noise_estimates.xyz`` divided by
+        ``laser_frequency**2``), ``"PSD_FREQUENCIES"`` and ``"PSD_TIMES"``.
+        :meth:`L1ProcessingStep.process` adds ``"TIMES"`` and ``"COMBINED"``
+        (the processed data).
 
         Returns:
-            dict: A dictionary containing individual timeseries for each source type and ID.
+            dict | None: The mapping, or ``None`` when nothing was stored.
         """
         if not hasattr(self, "_individual_timeseries"):
             return None
         return self._individual_timeseries
 
     def load_data(self) -> tuple:
-        """
-        Load data from L1 files based on the specified source types and IDs.
+        """Read the data stream(s), the orbits and the catalogue rows.
+
+        Order: ``COMBINED`` (if listed), then ``NOISE``, then ``GALFOR``,
+        then the per-class types in ``source_types`` order. The first brick
+        read sets the time grid and builds the orbits (eagerly configured
+        for COMBINED / NOISE / GALFOR, lazily otherwise); every later brick
+        must be on the same grid. Under ``COMBINED`` the per-class bricks are
+        not opened (their catalogue rows are still read).
+
+        Side effects: fills :attr:`catalogue`, :attr:`missing_source_bricks`
+        and (with ``store_individual_timeseries``) the per-stream store, and
+        REMOVES ``COMBINED`` / ``NOISE`` / ``GALFOR`` from
+        :attr:`source_types`, so a second call does not read them again.
 
         Returns:
-            tuple: A tuple containing:
-                - tdi_times (np.ndarray): Array of time samples.
-                - tdi_fs (float): Sampling frequency in Hz.
-                - xyz (np.ndarray): Array of channel data with shape (n_channels, n_times).
-                - orbits (Orbits): An instance of the Orbits class initialized with the loaded data.
+            tuple: ``(tdi_times, tdi_fs, xyz, orbits)``: ``tdi_times``
+            ``np.ndarray`` ``(n_times,)`` [s]; ``tdi_fs`` float [Hz]; ``xyz``
+            ``np.ndarray`` ``(3, n_times)`` dimensionless TDI X, Y, Z (summed
+            over the streams read); ``orbits`` the ``orbits_class`` instance.
+
+        Raises:
+            ValueError: ``COMBINED`` listed with ``NOISE`` or ``GALFOR``
+                (double counting), or a per-class type has an empty id list.
+            AttributeError: ``source_ids`` is ``None`` and an ``MBHB`` /
+                ``EMRI`` / ``SOBHB`` type is listed.
+            FileNotFoundError: A brick or catalogue file is missing (a
+                per-class brick only without ``allow_missing_bricks``).
+            RuntimeError: No brick could be loaded at all.
+            AssertionError: Bricks on different time grids.
         """
         xyz = None
         orbits: Orbits = None
@@ -629,6 +819,7 @@ class L1DataLoader:
 
         return tdi_times, tdi_fs, xyz, orbits
 
+    # TODO check: keep/remove/document -- debug dump; no caller in src/scripts/tests/LATW
     def dump_individual_timeseries(self, file_path: str, delete_after_dump: bool = False):
         """
         Dump the individual timeseries for each source type and ID to a .h5 file for debugging or further analysis.
@@ -646,6 +837,7 @@ class L1DataLoader:
         if delete_after_dump:
             self.individual_timeseries.clear()
 
+    # TODO check: keep/remove/document -- debug dump; no caller; np.string_ is gone in NumPy 2
     def dump_catalogue(self, file_path: str):
         """
         Dump the loaded catalogue parameters to a .h5 file for debugging or further analysis.
@@ -667,8 +859,25 @@ class L1DataLoader:
 
 
 class SangriaDataLoader:
-    """
-    Class to load data injections from Sangria HDF5 file
+    """Loader for an LDC Sangria HDF5 file (``data_mode="sangria"``).
+
+    Reads the structured ``obs/tdi`` dataset (fields ``t``, ``X``, ``Y``,
+    ``Z``) and, for removals, the per-component ``sky/<component>/tdi``
+    datasets of the same layout. Base of :class:`SangriaProcessingStep`;
+    no I/O at construction.
+
+    Args:
+        data_input_path: Path of the Sangria HDF5 file
+            (``general.ldc_source_file`` in the stock fits).
+        remove_from_data: Components to drop. A ``sky`` component name
+            (e.g. ``"vgb"``, ``"mbhb"``) is subtracted from ``obs/tdi``;
+            ``"noise"`` switches to summing the ``sky`` components not
+            listed (a noise-free stream). Default ``None`` (keep all).
+
+    Attributes:
+        data_input_path (str): Constructor argument.
+        remove_from_data (list | None): Constructor argument (``None``
+            becomes ``[]`` in :meth:`load_data`).
     """
 
     def __init__(
@@ -680,11 +889,23 @@ class SangriaDataLoader:
         self.remove_from_data = remove_from_data
 
     def _open(self, file_path: str) -> h5py.File:
+        """Open the Sangria file read-only."""
         return h5py.File(file_path, "r")
 
     def load_data(
         self,
     ):
+        """Read the Sangria TDI stream with the requested components removed.
+
+        Returns:
+            tuple: ``(times, fs, data_xyz, None)``: ``times`` ``np.ndarray``
+            ``(n_times,)`` [s]; ``fs`` float [Hz] from the first time step;
+            ``data_xyz`` ``np.ndarray`` ``(3, n_times)`` TDI X, Y, Z; no
+            orbits (``None``).
+
+        Raises:
+            AssertionError: ``remove_from_data`` is not a list.
+        """
         if self.remove_from_data is None:
             self.remove_from_data = []
 
@@ -736,21 +957,33 @@ class SangriaDataLoader:
 
 
 class SignalProcessor:
-    """
-    Class to preprocess time-domain signals. Credits: Ollie Burke.
+    """Time-domain conditioning of multi-channel data. Credits: Ollie Burke.
 
-    Parameters
-    ----------
-    times : np.ndarray
-        Array of time samples. Shape: (n_times,)
-    data : np.ndarray
-        Array of channel data. Shape: (n_channels, n_times)
-    fs : float
-        Sampling frequency in Hz
-    verbose : bool, optional
-        Verbosity flag. Default is True.
-    do_plots : bool, optional
-        Whether to generate plots during processing steps. Default is False.
+    Holds the stream and provides the filter / downsample / trim steps that
+    :meth:`BaseProcessingStep.process` chains. Filtering and resampling
+    delegate to ``MojitoProcessor.SignalProcessor`` with channels named
+    ``X``, ``Y``, ``Z``. The filter methods return the filtered array without
+    storing it; :meth:`downsample` and :meth:`trim` update the instance.
+
+    Args:
+        times: Time samples [s], shape ``(n_times,)``, uniformly spaced.
+        data: Channel data, shape ``(n_channels, n_times)``.
+        fs: Sampling frequency [Hz].
+        verbose: Log each step at INFO. Default ``True``.
+        do_plots: Save a before/after PNG of the X channel at each filter or
+            trim step (folder from the ``plot_folder`` keyword of the step).
+            Default ``False``.
+
+    Attributes:
+        times (np.ndarray): Current time samples [s].
+        data (np.ndarray): Current ``(n_channels, n_times)`` data.
+        dt (float): Sample spacing ``times[1] - times[0]`` [s].
+        N (int): Number of samples.
+        T (float): Duration [s]: ``N * dt`` at construction, then
+            ``times[-1] - times[0]`` after a trim or downsample.
+        fs (float): Sampling frequency [Hz].
+        verbose (bool): Constructor argument.
+        do_plots (bool): Constructor argument.
     """
 
     _CHANNEL_NAMES = ["X", "Y", "Z"]
@@ -791,6 +1024,12 @@ class SignalProcessor:
     def _filter_via_mp(
         self, *, low=None, high=None, order=2, filter_type="butterworth", zero_phase=True
     ):
+        """Filter a copy of :attr:`data` with ``MojitoProcessor`` (``low``/``high`` cutoffs in Hz).
+
+        Returns:
+            np.ndarray: Filtered ``(n_channels, n_times)`` array (``data`` is
+            not modified).
+        """
         mp = MPSignalProcessor(self._to_mp_dict(), fs=self.fs)
         mp.filter(low=low, high=high, order=order, filter_type=filter_type, zero_phase=zero_phase)
         return self._from_mp_dict(mp.data)
@@ -822,28 +1061,22 @@ class SignalProcessor:
         zero_phase: bool = True,
         **kwargs,
     ) -> np.ndarray:
-        """
-        Apply bandpass filter to all channels.
+        """Apply a band-pass filter to all channels.
 
-        Parameters
-        ----------
-        low : float
-            Lower cutoff frequency in Hz
-        high : float
-            Upper cutoff frequency in Hz
-        order : int, optional
-            Filter order (default: 2)
-        filter_type : str, optional
-            Filter type: 'butterworth', 'chebyshev1', 'chebyshev2', 'bessel'
-            (default: 'butterworth')
-        zero_phase : bool, optional
-            Use zero-phase filtering (filtfilt) if True, else single-pass (default: True)
-        **kwargs: Additional keyword arguments for the eventual plot.
+        Args:
+            low: Lower cutoff frequency [Hz].
+            high: Upper cutoff frequency [Hz].
+            order: Filter order. Default ``2``.
+            filter_type: ``"butterworth"``, ``"chebyshev1"``, ``"chebyshev2"``
+                or ``"bessel"``. Default ``"butterworth"``.
+            zero_phase: Zero-phase (forward-backward) filtering if ``True``,
+                else single pass. Default ``True``.
+            **kwargs: Plot options when ``do_plots`` (``plot_folder``,
+                ``decimate_factor``); others are ignored.
 
-        Returns
-        -------
-        filtered_data : np.ndarray
-            Array of filtered channel data
+        Returns:
+            np.ndarray: Filtered ``(n_channels, n_times)`` data (:attr:`data`
+            is not modified).
         """
         filtered = self._filter_via_mp(
             low=low, high=high, order=order, filter_type=filter_type, zero_phase=zero_phase
@@ -860,25 +1093,20 @@ class SignalProcessor:
         zero_phase: bool = True,
         **kwargs,
     ) -> np.ndarray:
-        """
-        Apply lowpass filter to all channels.
+        """Apply a low-pass filter to all channels.
 
-        Parameters
-        ----------
-        cutoff : float
-            Cutoff frequency in Hz
-        order : int, optional
-            Filter order (default: 2)
-        filter_type : str, optional
-            Filter type (default: 'butterworth')
-        zero_phase : bool, optional
-            Use zero-phase filtering if True (default: True)
-        **kwargs: Additional keyword arguments for the eventual plot.
+        Args:
+            cutoff: Cutoff frequency [Hz].
+            order: Filter order. Default ``2``.
+            filter_type: Filter family (see :meth:`bandpass_filter`). Default
+                ``"butterworth"``.
+            zero_phase: Zero-phase filtering if ``True``. Default ``True``.
+            **kwargs: Plot options when ``do_plots`` (``plot_folder``,
+                ``decimate_factor``); others are ignored.
 
-        Returns
-        -------
-        filtered_data : np.ndarray
-            Array of filtered channel data
+        Returns:
+            np.ndarray: Filtered ``(n_channels, n_times)`` data (:attr:`data`
+            is not modified).
         """
         filtered = self._filter_via_mp(
             high=cutoff, order=order, filter_type=filter_type, zero_phase=zero_phase
@@ -895,25 +1123,24 @@ class SignalProcessor:
         zero_phase: bool = True,
         **kwargs,
     ) -> np.ndarray:
-        """
-        Apply highpass filter to all channels.
+        """Apply a high-pass filter to all channels.
 
-        Parameters
-        ----------
-        cutoff : float
-            Cutoff frequency in Hz
-        order : int, optional
-            Filter order (default: 2)
-        filter_type : str, optional
-            Filter type (default: 'butterworth')
-        zero_phase : bool, optional
-            Use zero-phase filtering if True (default: True)
-        **kwargs: Additional keyword arguments for the eventual plot.
+        The engine's default ``highpass_kwargs`` (cutoff 2e-5 Hz, order 2,
+        zero phase) run this for the data modes that keep the engine
+        defaults (``sangria``); the production mojito runs skip it.
 
-        Returns
-        -------
-        filtered_data : np.ndarray
-            Array of filtered channel data
+        Args:
+            cutoff: Cutoff frequency [Hz].
+            order: Filter order. Default ``2``.
+            filter_type: Filter family (see :meth:`bandpass_filter`). Default
+                ``"butterworth"``.
+            zero_phase: Zero-phase filtering if ``True``. Default ``True``.
+            **kwargs: Plot options when ``do_plots`` (``plot_folder``,
+                ``decimate_factor``); others are ignored.
+
+        Returns:
+            np.ndarray: Filtered ``(n_channels, n_times)`` data (:attr:`data`
+            is not modified).
         """
         filtered = self._filter_via_mp(
             low=cutoff, order=order, filter_type=filter_type, zero_phase=zero_phase
@@ -931,24 +1158,25 @@ class SignalProcessor:
             logger.info(f"Updated parameters: N={self.N}, T={self.T}")
 
     def downsample(self, target_fs, window=("kaiser", 31.0), padtype="line"):
-        """Downsample all channels to target_fs via polyphase filtering.
+        """Downsample all channels to ``target_fs`` via polyphase filtering.
 
-        Delegates to MojitoProcessor.SignalProcessor.downsample().
-        Updates self.data, self.fs, self.times and derived params (N, T, dt).
+        Delegates to ``MojitoProcessor.SignalProcessor.downsample``. Updates
+        :attr:`data`, :attr:`fs`, :attr:`dt`, :attr:`times` (rebuilt from
+        ``times[0]``) and :attr:`N` / :attr:`T`. A ``target_fs`` equal to the
+        current rate is a no-op.
 
-        Parameters
-        ----------
-        target_fs : float
-            Target sampling frequency in Hz.
-        window : tuple, optional
-            Window for the anti-aliasing filter (default: ('kaiser', 31.0)).
-        padtype : str, optional
-            Padding type for the resampling (default: 'line').
+        Args:
+            target_fs (float): Target sampling frequency [Hz].
+            window (tuple): Anti-aliasing window. Default
+                ``("kaiser", 31.0)``.
+            padtype (str): Padding type of the resampling. Default
+                ``"line"``.
 
-        Returns
-        -------
-        np.ndarray
-            Downsampled data array.
+        Returns:
+            np.ndarray: The downsampled ``(n_channels, n_times)`` data.
+
+        Raises:
+            ValueError: ``target_fs`` above the current rate.
         """
         if target_fs == self.fs:
             if self.verbose:
@@ -977,24 +1205,34 @@ class SignalProcessor:
         trimming_type: str = "from_each_end",
         **kwargs,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Trim data by removing specified duration.
+        """Trim the data in time and update the instance.
 
-        Parameters
-        ----------
-        duration : float
-            Duration to remove in seconds or percent of total duration.
-        is_percent : bool, optional
-            If True, `duration` is treated as a percentage of total duration (0-1).
-            If False, `duration` is in seconds (default: False)
-        trimming_type : str, optional
-            Type of trimming: 'from_each_end', 'keep_from_start', or 'discard_from_start' (default: 'from_each_end')
-        **kwargs: Additional keyword arguments for the eventual plot.
+        ``duration`` is converted to ``int(duration / dt)`` samples. Modes:
 
-        Returns
-        -------
-        tuple[np.ndarray, np.ndarray]
-            Trimmed time and data arrays
+        - ``"from_each_end"``: drop that many samples at both ends (the
+          engine default trims 200 h this way after filtering).
+        - ``"discard_from_start"``: drop them at the start.
+        - ``"keep_from_start"``: keep only the first that many samples (the
+          ``Tobs`` cut of :meth:`BaseProcessingStep.process`).
+
+        Args:
+            duration: Seconds, or a fraction of :attr:`T` in ``[0, 1]`` when
+                ``is_percent``.
+            is_percent: Treat ``duration`` as a fraction of the duration.
+                Default ``False``.
+            trimming_type: One of the modes above. Default
+                ``"from_each_end"``.
+            **kwargs: Plot options when ``do_plots`` (``plot_folder``,
+                ``filename``, ``decimate_factor``); others are ignored.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: The trimmed ``times`` and ``data``
+            (also stored on the instance).
+
+        Raises:
+            ValueError: The trim removes (or keeps) at least the whole data.
+            AssertionError: Unknown ``trimming_type``, or ``is_percent`` with
+                ``duration`` outside ``[0, 1]``.
         """
 
         assert trimming_type in [
@@ -1089,9 +1327,23 @@ class SignalProcessor:
 class BaseProcessingStep(SignalProcessor):
     """:class:`SignalProcessor` extended with :meth:`process` and :meth:`pour` helpers.
 
-    Subclasses inherit a high-level :meth:`process` that runs the configured
-    sequence of filters / downsamples / trims and a :meth:`pour` that turns
-    the conditioned time-domain data into a :class:`DataResidualArray`.
+    The interface every global-fit data processor implements
+    (``GeneralSettings.data_processor_class``). Subclasses load the data in
+    their constructor and hand ``(times, data, fs)`` to this base; they also
+    set ``orbits`` (``None`` when the source has none). The engine then calls
+    :meth:`process` (filters / downsample / trims, then builds
+    :attr:`td_signal`) and :meth:`pour` (projection onto the analysis
+    domain), and the run calls :meth:`release_transients` once sampling
+    starts.
+
+    Args:
+        *args: Forwarded to :class:`SignalProcessor` (``times``, ``data``,
+            ``fs``, ``verbose``, ``do_plots``).
+        **kwargs: Forwarded to :class:`SignalProcessor`.
+
+    Attributes:
+        td_signal (lisatools.domains.TDSignal): The processed stream, set by
+            :meth:`process` (absent before it runs).
     """
 
     def __init__(self, *args, **kwargs):
@@ -1108,8 +1360,9 @@ class BaseProcessingStep(SignalProcessor):
     def release_transients(self) -> None:
         """Drop large intermediate arrays kept only for data production.
 
-        Called once by ``run.py::setup_acs`` at the build->sampling
-        transition, after the produced data/residuals have been installed
+        Called once by :meth:`~lisatools.globalfit.run.GlobalFit.setup_acs`
+        at the build->sampling transition, after the produced data/residuals
+        have been installed
         into the shared :class:`AnalysisContainerArray`. Subclasses that
         cache big device (or host) arrays during production — waveform
         buffers, full-rate streams already poured into the ACA — should
@@ -1129,21 +1382,47 @@ class BaseProcessingStep(SignalProcessor):
         Tobs: float = None,
         **kwargs,
     ) -> tuple:
-        """
-        Apply preprocessing steps to the loaded data. for each step, if the corresponding kwargs is None, the step is skipped.
+        """Apply the configured conditioning steps, then build :attr:`td_signal`.
+
+        Steps run in this order, each only when its kwargs are not ``None``:
+        high-pass, low-pass, band-pass (each result replaces :attr:`data`),
+        :meth:`downsample`, :meth:`trim`. If a filter ran but ``trim_kwargs``
+        is ``None``, 100 h are trimmed from each end (with a warning). Then
+        ``Tobs`` keeps the first ``Tobs`` seconds (``keep_from_start``). A
+        ``Tobs`` longer than the data is clamped to :attr:`T` with a warning
+        that says no trim is applied, but the trim still runs on
+        ``int(T / dt)`` samples: with ``T = N * dt`` (no earlier trim or
+        downsample) that is normally ``N``, which raises ``ValueError``;
+        after a trim (``T = times[-1] - times[0]``) it drops the last sample.
+        Finally :attr:`td_signal` is built on
+        ``TDSettings(t0=times[0], dt, N)`` with the backend of :attr:`data`.
+
+        Called by :meth:`~lisatools.globalfit.engine.GeneralSetup.init_data_information`
+        with ``preprocess_kwargs``. The engine defaults are a 2e-5 Hz
+        high-pass, a 200 h trim from each end and ``Tobs`` = the run's
+        ``Tobs``; ``all_sources`` in mojito / synthetic mode sets all three
+        to ``None``, so in the production runs only :attr:`td_signal` is
+        built.
 
         Args:
-            highpass_kwargs (dict, optional): Keyword arguments for highpass_filter method.
-            lowpass_kwargs (dict, optional): Keyword arguments for lowpass_filter method.
-            bandpass_kwargs (dict, optional): Keyword arguments for bandpass_filter method.
-            downsample_kwargs (dict, optional): Keyword arguments for downsample method.
-                Applied after filtering and before trimming. Example: dict(target_fs=1.0).
-            trim_kwargs (dict, optional): Keyword arguments for trim method.
-            Tobs (float, optional): Observation time in seconds. If provided, applies trimming to keep only the first `Tobs` duration of data.
-            **kwargs: Additional keyword arguments for the eventual plots.
+            highpass_kwargs (dict, optional): Keyword arguments of
+                :meth:`highpass_filter`.
+            lowpass_kwargs (dict, optional): Keyword arguments of
+                :meth:`lowpass_filter`.
+            bandpass_kwargs (dict, optional): Keyword arguments of
+                :meth:`bandpass_filter`.
+            downsample_kwargs (dict, optional): Keyword arguments of
+                :meth:`downsample`, e.g. ``{"target_fs": 1.0}``. Applied after
+                filtering and before trimming.
+            trim_kwargs (dict, optional): Keyword arguments of :meth:`trim`.
+            Tobs (float, optional): Keep only the first ``Tobs`` seconds.
+            **kwargs: Plot options forwarded to the filter and trim steps
+                (``plot_folder``, ``decimate_factor``); unknown keys (such as
+                the stock ``normalize``) are ignored.
 
         Returns:
-            tuple: Processed times and data arrays.
+            tuple[np.ndarray, np.ndarray]: The processed :attr:`times` [s]
+            and :attr:`data` ``(n_channels, n_times)``.
         """
         filtered = False
 
@@ -1221,17 +1500,31 @@ class BaseProcessingStep(SignalProcessor):
         window: Optional[np.ndarray | str] = None,
         return_orbits: bool = False,
     ) -> "DomainBase | tuple[DomainBase, Orbits]":
-        """
-        Pour the loaded and preprocessed data into a domain instance.
+        """Project the processed :attr:`td_signal` onto the analysis domain.
+
+        If ``settings`` equals ``td_signal.settings`` the TD signal is
+        returned as is. Otherwise the TD stream is first cut from its start
+        to the target length (``round(1 / (df * dt))`` samples for
+        :class:`~lisatools.domains.FDSettings`, ``settings.N`` otherwise) and
+        transformed with ``window``. Called by the engine with the resolved
+        domain (WDM in the production runs) and the analysis window
+        (``general.window_type``, default Tukey) on the TD grid. Requires
+        :meth:`process` to have run.
 
         Args:
-            settings (DomainSettingsBase): Settings for the domain.
-            window (Optional[np.ndarray | str], optional): Window to apply to the data. Defaults to None.
-            return_orbits (bool, optional): Whether to return the orbits instance along with the domain. Defaults to False.
+            settings: Target domain settings (WDM, FD, STFT or TD).
+            window: Window applied in the transform (an array on the TD grid,
+                or a name the transform accepts). Default ``None``.
+            return_orbits: Also return :attr:`orbits`. Default ``False``.
 
         Returns:
-            A :class:`DomainBase` child (FDSignal / WDMSignal / TDSignal / STFTSignal)
-            in the requested domain. Optionally also returns the orbits instance.
+            DomainBase | tuple[DomainBase, Orbits]: The data as a
+            :class:`~lisatools.domains.DomainBase` child (``WDMSignal``,
+            ``FDSignal``, ``STFTSignal`` or ``TDSignal``), plus the orbits
+            when ``return_orbits``.
+
+        Raises:
+            AssertionError: The target needs more samples than the data has.
         """
 
         # The TD signal is already a DomainBase; ``.transform(settings, window)``
@@ -1279,9 +1572,52 @@ class BaseProcessingStep(SignalProcessor):
 
 
 class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
-    """
-    Class to load and preprocess Mojito L1 files.
-    Inherits from L1DataLoader and BaseProcessingStep.
+    """Load and condition a mojito L1 brick cache (the ``data_mode="mojito"`` processor).
+
+    Construction does the I/O: :meth:`L1DataLoader.load_data`, then the
+    optional ``Tobs`` window, then :class:`BaseProcessingStep` on the result.
+    The stock fits' default processor; the production runs use its subclass
+    :class:`~lisatools.globalfit.stock.erebor.injections.L1ProcessingStepWithSyntheticNoise`.
+
+    Args:
+        L1_folder: Mojito brick-cache root (see :class:`L1DataLoader`).
+        source_types: Types to load (see :class:`L1DataLoader`).
+        source_ids: ``{type: [ids]}`` (see :class:`L1DataLoader`). Default
+            ``None``.
+        orbits_class: Orbits class. Default :class:`~lisatools.detector.L1Orbits`.
+        orbits_kwargs: Orbits keyword arguments. Default ``None``.
+        verbose: Log progress. Default ``True``.
+        store_individual_timeseries: Keep every stream (see
+            :attr:`L1DataLoader.individual_timeseries`). Default ``False``.
+        do_plots: Diagnostic plots of the conditioning steps. Default
+            ``False``.
+        Tobs: Window length [s] kept at load: the samples whose time from
+            the first sample lies in ``[window_start_offset,
+            window_start_offset + Tobs)``. ``None`` (default) keeps the whole
+            file.
+        window_start_offset: Start of the kept window [s from the first
+            sample]. Default ``0.0``.
+        allow_missing_bricks: See :class:`L1DataLoader`. Default ``False``.
+
+    Attributes:
+        orbits (Orbits): Orbits built from the first brick read.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.detector import L1Orbits
+            from lisatools.globalfit.preprocessing import L1ProcessingStep
+
+            step = L1ProcessingStep(
+                L1_folder="/data/mojito_light",
+                source_types=["COMBINED", "MBHB"],
+                source_ids={"MBHB": [0, 5]},
+                orbits_class=L1Orbits,
+                orbits_kwargs=dict(force_backend="cpu", frame="icrs"),
+                Tobs=31104000.0,
+            )
+            times, data = step.process()  # no filters: builds step.td_signal
+            catalogue_rows = step.catalogue["MBHB"]
     """
 
     def __init__(
@@ -1328,11 +1664,24 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
         self.orbits = orbits
 
     def _open(self, file_path: str) -> MojitoL1File:
+        """Open a brick as a ``mojito.MojitoL1File``."""
         return MojitoL1File(file_path)
 
     def process(self, *args, **kwargs):
-        """
-        Apply identical processing to the main data and all individual timeseries.
+        """Apply identical processing to the main data and all individual timeseries.
+
+        With ``store_individual_timeseries`` each stored stream (except the
+        ``PSD_*`` entries) is processed by a throwaway
+        :class:`BaseProcessingStep` with the same arguments and replaced;
+        ``"TIMES"`` and ``"COMBINED"`` (the processed data) are then added.
+
+        Args:
+            *args: Forwarded to :meth:`BaseProcessingStep.process`.
+            **kwargs: Forwarded to :meth:`BaseProcessingStep.process`.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: The processed times [s] and data
+            ``(n_channels, n_times)``.
         """
         if hasattr(self, "individual_timeseries") and self.individual_timeseries is not None:
             for key, ts_data in self.individual_timeseries.items():
@@ -1360,9 +1709,24 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
 
 
 class SangriaProcessingStep(SangriaDataLoader, BaseProcessingStep):
-    """
-    Class to load and preprocess Sangria HDF5 data injections.
-    Inherits from SangriaDataLoader and BaseProcessingStep.
+    """Load and condition an LDC Sangria file (the ``data_mode="sangria"`` processor).
+
+    Construction reads the file (:meth:`SangriaDataLoader.load_data`) and
+    initializes :class:`BaseProcessingStep`. Used by ``erebor.all_sources``
+    with ``data_mode="sangria"``; that mode keeps the engine's default
+    high-pass + edge trim + ``Tobs`` cut.
+
+    Args:
+        data_input_path: Sangria HDF5 path.
+        remove_from_data: Components to drop (see :class:`SangriaDataLoader`).
+            Default ``None``.
+        verbose: Log progress. Default ``True``.
+        do_plots: Diagnostic plots of the conditioning steps. Default
+            ``False``.
+
+    Attributes:
+        orbits (None): Sangria files carry no orbits.
+        individual_timeseries (dict): Always empty.
     """
 
     def __init__(
@@ -1392,6 +1756,10 @@ class SangriaProcessingStep(SangriaDataLoader, BaseProcessingStep):
 @dataclasses.dataclass
 class SyntheticSourceSpec:
     """One source class to inject onto a synthetic data grid.
+
+    Input of :func:`build_synthetic_source_streams` (this module's generic
+    version; the stock ``data_mode="synthetic"`` path uses the different,
+    same-named helpers of :mod:`lisatools.globalfit.stock.erebor.injections`).
 
     Args:
         label: Identifier for the returned per-source stream (e.g. ``"EMRI"``).
@@ -1429,6 +1797,20 @@ def build_synthetic_source_streams(
     the resulting signals are placed onto the shared ``grid`` via
     :func:`~lisatools.domains.place_td_signal_on_grid`. Returns a mapping
     ``{label: (nchannels, grid.N)}`` (one summed stream per source class).
+    Not used by the stock fits, which call the same-named function of
+    :mod:`lisatools.globalfit.stock.erebor.injections` (a different
+    signature).
+
+    Args:
+        grid: Target time grid (``N``, ``dt``, ``t0``).
+        sources: Source classes to evaluate.
+        nchannels: Channels kept from each placed signal (the first
+            ``nchannels`` rows).
+        progress: Log one line per injected source. Default ``False``.
+
+    Returns:
+        dict[str, np.ndarray]: ``{spec.label: (nchannels, grid.N)}`` float64
+        streams; a spec with no injection rows gives zeros.
     """
     N = grid.N
     out: "dict[str, np.ndarray]" = {}
@@ -1471,8 +1853,39 @@ class SyntheticSourceProcessingStep(BaseProcessingStep):
     hold unpicklable C++ objects, so when this step is registered as
     ``GeneralSettings.data_processor_class`` (whose ``processor_init_kwargs`` are
     deep-copied), pass a **module-level** ``wave_gen_factory`` function and let it
-    build the wrapper lazily inside ``__init__``. The factory is called as
-    ``wave_gen_factory(Tobs=..., dt=..., t_start=..., tdi_chan=...)``.
+    build the wrapper lazily inside ``__init__``. The factory is called with
+    the keywords ``Tobs``, ``dt``, ``t_start`` and ``tdi_chan``.
+
+    Not used by the stock fits (their per-source synthetic steps live in
+    :mod:`lisatools.globalfit.stock.erebor.injections`).
+
+    Args:
+        Tobs: Duration [s]; the grid has ``round(Tobs / dt)`` samples.
+        dt: Sample spacing [s].
+        t_start: Grid start time [s].
+        wave_gen: Per-source signal callable (see
+            :class:`SyntheticSourceSpec`). Default ``None``.
+        wave_gen_factory: Builds ``wave_gen`` when it is ``None``. Default
+            ``None``.
+        injections: ``(num_sources, ndim)`` parameter rows.
+        param_transform: Per-row transform applied before ``wave_gen``.
+            Default ``None``.
+        times_from_gen: ``wave_gen`` returns ``(times, channels)``. Default
+            ``False``.
+        call_kwargs: Extra keywords of ``wave_gen``. Default ``None``.
+        tdi_chan: Channel label, recorded on :attr:`tdi_chan`. Default
+            ``"XYZ"``.
+        nchannels: Number of channels. Default ``3``.
+        verbose: Log progress. Default ``True``.
+        do_plots: Diagnostic plots. Default ``False``.
+
+    Raises:
+        ValueError: Neither ``wave_gen`` nor ``wave_gen_factory`` is given.
+
+    Attributes:
+        orbits (None): No orbits.
+        tdi_chan (str): Channel label.
+        injections (np.ndarray): ``(num_sources, ndim)`` injection rows.
     """
 
     def __init__(
@@ -1538,8 +1951,15 @@ class SyntheticDataProcessor(BaseProcessingStep):
     mojito L1 stream) is added underneath. Exposes ``catalogue`` (if supplied)
     so downstream factories can read leaf counts uniformly.
 
+    This generic version is not what the stock fits run: their
+    ``data_mode="synthetic"`` path uses the same-named
+    :class:`lisatools.globalfit.stock.erebor.injections.SyntheticDataProcessor`
+    (different arguments).
+
     Args:
-        Tobs / dt / t_start: Data-grid definition (``N = round(Tobs/dt)``).
+        Tobs: Duration [s]; the grid has ``N = round(Tobs / dt)`` samples.
+        dt: Sample spacing [s].
+        t_start: Grid start time [s].
         source_specs: :class:`SyntheticSourceSpec` list to inject.
         nchannels: Number of TDI channels.
         add_instrument_noise: ``None`` or kwargs for
@@ -1552,6 +1972,13 @@ class SyntheticDataProcessor(BaseProcessingStep):
         base_data: Optional ``(nch, n)`` TD stream added underneath the injections.
         catalogue: Optional catalogue dict stored on ``self.catalogue``.
         tdi_chan: TDI channel label recorded on ``self.tdi_chan``.
+        verbose: Log progress. Default ``True``.
+        do_plots: Diagnostic plots. Default ``False``.
+
+    Attributes:
+        orbits (None): No orbits.
+        tdi_chan (str): Channel label.
+        catalogue (dict): Only when ``catalogue`` was given.
     """
 
     def __init__(

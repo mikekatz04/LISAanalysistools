@@ -20,7 +20,7 @@ sampler safe:
   (``-inf``) outside the domain before any waveform is attempted.
 
 ``few`` is imported lazily (inside the mask) so importing this module does not
-require it, matching :mod:`.waveform`.
+require it, matching :mod:`~lisatools.sources.emri.waveform`.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ FEW_DOMAIN_ERROR_PATTERNS = (
 
 
 def _few_off_grid_exceptions():
-    """FEW's typed off-grid trajectory exception(s), as an ``except`` tuple.
+    """FEW's typed off-grid trajectory exception classes, as an ``except`` tuple.
 
     Imported lazily so this module does not require ``few`` at import time
     (matching :func:`emri_kerr_domain_mask`). Returns an empty tuple — which
@@ -83,7 +83,28 @@ def few_domain_guard():
       :data:`FEW_DOMAIN_ERROR_PATTERNS` (``sanity_check_init`` and the
       trajectory ``isvalid_*`` bounds checks).
 
-    Anything else propagates untouched.
+    Anything else propagates untouched. Used around the FEW calls of
+    :class:`~lisatools.sources.emri.response.EMRIWaveWrap`,
+    :class:`~lisatools.sources.emri.waveform.EMRITDIWaveform`,
+    :class:`~lisatools.sources.emri.emritdionfly.EMRITDIonFly` and
+    :meth:`~lisatools.sources.emri.wdm_direct.EMRIDirectWDM.batch` (not around the bare
+    :meth:`~lisatools.sources.emri.wdm_direct.EMRIDirectWDM.__call__`).
+
+    Raises:
+        WaveformDomainError: For the FEW out-of-domain failures above (chained to the
+            original exception).
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.sources.emri import few_domain_guard
+            from lisatools.utils.exceptions import WaveformDomainError
+
+            try:
+                with few_domain_guard():
+                    h = few_generator(*params)
+            except WaveformDomainError:
+                log_like = -1e300
     """
     try:
         yield
@@ -110,14 +131,24 @@ def emri_kerr_domain_mask(a, p0, e0, xI=1.0):
     :func:`few_domain_guard` at waveform-call time.
 
     Args:
-        a: Dimensionless spin (broadcastable array or scalar).
-        p0: Initial semi-latus rectum.
-        e0: Initial eccentricity.
-        xI: Cosine of inclination, ``+1`` or ``-1`` (scalar fill value).
+        a (float | np.ndarray): Dimensionless spin (broadcastable array or scalar).
+        p0 (float | np.ndarray): Initial semi-latus rectum (units of the primary mass).
+        e0 (float | np.ndarray): Initial eccentricity.
+        xI (float, optional): Cosine of inclination, ``+1`` or ``-1`` (scalar fill value).
+            Default ``1.0``.
 
     Returns:
-        Boolean ``np.ndarray`` (broadcast shape), ``True`` where the
+        np.ndarray: Boolean array of the broadcast shape (at least 1-D), ``True`` where the
         combination is inside the domain of validity.
+
+    Example:
+        .. code-block:: python
+
+            import numpy as np
+            from lisatools.sources.emri import emri_kerr_domain_mask
+
+            ok = emri_kerr_domain_mask(np.array([0.5, 0.99]), np.array([12.0, 2.0]),
+                                       np.array([0.3, 0.3]), xI=1.0)
     """
     from few.utils.geodesic import get_separatrix
     from few.utils.mappings.kerrecceq import DELTAPMIN, kerrecceq_forward_map

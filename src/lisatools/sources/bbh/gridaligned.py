@@ -1,4 +1,13 @@
-"""Grid-aligned Phentax MBHB generation.
+"""Grid-aligned Phentax MBHB generation (the batched MBH scoring path).
+
+:class:`GridAlignedPhenomTHMTDIWaveform` evaluates every row of a walker batch on the DATA
+lattice so ``pyResponseTDI`` can run the batch in one launch;
+:class:`WindowedGridAlignedMBHWaveform` does the same on a per-leaf window around the merger
+instead of the whole analysis window. With ``MBH_LIKELIHOOD=batched`` (the 9mo / 12mo runs)
+the stock getter ``globalfit.stock.erebor.source_runtime.get_mbh_windowed_gen`` builds the
+windowed class (``waveform_t0`` snapped onto the ``MBH_WINDOW_DECIMATE * dt`` lattice) inside
+:class:`~lisatools.sources.batching.MBHWindowedWDMSignalGen`, which
+:class:`~lisatools.globalfit.moves.mbhbatchedmove.MBHBatchedLikeMove` scores with.
 
 Isolated from :mod:`lisatools.sources.bbh.waveform` because
 :meth:`GridAlignedPhenomTHMTDIWaveform._aligned_polarizations` reaches into
@@ -26,9 +35,7 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
     time grid it evaluates on. That difference is what makes a batch of
     independent parameter sets launchable at all.
 
-    WHY THIS EXISTS
-    ---------------
-    ``pyResponseTDI`` shares ONE relative evaluation grid across a batch, so
+    Why this exists: ``pyResponseTDI`` shares ONE relative evaluation grid across a batch, so
     ``t0_shift_to_data`` -- the sub-sample offset between a source's own grid
     and the data grid -- must be identical for every row, and it refuses a
     batch whose offsets differ by more than 1e-12 s.
@@ -52,9 +59,31 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
 
     Set :attr:`grid_align` to False for stock behaviour in-process (that is
     how the A/B comparison is taken); the class is otherwise interchangeable.
+
+    The shared lattice spans the analysis window (``domain_settings.N`` samples) plus a
+    ``tdi_buffer_time`` lead and tail (:meth:`_common_grid_spec`); the output is cropped back
+    to precisely the data grid. Each row's first ``buffer_time`` of TDI output after its own
+    onset is zeroed, as on the stock path (:meth:`_zero_onset_warmup`).
+
+    Args:
+        *args: Positional arguments of
+            :class:`~lisatools.sources.bbh.waveform.PhenomTHMTDIWaveform`.
+        **kwargs: Keyword arguments of
+            :class:`~lisatools.sources.bbh.waveform.PhenomTHMTDIWaveform` (same defaults).
+            ``waveform_t0`` must sit on the data lattice ``data_t0 + k * dt`` (checked at
+            generation time) and ``coarse_grain`` must be off.
+
+    Raises:
+        ValueError: At generation time, if ``waveform_t0 - data_t0`` is not a multiple of
+            ``dt`` (to 1e-9 s) or the phentax model is coarse-grained.
+        ImportError: Without jax / phentax (already at construction, from
+            :class:`~lisatools.sources.bbh.waveform.PhenomTHMWaveformBase`; the generation-time
+            check in :meth:`_check_alignable` is a second guard).
     """
 
-    #: Per-instance escape hatch; see the class docstring.
+    #: Per-instance escape hatch; see the class docstring. Class attribute, ``True``;
+    #: set ``False`` on an instance for the stock grid (then :attr:`supports_batch` is
+    #: ``False``).
     grid_align: bool = True
 
     @property
@@ -71,6 +100,8 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
 
     # -- preconditions -----------------------------------------------------
     def _check_alignable(self) -> None:
+        """Raise unless the lattice alignment can be delivered (jax present, no coarse grain,
+        ``waveform_t0`` on the data lattice); called by :meth:`_aligned_polarizations`."""
         if jax is None:  # pragma: no cover - exercised only without jax
             raise ImportError(
                 "grid-aligned generation needs jax (and phentax); this class "
@@ -395,11 +426,15 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
     _CONTAINER_FLAGS = ("apply_transform", "per_model_per_signal")
 
     def _drop_container_flags(self, kwargs):
+        """Pop :attr:`_CONTAINER_FLAGS` from ``kwargs`` in place and return it."""
         for _f in self._CONTAINER_FLAGS:
             kwargs.pop(_f, None)
         return kwargs
 
     def _call_batched(self, *args, ra, dec, merger_time, **kwargs):
+        """Batch on the shared lattice: aligned polarizations, ONE response call with the
+        lattice merger offset (zero), onset warm-up zeroing, tail crop. ``ref_freq`` and the
+        container flags are dropped. With ``grid_align=False`` defers to the stock path."""
         if not self.grid_align:
             return super()._call_batched(
                 *args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
@@ -411,6 +446,8 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
         return self._crop_tail(*self._zero_onset_warmup(times, channels, onset_abs))
 
     def _call_single(self, *args, ra, dec, merger_time, **kwargs):
+        """One source on the same lattice and with the same onset ramp as
+        :meth:`_call_batched` (so serial and batched evaluation agree)."""
         if not self.grid_align:
             return super()._call_single(
                 *args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
@@ -469,11 +506,33 @@ class WindowedGridAlignedMBHWaveform(GridAlignedPhenomTHMTDIWaveform):
     stock path does exactly the same there (identical crop and zeroing), so
     windowed and stock templates still agree; those hours sit inside the
     data window's taper.
+
+    The constructor is that of :class:`GridAlignedPhenomTHMTDIWaveform`; the production build
+    (``get_mbh_windowed_gen``) passes a decimated ``data_td_settings`` at
+    ``MBH_WINDOW_DECIMATE * dt`` and the run's WDM settings as ``output_domain_settings``.
+    :class:`~lisatools.sources.batching.MBHWindowedWDMSignalGen` calls :meth:`set_window` before
+    each batch.
+
+    Raises:
+        RuntimeError: At generation time, if :meth:`set_window` was never called.
     """
 
     _window_spec = None
 
     def set_window(self, t_seg_abs: float, n_seg: int) -> None:
+        """Set the lattice to a segment: ``n_seg`` samples from the absolute time ``t_seg_abs``.
+
+        The lattice gets ``n_lead = ceil(max(tdi_buffer_time, buffer_time) / dt) + 1`` samples
+        before the segment and :meth:`_tail_samples` after it; the result is stored as
+        :attr:`window_spec` ``(k0, n_grid)`` in lattice samples from ``waveform_t0``.
+
+        Args:
+            t_seg_abs: Absolute segment start [s]; must lie on ``waveform_t0 + k * dt``.
+            n_seg: Segment length in samples.
+
+        Raises:
+            ValueError: If ``t_seg_abs`` is off the waveform lattice by more than 1e-6 samples.
+        """
         dt = float(self.dt)
         rel = (float(t_seg_abs) - float(self.waveform_t0)) / dt
         k_seg = int(np.rint(rel))
@@ -501,9 +560,12 @@ class WindowedGridAlignedMBHWaveform(GridAlignedPhenomTHMTDIWaveform):
 
     @property
     def window_spec(self):
+        """tuple[int, int] | None: ``(k0, n_grid)`` of the last :meth:`set_window`, or ``None``."""
         return self._window_spec
 
     def _common_grid_spec(self, T):
+        """The window's ``(k0, n_grid)``; ``T`` is ignored. Raises ``RuntimeError`` before
+        :meth:`set_window` (no fall back to the analysis-window lattice)."""
         if self._window_spec is None:
             raise RuntimeError(
                 "WindowedGridAlignedMBHWaveform.set_window() was never called; "

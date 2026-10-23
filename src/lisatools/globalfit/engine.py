@@ -1,4 +1,42 @@
-"""Engine and configuration dataclasses for the LISA global-fit sampler."""
+"""Engine and configuration dataclasses for the LISA global-fit sampler.
+
+What lives here:
+
+* the per-branch knob layer and its built twin, :class:`Settings` /
+  :class:`Setup` (every stock branch block subclasses them);
+* the run-wide pair :class:`GeneralSettings` / :class:`GeneralSetup`;
+  building a :class:`GeneralSetup` loads and conditions the data (the
+  configured ``data_processor_class``), resolves the analysis domain, builds
+  the analysis window, the data signal in that domain (a
+  :class:`~lisatools.domains.DomainBase` child, ``WDMSignal`` on the
+  production grid) and the sensitivity backend, and resolves the deferred
+  noise-model inputs
+  (unequal-arm link-delay table, galfor modulation epoch);
+* the bundles :class:`GlobalFitSettings` (what
+  :class:`~lisatools.globalfit.run.GlobalFitSetup` is built from),
+  :class:`EngineInfo` and :class:`RankInfo`;
+* the sampler :class:`GlobalFitEngine`, an eryn
+  :class:`~eryn.ensemble.EnsembleSampler` that carries the shared
+  :class:`~lisatools.analysiscontainer.AnalysisContainerArray`, and its model
+  tuple :data:`GlobalFitInfo`.
+
+Pipeline position: ``StockGlobalFit.build`` (:mod:`lisatools.globalfit.stock`)
+builds the :class:`GeneralSetup`, one :class:`Setup` per branch and then the
+:class:`~lisatools.globalfit.run.GlobalFitSetup`.
+:meth:`~lisatools.globalfit.run.GlobalFit.prepare_main` builds the head's
+:class:`GlobalFitEngine` (store-backed, the recipe as its ``stopping_fn``);
+:meth:`~lisatools.globalfit.run.GlobalFit.prepare_compute` builds an
+in-memory shell engine on each compute rank. In the stock fits the engine
+runs the cold chain only (``general.ntemps`` is pinned to 1) and every branch
+tempers on its own ladder inside its sub-state; ``erebor.blank`` is the
+exception (engine ladder ``NTEMPS``, default 2, for its simple-API branches).
+
+Note:
+    ``__all__`` names only :data:`GlobalFitInfo` and :class:`GlobalFitEngine`,
+    so ``automodule :members:`` in the Sphinx docs renders only those two; the
+    other classes are imported directly (``from lisatools.globalfit.engine
+    import GeneralSettings, Settings, Setup``).
+"""
 
 from __future__ import annotations
 
@@ -55,8 +93,11 @@ class RankInfo:
         head_rank: DEPRECATED legacy alias from the retired multi-stage
             pipeline; it has no role and should equal ``main_rank``. The
             dedicated saver rank is assigned automatically at ``np >= 3``
-            (see ``GlobalFit.resolve_rank_roles``).
-        main_rank: Rank that drives the main sampler loop.
+            (the highest non-head rank; see
+            :func:`lisatools.globalfit.communication.ranks.resolve_roles`).
+        main_rank: Rank (of the run communicator) that becomes the HEAD: it
+            drives the sampler loop and computes walker block 0. The stock
+            fits pass ``0``; the dataclass default ``-1`` is a placeholder.
     """
 
     head_rank: int = -1
@@ -66,10 +107,22 @@ class RankInfo:
 class Setup:
     """Adapter wrapping a :class:`Settings` dataclass for use as a setup object.
 
+    A ``*Setup`` is the BUILT twin of its ``*Settings``: construction copies
+    every dataclass field of the settings onto ``self`` (by re-running the
+    settings class's dataclass ``__init__`` on this object), keeps the
+    original on :attr:`settings`, and rounds ``Tobs`` with :meth:`init_df`
+    (so ``Tobs`` and ``dt`` must be set). The stock branch setups
+    (``GBSetup``, ``MBHSetup``, ``PSDSetup``, ...) subclass it.
+
     Args:
         settings_holder: A :class:`Settings` instance whose fields populate
             this :class:`Setup`. The dataclass field metadata is introspected
             so the same constructor can be re-applied.
+
+    Attributes:
+        Tobs (float): Observation time rounded down to a multiple of ``dt``
+            (s).
+        df (float): ``1 / Tobs`` (Hz).
     """
 
     def __init__(self, settings_holder: Settings):
@@ -119,7 +172,7 @@ class Setup:
         return self.transform
 
     def init_df(self):
-        """Round ``Tobs`` to a multiple of ``dt`` and recompute ``df = 1/Tobs``."""
+        """Round ``Tobs`` down to a multiple of ``dt`` and recompute ``df = 1/Tobs``."""
         self.Tobs = int(self.Tobs / self.dt) * self.dt
         self.df = 1.0 / self.Tobs
 
@@ -130,7 +183,40 @@ class Settings:
 
     Most fields default to ``None`` so subclasses can extend or override
     them; users assemble settings either by subclassing or by setting fields
-    directly.
+    directly. The stock branch blocks (``fit.gb``, ``fit.mbh``, ...) are
+    subclasses whose defaults resolve from env knobs named after the field
+    (``GB_NTEMPS`` for ``gb.ntemps``).
+
+    Args:
+        Tobs: Observation time (s).
+        dt: Sampling cadence (s).
+        initialize_kwargs: Branch-specific construction kwargs.
+        transform: Sampling-basis -> waveform-basis
+            :class:`~eryn.utils.transform.TransformContainer`.
+        priors: ``{branch: ProbDistContainer}`` priors in the sampling basis.
+        periodic: ``{branch: {parameter name or index: period}}``; names are
+            resolved through ``transform.input_basis``.
+        nleaves_max: Maximum leaves (sources) on the branch.
+        nleaves_min: Minimum leaves; equal to ``nleaves_max`` for a fixed-leaf
+            branch (always on at a fresh start).
+        ndim: Parameters per leaf (sampling basis).
+        ntemps: This branch's OWN temperature count (in the stock fits the
+            engine runs the cold chain only). An explicit ``betas`` wins and
+            defines ``ntemps = len(betas)``; with neither, the branch runs on
+            the engine ladder.
+        betas: Explicit inverse-temperature ladder ``(ntemps,)``.
+        other_tempering_kwargs: Extra kwargs for the branch's tempering.
+        branch_state: The sub-state class of the branch (e.g.
+            :class:`~lisatools.globalfit.state.GBState`), instantiated per
+            branch by :class:`~lisatools.globalfit.state.GFState`.
+        branch_backend: The matching sub-backend class (e.g.
+            :class:`~lisatools.globalfit.hdfbackend.GBHDFBackend`).
+        log_dir: Directory for the branch's log file.
+        signal_gen: Params-based template generator ``fn(*sampling_params) ->
+            DomainBase`` (wraps transform + waveform + domain projection),
+            registered in every container's ``signal_gen`` dict by
+            :meth:`~lisatools.globalfit.run.GlobalFit.setup_acs`, which then
+            subtracts the branch's templates from the residuals itself.
     """
     Tobs: float | None = None
     dt: float | None = None
@@ -181,7 +267,105 @@ class GeneralSettings(Settings):
     (passed as a :class:`DomainSettingsBase` instance or a factory callable),
     and the ``data_processor`` that loads/conditions the input data. Field
     defaults of ``None`` mark options that the user must supply (see
-    :meth:`GeneralSetup.init_setup` for assertions).
+    :meth:`GeneralSetup.init_setup` for the checks). The stock fits expose
+    this block as ``fit.general`` (a subclass whose defaults resolve from env
+    knobs named after the field: ``NUM_ITERATIONS``, ``NWALKERS``,
+    ``BACKUP_ITER``, ``MIDIT_CHECKPOINT``, ``VERBOSE``, ``PROGRESS``, ...) and
+    add run fields of their own (``data_mode``, ``coarse_Q``,
+    ``make_diagnostic_plots``, ``plot_iterations``, ...).
+
+    Args:
+        num_iterations: Sampler iterations for ``run_mcmc`` /
+            :meth:`~lisatools.globalfit.run.GlobalFit.sample`. Default 500.
+        Tobs: Requested observation time (s); after the data load it is reset
+            to the loaded span ``Nt * dt``.
+        dt: Sampling cadence (s).
+        file_store_dir: Output directory (required).
+        base_file_name: Run name stem (required); the store is
+            ``<file_store_dir>/<base_file_name>_<main_file_key>.h5`` and the
+            artifacts go to ``<base_file_name>_artifacts/``.
+        main_file_key: Store-name suffix. Default
+            ``"parameter_estimation_main"``.
+        past_file_for_start: Optional store to restart from directly (its
+            last sample) when the run's own store has no saved iteration.
+        orbits: Detector orbits. Orbits returned by the data processor's
+            ``pour`` (the L1 data's own orbits on the mojito path) replace
+            this field (and are rebuilt on the GPU backend as ``gpu_orbits``
+            on a GPU run); ``None`` with no processor orbits falls back to
+            :class:`~lisatools.detector.EqualArmlengthOrbits`.
+        gpu_orbits: The same orbits on the GPU backend (required alongside a
+            user-supplied ``orbits`` on a GPU run).
+        domain_settings: A :class:`~lisatools.domains.DomainSettingsBase`
+            instance, or a factory ``(times, dt, force_backend) ->
+            DomainSettingsBase`` called after the data load (the STFT path).
+            Required; dispatch is by class, never by string.
+        random_seed: Run seed. Multi-rank: the seed base every rank derives
+            its RNG stream from (``None`` -> fresh entropy drawn on the head).
+        backup_iter: Saver-rank cadence, in saves, of the running backup copy
+            of the store (``None``, the dataclass default, means every save;
+            the stock default is 1; the 9mo/12mo launchers export
+            ``BACKUP_ITER=10``).
+        midit_checkpoint: Arm the mid-iteration checkpoint
+            (:mod:`lisatools.globalfit.midit_checkpoint`) on the head. Default
+            ``True``; the 9mo/12mo launchers export ``MIDIT_CHECKPOINT=0``.
+        midit_checkpoint_min_interval: Minimum seconds between checkpoint
+            writes. Default 600.
+        hdf_compression: Store dataset compression. Default ``"gzip"``.
+        hdf_compression_opts: Compression level. Default 4.
+        nwalkers: Walkers (the stock fits: env ``NWALKERS``; production 4).
+        ntemps: Engine temperature count (the stock fits pin it to 1;
+            ``erebor.blank`` defaults to 2).
+        window_type: Analysis window passed to
+            :func:`~lisatools.utils.utility.windowfun`. Default ``"tukey"``.
+        window_taper_duration: Taper duration (s); the window's ``alpha`` is
+            ``window_taper_duration / (N * dt)`` with ``N`` the data length
+            (the segment length on an STFT grid). Must be set.
+        likelihood_source_only: Every container defaults to the source-only
+            likelihood ``-1/2 <r|r>`` (no noise normalization). Only valid for
+            a FIXED PSD; ignored (with a warning) when a ``psd`` branch exists.
+        gpu_backend: Backend name used when ``gpus`` is set. Default
+            ``"cuda12x"``.
+        gpus: Device ids of this rank (after per-rank pinning); ``None`` runs
+            on the CPU backend.
+        fixed_psd_kwargs: Sensitivity kwargs when no ``psd`` branch is
+            sampled; ``galfor_params`` here also pins the foreground when a
+            ``psd`` branch exists without a ``galfor`` branch. ``None`` ->
+            ``{"psd_params": [15e-12, 3e-15], "galfor_params": None}``.
+        data_processor_class: Data loader/conditioner class (a
+            :class:`~lisatools.globalfit.preprocessing.BaseProcessingStep`
+            subclass; required).
+        processor_init_kwargs: Its constructor kwargs.
+        preprocess_kwargs: Merged over the defaults (high-pass
+            ``cutoff=2e-5, order=2, zero_phase=True``; trim 200 h from each
+            end; ``Tobs``; plot folder) and passed to its ``process``.
+        sensitivity_init_kwargs: Sensitivity-backend constructor kwargs
+            (deferred noise-model specs resolved at build, see
+            :meth:`GeneralSetup._resolve_deferred_noise_model`).
+        sensitivity_backend_class: Backend class; ``None`` ->
+            :class:`~lisatools.sensitivity.CompositeSensitivityBackend`.
+        normalize_window: Pass the window to a non-composite (XYZ) backend as
+            ``window_values``.
+        catalogue: Source catalogue; refreshed from the data processor after
+            the load.
+        verbose: Stream logs to the console and turn progress bars on.
+            Default ``False`` (logs go to files only).
+        progress: Sampler progress bar alone; ``None`` follows ``verbose``.
+        global_fit_codename: Run metadata, propagated to
+            :class:`~lisatools.globalfit.postprocessing.RunMetadata` (the same
+            holds for the remaining metadata fields below).
+        global_fit_version: Run metadata.
+        global_fit_contact: Run metadata.
+        global_fit_code_link: Run metadata.
+        submission_parent_folder: Output folder of the end-of-run submission
+            (:class:`~lisatools.globalfit.postprocessing.SubmissionWriter`);
+            ``None`` writes no submission.
+        input_data_link: Run metadata.
+        input_reference: Run metadata.
+        noise_model: Run metadata.
+        noise_model_code_link: Run metadata.
+        run_waveform_model: Run metadata.
+        run_waveform_model_code_link: Run metadata.
+        comment: Run metadata.
     """
     num_iterations: int | None = 500
     Tobs: float | None = None
@@ -276,19 +460,43 @@ from .loginfo import init_logger
 class GeneralSetup(Setup, GeneralSettings):
     """Setup object that ingests data, prepares orbits, and builds the sensitivity backend.
 
-    On construction it:
+    On construction (``StockGlobalFit.build_general`` on every rank) it:
 
-    1. Ensures the artifacts directory exists and attaches a logger.
-    2. Runs the configured :attr:`data_processor` to load and condition the
-       time-domain data.
-    3. Resolves ``domain_settings`` (instance or factory) into a concrete
+    1. Ensures the artifacts directory exists and attaches a logger
+       (``general_setup.log``).
+    2. Checks the required fields and picks ``force_backend``
+       (``gpu_backend`` when ``gpus`` is set, else ``"cpu"``).
+    3. Builds ``data_processor_class(**processor_init_kwargs)`` and runs its
+       ``process(**preprocess_kwargs)`` to load and condition the time-domain
+       data; ``Tobs`` becomes the loaded span.
+    4. Resolves ``domain_settings`` (instance or factory) into a concrete
        :class:`~lisatools.domains.DomainSettingsBase`, builds the analysis
-       window, and constructs the input :class:`DataResidualArray`.
-    4. Configures :class:`XYZSensitivityBackend` for use in PSD/likelihood
-       calls.
+       window, and pours the data into that domain (the processor's ``pour``
+       returns a :class:`~lisatools.domains.DomainBase` child such as
+       ``WDMSignal``), plus diagnostic data plots.
+    5. Takes the processor's orbits when it returns them, resolves the
+       deferred noise-model inputs (:meth:`_resolve_deferred_noise_model`)
+       and builds the sensitivity backend: ``sensitivity_backend_class``,
+       default :class:`~lisatools.sensitivity.CompositeSensitivityBackend`
+       (XYZ-only kwargs are dropped for it).
 
     Args:
         general_settings: The :class:`GeneralSettings` to use.
+
+    Attributes:
+        force_backend (str): ``"cpu"`` or the GPU backend name.
+        data_processor: The built data processor.
+        data_td_settings (TDSettings): Time-domain settings of the loaded data,
+            carrying its start time ``t0`` (see :attr:`data_t0`).
+        domain_settings (DomainSettingsBase): The resolved analysis domain.
+        input_data_residual_array (DomainBase): The data in the analysis
+            domain (``WDMSignal`` on a WDM grid); every walker's container
+            starts from a deep copy of it.
+        sensitivity_backend: Callable building one walker's sensitivity
+            matrix from noise parameters.
+        noise_model_identity (dict): Semantic noise-model identity persisted
+            by the run backend (resume refuses a mismatch).
+        catalogue (dict): The processor's source catalogue.
     """
 
     def __init__(self, general_settings: GeneralSettings):
@@ -325,10 +533,12 @@ class GeneralSetup(Setup, GeneralSettings):
 
     @property
     def data_t0(self) -> float:
+        """Start time of the loaded data (s, mission clock): the epoch every grid aligns to."""
         return self.data_td_settings.t0
 
     @property
     def data_dt(self) -> float:
+        """Sampling cadence of the loaded data (s)."""
         return self.data_td_settings.dt
 
     def _resolve_deferred_noise_model(self, sensitivity_init_kwargs: dict) -> dict:
@@ -353,7 +563,23 @@ class GeneralSetup(Setup, GeneralSettings):
         Side effect: sets ``self.noise_model_identity`` — the semantic noise
         model identity (instrument class, WDM PSD method, delay-table and
         modulation digests, data epoch) the run backend persists so a resume
-        under a silently different likelihood is refused.
+        under a silently different likelihood is refused — and publishes the
+        resolved kwargs as ``self.sensitivity_init_kwargs``.
+
+        Args:
+            sensitivity_init_kwargs (dict): A copy of the configured
+                sensitivity-backend kwargs, possibly carrying the deferred
+                specs above.
+
+        Returns:
+            dict: The resolved kwargs (``ltts`` table in place of
+            ``ltts_l1_file`` / ``ltts_stride``; ``galfor_modulation_anchor``
+            removed).
+
+        Raises:
+            ValueError: The delay table or the modulation table does not cover
+                the data span, or ``galfor_modulation_anchor`` is not
+                ``"data_t0"`` / has no tabulated modulation to anchor.
         """
         from ..sensitivity import GalForTimeModulation, LinkDelayTable
 
@@ -504,7 +730,12 @@ class GeneralSetup(Setup, GeneralSettings):
     # NOT be a read-only property here or the dataclass-field setattr fails.
 
     def init_setup(self):
-        """Validate required settings and trigger data preparation."""
+        """Validate required settings, pick ``force_backend`` and run :meth:`init_data_information`.
+
+        Raises:
+            ValueError: ``file_store_dir``, ``base_file_name`` or
+                ``domain_settings`` is missing.
+        """
         if self.file_store_dir is None:
             raise ValueError("Must provide file_store_dir settings for GeneralSetup.")
         if self.base_file_name is None:
@@ -525,7 +756,16 @@ class GeneralSetup(Setup, GeneralSettings):
         self.init_data_information()
 
     def init_orbit_information(self):
-        """Construct orbit objects, defaulting to :class:`EqualArmlengthOrbits`."""
+        """Fill in missing orbit objects (fallback :class:`EqualArmlengthOrbits`).
+
+        Runs after the data processor's orbits (if any) were installed. With
+        ``orbits`` still ``None`` both fields get equal-arm orbits (the GPU
+        copy on ``force_backend``).
+
+        Raises:
+            ValueError: ``orbits`` is set but ``gpu_orbits`` is ``None`` on a
+                GPU run.
+        """
         if self.orbits is None:
             self.orbits = EqualArmlengthOrbits()
             self.gpu_orbits = EqualArmlengthOrbits(force_backend=self.force_backend)
@@ -541,6 +781,16 @@ class GeneralSetup(Setup, GeneralSettings):
 
         Accepts either a :class:`DomainSettingsBase` (used directly) or a
         factory called with ``(times, dt, force_backend)``.
+
+        Args:
+            times: Time stamps of the loaded data (s).
+            dt: Sampling cadence (s).
+
+        Returns:
+            DomainSettingsBase: The resolved domain settings.
+
+        Raises:
+            TypeError: ``domain_settings`` is neither.
         """
         spec = self.domain_settings
         if isinstance(spec, DomainSettingsBase):
@@ -553,7 +803,19 @@ class GeneralSetup(Setup, GeneralSettings):
         )
 
     def init_data_information(self):
-        """Run preprocessing, build the basis domain, and configure the sensitivity backend."""
+        """Run preprocessing, build the basis domain, and configure the sensitivity backend.
+
+        Steps 3-5 of the class description. Sets ``data_processor``,
+        ``fixed_psd_kwargs`` (default when ``None``), ``preprocess_kwargs``
+        (merged over the defaults), ``catalogue``, ``data_td_settings``,
+        ``Tobs``, ``domain_settings``, ``window_alpha``,
+        ``input_data_residual_array``, the orbits, ``noise_model_identity``
+        and ``sensitivity_backend``.
+
+        Raises:
+            ValueError: No ``data_processor_class``.
+            NotImplementedError: The resolved domain is not STFT, FD or WDM.
+        """
         if self.data_processor_class is None:
             raise ValueError("Must provide data_processor_class for GeneralSetup.")
 
@@ -744,12 +1006,21 @@ class GeneralSetup(Setup, GeneralSettings):
 class GlobalFitSettings:
     """Top-level settings bundle describing one global-fit run.
 
+    What :class:`~lisatools.globalfit.run.GlobalFitSetup` is built from
+    (``StockGlobalFit.build`` fills it with the built setups).
+
     Args:
-        source_info: Mapping of source-class name to its :class:`Setup`.
-        general_info: General (non-source) settings.
+        source_info: Mapping of branch name to its built :class:`Setup`.
+        general_info: The built :class:`GeneralSetup`.
         rank_info: MPI rank assignments.
-        setup_function: User-supplied callback invoked once at run start to
-            wire the global fit's components together.
+        setup_function: Callback that materializes the recipe's moves, called
+            once per rank by
+            :meth:`~lisatools.globalfit.run.GlobalFit._build_acs_and_recipe` as
+            ``setup_function(recipe, engine_info, curr, acs, priors, state)``
+            (the stock variants pass their module-level ``setup_recipe``).
+        source_metadata: Extra run objects keyed by name; the stock fits put
+            the live :class:`~lisatools.globalfit.recipe.Recipe` under
+            ``"recipe"`` (``None`` there -> an empty recipe).
     """
 
     source_info: typing.Dict[str, Setup]
@@ -763,7 +1034,20 @@ class GlobalFitSettings:
 
 @dataclasses.dataclass
 class EngineInfo:
-    """Branch-keyed metadata that the engine needs in order to launch a sampler."""
+    """Branch-keyed metadata that the engine needs in order to launch a sampler.
+
+    Built by :attr:`lisatools.globalfit.run.GlobalFitSetup.engine_info` from
+    the branch setups.
+
+    Args:
+        branch_names: Branch names in model order.
+        ndims: ``{branch: parameters per leaf}``.
+        nleaves_max: ``{branch: maximum leaves}``.
+        nleaves_min: ``{branch: minimum leaves}``.
+        branch_states: ``{branch: sub-state class or None}`` (the
+            ``sub_state_bases`` of :class:`~lisatools.globalfit.state.GFState`).
+        branch_backends: ``{branch: sub-backend class or None}``.
+    """
 
     branch_names: typing.List[str]
     ndims: typing.Dict[str, int]
@@ -773,6 +1057,13 @@ class EngineInfo:
     branch_backends: typing.Dict[str, eryn_Backend] = None
 
 
+#: The ``model`` every global-fit move receives (from
+#: :meth:`GlobalFitEngine.get_model` on the head; built by hand on a compute
+#: rank): ``analysis_container_arr`` (this rank's
+#: :class:`~lisatools.analysiscontainer.AnalysisContainerArray`, the residuals
+#: the moves score against), ``map_fn`` (the pool's ``map`` or the builtin) and
+#: ``random`` (the RNG, a ``numpy.random.RandomState``). Unlike eryn's ``Model``
+#: it carries no likelihood or prior callables.
 GlobalFitInfo = namedtuple(
     "GlobalFitInfo",
     (
@@ -788,12 +1079,21 @@ class GlobalFitEngine(EnsembleSampler):
 
     The engine owns the :class:`AnalysisContainerArray` shared by all moves so
     likelihoods, residuals, and PSDs stay synchronized across walker indices
-    during the run.
+    during the run. It samples ``general.ntemps`` rungs (``tempering_kwargs``),
+    i.e. the COLD chain only in the stock fits (``erebor.blank`` aside); the moves come
+    from the recipe (each step's ``setup_run`` sets ``sampler.moves``) and the
+    :class:`~lisatools.globalfit.recipe.Recipe` is the ``stopping_fn``, called
+    after every iteration. Built by
+    :meth:`~lisatools.globalfit.run.GlobalFit.prepare_main` (head, with the
+    run's :class:`~lisatools.globalfit.hdfbackend.GFHDFBackend`) and
+    :meth:`~lisatools.globalfit.run.GlobalFit.prepare_compute` (compute-rank
+    shell: in-memory backend, never sampled).
 
     Args:
         analysis_container_arr: Shared :class:`AnalysisContainerArray` for
-            this run.
-        *args: Forwarded to :class:`eryn.ensemble.EnsembleSampler`.
+            this run (this rank's walker block under the multi-rank layout).
+        *args: Forwarded to :class:`eryn.ensemble.EnsembleSampler`
+            (``nwalkers, ndims, log_like_fn, priors``).
         **kwargs: Forwarded to :class:`eryn.ensemble.EnsembleSampler`.
     """
 
@@ -802,10 +1102,12 @@ class GlobalFitEngine(EnsembleSampler):
         self.analysis_container_arr = analysis_container_arr
 
     def get_model(self):
-        """Get ``Model`` object from sampler.
+        """Get the ``model`` object the moves receive (overrides eryn's ``Model``).
 
         Returns:
-            :class:`GlobalFitInfo`: model object used by the sampler.
+            GlobalFitInfo: ``(analysis_container_arr, map_fn, random)`` with
+            ``map_fn`` the pool's ``map`` (builtin ``map`` without a pool) and
+            ``random`` the sampler's RNG.
         """
         if self.pool is not None:
             map_fn = self.pool.map

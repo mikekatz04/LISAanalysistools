@@ -14,6 +14,60 @@ the variant's setup function calls :meth:`Recipe.setup` with a
 :class:`~lisatools.globalfit.moves.globalfitmove.MoveBuildContext`, which
 materializes every stage (running each move's ``setup(ctx)``) into the runtime
 recipe steps that drive the sampler.
+
+Main entry points:
+
+* the recipe API: :class:`Recipe` (``fit.recipe``: ``add_stage`` /
+  ``pop_stage`` / ``add_move`` / ``pop_move`` / ``get_move`` /
+  ``move_names`` / ``list_moves`` / ``set_move_debug``) and :class:`Stage`;
+* the step classes a stage ``kind`` selects (``_STEP_CLASSES``):
+  ``"search"`` -> :class:`SearchRecipeStep`, ``"pe"`` -> :class:`PERecipeStep`,
+  ``"rj"`` -> :class:`RJRecipeStep`, ``"gb_search"`` ->
+  :class:`SearchStageProfileStep`, ``"replica_pe"`` -> :class:`ReplicaPERecipeStep`;
+* the move builders the variants' setup functions call: :func:`build_gb_moves`,
+  :func:`build_vgb_moves`, :func:`build_noise_moves` and the
+  :class:`SingleSourcePEBuilder` family (MBH / EMRI / SOBBH);
+* the stage-gate helpers: :func:`band_shutoff_w_pending_total`,
+  :func:`band_shutoff_w_armed`, :func:`release_band_shutoff_window`,
+  :func:`reset_band_logl_max`, :func:`force_fstat_refit`,
+  :func:`apply_inmodel_budget`, :func:`apply_fstat_refit_every`,
+  :func:`apply_inmodel_repeats`, :func:`apply_rj_flip_fraction`;
+* catalogue -> sampling-basis converters (:func:`mbh_catalogue_to_sampling_basis`,
+  :func:`gb_catalogue_to_sampling_basis`) and the injection seeding helpers.
+
+Where it sits in the pipeline (9mo / 12mo production, variant
+``erebor.all_sources``): the driver ``scripts/fstat_proposal/run_combined_staged.py``
+composes ``fit.recipe = Recipe([...])`` with the stages ``gb_search_seed``
+(``kind="gb_search"``, fixed length) -> ``source_search`` (``"search"``) ->
+``gb_search_1`` -> ``gb_search_2`` (``"gb_search"``) -> ``full_pe``
+(``"pe"``, never ends). At run start ``all_sources.setup_recipe`` builds the
+stock moves (:func:`build_gb_moves`, :func:`build_vgb_moves`,
+:func:`build_noise_moves`, the source builders) and calls :meth:`Recipe.setup`.
+:class:`~lisatools.globalfit.run.GlobalFit` then hands the recipe to the eryn
+sampler as ``stopping_fn``: :meth:`Recipe.__call__` runs after every iteration
+on the head, asks the active step's ``stopping_function`` whether to advance,
+records completion in the store and runs the next step's ``setup_run`` and
+stage-entry hooks.
+
+Env knobs read in this module at the recipe-step level (the move builders
+read many more; see each function): ``GB_SEARCH_STAGE_END_ON_SHUTOFF``
+(default ``"1"``), ``GF_PERSIST_STAGE_START`` (default ``"0"``, production
+``1``), ``GB_SEARCH_CAP_QUIESCENT`` (default ``"1"``, production ``0``),
+``GB_SEARCH_CAP_HEADROOM`` (default ``0``), ``GF_FANOUT_DIGEST`` (default
+``"0"``), ``GB_SEARCH_RJ_FLIP_FRACTION`` / ``GB_PE_RJ_FLIP_FRACTION`` (default
+0.2 each) and the ``GALFOR_RATCHET_*`` family (inert while the driver passes
+``ratchet=None``, i.e. ``GALFOR_RATCHET=0`` as in production). The stage
+lengths themselves come from the driver (``GB_PLATEAU_ITERS``,
+``GB_SEARCH_SEED_ITERS``, the per-stage profile knobs).
+
+Example:
+    >>> from lisatools.globalfit import Move, Recipe, Stage
+    >>> recipe = Recipe([Stage("gb_pe", kind="pe",
+    ...                        moves=[Move("rj_fstat_pe", branch="gb")])])
+    >>> recipe.add_move(Move("rj_prior_pe", branch="gb"), stage="gb_pe")
+    Move('rj_prior_pe', branch='gb')
+    >>> recipe.move_names()
+    ['rj_fstat_pe', 'rj_prior_pe']
 """
 
 from __future__ import annotations
@@ -79,6 +133,12 @@ if typing.TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: The mojito catalogue reference epoch (``TimeReferenceSSBFrame``, SSB time
+#: in seconds) at which the (V)GB catalogue parameters are given; also the
+#: origin of ``trim_duration = general_info.data_t0 - MOJITO_REFERENCE_TIME``.
+#: Imported across the stock erebor stack (``vgb``, ``source_runtime``,
+#: ``injections``, the ``all_sources`` / ``gb_no_fg`` /
+#: ``full_year_combined`` variants) and by the monitor.
 MOJITO_REFERENCE_TIME = 97729089.327664
 
 #: ``rj_flip_fraction`` policy: the share of eligible RJ slots a single
@@ -111,6 +171,17 @@ def _stage_rj_flip_default(env_name: str, code_default: float) -> float:
     ``GB_PE_RJ_FLIP_FRACTION``). Precedence is unchanged above this: an
     explicit per-move kwarg, then the GLOBAL ``{BRANCH}_RJ_FLIP_FRACTION``,
     then this stage default. Validated like the move-level resolver.
+
+    Args:
+        env_name: Environment variable to read; unset or blank means
+            ``code_default``.
+        code_default: The module constant used when the variable is unset.
+
+    Returns:
+        float: The flip fraction, in ``(0, 1]``.
+
+    Raises:
+        ValueError: The variable is not a float in ``(0, 1]``.
     """
     raw = os.environ.get(env_name, None)
     if raw is None or not str(raw).strip():
@@ -125,10 +196,20 @@ def _stage_rj_flip_default(env_name: str, code_default: float) -> float:
 
 
 def _search_rj_flip_default() -> float:
+    """``GB_SEARCH_RJ_FLIP_FRACTION`` (default 0.2): the ``rj_flip_fraction_default``
+    every search-named GB RJ move is built with (production exports 1.0)."""
     return _stage_rj_flip_default("GB_SEARCH_RJ_FLIP_FRACTION", _SEARCH_RJ_FLIP_DEFAULT)
 
 
 def _pe_rj_flip_default() -> float:
+    """``GB_PE_RJ_FLIP_FRACTION`` (default 0.2): the PE-stage flip fraction.
+
+    Read by the driver for ``full_pe``'s ``pe_rj_flip_fraction`` (production
+    0.1, applied at stage entry by :func:`apply_rj_flip_fraction`) and by
+    :func:`build_gb_moves` for the pe-named moves of a PE-mode build. Under
+    ``GB_PE_MOVES_STRICT=1`` (production) :func:`build_gb_moves` builds the
+    pe-named moves with the constant ``_PE_RJ_FLIP_DEFAULT`` instead.
+    """
     return _stage_rj_flip_default("GB_PE_RJ_FLIP_FRACTION", _PE_RJ_FLIP_DEFAULT)
 
 
@@ -145,6 +226,15 @@ def warm_search_move_overrides() -> dict:
     tempers per iteration -- rj_fstat_search/removal own it) and
     ``leaf_cap_update=False`` (rj_fstat_search is the designated cap
     updater; a second updater would double-advance the cap counters).
+
+    Because ``leaf_cap_update`` is False, ``rj_warm_search`` never runs the
+    per-(walker, band) valve judge either (the judge rides the designated cap
+    updater), so it never publishes ``_shutoff_w_pending``.
+
+    Returns:
+        dict: ``{"phase_maximize": bool(GB_RJ_PHASE_MAXIMIZE, default "0"),
+        "run_swaps": False, "leaf_cap_update": False}``, merged LAST into the
+        move's constructor kwargs by :func:`build_gb_moves`.
     """
     return dict(
         phase_maximize=bool(int(os.environ.get("GB_RJ_PHASE_MAXIMIZE", "0"))),
@@ -167,6 +257,12 @@ def warm_pe_move_overrides() -> dict:
     updater, same as the search twin). Exactness of the charged density
     itself is the container's job: the PE instance is built with
     ``circ_images > 0`` (wrapped-normal image sums).
+
+    Returns:
+        dict: ``{"phase_maximize": False, "run_swaps": True,
+        "temper_every_proposes": int(GB_TEMPER_EVERY_PROPOSES, default "3"),
+        "leaf_cap_update": False}``; used for ``rj_warm_pe`` and for
+        ``rj_para_search_pe`` (``GB_PARA_SEARCH=1`` only).
     """
     return dict(
         phase_maximize=False,
@@ -210,6 +306,15 @@ def pe_phase_maximize_on(gb_mode_search: bool, pe_strict: bool) -> bool:
     selects between two EXACTLY BALANCED proposals (pinned-and-uniform-washed
     vs maximizer-centered-and-charged), so it is not a maximization and is not
     what this policy is about.
+
+    Args:
+        gb_mode_search: The GB branch runs in search mode (``GB_MODE=search``).
+        pe_strict: ``GB_PE_MOVES_STRICT=1`` is in force.
+
+    Returns:
+        bool: True only when ``GB_PE_PHASE_MAXIMIZE=1`` (default ``"0"``) AND
+        ``gb_mode_search`` AND not ``pe_strict``. Production (strict, knob
+        unset) resolves False for ``rj_fstat_pe`` and ``rj_fstat_pe_residual``.
     """
     if os.environ.get("GB_PE_PHASE_MAXIMIZE", "0") != "1":
         return False
@@ -251,6 +356,7 @@ PE_FSTAT_GB_FREE_PEAK_MIN_SNR_DEFAULT = 6.5
 
 
 def _env_nonneg_int(knob: str, default: int) -> int:
+    """``int(os.environ[knob])``, blank/unset -> ``default``; ValueError unless an int >= 0."""
     raw = os.environ.get(knob, "").strip()
     try:
         val = int(raw) if raw else int(default)
@@ -268,7 +374,15 @@ def pe_fstat_refit_every() -> int:
     ELAPSED iterations on the F-stat refit clock, of the LIVE-residual move
     ``rj_fstat_pe_residual`` (since 2026-10-12; it was ``rj_fstat_pe``'s until
     the galaxy move became fit-once). The decision runs inside the move's
-    propose, so the refit lands on its first draw at or after the cadence."""
+    propose, so the refit lands on its first draw at or after the cadence.
+    0 = fit once, never refit. Production exports 150.
+
+    Returns:
+        int: Iterations between refits (>= 0).
+
+    Raises:
+        ValueError: The knob is not an integer >= 0.
+    """
     return _env_nonneg_int("GB_FSTAT_REFIT_EVERY_PE", 150)
 
 
@@ -276,7 +390,14 @@ def pe_fstat_gb_free_refit_every() -> int:
     """``GB_FSTAT_REFIT_EVERY_PE_GB_FREE`` (default 0): the GB-free galaxy
     move ``rj_fstat_pe``'s cadence. 0 = fit exactly ONCE (at its first visit
     in PE, or load the epoch a resumed store already holds) and never refit
-    (user ruling 2026-10-12)."""
+    (user ruling 2026-10-12). Production exports 0.
+
+    Returns:
+        int: Iterations between refits (>= 0; 0 = fit once).
+
+    Raises:
+        ValueError: The knob is not an integer >= 0.
+    """
     return _env_nonneg_int("GB_FSTAT_REFIT_EVERY_PE_GB_FREE", 0)
 
 
@@ -285,7 +406,16 @@ def pe_fstat_gb_free_peak_min_snr():
     move's OWN F-stat peak floor, as an SNR (F = SNR^2 / 2). ``none`` / ``stage``
     hands it back to the stage's declared floor (full_pe: 6.25). A fit selects
     at it; a LOAD of an epoch selected lower keeps only the boxes at or above
-    it (no refit -- see ``fstat_gridfit.stacked_cache_at_floor``)."""
+    it (no refit -- see ``fstat_gridfit.stacked_cache_at_floor``).
+    Production exports 6.5.
+
+    Returns:
+        float | None: The SNR floor, or ``None`` for "use the stage's floor".
+
+    Raises:
+        ValueError: The knob is not a positive finite number (or
+            ``none`` / ``stage``).
+    """
     raw = os.environ.get("GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE", "").strip()
     if raw.lower() in ("none", "stage"):
         return None
@@ -309,6 +439,27 @@ def pe_fstat_move_config(name: str) -> dict:
     ``rj_replace_pe`` (not in the v9 recipe) shares ``rj_fstat_pe``'s root and
     therefore its configuration: on the old shared cadence it would have
     re-opened the galaxy's epochs every 150 iterations.
+
+    Args:
+        name: ``"rj_fstat_pe"``, ``"rj_replace_pe"`` or
+            :data:`PE_FSTAT_RESIDUAL_MOVE` (``"rj_fstat_pe_residual"``).
+
+    Returns:
+        dict: ``rj_fstat_pe`` / ``rj_replace_pe``:
+        ``fstat_refit_every`` = :func:`pe_fstat_gb_free_refit_every`,
+        ``fstat_peak_min_snr`` = :func:`pe_fstat_gb_free_peak_min_snr`,
+        ``fstat_pe_residual=False``. ``rj_fstat_pe_residual``:
+        ``fstat_refit_every`` = :func:`pe_fstat_refit_every`,
+        ``fstat_peak_min_snr=None`` (the stage's floor),
+        ``fstat_pe_residual=True``.
+
+    Raises:
+        KeyError: ``name`` is not a PE F-stat grid move.
+
+    Example:
+        >>> from lisatools.globalfit.recipe import pe_fstat_move_config
+        >>> sorted(pe_fstat_move_config("rj_fstat_pe_residual"))
+        ['fstat_pe_residual', 'fstat_peak_min_snr', 'fstat_refit_every']
     """
     if name in ("rj_fstat_pe", "rj_replace_pe"):
         return dict(fstat_refit_every=pe_fstat_gb_free_refit_every(),
@@ -322,10 +473,14 @@ def pe_fstat_move_config(name: str) -> dict:
 
 
 def _stage_kind_of(step):
-    """The stage kind (``"search"``/``"rj"``/``"pe"``) stamped on a materialized step.
+    """The RUNTIME stage kind (``"search"``/``"rj"``/``"pe"``) stamped on a materialized step.
+
+    This is :attr:`Stage.runtime_kind` (``"gb_search"`` reads as ``"rj"``,
+    ``"replica_pe"`` as ``"pe"``). The recipe passes it to
+    ``fanout.enter_stage`` at every step start in a multi-rank run.
 
     :meth:`Stage.setup` stamps ``gf_stage_kind`` on the stage's single
-    :class:`~lisatools.globalfit.moves.combinemove.GFCombineMove`, which is the
+    :class:`~lisatools.globalfit.moves.globalfitmove.GFCombineMove`, which is the
     step's only move; ``(move, weight)`` entries are unwrapped. Returns ``None``
     for anything that does not carry the stamp -- including a legacy
     ``RecipeStep`` whose ``moves`` property RAISES when it was never given any.
@@ -358,8 +513,65 @@ class Recipe:
     advance, and on advance it invokes the next step's ``setup_run`` to
     reconfigure the sampler.
 
+    In a run, :class:`~lisatools.globalfit.run.GlobalFit` passes the recipe to
+    the eryn sampler as ``stopping_fn`` (``stopping_iterations=1``), sets
+    :attr:`backend` to the run's
+    :class:`~lisatools.globalfit.hdfbackend.GFHDFBackend`, calls
+    :meth:`setup_first_recipe_step` once, and from then on eryn calls
+    :meth:`__call__` after every iteration. Stage completion is persisted
+    per step name (``backend.completed_recipe_step``) and read back into
+    :attr:`recipe` by ``backend.add_recipe`` on a resume, so a resumed run
+    skips finished stages and re-enters the active one.
+
+    Stage names are unique within the recipe; move names are unique within a
+    stage (the same stock move may appear in several stages and then
+    resolves to the SAME runtime object in each).
+
     Args:
         stages: Optional initial list of :class:`Stage` blocks.
+
+    Attributes:
+        stages (list[Stage]): The declarative stage list (edit through the
+            methods below).
+        recipe (list[dict]): The runtime step list built by :meth:`setup`:
+            one ``{"name", "adjust", "status"}`` dict per stage, ``adjust``
+            being the :class:`RecipeStep`.
+        stock_moves (dict): The ``ctx.stock_moves`` the recipe was
+            materialized against.
+        snapshot_context (dict): Set by ``GlobalFit`` when it builds the
+            recipe (used by the head's :meth:`__call__`): the arguments
+            :func:`~lisatools.globalfit.residual_snapshot.maybe_snapshot`
+            needs (``GF_RESIDUAL_SNAPSHOT_EVERY``, default every 3 rows).
+            Absent until then; dropped on pickling.
+
+    Raises:
+        ValueError: Duplicate stage names, or duplicate move names inside one
+            stage.
+
+    Example:
+        >>> from lisatools.globalfit import Move, Recipe, Stage
+        >>> recipe = Recipe([
+        ...     Stage("gb_pe", kind="pe", moves=[Move("rj_fstat_pe", branch="gb")]),
+        ...     Stage("vgb_pe", kind="pe", moves=[Move("vgb_pe", branch="vgb")]),
+        ... ])
+        >>> recipe
+        Recipe(['gb_pe', 'vgb_pe'])
+        >>> recipe.pop_move("vgb_pe")
+        Move('vgb_pe', branch='vgb')
+        >>> recipe.pop_stage("vgb_pe")
+        Stage('vgb_pe', kind='pe', moves=[])
+
+        On a stock fit the recipe is ``fit.recipe`` (heavier: builds settings
+        from the environment):
+
+        .. code-block:: python
+
+            from lisatools.globalfit.stock import erebor
+
+            fit = erebor.all_sources(nwalkers=4)
+            print(fit.recipe.list_moves())
+            fit.recipe.pop_move("emri_pe")          # one stage holds it
+            fit.recipe.set_move_debug("psd_pe", False)
     """
 
     #: Multi-rank fan-out (:class:`~lisatools.globalfit.communication.fanout.WalkerFanout`);
@@ -374,6 +586,11 @@ class Recipe:
         self._init_runtime()
 
     def _init_runtime(self):
+        """Reset the runtime products (step list, cursor, stock moves); keeps :attr:`stages`.
+
+        Called by the constructor, after unpickling, and by ``GlobalFit``
+        before the setup function materializes the recipe.
+        """
         self.recipe = []
         self.backend_added = False
         self._current_iter = 0
@@ -437,6 +654,7 @@ class Recipe:
         )
 
     def _check_unique(self):
+        """Raise ValueError on duplicate stage names or duplicate move names within a stage."""
         stage_names = [s.name for s in self.stages]
         if len(set(stage_names)) != len(stage_names):
             raise ValueError(f"Duplicate stage names: {stage_names}.")
@@ -457,6 +675,7 @@ class Recipe:
                 )
 
     def _stage(self, name: str) -> "Stage":
+        """The declarative :class:`Stage` named ``name``; KeyError (listing stages) if absent."""
         for stage in self.stages:
             if stage.name == name:
                 return stage
@@ -467,6 +686,12 @@ class Recipe:
     def _find_move(
         self, name: str, stage: typing.Optional[str] = None
     ) -> typing.Tuple["Stage", int]:
+        """``(stage, index)`` of the move named ``name``.
+
+        Searches every stage, or only ``stage`` when given. Raises KeyError
+        when the name is absent, and when it appears in several stages and
+        ``stage`` was not given (the caller must disambiguate).
+        """
         hits = []
         for st in self.stages if stage is None else [self._stage(stage)]:
             for i, mv in enumerate(st.moves):
@@ -490,6 +715,34 @@ class Recipe:
         after: typing.Optional[str] = None,
         index: typing.Optional[int] = None,
     ) -> "Stage":
+        """Insert a :class:`Stage` into the recipe.
+
+        Args:
+            stage: The stage to insert; its name must be new.
+            before: Insert immediately before the stage of this name.
+            after: Insert immediately after the stage of this name.
+            index: Insert at this position in :attr:`stages`.
+
+        Returns:
+            Stage: ``stage`` itself.
+
+        Raises:
+            TypeError: ``stage`` is not a :class:`Stage`.
+            ValueError: More than one of ``before`` / ``after`` / ``index``,
+                or a stage of the same name already exists.
+            KeyError: ``before`` / ``after`` names no stage.
+
+        Example:
+            >>> from lisatools.globalfit import Move, Recipe, Stage
+            >>> recipe = Recipe([Stage("full_pe", kind="pe",
+            ...                        moves=[Move("psd_pe", branch="psd")])])
+            >>> _ = recipe.add_stage(
+            ...     Stage("noise_search", kind="search",
+            ...           moves=[Move("psd_search", branch="psd")]),
+            ...     before="full_pe")
+            >>> recipe
+            Recipe(['noise_search', 'full_pe'])
+        """
         if not isinstance(stage, Stage):
             raise TypeError(f"add_stage expects a Stage, got {type(stage).__name__}.")
         if sum(x is not None for x in (before, after, index)) > 1:
@@ -507,11 +760,17 @@ class Recipe:
         return stage
 
     def pop_stage(self, name: str) -> "Stage":
+        """Remove and return the stage named ``name`` (KeyError if absent).
+
+        ``StockGlobalFit.remove_branch`` uses this to drop stages left empty
+        after the branch's moves were popped.
+        """
         stage = self._stage(name)
         self.stages.remove(stage)
         return stage
 
     def move_names(self) -> typing.List[str]:
+        """Every move name, stage by stage in order (a name may repeat across stages)."""
         return [m.name for s in self.stages for m in s.moves]
 
     def stock_names(self) -> typing.List[str]:
@@ -531,6 +790,10 @@ class Recipe:
           invisible from the move's own name, so a subclass that pulls things
           out of ``ctx.stock_moves`` must declare them here or they will not
           exist when it looks.
+
+        Returns:
+            list[str]: Names in stage / move order; a name used in several
+            stages appears once per use.
         """
         names = []
         for s in self.stages:
@@ -542,10 +805,67 @@ class Recipe:
         return names
 
     def get_move(self, name: str, stage: typing.Optional[str] = None) -> Move:
+        """Return the declarative :class:`Move` named ``name`` (not removed).
+
+        Args:
+            name: Move name.
+            stage: Stage to look in. Required when the name appears in
+                several stages (a staged run installs e.g. ``vgb_pe`` in
+                every search stage and in ``full_pe``).
+
+        Returns:
+            Move: The declarative move (its ``.runtime`` is the materialized
+            eryn move after :meth:`setup`).
+
+        Raises:
+            KeyError: Unknown name, unknown stage, or an ambiguous name
+                without ``stage``.
+        """
         st, i = self._find_move(name, stage)
         return st.moves[i]
 
     def pop_move(self, name: str, stage: typing.Optional[str] = None) -> Move:
+        """Remove and return the move named ``name``.
+
+        Pre-run edit: a popped stock name is no longer in :meth:`stock_names`,
+        so the variant's setup function does not build it. A stage emptied
+        this way must also be removed (:meth:`pop_stage`), or
+        :meth:`Stage.setup` raises at materialization.
+
+        Args:
+            name: Move name.
+            stage: Stage to remove it from; required when the name appears in
+                several stages.
+
+        Returns:
+            Move: The removed declarative move.
+
+        Raises:
+            KeyError: Unknown name, unknown stage, or an ambiguous name
+                without ``stage``.
+
+        Example:
+            >>> from lisatools.globalfit import Move, Recipe, Stage
+            >>> recipe = Recipe([
+            ...     Stage("gb_search_1", kind="gb_search",
+            ...           moves=[Move("vgb_pe", branch="vgb"),
+            ...                  Move("rj_fstat_search", branch="gb")]),
+            ...     Stage("full_pe", kind="pe",
+            ...           moves=[Move("vgb_pe", branch="vgb"),
+            ...                  Move("rj_fstat_pe", branch="gb")]),
+            ... ])
+            >>> recipe.pop_move("vgb_pe", stage="full_pe")
+            Move('vgb_pe', branch='vgb')
+            >>> recipe.move_names()
+            ['vgb_pe', 'rj_fstat_search', 'rj_fstat_pe']
+
+            On a stock fit:
+
+            .. code-block:: python
+
+                fit = erebor.all_sources(nwalkers=4)
+                fit.recipe.pop_move("sobbh_pe")
+        """
         st, i = self._find_move(name, stage)
         return st.moves.pop(i)
 
@@ -561,10 +881,25 @@ class Recipe:
 
         ``opts`` (plot_dir / plot_walker / plot_leaf / plot_band / every) are
         forwarded to :meth:`GlobalFitMove.set_debug`. Overrides any
-        stage-level debug and the move's env default. Example::
+        stage-level debug and the move's env default.
 
-            fit.recipe.set_move_debug("emri_pe", plot_dir="./emri_dbg", every=5)
-            fit.recipe.set_move_debug("psd_pe", False)   # force off
+        Args:
+            name: Move name.
+            enabled: Debug on (True) or forced off (False).
+            stage: Stage to look in; required when the name is in several
+                stages.
+            **opts: Debug options stored with ``enabled`` as
+                ``Move.debug = {"enabled": enabled, **opts}`` and forwarded
+                to ``set_debug`` at :meth:`setup`.
+
+        Returns:
+            Move: The declarative move that was changed.
+
+        Example:
+            .. code-block:: python
+
+                fit.recipe.set_move_debug("emri_pe", plot_dir="./emri_dbg", every=5)
+                fit.recipe.set_move_debug("psd_pe", False)   # force off
         """
         mv = self.get_move(name, stage)
         mv.debug = {"enabled": enabled, **opts} if opts else enabled
@@ -576,9 +911,19 @@ class Recipe:
         """Turn debug on/off for every move in a stage (unless a move overrides).
 
         ``opts`` are forwarded to each move's :meth:`GlobalFitMove.set_debug`.
-        Example::
 
-            fit.recipe.set_stage_debug("full_pe", plot_walker=2)
+        Args:
+            stage_name: Stage name.
+            enabled: Debug on (True) or forced off (False).
+            **opts: Debug options, stored as ``Stage.debug``.
+
+        Returns:
+            Stage: The declarative stage that was changed.
+
+        Example:
+            .. code-block:: python
+
+                fit.recipe.set_stage_debug("full_pe", plot_walker=2)
         """
         st = self._stage(stage_name)
         st.debug = {"enabled": enabled, **opts} if opts else enabled
@@ -603,9 +948,49 @@ class Recipe:
         :class:`~lisatools.globalfit.moves.functionmove.FunctionMove`;
         ``sync_log_like`` applies to this case). Placement: with no stages an
         initial ``Stage("main", kind="pe")`` is created; with one stage the
-        move lands there; with several, ``stage=`` is required. At most one of
+        move lands there; with several, ``stage=`` is required (or
+        ``before=`` / ``after=``, whose move picks the stage). At most one of
         ``before=``/``after=`` (move names) or ``index=`` positions it inside
         the stage (default: append).
+
+        Args:
+            move (Move | str | object | Callable): A :class:`Move`, a
+                stock-move name, a constructed eryn move, or a plain function
+                (see above).
+            stage: Target stage name.
+            before: Insert before this move (and in its stage).
+            after: Insert after this move (and in its stage).
+            index: Insert at this position in the stage's move list.
+            name: Name for a wrapped eryn move / function (ignored for a
+                :class:`Move` or a stock name).
+            branch: Branch the move samples; filled into a :class:`Move`
+                whose ``branch`` is ``None``.
+            sync_log_like: Forwarded to
+                :class:`~lisatools.globalfit.moves.functionmove.FunctionMove`
+                for a plain function.
+
+        Returns:
+            Move: The declarative move as stored in the stage.
+
+        Raises:
+            TypeError: ``move`` is none of the accepted kinds.
+            ValueError: More than one position given, several stages and no
+                ``stage`` (nor ``before`` / ``after``), the name already present
+                in the target stage, or, with ``stage`` given, a ``before`` /
+                ``after`` move that is not in that stage.
+            KeyError: Unknown ``stage``; or, without ``stage``, a ``before`` /
+                ``after`` move that is absent from every stage or present in
+                several of them.
+
+        Example:
+            >>> from lisatools.globalfit import Move, Recipe, Stage
+            >>> recipe = Recipe([Stage("full_pe", kind="pe",
+            ...                        moves=[Move("psd_pe", branch="psd"),
+            ...                               Move("rj_fstat_pe", branch="gb")])])
+            >>> recipe.add_move("rj_prior_pe", after="rj_fstat_pe", branch="gb")
+            Move('rj_prior_pe', branch='gb')
+            >>> recipe.move_names()
+            ['psd_pe', 'rj_fstat_pe', 'rj_prior_pe']
         """
         move = self._coerce_move(move, name=name, branch=branch, sync_log_like=sync_log_like)
         if sum(x is not None for x in (before, after, index)) > 1:
@@ -645,7 +1030,19 @@ class Recipe:
         return move
 
     def list_moves(self) -> str:
-        """Human-readable, stage-grouped summary of the recipe."""
+        """Human-readable, stage-grouped summary of the recipe.
+
+        Returns:
+            str: One ``[kind] name:`` header per stage, then one line per
+            move (``name  <- stock`` or the class name, plus ``branch=``).
+
+        Example:
+            >>> from lisatools.globalfit import Move, Recipe, Stage
+            >>> print(Recipe([Stage("gb_pe", kind="pe",
+            ...                     moves=[Move("rj_fstat_pe", branch="gb")])]).list_moves())
+            [pe] gb_pe:
+                rj_fstat_pe  <- stock branch=gb
+        """
         lines = []
         for st in self.stages:
             lines.append(f"[{st.kind}] {st.name}:")
@@ -669,6 +1066,16 @@ class Recipe:
         live :class:`~lisatools.globalfit.moves.globalfitmove.MoveBuildContext`.
         Runs every move's ``setup(ctx)`` via :meth:`Stage.setup` and registers
         the resulting steps on this same object.
+
+        Args:
+            ctx: The build context; ``ctx.stock_moves`` maps stock names to
+                the runtime moves the variant built (see :meth:`stock_names`).
+
+        Raises:
+            ValueError: The recipe has no stages; a branch added with plain
+                branch info (``fit.add_branch``) is targeted by no move; or
+                any :meth:`Stage.setup` error (unknown stock name, move on a
+                disabled branch, empty stage).
         """
         if not self.stages:
             raise ValueError(
@@ -694,7 +1101,11 @@ class Recipe:
     # -- runtime engine ------------------------------------------------------------
 
     def get_step(self, name: str):
-        """Return the materialized runtime step registered under ``name``."""
+        """Return the materialized runtime step (a :class:`RecipeStep`) registered under ``name``.
+
+        Raises:
+            KeyError: No step of that name (e.g. before :meth:`setup`).
+        """
         for entry in self.recipe:
             if entry["name"] == name:
                 return entry["adjust"]
@@ -713,25 +1124,30 @@ class Recipe:
         self.backend_added = True
 
     def add_recipe_component(self, adjust_fn, name=None):
-        """Append a recipe step.
+        """Append a recipe step (``status`` False) to :attr:`recipe`.
 
         Args:
-            adjust_fn: A :class:`RecipeStep` (or compatible object) implementing
-                ``setup_run`` and ``stopping_function``.
-            name: Optional human-readable name. If ``None``, a default name is
-                assigned based on the current recipe length.
+            adjust_fn (RecipeStep): A :class:`RecipeStep` (or compatible object)
+                implementing ``setup_run`` and ``stopping_function``.
+            name (str, optional): Step name; :meth:`setup` uses the stage name,
+                which is also the store's recipe-group key. If ``None``, a
+                default name ``"recipe step <n>"`` is assigned.
         """
         if name is None:
             name = f"recipe step {len(self.recipe) + 1}"
         self.recipe.append({"name": name, "adjust": adjust_fn, "status": False})
 
     def to_file(self):
-        """Return a dict mapping recipe-step names to their completion status."""
+        """Return a dict mapping recipe-step names to their completion status (bool)."""
         _tmp = {recipe_step["name"]: recipe_step["status"] for recipe_step in self.recipe}
         return _tmp
 
     def __next__(self):
-        """Advance the internal cursor past any completed steps."""
+        """Advance the internal cursor past any completed steps.
+
+        Sets the active step record to the first step whose ``status`` is
+        False; leaves it unchanged when every step is complete.
+        """
         while self._current_iter < len(self.recipe):
             # False means it is not finished
             if self.recipe[self._current_iter]["status"]:
@@ -746,12 +1162,22 @@ class Recipe:
     def setup_first_recipe_step(self, iteration, last_sample, sampler):
         """Configure the sampler for the very first (incomplete) recipe step.
 
+        Skips the steps the store marks complete (a resume), runs the active
+        step's ``setup_run``, announces it (:meth:`_announce_recipe_step`:
+        the step's ``note_recipe_step`` stage-entry hook, then
+        :func:`begin_search_recipe_step` on its moves) and, multi-rank, seeds
+        the fan-out's iteration clock and stage. Called once, on the head, by
+        ``GlobalFit.prepare_main``.
+
         Args:
-            iteration: Current iteration index.
-            last_sample: Last sampled state object.
-            sampler: The :class:`GlobalFitEngine` (or eryn-compatible) sampler.
+            iteration (int): Current iteration index (the engine's
+                ``iteration``).
+            last_sample (GFState): Last sampled state object.
+            sampler (GlobalFitEngine): The :class:`GlobalFitEngine` (or
+                eryn-compatible) sampler.
 
         Raises:
+            AssertionError: Called a second time.
             ValueError: If the recipe has already been completed.
         """
         assert not self._has_setup_first_step
@@ -785,13 +1211,27 @@ class Recipe:
     def __call__(self, iteration, last_sample, sampler):
         """Evaluate the current step's stopping criterion and advance if met.
 
+        eryn's ``stopping_fn`` hook, called on the head after every iteration.
+        In order: forward ``iteration`` to the fan-out; with
+        ``GF_FANOUT_DIGEST=1`` (default off) log a ``[FANOUT_DIGEST]`` line;
+        with a ``snapshot_context`` call
+        :func:`~lisatools.globalfit.residual_snapshot.maybe_snapshot`
+        (``GF_RESIDUAL_SNAPSHOT_EVERY``, default every 3 rows); then ask the
+        active step's ``stopping_function``. On True: record completion in the
+        store (``backend.completed_recipe_step``, which also stamps the next
+        incomplete step's start iteration; with a saver rank it returns only
+        after the saver acknowledged the write), mark the step done, move to
+        the next incomplete step, run its ``setup_run``, announce it, and
+        (multi-rank) tell the fan-out the new stage.
+
         Args:
-            iteration: Current iteration index.
-            last_sample: Last sampled state object.
-            sampler: The active sampler.
+            iteration (int): Index of the iteration whose moves just ran.
+            last_sample (GFState): Last sampled state object.
+            sampler (GlobalFitEngine): The active sampler.
 
         Returns:
-            ``True`` if the entire recipe has finished, ``False`` otherwise.
+            bool: ``True`` if the entire recipe has finished (eryn then stops),
+            ``False`` otherwise.
         """
         if self.fanout is not None:
             self.fanout.note_iteration(iteration)
@@ -909,11 +1349,19 @@ class RecipeStep:
 
     Each subclass must define a ``setup_run`` method that configures the
     sampler when the step becomes active and a ``stopping_function`` that
-    decides when to advance to the next step.
+    decides when to advance to the next step. A step built by
+    :meth:`Stage.setup` holds exactly one move, the stage's
+    :class:`~lisatools.globalfit.moves.globalfitmove.GFCombineMove`.
+
+    Optional hook: a ``note_recipe_step(serial)`` method is called by
+    :meth:`Recipe._announce_recipe_step` right after ``setup_run`` with the
+    step's index in the recipe (stable across a resume).
 
     Args:
-        moves: List of MCMC moves to use during this recipe step.
-        weights: List of weights matching ``moves``. Defaults to uniform.
+        moves (list, optional): List of MCMC moves to use during this recipe
+            step. ``None`` leaves :attr:`moves` unset (reading it raises).
+        weights (list[float], optional): List of weights matching ``moves``.
+            Defaults to uniform. Ignored when ``moves`` is ``None``.
     """
 
     def __init__(self, moves=None, weights=None):
@@ -927,7 +1375,7 @@ class RecipeStep:
 
     @property
     def moves(self):
-        """List of MCMC moves used by this step."""
+        """List of MCMC moves used by this step (ValueError when never set)."""
         if not hasattr(self, "_moves"):
             raise ValueError("Must add moves for this recipe step.")
         return self._moves
@@ -958,9 +1406,24 @@ class RecipeStep:
 class BaseRecipeStep(RecipeStep):
     """Default :class:`RecipeStep` that simply assigns moves to the sampler.
 
+    Base of every concrete step class. ``Stage.setup`` constructs a step as
+    ``StepClass(moves=[combine], **stage.step_kwargs)``.
+
     Args:
-        moves: List of MCMC moves to use during this recipe step.
-        weights: List of weights matching ``moves``.
+        *args: Accepted and IGNORED.
+        moves (list, optional): List of MCMC moves to use during this recipe step.
+        weights (list[float], optional): List of weights matching ``moves``.
+        **kwargs: Accepted and IGNORED.
+
+    Warning:
+        Unknown keyword arguments are swallowed silently. A
+        ``Stage(step_kwargs=...)`` key that no class in the step's MRO
+        consumes reaches nothing and raises nothing. In the production
+        driver the ``gb_search_seed`` stage passes
+        ``search_shutoff_per_walker=False`` "to disarm the valve"; no step
+        class reads it, so it has no effect (the valve is armed per move,
+        from ``GBSettings.search_shutoff_per_walker``; in the seed stage no
+        move owns the valve judge, see :class:`SearchStageProfileStep`).
     """
 
     def __init__(self, *args, moves=None, weights=None, **kwargs):
@@ -971,6 +1434,12 @@ class BaseRecipeStep(RecipeStep):
 
         Each move that lacks an explicit periodicity setting inherits the
         sampler's periodicity.
+
+        Args:
+            iteration (int): Current iteration (unused here).
+            last_sample (GFState): Current state (unused here).
+            sampler (GlobalFitEngine): The sampler; its ``moves`` / ``weights``
+                are replaced.
         """
         for move in self.moves:
             if sampler.periodic is not None and move.periodic is None:
@@ -992,11 +1461,27 @@ class SearchRecipeStep(BaseRecipeStep):
 
     The stopping criterion is handled **internally**, inside the search move —
     the move runs its own search to completion (e.g. to log-likelihood
-    convergence) before the recipe is consulted. So there is nothing left for
-    the recipe to wait on and this step reports done on its first call. That is
-    a statement about where the criterion lives, not about how much work was
-    done: compare :class:`RJRecipeStep`, which owns its criterion at the recipe
-    level and watches the leaf count across iterations.
+    convergence) before the recipe is consulted. A move that finishes inside
+    one propose leaves nothing for the recipe to wait on, and the step reports
+    done on its first call. A CHUNKED search
+    (:class:`~lisatools.globalfit.moves.globalfitmove.MaxLogLCombineMove`, e.g.
+    the driver's ``JointMaxLogLSearch``) runs a bounded number of inner rounds
+    per propose and publishes ``maxlogl_plateau_done``; the step then stays
+    open until every such move reports True. That is a statement about where
+    the criterion lives, not about how much work was done: compare
+    :class:`RJRecipeStep`, which owns its criterion at the recipe level and
+    watches the leaf count across iterations.
+
+    Production: ``source_search`` (``kind="search"``), whose single move is
+    ``JointMaxLogLSearch`` over ``sobbh_pe`` / ``mbh_pe`` / ``emri_pe`` with
+    the per-walker plateau rule configured by the driver
+    (``SOURCE_SEARCH_CHECKS`` 10, ``SOURCE_SEARCH_TOL`` 10,
+    ``SOURCE_SEARCH_MAX_ROUNDS`` 200 in the launchers).
+
+    Args:
+        *args: Forwarded to :class:`BaseRecipeStep` (ignored there).
+        **kwargs: Forwarded to :class:`BaseRecipeStep` (``moves``,
+            ``weights``; anything else is ignored).
     """
 
     def stopping_function(self, *args, **kwargs):
@@ -1031,6 +1516,32 @@ class PERecipeStep(BaseRecipeStep):
     person to change a search stage's floor would have moved this one too.
     Declared, applied and logged; ``None`` clears the override so the run's
     own ``FSTAT_PEAK_MIN_SNR`` governs again.
+
+    All three declarations are applied at stage ENTRY, in
+    :meth:`note_recipe_step` (head-only), every time the step is announced
+    with a new serial. Production ``full_pe`` (``kind="pe"``) is built with
+    ``peak_min_snr=6.25``, ``pe_repeats={b: 25 for b in
+    PE_INMODEL_REPEATS_BRANCHES}`` (``PE_INMODEL_REPEATS=25``, branches
+    ``gb,vgb,sobbh,mbh,emri,psd,galfor``) and ``pe_rj_flip_fraction=0.1``
+    (``GB_PE_RJ_FLIP_FRACTION``).
+
+    Args:
+        *args: Forwarded to :class:`BaseRecipeStep` (ignored there).
+        peak_min_snr (float, optional): F-stat peak floor (SNR; F = SNR^2 / 2)
+            installed with ``set_peak_min_F_override`` at entry. ``None``
+            clears any search-stage override.
+        stage_name: Label for the ``[V9-STAGE <name>]`` log lines (default
+            ``"pe"``).
+        pe_repeats (dict, optional): ``{branch: n}`` in-model repeats, applied
+            with :func:`apply_inmodel_repeats` at entry. ``None`` / empty
+            leaves the moves as built.
+        pe_rj_flip_fraction (float, optional): GB RJ flip fraction in
+            ``(0, 1]``, applied with :func:`apply_rj_flip_fraction` at entry.
+        **kwargs: Forwarded to :class:`BaseRecipeStep` (``moves``,
+            ``weights``; anything else is ignored).
+
+    Raises:
+        ValueError: ``pe_rj_flip_fraction`` outside ``(0, 1]``.
     """
 
     def __init__(self, *args, peak_min_snr=None, stage_name: str = "",
@@ -1049,10 +1560,13 @@ class PERecipeStep(BaseRecipeStep):
         # move proposes on per propose in this stage (user ruling 2026-10-02:
         # "during full PE all RJ moves sample 0.1 of the available slots. This
         # is the FRAC env variable"). Declared per stage because the recipe
-        # BUILDS the PE-named RJ moves with the SEARCH default whenever the GB
-        # branch runs in search mode (``_rj_flip_default`` follows
-        # ``gb_info.mode``, not the move's name), so in a v9 search run
-        # GB_PE_RJ_FLIP_FRACTION=0.1 reached nothing until this.
+        # never BUILDS the PE-named RJ moves with GB_PE_RJ_FLIP_FRACTION in a
+        # search-mode run: ``_rj_flip_default`` follows ``gb_info.mode`` (the
+        # SEARCH default, GB_SEARCH_RJ_FLIP_FRACTION), and under
+        # GB_PE_MOVES_STRICT=1 (the v9 driver's setdefault) build_gb_moves
+        # replaces it with the CONSTANT _PE_RJ_FLIP_DEFAULT (0.2). Either way
+        # GB_PE_RJ_FLIP_FRACTION=0.1 reached nothing until this entry-time
+        # declaration.
         self.pe_rj_flip_fraction = (None if pe_rj_flip_fraction is None
                                     else float(pe_rj_flip_fraction))
         if self.pe_rj_flip_fraction is not None and not (
@@ -1062,8 +1576,18 @@ class PERecipeStep(BaseRecipeStep):
         self._profile_serial = None
 
     def note_recipe_step(self, serial) -> None:
-        """Apply this stage's declared peak floor and in-model repeats
-        (idempotent per step)."""
+        """Apply this stage's declared peak floor, in-model repeats and RJ flip
+        fraction (idempotent per step).
+
+        Called by :meth:`Recipe._announce_recipe_step` on the head at stage
+        entry (and again on a resume into the stage, which re-applies the
+        same values). Logs one ``[V9-STAGE <name>] entering`` line with the
+        floor in force.
+
+        Args:
+            serial (int): The step's index in the recipe; a repeat of the
+                last applied serial is a no-op.
+        """
         if serial is not None and serial == self._profile_serial:
             return
         self._profile_serial = serial
@@ -1108,6 +1632,21 @@ def apply_rj_flip_fraction(moves, fraction, tag: str = "pe") -> dict:
     carry the attribute and propose RJ (``is_rj_prop``); in-model GB moves
     and the fixed-leaf VGB branch (no RJ, fraction pinned to 1.0 by its
     resolver) are left alone. Returns ``{move name: (old, new)}``.
+
+    Called by :meth:`PERecipeStep.note_recipe_step` at ``full_pe`` entry
+    (production 0.1). The moves are shared across stages, so the value stays
+    until another stage writes it.
+
+    Args:
+        moves (list): A move tree (walked with :func:`iter_move_tree`).
+        fraction (float): New ``rj_flip_fraction``, in ``(0, 1]``.
+        tag: Stage label for the ``[V9-STAGE <tag>]`` log line.
+
+    Returns:
+        dict: ``{move name: (old, new)}`` for the moves that changed.
+
+    Raises:
+        ValueError: ``fraction`` outside ``(0, 1]``.
     """
     fraction = float(fraction)
     if not (0.0 < fraction <= 1.0):
@@ -1147,6 +1686,21 @@ def apply_inmodel_repeats(moves, repeats, tag: str = "pe") -> dict:
     the compute ranks through ``GB_RANK_LIVE_ATTRS``.
     Returns ``{move name: (old, new)}`` for what changed (a per-class change
     is keyed ``"<move>.newborn"`` / ``"<move>.survivor"``).
+
+    Called by :meth:`PERecipeStep.note_recipe_step` at ``full_pe`` entry
+    (production: 25 for ``gb,vgb,sobbh,mbh,emri,psd,galfor``).
+
+    Args:
+        moves (list): A move tree (walked with :func:`iter_move_tree`); a
+            move's branch is its ``branch_name`` attribute.
+        repeats (dict): ``{branch_name: n}`` with every ``n >= 1``.
+        tag: Stage label for the log lines.
+
+    Returns:
+        dict: ``{key: (old, new)}`` for what changed.
+
+    Raises:
+        ValueError: A repeat count below 1.
     """
     want = {str(k): int(v) for k, v in dict(repeats or {}).items()}
     for b, n in want.items():
@@ -1227,6 +1781,35 @@ def apply_inmodel_budget(gb_moves, budget, tag: str = "gb_search") -> dict:
     without a budget runs the constructor's -- the move objects are shared
     across stages and a later stage must not inherit an earlier one's
     budget. Returns ``{"<move>.<key>": (old, new)}`` for what changed.
+
+    Called by ``SearchStageProfileStep._apply_profile`` at EVERY entry of a
+    ``gb_search`` stage (resume included). The driver fills the key from
+    ``GB_SEARCH_{N}_NUM_REPEAT_PROPOSALS`` / ``_INMODEL_GROUP_ITERS`` /
+    ``_INMODEL_CONVERGE_ITERS`` and writes it only for the knobs that are set
+    (it has no default of its own). Production: the 9mo / 12mo launchers
+    default ``GB_SEARCH_2_NUM_REPEAT_PROPOSALS=30``,
+    ``GB_SEARCH_2_INMODEL_GROUP_ITERS=1`` and
+    ``GB_SEARCH_2_INMODEL_CONVERGE_ITERS=100`` (30 repeats x a 1-pass window
+    since 2026-10-21; 15 / 2 / 100 before), so ``gb_search_2`` gives
+    ``{"num_repeat_proposals": 30, "inmodel_group_iters": 1,
+    "inmodel_converge_iters": 100}``; ``gb_search_seed`` and ``gb_search_1``
+    give none and so restore the built values.
+
+    Args:
+        gb_moves (list): The stage's GB band moves (:func:`gb_moves_in_tree`).
+            ``num_repeat_proposals`` / ``inmodel_group_iters`` are written to
+            the moves with ``is_rj_prop`` False, ``inmodel_converge_iters``
+            to the RJ moves.
+        budget (dict, optional): ``{key: int}`` over
+            :data:`INMODEL_BUDGET_KEYS`, values >= 1; ``None`` restores every
+            key.
+        tag: Stage label for the log line.
+
+    Returns:
+        dict: ``{"<move>.<key>": (old, new)}`` for what changed.
+
+    Raises:
+        ValueError: An unknown key or a value below 1.
     """
     want = {}
     for k, v in dict(budget or {}).items():
@@ -1294,6 +1877,17 @@ def apply_fstat_refit_every(gb_moves, every, tag: str = "gb_search") -> dict:
     shared across stages and a later stage must not inherit an earlier
     one's cadence.
 
+    Called by ``SearchStageProfileStep._apply_profile`` at every entry of a
+    ``gb_search`` stage, with the profile's ``fstat_refit_every`` (None when
+    the stage has none). The driver writes that key only when
+    ``GB_SEARCH_{N}_FSTAT_REFIT_EVERY`` is set. Production: the 9mo / 12mo
+    launchers default ``GB_SEARCH_2_FSTAT_REFIT_EVERY=4`` (``gb_search_2``
+    refits every second cycle) and export ``GB_FSTAT_REFIT_EVERY=2``, the
+    built cadence that ``gb_search_seed`` / ``gb_search_1`` get back (every
+    cycle). Only moves that carry a ``fstat_refit_every`` attribute are
+    considered (the F-stat grid moves, e.g. ``rj_fstat_search``); every
+    other move is skipped.
+
     Args:
         gb_moves (list): The stage's GB band moves (:func:`gb_moves_in_tree`).
         every (int, optional): The stage's cadence in refit-clock ticks,
@@ -1301,10 +1895,25 @@ def apply_fstat_refit_every(gb_moves, every, tag: str = "gb_search") -> dict:
         tag: Stage label for the log line.
 
     Returns:
-        dict: ``{"<move>.fstat_refit_every": (old, new)}`` for what changed.
+        dict: ``{"<move>.fstat_refit_every": (old, new)}`` for what changed
+        (empty when nothing did). A non-empty result is also logged as one
+        INFO line, e.g. ``[V9-STAGE gb_search_2] F-stat refit cadence set on
+        entry (the stage's value): rj_fstat_search.fstat_refit_every 2 -> 4``.
 
     Raises:
         ValueError: ``every`` below 1.
+
+    Example:
+        A stand-in move built with cadence 2: the stage value is written, and a
+        stage without the key restores the built one.
+
+        >>> from types import SimpleNamespace
+        >>> from lisatools.globalfit.recipe import apply_fstat_refit_every
+        >>> grid = SimpleNamespace(name="grid", fstat_refit_every=2)
+        >>> apply_fstat_refit_every([grid], 4, tag="gb_search_2")
+        {'grid.fstat_refit_every': (2, 4)}
+        >>> apply_fstat_refit_every([grid], None, tag="gb_search_1")
+        {'grid.fstat_refit_every': (4, 2)}
     """
     want = None
     if every is not None:
@@ -1368,6 +1977,30 @@ class ReplicaPERecipeStep(PERecipeStep):
     must be stored in the stage first (default: the window). One log line per
     iteration carries all six values and trends, so the log reads the same
     numbers the stop reads.
+
+    Stage kind ``"replica_pe"`` (runtime kind ``"pe"``). Composed by the
+    driver when ``STAGE_REPLICA_PE`` is on (driver default ``"1"``); the 9mo /
+    12mo launchers export ``STAGE_REPLICA_PE=0``, so production has no
+    replica stage. The driver fills the stop knobs from ``REPLICA_PE_WINDOW``
+    (10), ``REPLICA_PE_LEAF_TOL`` (10), ``REPLICA_PE_LNL_TOL`` (100) and
+    ``REPLICA_PE_MIN_ITERS`` (= the window).
+
+    Args:
+        *args: Forwarded to :class:`PERecipeStep`.
+        window: Rows the trends are fitted over (>= 3).
+        leaf_tol: Largest allowed total change over the window of the cold
+            leaf count's min / mean / max over walkers (leaves, > 0).
+        lnl_tol: Same for the cold log-likelihood's min / mean / max (nats,
+            > 0).
+        min_iters (int, optional): Rows that must be stored in the stage
+            before the check runs; at least ``window``.
+        plateau_branch: Branch whose cold leaf count is read (default
+            ``"gb"``).
+        **kwargs: Forwarded to :class:`PERecipeStep` (``peak_min_snr``,
+            ``stage_name``, ``pe_repeats``, ``pe_rj_flip_fraction``, ``moves``).
+
+    Raises:
+        ValueError: ``window < 3`` or a non-positive tolerance.
     """
 
     def __init__(self, *args, window: int = 10, leaf_tol: float = 10.0,
@@ -1387,6 +2020,7 @@ class ReplicaPERecipeStep(PERecipeStep):
         self._stage_start_iter = 0
 
     def setup_run(self, iteration, last_sample, sampler):
+        """Install the moves and latch the stage's first row (``iteration``)."""
         super().setup_run(iteration, last_sample, sampler)
         self._stage_start_iter = int(iteration)
 
@@ -1420,6 +2054,19 @@ class ReplicaPERecipeStep(PERecipeStep):
         return nl[:n], ll[:n]
 
     def stopping_function(self, i, sample, sampler) -> bool:
+        """The trend rule above; True ends the stage (``[REPLICA_PE]`` log lines).
+
+        Holds the stage open (False) while fewer than ``min_iters`` rows are
+        stored in the stage, and when the store cannot be read.
+
+        Args:
+            i (int): Iteration index (unused; the store is read instead).
+            sample (GFState): Current state (unused).
+            sampler (GlobalFitEngine): The sampler whose ``backend`` is read.
+
+        Returns:
+            bool: True when all six trends are within tolerance.
+        """
         tag = self.stage_name or "replica_pe"
         try:
             nl, ll = self.metrics(sampler)
@@ -1467,6 +2114,14 @@ def _cap_ramp_pending_total(moves) -> int:
     increment (armed, mid patience window, occupied at cap, below ceiling)
     at the end of every cap update; anything without the attribute
     contributes 0. Weighted ``(move, weight)`` entries are unwrapped.
+
+    Read by the cap-quiescence veto of :meth:`RJRecipeStep.stopping_function`
+    (``GB_SEARCH_CAP_QUIESCENT``, code default ``"1"``; the 9mo / 12mo
+    launchers export 0 and run with leaf caps off, so it is not consulted
+    there).
+
+    Returns:
+        int: Total pending cap cells (0 = quiescent).
     """
     total = 0
     for m in list(moves or []):
@@ -1484,6 +2139,13 @@ def _cap_headroom_deficit_total(moves) -> int:
     OCCUPIED sub-bands that lack the required cap headroom (cap - maxocc <
     headroom, below the ceiling); anything without the attribute contributes
     0. Weighted ``(move, weight)`` entries are unwrapped.
+
+    Read only by the cap-headroom veto of :meth:`RJRecipeStep.stopping_function`,
+    armed by ``GB_SEARCH_CAP_HEADROOM`` > 0 (code default 0; not set by the
+    9mo / 12mo launchers).
+
+    Returns:
+        int: Total occupied sub-bands short of headroom.
     """
     total = 0
     for m in list(moves or []):
@@ -1536,11 +2198,27 @@ def band_shutoff_w_pending_total(moves) -> int:
     unnoticed; the human-facing count and the monitor's "pending" trace do
     not. Moves are deduplicated by the identity of the table they publish
     against, falling back to the move's own identity when it exposes none.
+
+    WHO PUBLISHES. Only a move that runs the valve judge publishes the
+    counter: the judge rides the designated cap updater (the one GB move
+    built with ``leaf_cap_update`` on) and needs ``search_shutoff_per_walker``
+    (``GB_SEARCH_BAND_SHUTOFF_PER_WALKER``, production 1), ``search_mode``
+    and ``is_rj_prop``. In the production stages that is ``rj_fstat_search``
+    (``gb_search_1`` / ``gb_search_2``); ``gb_search_seed`` carries no such
+    move (``rj_warm_search`` is built ``leaf_cap_update=False``).
+
+    Args:
+        moves (list): A move tree (``sampler.moves`` of the stage).
+
+    Returns:
+        int: Occupied cold-chain (walker, band) pairs not yet shut, counted
+        once per valve table.
     """
     return _band_shutoff_w_pending(moves, set())
 
 
 def _band_shutoff_w_pending(moves, seen) -> int:
+    """Recursive body of :func:`band_shutoff_w_pending_total`; ``seen``: table ids counted."""
     total = 0
     for m in list(moves or []):
         if isinstance(m, (tuple, list)) and m:
@@ -1563,6 +2241,16 @@ def band_shutoff_w_armed(moves) -> bool:
     that makes it safe to use as a stage criterion: the pending count is 0
     both when everything has converged and when nothing is armed, and only
     this can tell those apart.
+
+    "Live" means some move in the tree has published a (non-``None``)
+    ``_shutoff_w_pending``; a move whose valve was just released at step
+    entry reads ``None`` again until its next judge.
+
+    Args:
+        moves (list): A move tree (``sampler.moves`` of the stage).
+
+    Returns:
+        bool: True when at least one move publishes the counter.
     """
     for m in list(moves or []):
         if isinstance(m, (tuple, list)) and m:
@@ -1595,6 +2283,10 @@ def begin_search_recipe_step(moves, serial) -> None:
     re-announcing an already-active step does not wipe a valve that step
     earned -- which is what makes "hold for the whole step, release at the
     next one" true across a resume and not only within one process.
+
+    Args:
+        moves (list): A move tree (the step's ``moves``).
+        serial (int): The step's index in the recipe.
     """
     for m in list(moves or []):
         if isinstance(m, (tuple, list)) and m:
@@ -1612,6 +2304,13 @@ def iter_move_tree(moves):
     a ``(move, weight)`` tuple. Same unwrapping as
     :func:`_cap_ramp_pending_total` and friends, factored out because the v9
     stage profile needs to WRITE to the tree rather than sum over it.
+
+    Args:
+        moves (list, optional): Moves or ``(move, weight)`` tuples; ``None``
+            yields nothing.
+
+    Yields:
+        object: Each move, parents before their children (depth first).
     """
     for m in list(moves or []):
         if isinstance(m, (tuple, list)) and m:
@@ -1631,6 +2330,13 @@ def gb_moves_in_tree(moves):
     their own value (``VGB_OPT_SNR_LIMIT``, default 0.0 = off); writing the GB
     floor onto them would silently arm an SNR gate the VGB branch has never
     had, on 55 KNOWN sources that must not be gated at all.
+
+    Args:
+        moves (list): A move tree.
+
+    Yields:
+        GBSpecialBase: Each GB band move (RJ and pure in-model alike), in
+        tree order. A move shared by several slots is yielded once per slot.
     """
     for m in iter_move_tree(moves):
         if (getattr(m, "branch_name", None) == "gb"
@@ -1648,6 +2354,22 @@ def force_fstat_refit(moves, serial, reason: str = "", hard: bool = False) -> in
 
     ``hard=True`` arms the age-ignoring form (the galfor ratchet: the noise
     curve changed, so the latest epoch is wrong however fresh it is).
+
+    Production caller: ``SearchStageProfileStep._apply_profile`` when a stage
+    entry CHANGES the F-stat peak floor (unset -> SNR 8 at ``gb_search_seed``,
+    where the tree carries no grid move and 0 is returned; 8 -> 6.25 at
+    ``gb_search_2``). The ``hard=True`` caller is the ratchet only.
+
+    Args:
+        moves (list): A move tree; every move with a callable
+            ``arm_fstat_refit`` is armed.
+        serial (int | tuple): Identifies the request (the step serial, or the
+            ratchet's tuple); ``arm_fstat_refit`` is idempotent per serial.
+        reason: Text for the move's log line.
+        hard: Arm with ``ignore_age=True``.
+
+    Returns:
+        int: Number of moves armed.
     """
     n = 0
     for m in iter_move_tree(moves):
@@ -1679,6 +2401,18 @@ def reset_band_logl_max(state, branch: str = "gb") -> int:
 
     Returns the number of entries reset, 0 when the state carries no such
     array (valve off, or a fake state).
+
+    Production caller: ``SearchStageProfileStep._reset_valves_at_entry``
+    (``gb_search_2``'s fresh entry, ``GB_SEARCH_2_RESET_VALVES=1``). The
+    ``reset_band_max`` profile key (every entry) belongs to ``gb_search_3``,
+    which the 9mo / 12mo runs do not compose.
+
+    Args:
+        state (GFState): The live state the moves bind (``None`` -> 0).
+        branch: Sub-state holding the valve (default ``"gb"``).
+
+    Returns:
+        int: Entries set to ``-inf``.
     """
     try:
         bi = state.sub_states[branch].band_info
@@ -1702,6 +2436,13 @@ def revive_band_shutoff_on_state(state, branch: str = "gb") -> int:
     adopted the record adopts it from ``band_info`` at its first propose, and
     would otherwise re-install the previous stage's shut set. Returns how many
     bands were off; 0 when the state carries no record.
+
+    Args:
+        state (GFState): The live state (``None`` -> 0).
+        branch: Sub-state holding the record (default ``"gb"``).
+
+    Returns:
+        int: Number of bands that were shut before the revive.
     """
     try:
         bi = state.sub_states[branch].band_info
@@ -1747,6 +2488,19 @@ def release_band_shutoff_window(state, serial, branch: str = "gb"):
     re-stamp; same stamp (a resume inside the step) -> honour it. In place,
     so the saver persists the release and the RJ move's own bind then sees a
     matching stamp and releases nothing twice.
+
+    Called by ``SearchStageProfileStep.note_recipe_step`` at every
+    ``gb_search`` stage entry (log ``per-walker RJ valve RELEASED at step
+    entry``).
+
+    Args:
+        state (GFState): The live state (``None`` or no valve -> no-op).
+        serial (int): The new step's index; ``None`` -> no-op.
+        branch: Sub-state holding the valve (default ``"gb"``).
+
+    Returns:
+        tuple[int, bool]: ``(pairs that were shut, whether a release
+        happened)``.
     """
     if serial is None:
         return 0, False
@@ -1775,6 +2529,7 @@ def release_band_shutoff_window(state, serial, branch: str = "gb"):
     return n, True
 
 
+# TODO check: keep/remove/document -- only caller SearchStageProfileStep._ratchet_shutoff_floor (galfor ratchet; GALFOR_RATCHET=0 in the 9mo/12mo runs)
 def apply_shutoff_floor_to_state(state, fmin_hz, band_edges=None, branch: str = "gb"):
     """Reopen the live valve below ``fmin_hz`` NOW, on the state the moves bind.
 
@@ -1839,7 +2594,11 @@ def apply_shutoff_floor_to_state(state, fmin_hz, band_edges=None, branch: str = 
 def _arm_cap_headroom_grant(moves) -> None:
     """Set the one-shot ``_grant_cap_headroom`` flag on every move in the tree
     that publishes a headroom deficit, so the next cap update grants +1 slot to
-    saturated occupied cells (letting the search try to fill the new headroom)."""
+    saturated occupied cells (letting the search try to fill the new headroom).
+
+    Called only by the cap-headroom veto of
+    :meth:`RJRecipeStep.stopping_function` (``GB_SEARCH_CAP_HEADROOM`` > 0;
+    off by default and in the 9mo / 12mo runs)."""
     for m in list(moves or []):
         if isinstance(m, (tuple, list)) and m:
             m = m[0]
@@ -1851,10 +2610,58 @@ def _arm_cap_headroom_grant(moves) -> None:
 class RJRecipeStep(BaseRecipeStep):
     """Reversible-jump recipe step that stops once GB leaf count plateaus.
 
+    THE PLATEAU RULE (:meth:`stopping_function`). With ``s`` the stage's
+    first row (latched in :meth:`setup_run`) and ``n = backend.iteration``,
+    nothing is evaluated until ``n - s > 2 * convergence_iter``. Then, over
+    the cold-chain leaf counts of ``plateau_branch`` stored since ``s``, the
+    stage may stop when the maximum (over walkers and rows) of the last
+    ``convergence_iter`` rows does not exceed the maximum of the rows before
+    them, and never while that recent maximum is 0 (a search that has found
+    nothing has not started). Two vetoes can then hold it open:
+
+    * cap quiescence (``GB_SEARCH_CAP_QUIESCENT``, code default ``"1"``):
+      hold while any move reports cap cells mid patience window
+      (:func:`_cap_ramp_pending_total`);
+    * cap headroom (``GB_SEARCH_CAP_HEADROOM`` > 0, default 0): hold while
+      occupied sub-bands lack headroom, arming a +1 cap grant.
+
+    ``convergence_fn`` replaces the whole rule (vetoes included).
+
+    Stock kind ``"rj"``; base of :class:`SearchStageProfileStep` (kind
+    ``"gb_search"``). In the 9mo / 12mo runs the launchers set
+    ``GB_PLATEAU_ITERS=20`` (the driver's ``convergence_iter``),
+    ``GB_SEARCH_CAP_QUIESCENT=0`` and no headroom, so for ``gb_search_1`` /
+    ``gb_search_2`` this is the bare plateau rule, and ``gb_search_seed``
+    replaces it with the driver's ``FixedIterationStop``.
+
     Args:
+        *args: Forwarded to :class:`BaseRecipeStep` (ignored there).
         convergence_iter: Window length used to compare older vs newer
-            cold-chain max leaf counts.
-        thin_by: Forwarded thinning factor applied to the sampler.
+            cold-chain max leaf counts (rows). Default 5.
+        thin_by: Forwarded thinning factor applied to the sampler
+            (``yield_step`` and ``checkpoint_step``). Default 1.
+        plateau_branch: Branch whose cold-chain leaf count is monitored.
+            Default ``"gb"``.
+        convergence_fn: ``fn(i, sample, sampler) -> bool``
+            that fully replaces the plateau rule and both vetoes (e.g. the
+            driver's ``FixedIterationStop(n)``).
+        **kwargs: Forwarded to :class:`BaseRecipeStep` (``moves``,
+            ``weights``; anything else is ignored).
+
+    Example:
+        A stage of this kind, ending on a 20-row plateau of the GB leaf count:
+
+        .. code-block:: python
+
+            from lisatools.globalfit import Move, Stage
+
+            Stage(
+                name="gb_search", kind="rj",
+                moves=[Move("rj_fstat_search", branch="gb"),
+                       Move("rj_prior_removal", branch="gb")],
+                step_kwargs=dict(plateau_branch="gb", convergence_iter=20),
+                combine_kwargs=dict(share_temperature_control=False),
+            )
     """
 
     def __init__(
@@ -1884,7 +2691,23 @@ class RJRecipeStep(BaseRecipeStep):
         sample,
         sampler: GlobalFitEngine
     ) -> bool:
-        """Stop when the cold chain stops growing in number of leaves."""
+        """Stop when the cold chain stops growing in number of leaves.
+
+        The plateau rule and the two cap vetoes described in the class
+        docstring, or ``convergence_fn(i, sample, sampler)`` when one was
+        given. Logs ``Previous nleaves: ... --> new nleaves: ...`` whenever
+        the plateau is evaluated.
+
+        Args:
+            i (int): Iteration index (passed to ``convergence_fn`` only).
+            sample (GFState): Current state (passed to ``convergence_fn`` only).
+            sampler: The sampler; ``sampler.backend`` supplies
+                ``iteration`` and ``get_nleaves``, ``sampler.moves`` the tree
+                the vetoes read.
+
+        Returns:
+            bool: True when the stage may end.
+        """
 
         if self.convergence_fn is not None:
             return self.convergence_fn(i, sample, sampler)
@@ -1976,7 +2799,30 @@ class RJRecipeStep(BaseRecipeStep):
         last_sample,
         sampler: GlobalFitEngine
     ):
-        """Configure the sampler for this RJ recipe step (moves, weights, thinning)."""
+        """Configure the sampler for this RJ recipe step (moves, weights, thinning).
+
+        Latches ``_stage_start_iter = sampler.backend.iteration`` (the
+        plateau window's origin). With ``GF_PERSIST_STAGE_START`` in
+        ``1/true/yes/on`` (code default ``"0"``; the 9mo / 12mo launchers
+        export 1) and a step name (``stage_name``: set by
+        :class:`SearchStageProfileStep`; a plain ``"rj"`` step has none and
+        skips this block), the stored start of this
+        stage (``backend.stage_start_iteration``) replaces it, or the live
+        value is stamped (``backend.stamp_stage_start``) when none is
+        stored; a stored start past the live iteration is ignored. Then
+        installs moves, weights and ``thin_by`` on the sampler and gives
+        every move the sampler's periodicity and temperature control when
+        the move has none.
+
+        Runs on every rank (compute ranks against a shell engine whose
+        backend has no stage stamps, so the persistence block is inert
+        there).
+
+        Args:
+            iteration (int): Current iteration (unused; the backend's is read).
+            last_sample (GFState): Current state (unused here).
+            sampler: The sampler being reconfigured.
+        """
         # Stage-scope the plateau window: the backend's nleaves history
         # spans the WHOLE run, so without this anchor the first check
         # compares pre-stage iterations (0 leaves during the noise stages)
@@ -2011,6 +2857,8 @@ class RJRecipeStep(BaseRecipeStep):
         # inert there and the store is never touched off the head.
         if os.environ.get("GF_PERSIST_STAGE_START", "0").strip() in (
                 "1", "true", "True", "yes", "on"):
+            # ``_current_step_name`` is never assigned anywhere in the
+            # package, so in practice the name is ``stage_name`` or nothing.
             _name = getattr(self, "stage_name", None) or getattr(
                 self, "_current_step_name", None)
             if _name:
@@ -2061,7 +2909,8 @@ class SearchStageProfileStep(RJRecipeStep):
     """An RJ step that also owns a per-stage GB SEARCH PROFILE (v9).
 
     The v9 restructure (user spec 2026-09-24) replaces the single
-    ``gb_search`` stage with three, differing ONLY in four knobs:
+    ``gb_search`` stage with three, differing ONLY in four knobs (the
+    driver's ``V9_SEARCH_STAGE_PROFILES`` table):
 
     ======================  =========  =========  =========  ===========
     stage                   noise      phase max  opt SNR    F-stat peak
@@ -2070,6 +2919,20 @@ class SearchStageProfileStep(RJRecipeStep):
     ``gb_search_2``         fixed      off        5          6.25
     ``gb_search_3``         sampled    off        5          6.25
     ======================  =========  =========  =========  ===========
+
+    The 9mo / 12mo production runs compose ``gb_search_seed`` (gb_search_1's
+    profile verbatim, fixed length ``FixedIterationStop(GB_SEARCH_SEED_ITERS=3)``,
+    which ends after the 4th iteration because it latches its start at its
+    first call), ``gb_search_1`` and ``gb_search_2`` (``GB_SEARCH_STAGES=1,2``;
+    no ``gb_search_3``). ``gb_search_2`` adds ``prior_births=True``,
+    ``reset_valves=True`` (``GB_SEARCH_2_RESET_VALVES=1``),
+    ``inmodel_budget={num_repeat_proposals: 30, inmodel_group_iters: 1,
+    inmodel_converge_iters: 100}`` (the launcher defaults since 2026-10-21;
+    15 / 2 / 100 before) and ``fstat_refit_every=4``
+    (``GB_SEARCH_2_FSTAT_REFIT_EVERY``: an F-stat refit every second cycle),
+    and its move list ends with one cycle-end noise search
+    (``GB_SEARCH_2_NOISE_MODE=cycle_end``), so the "fixed" noise column above
+    is a stage-3-era statement.
 
     Noise fixed-vs-sampled is a MOVE-LIST difference (an unsampled branch
     does not move), so it is handled by the driver. The other three are
@@ -2087,10 +2950,13 @@ class SearchStageProfileStep(RJRecipeStep):
       BOUNDARY, not a per-move heuristic: a birth move and an in-model move
       disagreeing about where the prior ends would let a source be walked
       into a region the move that birthed it treats as zero-prior.
-    * ``phase_maximize`` -> the **RJ moves only** (``is_rj_prop``). The pure
-      in-model move is constructed ``phase_maximize=False`` deliberately
-      ("in-model scoring is at the actual phase") and that is not a stage
-      choice to make; phase maximization is a BIRTH heuristic.
+    * ``phase_maximize`` -> **every GB-branch band move** in the stage,
+      the pure in-model slots included (user ruling 2026-09-25: "all the GB
+      proposals in the gb search 1 should be phase maximized"); a stage
+      that gives False turns every flag back off. The constructors keep
+      ``phase_maximize=False`` on the in-model moves, so a recipe without
+      a profile keeps the old behaviour. The REMOVED source of a death or a
+      replace swap is always scored at its actual phase, inside the moves.
     * ``peak_min_snr`` -> the process-wide F-stat peak floor
       (:func:`lisatools.sampling.fstat_proposal.set_peak_min_F_override`)
       plus, on a CHANGE, a forced fresh-epoch refit
@@ -2098,23 +2964,112 @@ class SearchStageProfileStep(RJRecipeStep):
       FITTED and stamped into the stage-B cache, whose loader refuses a
       mismatch -- so moving it without a refit either silently reuses the
       old peak list or hard-refuses. See ``arm_fstat_refit``.
+    * ``prior_births`` -> ``rj_removal_only = not prior_births`` on the move
+      named ``rj_prior_removal`` only (False = deaths only, True = prior
+      births and deaths).
+    * ``inmodel_budget`` -> :func:`apply_inmodel_budget` (a stage without the
+      key restores the built values).
+    * ``fstat_refit_every`` -> :func:`apply_fstat_refit_every`: the F-stat
+      refit cadence (refit-clock ticks) of every stage move that carries one
+      and was built with a positive cadence, written before the peak-floor
+      block; a stage without the key restores the built cadence
+      (``GB_FSTAT_REFIT_EVERY``).
 
     Every mutation prints one ``[V9-STAGE]`` line naming stage, knob, old and
     new value. This machinery is otherwise invisible, and a profile that
     silently failed to apply would look exactly like a normal run.
 
-    STOPPING. The stage ends when the nleaves plateau AND the
-    per-(walker, band) RJ shutoff valve both say so -- see
-    :meth:`stopping_function`.
+    STAGE ENTRY (:meth:`note_recipe_step`, head only, once per step serial):
+    apply the profile; release the per-(walker, band) valve on the live state
+    (:func:`release_band_shutoff_window`); ``reset_band_max`` ->
+    :func:`reset_band_logl_max`; ``reset_valves`` ->
+    :meth:`_reset_valves_at_entry` (fresh entry only); position the leg
+    cursor (``legs``); drive the galfor ratchet (only when one is given).
+
+    STOPPING (:meth:`_stopping_rules`, wrapped by :meth:`stopping_function`).
+    First the :class:`RJRecipeStep` rule (``convergence_fn`` when given, else
+    the nleaves plateau over ``convergence_iter`` rows). Then the
+    per-(walker, band) valve, consulted only when
+    :func:`band_shutoff_w_armed` is True for the stage's moves:
+
+    * ``GB_SEARCH_STAGE_END_ON_SHUTOFF`` (default ``"1"``; ``0`` / ``false``
+      / ``no`` / ``off`` / empty disable): when the first rule says
+      "continue", the stage ENDS anyway once
+      :func:`band_shutoff_w_pending_total` is 0 and the stage has stored at
+      least one cold leaf (``STAGE COMPLETE on the SHUTOFF rule alone``);
+    * when the first rule says "stop" but occupied pairs are still pending,
+      the stage is HELD OPEN.
+
+    With the valve not armed the first rule decides alone. In production the
+    valve is owned by ``rj_fstat_search``, so ``gb_search_1`` / ``gb_search_2``
+    normally end on the shutoff rule; ``gb_search_seed`` has no valve owner
+    (its only RJ move, ``rj_warm_search``, is built ``leaf_cap_update=False``),
+    so ``FixedIterationStop`` decides it alone.
 
     Args:
-        profile: ``{"phase_maximize": bool|None, "opt_snr": float|None,
-            "peak_min_snr": float|None}``. ``None`` for a key means "leave
-            it alone", which is how a stage opts out of owning a knob.
-            Entry-time keys: ``reset_band_max`` (every entry),
+        *args: Forwarded to :class:`RJRecipeStep`.
+        profile: ``{"phase_maximize": bool|None, "opt_snr":
+            float|None, "peak_min_snr": float|None}``. ``None`` for a key
+            means "leave it alone", which is how a stage opts out of owning a
+            knob. Further keys: ``reset_band_max`` (every entry),
             ``prior_births`` (move-scoped), ``reset_valves`` (fresh entry
-            only; :meth:`_reset_valves_at_entry`).
-        stage_name: label for the log lines.
+            only; :meth:`_reset_valves_at_entry`), ``inmodel_budget`` (every
+            entry), ``fstat_refit_every`` (every entry;
+            :func:`apply_fstat_refit_every`). Any other key raises.
+        stage_name: Label for the log lines; also the store key for the
+            stage-start stamp, the move-order stamp and the ratchet flag.
+        ratchet (noise_ratchet.RatchetSchedule, optional): The galfor ratchet
+            schedule; ``None`` (production, ``GALFOR_RATCHET=0``) disables
+            every ratchet path.
+        ratchet_delta (array_like, optional): Per-nudge galfor shift in the
+            sampled basis.
+        ratchet_min_gain: Nats; the ``"gain"`` stop rule's threshold (0 = off).
+        ratchet_min_nudges: Nudges that must run in this process before any
+            stop rule may end the ratchet.
+        ratchet_stop_rule: ``"gain"`` (default), ``"galfor"`` or ``"off"``
+            (``noise_ratchet.STOP_RULES``).
+        ratchet_min_drop: The ``"galfor"`` rule's fractional foreground drop,
+            in ``(0, 1)`` when that rule is used with a ratchet.
+        ratchet_drop_band (tuple[float, float], optional): ``(f_lo, f_hi)`` Hz
+            for the ``"galfor"`` rule; default ``(3e-3, 5e-3)``.
+        ratchet_end_stage_on_stop: End the stage when the ratchet stops.
+        legs: The stage combine carries a leg cursor (``GB_SEARCH_LEGS=1``;
+            production True for ``gb_search_1`` / ``gb_search_2``).
+        **kwargs: Forwarded to :class:`RJRecipeStep` (``convergence_iter``,
+            ``thin_by``, ``plateau_branch``, ``convergence_fn``, ``moves``).
+
+    Raises:
+        ValueError: An unknown profile key, an unknown
+            ``ratchet_stop_rule``, a bad ``ratchet_min_drop`` with the
+            ``"galfor"`` rule, or a bad ``ratchet_drop_band``.
+
+    Example:
+        ``gb_search_1`` as the production driver composes it (move list
+        shortened):
+
+        .. code-block:: python
+
+            from lisatools.globalfit import Move, Stage
+
+            Stage(
+                name="gb_search_1", kind="gb_search",
+                moves=[Move("vgb_pe", branch="vgb"),
+                       Move("rj_warm_search", branch="gb"),
+                       Move("in_model", branch="gb"),
+                       Move("rj_fstat_search", branch="gb"),
+                       Move("in_model_fstat", branch="gb"),
+                       Move("rj_prior_removal", branch="gb"),
+                       Move("in_model_removal", branch="gb"),
+                       Move("mbh_pe", branch="mbh")],
+                step_kwargs=dict(
+                    plateau_branch="gb", convergence_iter=20,
+                    stage_name="gb_search_1",
+                    profile=dict(phase_maximize=True, opt_snr=8.0,
+                                 peak_min_snr=8.0, prior_births=False),
+                    legs=True),
+                combine_kwargs=dict(share_temperature_control=False,
+                                    leg_ends="auto"),
+            )
     """
 
     def __init__(self, *args, profile: typing.Optional[dict] = None,
@@ -2139,8 +3094,8 @@ class SearchStageProfileStep(RJRecipeStep):
         #: Step serial the profile was last applied for (idempotence across a
         #: mid-step resume, which re-announces the ACTIVE step).
         self._profile_serial = None
-        #: Whether this step has ever been announced. Read by the
-        #: ``stopping_function`` guard below.
+        #: Whether this step has ever been announced (set in
+        #: ``note_recipe_step``). Nothing in the package reads it today.
         self._profile_applied = False
         # ---- the galfor RATCHET (user design 2026-09-30) -------------------
         # ``ratchet`` is a ``noise_ratchet.RatchetSchedule`` (or None = off);
@@ -2384,6 +3339,9 @@ class SearchStageProfileStep(RJRecipeStep):
     # ---- the galfor ratchet -----------------------------------------------
 
     def setup_run(self, iteration, last_sample, sampler):
+        """:meth:`RJRecipeStep.setup_run`, then stash ``iteration``, the backend
+        and ``last_sample`` for the head-only stage-entry hook
+        (:meth:`note_recipe_step`)."""
         super().setup_run(iteration, last_sample, sampler)
         # Stash what the HEAD-ONLY announce path needs. ⚠ setup_run itself
         # runs on every compute rank too (run.py's build loop calls it with
@@ -2401,6 +3359,14 @@ class SearchStageProfileStep(RJRecipeStep):
         head's transition path, and by the rewind tool), so a resume lands in
         the right phase of the schedule instead of nudging again. Falls back
         to the live stage start when the store carries no stamp.
+
+        Despite the name it is also the legs' origin: :meth:`_legs_enter`
+        reads the rows ``[origin, live)`` of this stage from it (production
+        path; the ratchet itself is off).
+
+        Returns:
+            int: The stage's first stored row (a stamp ahead of the live
+            iteration is ignored).
         """
         live = int(getattr(self, "_stage_start_iter", 0))
         be = getattr(self, "_ratchet_backend", None)
@@ -2698,6 +3664,7 @@ class SearchStageProfileStep(RJRecipeStep):
             return None
 
     def _ratchet_gate(self, moves):
+        """The tree's ``NoiseRatchetGate`` (the gated noise head), or ``None``."""
         from .noise_ratchet import is_noise_ratchet_gate
 
         for m in iter_move_tree(moves):
@@ -2923,6 +3890,25 @@ class SearchStageProfileStep(RJRecipeStep):
             logger.debug("[GALFOR_RATCHET] readout skipped: %r", e)
 
     def _apply_profile(self, serial) -> None:
+        """Write :attr:`profile` onto this stage's GB band moves (see the class docstring).
+
+        Order: ``opt_snr`` -> ``opt_snr_rej_samp_limit`` on every GB band
+        move (with a WARNING when a per-(walker, band) floor table shadows
+        it); ``prior_births`` -> ``rj_prior_removal.rj_removal_only``;
+        ``phase_maximize`` on every GB band move; :func:`apply_inmodel_budget`
+        (always called, so a stage without ``inmodel_budget`` restores the
+        built values); :func:`apply_fstat_refit_every` (always called, the
+        same restore rule); ``peak_min_snr`` -> the process-wide floor override
+        and, when the floor changed, :func:`force_fstat_refit` (a WARNING
+        when no grid move exists to refit, as in ``gb_search_seed``).
+
+        Args:
+            serial (int): The step serial, used as the refit request id.
+
+        Raises:
+            ValueError: ``prior_births=False`` on a move built with
+                ``rj_replace`` (the two are mutually exclusive).
+        """
         tag = self.stage_name or "gb_search"
         prof = self.profile
         gb_moves = list(gb_moves_in_tree(self.moves))
@@ -3097,7 +4083,21 @@ class SearchStageProfileStep(RJRecipeStep):
         ratchet layered on top: the stage-local clock advances by one per
         call, the readout line is written, the stage is HELD OPEN while the
         ratchet schedule is still pending, and the gate is driven for the
-        iteration about to start."""
+        iteration about to start.
+
+        With ``ratchet=None`` (production) this returns
+        :meth:`_stopping_rules` unchanged. Under legs it is called at every
+        leg end (one stored row each), so the plateau and valve rules are
+        evaluated per row, not per cycle.
+
+        Args:
+            i (int): Iteration index.
+            sample (GFState): The state after the iteration (or leg).
+            sampler (GlobalFitEngine): The sampler (``backend``, ``moves``).
+
+        Returns:
+            bool: True ends the stage.
+        """
         stop = self._stopping_rules(i, sample, sampler)
         # getattr: fake-based suites build this step without __init__
         if getattr(self, "ratchet", None) is None:
@@ -3170,6 +4170,19 @@ class SearchStageProfileStep(RJRecipeStep):
         * ⚠ ``band_shutoff_w_armed`` is MANDATORY. ``pending_total`` returns
           0 both when everything converged and when the feature is off, and
           the second reading would end every stage at its first check.
+
+        Since 2026-09-26 the valve can also end the stage ALONE
+        (``GB_SEARCH_STAGE_END_ON_SHUTOFF``, default on): when the
+        :class:`RJRecipeStep` rule says "continue", the valve is armed, no
+        occupied pair is pending and the stage has stored at least one cold
+        leaf, the stage completes. When that rule says "stop" while pairs are
+        still pending, the stage is held open. Unarmed, the
+        :class:`RJRecipeStep` rule decides alone. Logs ``[V9-STAGE <name>]
+        STAGE COMPLETE ...`` on every end, and ``running: N occupied
+        (walker, band) pair(s) still active`` every 10th iteration.
+
+        Returns:
+            bool: True ends the stage.
         """
         stop = super().stopping_function(i, sample, sampler)
         moves = getattr(sampler, "moves", None)
@@ -3256,6 +4269,7 @@ class SearchStageProfileStep(RJRecipeStep):
         return stop
 
 
+#: ``Stage.kind`` -> the :class:`RecipeStep` subclass :meth:`Stage.setup` builds.
 _STEP_CLASSES = {
     "search": SearchRecipeStep,
     "pe": PERecipeStep,
@@ -3278,29 +4292,64 @@ class Stage:
     recipe advances past it:
 
     * ``"search"`` -> :class:`SearchRecipeStep` (the move runs its search to
-      completion internally; the stage is done on its first check);
-    * ``"pe"`` -> :class:`PERecipeStep` (runs indefinitely);
+      completion internally; the stage is done on its first check, or, for a
+      chunked search, when every move reports ``maxlogl_plateau_done``);
+    * ``"pe"`` -> :class:`PERecipeStep` (runs indefinitely; ``step_kwargs``
+      ``peak_min_snr`` / ``stage_name`` / ``pe_repeats`` /
+      ``pe_rj_flip_fraction``);
     * ``"rj"`` -> :class:`RJRecipeStep` (stops when the monitored branch's
-      cold-chain leaf count plateaus; knobs via ``step_kwargs``);
+      cold-chain leaf count plateaus; ``step_kwargs`` ``convergence_iter`` /
+      ``plateau_branch`` / ``thin_by`` / ``convergence_fn``);
     * ``"gb_search"`` -> :class:`SearchStageProfileStep` (v9): an ``"rj"``
       step that also applies a per-stage GB search profile at stage entry
       and composes the per-(walker, band) RJ shutoff valve into its stopping
-      rule. ``step_kwargs`` takes ``profile=`` and ``stage_name=`` on top of
-      the RJ plateau knobs.
+      rule. ``step_kwargs`` takes ``profile=``, ``stage_name=``, ``legs=``
+      and the ``ratchet*`` arguments on top of the RJ plateau knobs;
+    * ``"replica_pe"`` -> :class:`ReplicaPERecipeStep`: a ``"pe"`` step that
+      ends when the large-scale cold-chain trends flatten (``window``,
+      ``leaf_tol``, ``lnl_tol``, ``min_iters``, ``plateau_branch``).
+
+    ``step_kwargs`` keys that the chosen class does not take are swallowed
+    without error by :class:`BaseRecipeStep` (see the warning there).
+
+    The 9mo / 12mo production recipe, composed by
+    ``scripts/fstat_proposal/run_combined_staged.py``: ``gb_search_seed``
+    (``"gb_search"``) -> ``source_search`` (``"search"``) -> ``gb_search_1``
+    -> ``gb_search_2`` (``"gb_search"``) -> ``full_pe`` (``"pe"``).
 
     Args:
-        name: Unique stage name (e.g. ``"gb_pe"``, ``"main"``).
-        kind: ``"search"`` | ``"pe"`` | ``"rj"``.
+        name: Unique stage name (e.g. ``"gb_pe"``, ``"main"``). Also the
+            store's recipe-group key, so renaming a stage breaks a resume.
+        kind: ``"search"`` | ``"pe"`` | ``"rj"`` | ``"gb_search"`` |
+            ``"replica_pe"`` (default ``"pe"``).
         moves: Ordered moves for this stage — each entry is anything
             :meth:`Recipe.add_move` accepts (a
             :class:`~lisatools.globalfit.moves.globalfitmove.Move`, a stock
             name, a constructed eryn move, or a plain function).
         step_kwargs: Extra keyword arguments for the RecipeStep constructor
-            (e.g. RJ plateau knobs).
+            (see the per-kind lists above).
         combine_kwargs: Extra keyword arguments for the ``GFCombineMove``
-            wrapping this stage's moves.
+            wrapping this stage's moves (e.g. ``share_temperature_control``,
+            ``random_choice``, ``weighted_cycle``, ``move_weights``,
+            ``leg_ends``). ``move_every`` is filled from the moves'
+            ``Move(every=N)`` when any is not 1, and ``verbose`` from the
+            run's ``verbose`` unless given.
         debug: Stage-level debug override applied to every move that does not
             carry its own ``Move.debug`` (same value semantics).
+
+    Raises:
+        ValueError: ``kind`` is not one of :attr:`_KINDS`.
+
+    Example:
+        >>> from lisatools.globalfit import Move, Stage
+        >>> st = Stage("full_pe", kind="pe",
+        ...            moves=[Move("psd_pe", branch="psd"),
+        ...                   Move("mbh_pe", branch="mbh", every=5)],
+        ...            step_kwargs=dict(peak_min_snr=6.25, stage_name="full_pe"))
+        >>> st
+        Stage('full_pe', kind='pe', moves=['psd_pe', 'mbh_pe'])
+        >>> Stage("gb_search_1", kind="gb_search").runtime_kind
+        'rj'
     """
 
     _KINDS = ("search", "pe", "rj", "gb_search", "replica_pe")
@@ -3343,14 +4392,40 @@ class Stage:
 
     @property
     def runtime_kind(self) -> str:
-        """The kind this stage BEHAVES as (see :data:`_RUNTIME_KIND`)."""
+        """The kind this stage BEHAVES as (see :attr:`_RUNTIME_KIND`).
+
+        ``"gb_search"`` -> ``"rj"``, ``"replica_pe"`` -> ``"pe"``, any other
+        kind -> itself.
+        """
         return self._RUNTIME_KIND.get(self.kind, self.kind)
 
     def move_names(self) -> typing.List[str]:
+        """This stage's move names, in cycle order."""
         return [m.name for m in self.moves]
 
     def setup(self, ctx: MoveBuildContext) -> RecipeStep:
-        """Materialize this stage: run every move's ``setup(ctx)``, wrap, return the step."""
+        """Materialize this stage: run every move's ``setup(ctx)``, wrap, return the step.
+
+        For each move: check its branch is enabled, ``materialize(ctx)``,
+        stamp ``gf_move_name`` / ``gf_stage_name`` on the runtime move and
+        apply the move- or stage-level debug. The runtime moves are wrapped
+        in ONE :class:`~lisatools.globalfit.moves.globalfitmove.GFCombineMove`
+        (``combine_kwargs``, plus ``move_every`` / ``verbose`` defaults)
+        stamped with ``gf_stage_name``, ``gf_stage_kind``
+        (:attr:`runtime_kind`) and ``gf_is_stage_combine=True``.
+
+        Args:
+            ctx: The build context (``ctx.curr``, ``ctx.stock_moves``,
+                ``ctx.ntemps``, ``ctx.nwalkers``).
+
+        Returns:
+            RecipeStep: ``_STEP_CLASSES[kind](moves=[combine], **step_kwargs)``.
+
+        Raises:
+            ValueError: A move targets a branch that is not enabled, a stock
+                name is unknown (from ``Move.setup``), or the stage has no
+                moves.
+        """
         enabled = set(ctx.curr.engine_info.branch_names)
         runtime_moves = []
         for mv in self.moves:
@@ -3436,65 +4511,74 @@ def scatter_around_injection(
     priors: ProbDistContainer | None = None,
     max_resample_tries: int = 50,
 ):
-    """
-    Initialize branch coordinates by scattering walkers around injection parameters.
+    """Initialize branch coordinates by scattering walkers around injection parameters.
 
     For each leaf, draws coordinates from a multivariate Gaussian centered on
     the (transformed) injection parameters.  Higher-temperature chains receive
     proportionally wider scatter when ``betas`` is provided.  Initialized
-    leaves are marked as active (``inds = True``).
+    leaves are marked as active (``inds = True``) on every temperature and
+    walker; leaves beyond ``len(injection_params)`` are not touched.
 
     When ``priors`` is supplied, any draw that lies outside the prior support
     (``logpdf == -inf``) is rejected and redrawn.  This is essential for
     sampling bases that contain ``arcsin``/``arccos`` transforms (e.g. MBH
-    ``sin_beta``, ``cos_iota``) where an out-of-support initial coordinate
+    ``sin_dec``, ``cos_iota``) where an out-of-support initial coordinate
     silently produces NaN once the transform pipeline runs, eventually
     surfacing as a CUDA illegal-memory-access in downstream kernels.
 
     The function modifies ``state`` in-place, so it can be called from
     ``setup_recipe`` (before MCMC) or from a ``RecipeStep.setup_run``
-    (between recipe phases).
+    (between recipe phases). Draws use the global ``np.random`` stream.
 
-    Parameters
-    ----------
-    state : GFState
-        Sampler state to modify in-place.
-    branch_name : str
-        Name of the branch to initialize (e.g. ``"mbh"``, ``"emri"``).
-    injection_params : ndarray
-        True source parameters in the **physical** (waveform) basis.
-        Shape ``(ndim_phys,)`` for a single leaf, or
-        ``(nleaves, ndim_phys)`` for multiple leaves.
-    spread : float, ndarray
-        Controls the width of the Gaussian scatter (in sampling basis).
+    Not reached by the 9mo / 12mo runs (sources there are seeded by
+    ``GlobalFit.load_info`` and the source warm start); its in-package caller
+    is :func:`setup_state_for_injection` (``gb_no_fg`` in ``GB_MODE=pe``).
 
-        * *scalar* -- isotropic standard deviation for every parameter.
-        * *1-D array* ``(ndim,)`` -- per-parameter standard deviations.
-        * *2-D array* ``(ndim, ndim)`` -- full covariance matrix
-          (shared across leaves).
-        * *3-D array* ``(nleaves, ndim, ndim)`` -- per-leaf covariance
-          matrices.
-    reverse_transform : callable, optional
-        Converts a single parameter vector from physical basis to
-        sampling basis: ``(ndim_phys,) -> (ndim_sampling,)``.
-        If *None*, ``injection_params`` are assumed to already be in
-        the sampling basis.
-    betas : ndarray of shape ``(ntemps,)``, optional
-        Inverse-temperature ladder.  When provided the covariance for
-        temperature index *t* is scaled by ``1 / betas[t]`` so that
-        hotter chains start with a wider scatter.
-    priors : ProbDistContainer, optional
-        Prior container for ``branch_name``.  When given, walker draws
-        outside the prior support are rejected and redrawn (up to
-        ``max_resample_tries`` per walker).  Without it, this routine can
-        seed walkers that lie outside arcsin/arccos domains, producing
-        NaNs once the transform pipeline runs.
-    max_resample_tries : int, optional
-        Hard cap on resampling attempts per walker before raising.  Only
-        used when ``priors`` is supplied.  Default 50 — for any reasonable
-        scatter and prior, this is wildly more than needed; the cap exists
-        only to surface pathological configs (e.g. the entire scatter
-        landing outside the prior) instead of looping forever.
+    Args:
+        state: Sampler state to modify in-place.
+        branch_name: Name of the branch to initialize (e.g. ``"mbh"``,
+            ``"emri"``).
+        injection_params: True source parameters in the **physical**
+            (waveform) basis. Shape ``(ndim_phys,)`` for a single leaf, or
+            ``(nleaves, ndim_phys)`` for multiple leaves. With
+            ``reverse_transform=None`` they must already be in the sampling
+            basis (``ndim`` columns).
+        spread: Controls the width of the Gaussian scatter (in sampling
+            basis).
+
+            * *scalar* -- isotropic standard deviation for every parameter.
+            * *1-D array* ``(ndim,)`` -- per-parameter standard deviations.
+            * *2-D array* ``(ndim, ndim)`` -- full covariance matrix
+              (shared across leaves).
+            * *3-D array* ``(nleaves, ndim, ndim)`` -- per-leaf covariance
+              matrices.
+
+        reverse_transform: Converts a single parameter vector from physical
+            basis to sampling basis: ``(ndim_phys,) -> (ndim_sampling,)``.
+            If ``None``, ``injection_params`` are assumed to already be in
+            the sampling basis.
+        betas: Inverse-temperature ladder, shape ``(ntemps,)``. When provided
+            the covariance for temperature index ``t`` is scaled by
+            ``1 / betas[t]`` so that hotter chains start with a wider
+            scatter.
+        priors: Prior container dict; ``priors[branch_name]`` is used. When
+            given, walker draws outside the prior support are rejected and
+            redrawn (up to ``max_resample_tries`` passes). Without it, this
+            routine can seed walkers that lie outside arcsin/arccos domains,
+            producing NaNs once the transform pipeline runs.
+        max_resample_tries: Hard cap on resampling passes per (leaf,
+            temperature) before raising. Only used when ``priors`` is
+            supplied. Default 50 — for any reasonable scatter and prior, this
+            is wildly more than needed; the cap exists only to surface
+            pathological configs (e.g. the entire scatter landing outside the
+            prior) instead of looping forever.
+
+    Raises:
+        AssertionError: More injection leaves than ``nleaves_max``, or a
+            column count different from the branch ``ndim``.
+        ValueError: ``spread`` with more than 3 dimensions.
+        RuntimeError: Draws still outside the prior after
+            ``max_resample_tries`` passes.
     """
     # TODO: make this better
     coords = state.branches_coords[branch_name]
@@ -3575,28 +4659,44 @@ def scatter_around_injection(
 
 
 def mbh_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float = 0.0) -> np.ndarray:
-    """Convert a single Mojito MBHB catalogue entry to MBH sampling basis.
+    """Convert a single Mojito MBHB catalogue entry to the MBH sampling basis.
 
-    The sampling basis is:
-    ``[logM, q, s1z, s2z, dist, phi_ref, cos_iota, psi, lam, sin_beta, t_plunge]``
+    The sampling basis (ICRS run frame; the same basis as the stock
+    :func:`~lisatools.globalfit.stock.erebor.transforms.make_mbh_transform_container`)
+    is::
 
-    Sky / polarization / time parameters are returned in the **SSB
-    ecliptic frame** — the sprint-wide sampling frame. (LISA-frame
-    sampling is handled by the moves themselves, e.g.
-    :class:`lisatools.sampling.moves.skymodehop.SkyMove` with
-    ``coord_frame="ssb_ecliptic"``.)
+        [logM, Q, s1z, s2z, dist, phi_ref, cos_iota, psi, alpha, sin_delta, t_plunge]
 
-    Parameters
-    ----------
-    catalogue_entry : dict
-        Dictionary of catalogue parameters for one MBHB source, as
-        stored by ``L1DataLoader.catalogue['MBHB'][source_id]``.
+    with
 
-    Returns
-    -------
-    np.ndarray
-        Parameter vector of shape ``(11,)`` in the MBH sampling basis
-        (SSB ecliptic frame for sky/time parameters).
+    * ``logM = ln(m1 + m2)`` from ``PrimaryMassSSBFrame`` /
+      ``SecondaryMassSSBFrame`` (swapped if needed so ``m1 >= m2``);
+    * ``Q = m1 / m2 >= 1`` (the mass ratio);
+    * ``s1z``, ``s2z`` = ``PrimarySpinCompZ``, ``SecondarySpinCompZ``;
+    * ``dist`` = ``LuminosityDistance / 1e3`` (Mpc -> Gpc);
+    * ``phi_ref`` = ``PhaseReferenceSourceFrame`` mod 2 pi;
+    * ``cos_iota`` = cos(``InclinationAngle``);
+    * ``psi`` = ``PolarisationAngle`` mod pi (ICRS);
+    * ``alpha`` = ``RightAscension`` mod 2 pi, ``sin_delta`` =
+      sin(``Declination``) (ICRS);
+    * ``t_plunge`` = ``TimeCoalescencePhenomTPHMSSBFrame`` (SSB time, s).
+
+    No frame conversion is applied: the ecliptic conversion computed in the
+    body is unused (kept for the commented LISA-frame variant).
+
+    Called for every armed MBHB by
+    ``stock.erebor.source_runtime.prepare_mbh_branch`` (9mo / 12mo runs) and
+    by the synthetic injections path.
+
+    Args:
+        catalogue_entry: Dictionary of catalogue parameters for one MBHB
+            source, as stored by ``L1DataLoader.catalogue['MBHB'][source_id]``.
+        trim_duration: Accepted for signature compatibility with the other
+            ``*_catalogue_to_sampling_basis`` converters; unused.
+
+    Returns:
+        np.ndarray: Parameter vector of shape ``(11,)`` in the MBH sampling
+        basis above.
     """
     m1 = float(catalogue_entry["PrimaryMassSSBFrame"])
     m2 = float(catalogue_entry["SecondaryMassSSBFrame"])
@@ -3642,23 +4742,39 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float 
 
 
 def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float = 0.0) -> np.ndarray:
-    """Converts the (V)GB catalogue entries to the sampling basis. 
-    The index 0 in f0 and phi0 refer to the frequency and phase at the start of the data.
+    """Convert (V)GB catalogue entries to the 8-column FDOT sampling basis.
 
-    The sampling basis is:
-    ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
+    The returned basis is the stock GB transform's fdot basis
+    (:func:`~lisatools.globalfit.stock.erebor.transforms.make_gb_transform_container`
+    with ``use_chirp_mass=False``), ICRS sky::
 
-    Parameters
-    ----------
-    catalogue_entry : dict
-        Dictionary of catalogue parameters for all (V)GBs, as
-        stored by ``L1DataLoader.catalogue['(V)GB'][source_id]``.
+        [ln A, f0 (mHz), fdot (Hz/s), phi0, cos_iota, psi, alpha, sin_delta]
 
-    Returns
-    -------
-    np.ndarray
-        Parameter vector of shape ``(8,)`` in the (V)GB sampling basis
-        (ICRS or LISA frame for sky/time parameters).
+    The catalogue parameters are taken AT the catalogue reference epoch
+    (``TimeReferenceSSBFrame`` == :data:`MOJITO_REFERENCE_TIME`), with no
+    evolution to the data start: ``Amplitude``, ``GW22FrequencySSBFrame``,
+    ``GW22FrequencyDerivativeSourceFrame``, ``TrueAnomaly`` (the physical
+    phase), ``InclinationAngle``, ``PolarisationAngle``, ``RightAscension``,
+    ``Declination``, with ``fddot = 0``. The physical row goes through the
+    container's ``both_inverse_transforms``, which applies the sampling-basis
+    sign convention (sampling ``phi0`` = ``-TrueAnomaly``); ``phi0`` and
+    ``alpha`` are then wrapped to ``[0, 2 pi)`` and ``psi`` to ``[0, pi)``.
+    Slot 2 is always ``fdot`` (negative for interacting systems): chirp-mass
+    runs convert the rows with :func:`gb_fdot_rows_to_run_basis`.
+
+    Callers: the VGB branch seeding (``stock/erebor/vgb.py``), the monitor's
+    truth builders, and the ``gb_no_fg`` PE-mode injection helpers.
+
+    Args:
+        catalogue_entry: One catalogue entry, as stored by
+            ``L1DataLoader.catalogue['GB' | 'VGB'][source_id]``. A mojito GB
+            entry holds parallel arrays over many sources.
+        trim_duration: Accepted for signature compatibility; ignored (the
+            anchor is the reference epoch).
+
+    Returns:
+        np.ndarray: Shape ``(..., 8)``: one row per source in the entry
+        (leading axes follow the entry's array fields).
     """
     # VALIDATED mojito GB convention (scripts/gb/gb_mojito_match.py +
     # gb_mojito_mcmc_three_ways.py, mm ~ 1e-8 vs band-passed data):
@@ -3734,6 +4850,19 @@ def gb_fdot_rows_to_run_basis(rows, *, use_chirp_mass, use_fdot_astro,
     * legacy fdot basis: returned unchanged.
 
     ``rows`` is not mutated; a converted copy is returned.
+
+    Args:
+        rows (array_like): ``(N, 8)`` FDOT-basis rows (slot 1 = f0 in mHz).
+        use_chirp_mass (bool): The run samples ``Mc`` in slot 2.
+        use_fdot_astro (bool): The run samples the 9-column basis (adds
+            ``fdot_astro_ratio``); takes precedence over ``use_chirp_mass``.
+        m_chirp_lims (sequence of float): ``[Mc_min, Mc_max]``; empty/None ->
+            ``[0.001, 1.0]``.
+        use_distance (bool): With ``use_fdot_astro``, slot 0 becomes the
+            distance (kpc).
+
+    Returns:
+        np.ndarray: ``(N, 9)`` with ``use_fdot_astro``, else ``(N, 8)``.
     """
     rows = np.array(rows, dtype=float, copy=True)
     mc_lims = list(m_chirp_lims) if m_chirp_lims else [0.001, 1.0]
@@ -3772,6 +4901,38 @@ def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source
     with the sprint-wide MULTIPLICATIVE form ``x * (1 + factor * randn)``:
     per-leaf diagonal covariances sized to ``factor`` times each injection
     value (0 -> exact truth).
+
+    Enumerates ``curr.general_info.catalogue[source_type]`` in sorted key
+    order, converts each entry with ``<branch_name>_catalogue_to_sampling_basis``
+    (looked up in this module), optionally subsets the rows, maps GB rows to
+    the run's chirp-mass basis (:func:`gb_fdot_rows_to_run_basis`), stores
+    them on ``curr.source_info[branch_name].injection`` and seeds the state
+    with :func:`scatter_around_injection` (betas from the branch settings).
+    A missing or empty catalogue does nothing. Used by the ``gb_no_fg``
+    variant in ``GB_MODE=pe`` (``GB_START_FACTOR``); not by the 9mo / 12mo
+    runs.
+
+    Args:
+        curr: Run info (``general_info.catalogue``, ``general_info.data_t0``,
+            ``source_info[branch_name]``).
+        state: State to seed in place.
+        source_type: Catalogue class key (``"GB"``, ``"VGB"``, ``"MBHB"``, ...).
+        branch_name: Branch to seed; also selects the converter
+            (``"gb"`` -> :func:`gb_catalogue_to_sampling_basis`, ``"mbh"`` ->
+            :func:`mbh_catalogue_to_sampling_basis`).
+        spread: Absolute scatter, as in :func:`scatter_around_injection`.
+            Default ``1e-5``.
+        subset_inds (array_like, optional): Row indices to keep (e.g. from
+            :func:`select_gb_injection_subset_by_snr`).
+        priors: Forwarded to :func:`scatter_around_injection` (redraws
+            outside the prior).
+        relative_spread: Multiplicative scatter factor; overrides ``spread``.
+
+    Raises:
+        AssertionError: No converter for ``branch_name``, or empty
+            ``general_info.preprocess_kwargs``.
+        ValueError: ``relative_spread`` given but the subset selected no
+            sources.
     """
 
     catalogue = getattr(curr.general_info, "catalogue", {})
@@ -3868,6 +5029,27 @@ class GBFillGlobalSignalGen:
     The heavy likelihood comp is NOT held here: it is read from (or built
     onto) ``source_info.gb_wdm_comp`` lazily on first call, so the
     pre-build fit config stays picklable and the moves reuse the same comp.
+
+    Registered as ``info.signal_gen`` by the ``gb_no_fg`` and ``vgb``
+    variants. The 9mo / 12mo variant (``all_sources``) does NOT register it:
+    there the GB / VGB residual subtraction runs recipe-side, in
+    :func:`build_gb_moves` / :func:`build_vgb_moves`.
+
+    Args:
+        branch (str): Branch name (``"gb"`` or ``"vgb"``).
+        transform (TransformContainer): The branch's transform container
+            (sampling -> physical basis; ``both_transforms``).
+        general_info (GeneralSetup): The run's general setup
+            (``domain_settings`` must be :class:`~lisatools.domains.WDMSettings`;
+            ``nchannels``, ``data_t0``, ``window_alpha``, ``gpu_orbits``,
+            ``force_backend``).
+        source_info (Setup): The branch's setup (``gb_wdm_comp`` and the chunked-het
+            kernel sizes ``nt_sub`` / ``n_pad`` / ``n_sparse`` /
+            ``n_cp_sig`` / ``n_cp_orbit``, ``t0``, ``use_tdi2``).
+        *fill_args: Extra positional arguments for every ``fill_global_wdm``
+            call.
+        **fill_kwargs: Extra keyword arguments for every ``fill_global_wdm``
+            call.
     """
 
     def __init__(self, branch, transform, general_info, source_info,
@@ -3881,6 +5063,11 @@ class GBFillGlobalSignalGen:
 
     # -- lazy comp -------------------------------------------------------
     def _comp(self):
+        """``source_info.gb_wdm_comp``, building (and caching there) a ``GBWDMComputations`` on WDM.
+
+        Raises:
+            NotImplementedError: No comp and a non-WDM domain.
+        """
         comp = getattr(self.source_info, "gb_wdm_comp", None)
         if comp is not None:
             return comp
@@ -3924,6 +5111,19 @@ class GBFillGlobalSignalGen:
         ``*params``: sampling-basis rows by default; waveform-basis with
         ``apply_transform=False`` (the engine pre-transforms per-leaf-fill
         branches like vgb, passing ``leaf_inds`` upstream).
+
+        Args:
+            *params: Parameter columns (or rows) that ``np.asarray`` stacks
+                into the array the transform consumes.
+            apply_transform (bool): Run ``transform.both_transforms`` first.
+            leaf_inds (array_like, optional): Per-row leaf indices for
+                per-leaf fills (forwarded to ``both_transforms``).
+            **kwargs: Extra ``fill_global_wdm`` keyword arguments (win over
+                the constructor's).
+
+        Returns:
+            DomainBase: ``domain_settings.associated_class`` holding the
+            summed template, shape ``(nchannels, Nf_active, Nt_active)``.
         """
         from lisatools.domains import WDMSettings
 
@@ -3977,6 +5177,28 @@ def select_gb_injection_subset_by_snr(
     ``acs``, so it is data-independent). Returns the array of catalogue-row
     indices whose optimal SNR exceeds ``snr_threshold`` — suitable for the
     ``subset_inds`` argument of :func:`setup_state_for_injection`.
+
+    Logs a WARNING-level dump of the physical parameters entering the kernel
+    and, when any SNR is non-finite, probes the PSD / data / template arrays.
+    ``GB_INFO_VALIDATE=1`` (default ``"0"``) also cross-checks the WDM
+    information matrix (``Gamma_AA * A^2`` vs ``<h|h>``). Used by the
+    ``gb_no_fg`` variant in PE mode; not by the 9mo / 12mo runs.
+
+    Args:
+        curr: Run info (``general_info.catalogue``, ``general_info.data_t0``).
+        acs: The analysis containers; ``acs[0]`` supplies the PSD.
+        gb_info (GBSetup): The GB settings (``f0_lims`` when ``f0_lims`` is None).
+        gb_wdm_comp (GBWDMComputations): The WDM likelihood object
+            (``get_ll_wdm``, ``h_h_out``).
+        snr_threshold: Keep sources with optimal SNR strictly above this.
+            Default 3.0.
+        source_type: Catalogue class key. Default ``"GB"``.
+        branch_name: Selects the converter. Default ``"gb"``.
+        f0_lims: ``(f_lo, f_hi)`` Hz band; default ``gb_info.f0_lims``.
+
+    Returns:
+        np.ndarray: Integer row indices into the flattened, sorted catalogue
+        rows (empty when nothing qualifies or no catalogue exists).
     """
     catalogue = getattr(curr.general_info, "catalogue", {}) or {}
     catalogue = catalogue.get(source_type, {})
@@ -4171,6 +5393,27 @@ def subtract_gb_neighbors_from_data(
     Pair with ``select_gb_injection_subset_by_snr(..., f0_lims=
     exclude_f0_lims)`` so injected leaves and subtracted neighbors are
     disjoint (a source must never be modeled AND pre-subtracted).
+
+    Driven by the ``gb_no_fg`` settings ``subtract_neighbors`` /
+    ``subtract_out_of_band`` (``GB_SUBTRACT_NEIGHBORS`` /
+    ``GB_SUBTRACT_OUT_OF_BAND``, both default off; not set by the 9mo / 12mo
+    runs). Marked unvalidated end to end in the code (see the TODO in the
+    body).
+
+    Args:
+        curr: Run info (``general_info.catalogue``, ``general_info.data_t0``).
+        acs: The analysis containers whose residuals are modified in place
+            (every local walker).
+        gb_info (GBSetup): The GB settings (unused in the body).
+        gb_wdm_comp (GBWDMComputations): The WDM template filler
+            (``fill_global_wdm``).
+        exclude_f0_lims: ``(f_lo, f_hi)`` Hz, the sampled band.
+        window_hz: Width (Hz) of the window on each side of the band.
+        source_type: Catalogue class key. Default ``"GB"``.
+        branch_name: Selects the converter. Default ``"gb"``.
+
+    Returns:
+        int: Number of catalogue sources subtracted (per walker).
     """
     # TODO(verify GB_SUBTRACT_OUT_OF_BAND, 2026-08-03): this path has never
     # been confirmed to work end to end in a real run. Three things are open.
@@ -4230,6 +5473,7 @@ def subtract_gb_neighbors_from_data(
     # only the survivors makes the cost scale with the number of neighbours
     # actually subtracted (hundreds) instead of the catalogue size.
     def _in_window(f0_hz_arr):
+        """Mask of f0 (Hz) within ``window_hz`` below ``lo`` or above ``hi`` (band excluded)."""
         return (((f0_hz_arr >= lo - window_hz) & (f0_hz_arr < lo))
                 | ((f0_hz_arr > hi) & (f0_hz_arr <= hi + window_hz)))
 
@@ -4307,6 +5551,7 @@ def subtract_gb_neighbors_from_data(
     return n_sub
 
 
+# TODO check: keep/remove/document -- only caller build_mbh_moves_phenom(subtract_initial=True); its one caller passes False; superseded by setup_acs(rebuild_residuals=True)
 def subtract_initial_signal(
     acs: AnalysisContainerArray,
     state: GFState,
@@ -4440,12 +5685,25 @@ def _noise_temperature_control(effective_ndim, nwalkers, *, betas, ntemps, Tmax)
     """The ladder shared by the psd/galfor/sgwb search and PE moves.
 
     ``walker_inds`` is pinned OUT of the fancy (walker-permuting) swap. It is the
-    ACA row ``PSDMove.compute_log_like`` scores against (psdmove.py ~679/1881);
-    Eryn scores a fancy swap against the UNPERMUTED destination rows
-    (tempering.py ~778-817) and would then swap the label together with the
-    coords (tempering.py ~607-614), leaving slot ``w`` pointing at another
-    walker's residual for the rest of the propose -- and, under several compute
-    ranks, at an ACA row that does not exist on the rank.
+    ACA row :meth:`~lisatools.globalfit.moves.psdmove.PSDMove.compute_log_like`
+    scores against; Eryn scores a fancy swap against the UNPERMUTED destination
+    rows (:meth:`eryn.moves.tempering.TemperatureControl.perform_fancy_swap_acceptance_fraction`)
+    and would then swap the label together with the coords (the supplemental
+    swap in ``eryn.moves.tempering.TemperatureControl._apply_swaps_vectorized``,
+    which honours ``skip_swap_supp_names``), leaving slot ``w`` pointing at
+    another walker's residual for the rest of the propose -- and, under several
+    compute ranks, at an ACA row that does not exist on the rank.
+
+    Args:
+        effective_ndim (int): Sum of the sampled noise branches' ``ndim``.
+        nwalkers (int): Local walker count.
+        betas (np.ndarray, optional): Explicit ladder; wins over ``ntemps``.
+        ntemps (int): Rung count when ``betas`` is None.
+        Tmax (float): Hottest temperature for the default ladder.
+
+    Returns:
+        TemperatureControl: ``permute=False``,
+        ``skip_swap_supp_names=["walker_inds"]``.
     """
     return TemperatureControl(
         effective_ndim,
@@ -4467,6 +5725,18 @@ def get_shared_dcga(acs):
     once, never torn down mid-run). Returns ``None`` on CPU / single-GPU
     runs — the plain shard-aware move paths are already correct there and
     replicas would only add memory.
+
+    Also ``None`` when the first container's sensitivity matrix carries no
+    ``orbits`` / ``kwargs`` (the stock ``CompositeSensitivityMatrix``). The
+    9mo / 12mo runs hold one GPU per compute rank, so this returns ``None``
+    there.
+
+    Args:
+        acs (AnalysisContainerArray): This rank's containers (``gpus``).
+
+    Returns:
+        DomainComputationGroupArray | None: The cached replica group, or
+        ``None``.
     """
     if acs.gpus is None or len(acs.gpus) <= 1:
         return None
@@ -4532,33 +5802,48 @@ def build_noise_moves(
     non-sampled branches at their cold rows (see :class:`PSDMove`).
 
     Both returned moves share the same ``acs``/``priors`` (by reference) and
-    the same ladder object.
+    the same ladder object (:func:`_noise_temperature_control`). The search
+    move is ``PSDMove(max_logl_mode=True)``, named ``"<branches> search move"``;
+    the PE move ``max_logl_mode=False``, ``"<branches> pe move"``. Both get
+    ``fanout_branches = sampled_branches`` and the run's walker fan-out.
+    Every other move setting (inner move kind, eigen refresh, ensemble
+    search, coarse runtime, CPU build threads) is read from the lead branch's
+    settings / the general settings.
 
-    Parameters
-    ----------
-    engine_info :
-        Engine info object exposing ``ndims``.
-    curr : CurrentInfoGlobalFit
-        Current run info; reads ``source_info[<branch>]`` and ``general_info``.
-    acs :
-        Shared analysis container (passed by reference).
-    priors : dict
-        Shared priors dict (passed by reference).
-    sampled_branches : list
-        Noise branches THIS move pair samples (subset of
-        ``["psd", "galfor", "sgwb"]``, all present in the run). The first
-        entry is the "lead" branch whose settings size the ladder and the
-        default ``num_repeats``.
-    num_repeats : int, optional
-        Number of internal move repeats. Default: the lead branch's
-        ``num_prop_repeats`` setting.
-    Tmax : float, optional
-        Maximum temperature for ``TemperatureControl``. Default 1e6.
+    Production (9mo / 12mo, ``all_sources``): called twice, for ``["psd"]``
+    and ``["galfor"]``, giving ``psd_search`` / ``psd_pe`` and
+    ``galfor_search`` / ``galfor_pe``. Only the PE moves run (in
+    ``gb_search_2``'s cycle-end noise search and in ``full_pe``); the search
+    moves are built and never staged. ``PSD_NUM_PROP_REPEATS`` /
+    ``GALFOR_NUM_PROP_REPEATS`` (10) set ``num_repeats``.
 
-    Returns
-    -------
-    search_move : PSDMove
-    pe_move : PSDMove
+    Args:
+        engine_info: Engine info object exposing ``ndims``.
+        curr: Current run info; reads ``source_info[<branch>]`` and
+            ``general_info``.
+        acs: Shared analysis container (passed by reference).
+        priors: Shared priors dict (passed by reference).
+        sampled_branches: Noise branches THIS move pair samples (subset of
+            ``["psd", "galfor", "sgwb"]``, all present in the run). The first
+            entry is the "lead" branch whose settings size the ladder and the
+            default ``num_repeats``.
+        num_repeats: Number of internal move repeats. Default: the lead
+            branch's ``num_prop_repeats`` setting (50 when unset).
+        permute_every: Forwarded to :class:`PSDMove`. Default 50.
+        Tmax: Maximum temperature for ``TemperatureControl``. Default 1e6.
+
+    Returns:
+        tuple[PSDMove, PSDMove]: ``(search_move, pe_move)``.
+
+    Raises:
+        ValueError: Empty ``sampled_branches``, a branch not in the run, or
+            sampled branches with different ladder sizes.
+
+    Example:
+        .. code-block:: python
+
+            psd_search, psd_pe = build_noise_moves(
+                engine_info, curr, acs, priors, sampled_branches=["psd"])
     """
     general_info = curr.general_info
     nwalkers: int = _local_nwalkers(acs)
@@ -4672,6 +5957,7 @@ def build_noise_moves(
     return search_move, pe_move
 
 
+# TODO check: keep/remove/document -- deprecated wrapper (DeprecationWarning); no code callers; docs/stock-stages-and-moves.md still names it instead of build_noise_moves
 def build_psd_moves(
     engine_info: Setup,
     curr: CurrentInfoGlobalFit,
@@ -4721,35 +6007,36 @@ def build_mbh_moves_phenom(
 
     Sets ``state.sub_states['mbh'].betas_all`` as a side effect.
 
-    Parameters
-    ----------
-    curr : CurrentInfoGlobalFit
-        Current run info; reads ``source_info["mbh"]`` and ``general_info``.
-    acs :
-        Shared analysis container (passed by reference).
-    priors : dict
-        Shared priors dict (passed by reference).
-    state :
-        Current sampler state; ``sub_states["mbh"].betas_all`` is set here.
-    wave_gen :
-        Optional pre-built ``PhenomTHMTDIWaveform`` instance. When the
-        settings file already constructed (and cached) the generator —
-        e.g. to register ``source_info['mbh'].signal_gen`` for the
-        engine-side residual rebuild — pass it here so the move shares
-        the same instance. Default ``None`` builds a fresh one from
-        ``mbh_info.initialize_kwargs``.
-    subtract_initial : bool
-        If ``True`` (default), subtract the state's current MBH templates
-        from the residuals here (legacy recipe-side path). Settings files
-        that register ``source_info['mbh'].signal_gen`` must pass
-        ``False`` — the engine already subtracts during
-        ``setup_acs(rebuild_residuals=True)`` and doing it twice corrupts
-        the residuals.
+    The move itself is built by :class:`MBHMoveBuilder`. Called by
+    ``stock.erebor.source_runtime.build_mbh_move_runtime`` on the
+    non-batched, non-tdionfly MBH path (with ``subtract_initial=False``); the 9mo /
+    12mo runs use ``MBH_LIKELIHOOD=batched`` (:class:`MBHBatchedMoveBuilder`)
+    instead.
 
-    Returns
-    -------
-    wave_gen : PhenomTHMTDIWaveform
-    mbh_pe_move : ResidualAddOneRemoveOneMove
+    Args:
+        curr: Current run info; reads ``source_info["mbh"]`` and
+            ``general_info``.
+        acs: Shared analysis container (passed by reference).
+        priors: Shared priors dict (passed by reference).
+        state: Current sampler state; ``sub_states["mbh"].betas_all`` is set
+            here.
+        permute_every: Forwarded to the move. Default 20.
+        wave_gen: Optional pre-built ``PhenomTHMTDIWaveform`` instance. When
+            the settings file already constructed (and cached) the generator
+            — e.g. to register ``source_info['mbh'].signal_gen`` for the
+            engine-side residual rebuild — pass it here so the move shares
+            the same instance. Default ``None`` builds a fresh one from
+            ``mbh_info.initialize_kwargs``.
+        subtract_initial: If ``True`` (default), subtract the state's current
+            MBH templates from the residuals here (legacy recipe-side path).
+            Settings files that register ``source_info['mbh'].signal_gen``
+            must pass ``False`` — the engine already subtracts during
+            ``setup_acs(rebuild_residuals=True)`` and doing it twice corrupts
+            the residuals.
+
+    Returns:
+        tuple[PhenomTHMTDIWaveform, ResidualAddOneRemoveOneMove]:
+        ``(wave_gen, mbh_pe_move)``.
     """
     from lisatools.sources.bbh.waveform import PhenomTHMTDIWaveform
 
@@ -4775,6 +6062,7 @@ def build_mbh_moves_phenom(
     return wave_gen, mbh_pe_moves[0]
 
 
+# TODO check: keep/remove/document -- no references anywhere (src/tests/scripts/LATW); a @dataclass on a TypedDict
 @dataclass
 class GBWaveformDict(typing.TypedDict):
     dt: float
@@ -4814,6 +6102,13 @@ def _fstat_dist_birth_stamp(default: bool = False) -> bool:
     that wants the F-stat distance birth opts in by name. The 2026-08-28
     mirroring ruling above is untouched -- it says search and PE resolve
     the SAME way, which they still do; only the value they agree on moved.
+
+    Args:
+        default: Value when ``GB_RJ_FSTAT_DIST_BIRTH`` is unset.
+
+    Returns:
+        bool: ``bool(int(GB_RJ_FSTAT_DIST_BIRTH))`` when set (production
+        exports 0), else ``default``.
     """
     env = os.environ.get("GB_RJ_FSTAT_DIST_BIRTH")
     return bool(int(env)) if env is not None else bool(default)
@@ -4842,6 +6137,16 @@ def ridge_gibbs_eligible(info) -> bool:
     ``GB_RIDGE_GIBBS=0`` disables it everywhere (shared knob, mirroring the
     sig-het reference-policy knobs the VGB move already reads from the GB
     namespace so the two branches audit identically).
+
+    Args:
+        info (Setup): The branch setup (``fdot_astro_ratio_max``,
+            ``transform.input_basis``).
+
+    Returns:
+        bool: True when ``GB_RIDGE_GIBBS`` is ``"1"`` (default),
+        ``fdot_astro_ratio_max`` is set and the basis holds every column
+        ``McRatioDistFiber`` needs. Production: True for the GB 9-column and
+        the VGB 6-column chirp basis.
     """
     if os.environ.get("GB_RIDGE_GIBBS", "1") != "1":
         return False
@@ -4874,6 +6179,14 @@ def _stamp_temper_seed_base(moves, random_seed):
     can never collide with the per-rank seeds ``derive_rank_seed`` spawns off
     the same number. ``None`` when the run sets no seed: every stream stays
     on today's entropy. No user/env knob -- the run seed is the only input.
+
+    Args:
+        moves (list): Moves to stamp (those with a ``gf_temper_seed_base``
+            attribute).
+        random_seed (int, optional): ``general_info.random_seed``.
+
+    Returns:
+        int | None: The stamped seed base.
     """
     base = None
     if random_seed is not None:
@@ -4913,6 +6226,13 @@ def _warm_start_seed(gb_info, tag):
     :func:`~lisatools.globalfit.communication.ranks.rank_build_seed`'s
     per-rank value. ``None`` (no run seed) keeps the container on OS
     entropy, which is independent per rank as before.
+
+    Args:
+        gb_info (GBSetup): The GB settings (``build_seed``).
+        tag (int): Domain tag (``_WARM_SEED_TAG_SEARCH`` / ``_WARM_SEED_TAG_PE``).
+
+    Returns:
+        int | None: A uint32 seed, or ``None`` without a build seed.
     """
     base = getattr(gb_info, "build_seed", None)
     if base is None:
@@ -4925,16 +6245,41 @@ def _warm_self_wrap(container, *, gb_info, general_info, tag, name,
                     load_kwargs):
     """The warm move's birth law: ``container``, or the SELF-refit mixer around it.
 
-    USER RULINGS 2026-10-13 (``warmstart/self_refit.py``): from gb_search_2
-    on, the run refits its warm start from its own last
-    ``GB_WARM_SELF_LAST_K`` rows x every cold walker, and the warm moves
-    draw from that self refit ``GB_WARM_SELF_FRACTION`` (0.75) of their
-    proposes and from the ORIGINAL warm start the rest ("We should keep the
-    original warm start in the fit"). ``GB_WARM_SELF=0`` (default) returns
-    ``container`` itself: the move is bit-identical to before. The self
-    epochs load with the original's ``load_kwargs`` (Tobs, floor box,
-    floor_eps, p_floor, circ_images, use_cupy) and the per-rank seed
+    USER RULINGS 2026-10-13 (``warmstart/self_refit.py``): the run refits
+    its warm start from its own last ``GB_WARM_SELF_LAST_K`` rows x every
+    cold walker, and the warm moves keep drawing from the ORIGINAL warm start
+    too ("We should keep the original warm start in the fit").
+    ``GB_WARM_SELF=0`` (default) returns ``container`` itself: the move is
+    bit-identical to before. The self epochs load with the original's
+    ``load_kwargs`` (Tobs, floor box, floor_eps, p_floor, circ_images,
+    use_cupy) and the per-rank seed
     ``_warm_start_seed(gb_info, tag ^ (epoch + 1))``.
+
+    Since 2026-10-15 the mixer holds THREE laws, weighted
+    ``"original,full,filtered"``: ``gb_info.warm_self_split_search``
+    (``GB_WARM_SELF_SPLIT_SEARCH``, default ``"0.5,0,0.5"``) for
+    ``rj_warm_search`` and ``gb_info.warm_self_split_pe``
+    (``GB_WARM_SELF_SPLIT_PE``, default ``"1,1,1"``) for ``rj_warm_pe``; the
+    original alone until a self epoch exists. ``gb_info.warm_self_adopt_lag``
+    (``GB_WARM_SELF_ADOPT_LAG``, default on) is the one-draw adoption lag.
+    The retired ``GB_WARM_SELF_FRACTION`` / ``GB_WARM_SELF_FRACTION_SEARCH``
+    are no longer read (a WARNING says so when they are set). Production
+    (9mo / 12mo): ``GB_WARM_SELF=1``, splits ``0.5,0,0.5`` / ``1,1,1``.
+
+    Args:
+        container (WarmStartComponents): The original warm-start mixture.
+        gb_info (GBSetup): The GB settings (the ``warm_self*`` fields,
+            ``build_seed``).
+        general_info (GeneralSetup): ``main_file_path`` (the self epochs live
+            under its run directory).
+        tag (int): The twin's seed domain tag.
+        name (str): The move name; ``rj_warm_search*`` selects the search
+            split, anything else the PE split.
+        load_kwargs (dict): How the self epochs are loaded.
+
+    Returns:
+        WarmStartComponents | WarmSelfMixer: ``container`` itself, or the
+        mixer wrapping it.
     """
     if not bool(getattr(gb_info, "warm_self", False)):
         return container
@@ -4998,33 +6343,155 @@ def build_gb_moves(
     replaces the post-hoc ``[m for m in gb_pe_moves if "prior" in m.name]``
     filtering that GB settings files used to duplicate).
 
-    Parameters
-    ----------
-    engine_info :
-        Engine info object exposing ``ndims``.
-    curr : CurrentInfoGlobalFit
-        Current run info; reads ``source_info["gb"]`` and ``general_info``.
-    acs :
-        Shared analysis container (passed by reference).
-    priors : dict
-        Shared priors dict (passed by reference).
-    Tmax : float, optional
-        Maximum temperature for ``TemperatureControl``. Default 1e6.
-    include_search : bool, optional
-        When ``False``, return an empty search-move list (PE-only recipes).
-        Default ``True``.
-    include_refit : bool, optional
-        When ``False``, never build the GMM-refit moves even if the refit
-        file is present. Default ``True`` (refit is still gated on the file
-        existing).
-    pe_move_names : list of str, optional
-        When given, keep only the PE moves whose ``name`` is in this list
-        (and in this order-preserving subset). ``None`` keeps all PE moves.
+    Called on every rank by ``stock.erebor.variants.gb_no_fg.setup_gb_moves``
+    (also for ``all_sources``), which passes ``include_search`` = any
+    requested ``*_search`` name, ``include_refit`` = any ``rj_refit*`` name and
+    ``pe_move_names`` = the requested names not ending in ``_search``.
 
-    Returns
-    -------
-    gb_search_moves : List[GBSpecialBase]
-    gb_pe_moves : List[GBSpecialBase]
+    SIDE EFFECTS, in order: when no GB ``signal_gen`` is registered and this
+    rank's walker block of ``state`` already holds GB leaves (a resume),
+    their templates are subtracted from ``acs`` (FD:
+    ``GBGPU.generate_global_template``; WDM: ``gb_wdm_comp.fill_global_wdm``;
+    a leaf outside the prior raises); the band tables are initialized on
+    ``state.sub_states["gb"]`` (band temperatures, cap-cell edges, the
+    per-walker cap / stage / valve arrays when their settings are on), a
+    stored ladder WINS over the configured one (``gb_info.betas`` is
+    rewritten); F-stat node grids are kept on the device only when a replace
+    move is built (:func:`~lisatools.sampling.fstat_proposal.set_stacked_keep_nodes`);
+    every returned move gets the temper-RNG seed base.
+
+    MOVES BUILT (name: class; condition). Search list, only with
+    ``include_search``: ``rj_fstat_mcmc_search``
+    (:class:`GBSpecialRJSerialSearchMCMC`; legacy FD-only),
+    ``rj_fstat_search`` (:class:`GBSpecialRJFStatGridMove` with
+    ``GB_FSTAT_FIT_IN_MOVE`` on, else :class:`GBSpecialRJPriorMove`; the
+    designated cap updater and valve owner), ``rj_warm_search``
+    (:class:`GBSpecialRJPriorMove` over the warm-start mixture; needs
+    ``GB_WARM_START_COMPONENTS``), then ``gb_ridge_gibbs`` (see below). PE
+    list, filtered by ``pe_move_names``: ``rj_fstat_pe`` (GB-free galaxy
+    grid, fit once), ``rj_fstat_pe_residual`` (live residual, refit every
+    ``GB_FSTAT_REFIT_EVERY_PE``), ``rj_refit`` (``include_refit`` and the
+    refit file ``general_info.main_file_path`` exists; ``rj_refit_search`` is
+    then built too but never returned), ``rj_warm_pe`` (warm start), ``rj_replace_pe``
+    (the PE-replace setting ``GB_PE_RJ_REPLACE``, in a PE or strict build), ``rj_prior_pe``,
+    ``rj_fstat_mcmc``, ``rj_para_search_pe`` (``GB_PARA_SEARCH=1``) and the
+    search-cycle companions registered in this list too: ``rj_replace``
+    (``gb.search_rj_replace``, search mode), the pure in-model slots
+    ``in_model`` / ``in_model_fstat`` / ``in_model_replace`` /
+    ``in_model_removal`` (:class:`GBSpecialStretchMove`, ``is_rj_prop=False``;
+    ``gb.search_in_model``, search mode) and ``rj_prior_removal``
+    (``gb.search_prior_removal``, search mode); then ``gb_ridge_gibbs``
+    (a head-only plain eryn move from
+    :func:`~lisatools.sampling.ridge_fiber.make_gb_ridge_gibbs_move`, appended
+    to BOTH lists when :func:`ridge_gibbs_eligible`).
+
+    9mo / 12mo production (``GB_MODE=search``, ``GB_PE_MOVES_STRICT=1``,
+    ``include_refit=False``): search list ``rj_fstat_mcmc_search`` (built,
+    never staged), ``rj_fstat_search``, ``rj_warm_search``,
+    ``gb_ridge_gibbs``; PE list ``rj_fstat_pe``, ``rj_fstat_pe_residual``,
+    ``rj_warm_pe``, ``rj_prior_pe``, ``in_model``, ``in_model_fstat``,
+    ``in_model_removal``, ``rj_prior_removal``, ``gb_ridge_gibbs``
+    (``rj_fstat_mcmc`` / ``in_model_replace`` are built and dropped by the
+    filter; no replace move, so node grids are dropped).
+
+    PER-MOVE CONFIGURATION. Search-named RJ moves: flip fraction
+    :func:`_search_rj_flip_default`, newborn / survivor in-model repeats
+    200 / 25, opt-SNR floor ``GB_OPT_SNR_LIMIT_SEARCH``. Pe-named moves:
+    mode-following defaults, or under ``GB_PE_MOVES_STRICT=1`` the constant
+    ``_PE_RJ_FLIP_DEFAULT``, repeats = ``gb.num_repeat_proposals``, leaf caps
+    off; opt-SNR floor ``GB_OPT_SNR_LIMIT_PE``; phase maximization only via
+    :func:`pe_phase_maximize_on`; PE tempering cadence
+    ``GB_TEMPER_EVERY_PROPOSES``.
+
+    ENV KNOBS READ DIRECTLY HERE (name: default; meaning):
+
+    * ``GB_RJ_PHASE_MAXIMIZE``: ``"0"``; birth phase maximization for
+      ``rj_fstat_search`` / ``rj_prior_removal`` / ``rj_fstat_mcmc_search``
+      / ``rj_warm_search`` (production 1; the v9 stage profiles then rewrite
+      it per stage).
+    * ``GB_TEMPER_ON_REMOVAL``: ``"1"``; in search mode with
+      ``rj_prior_removal`` built, the band-temperature swaps run in it.
+    * ``GB_TEMPER_ALL_MOVES``: ``"1"``; in search mode, swaps run in all
+      three cycle RJ moves.
+    * ``GB_TEMPER_EVERY_PROPOSES``: ``"3"``; PE tempering cadence (production 1).
+    * ``GB_PE_MOVES_STRICT``: ``"0"``; strict-PE configuration of the
+      pe-named moves (the v9 driver sets 1).
+    * ``GB_OPT_SNR_LIMIT_SEARCH`` / ``GB_OPT_SNR_LIMIT_PE``: fall back to
+      ``GB_OPT_SNR_LIMIT``, then 8.0 / 5.0; the built opt-SNR floors.
+    * ``GB_LEAF_CAP_START``: unset/empty -> caps off (production empty);
+      ``GB_LEAF_CAP_MIN_ITERS`` ``"3"``, ``GB_LEAF_CAP_LL_IMPROVE`` ``"1"``
+      (``"0"`` when ``gb.leaf_cap_iter_only``), ``GB_LEAF_CAP_NDIM`` ``"8"``,
+      ``GB_LEAF_CAP_LL_NSIGMA`` ``"3.0"``, ``GB_LEAF_CAP_OCCUPANCY`` ``"1"``:
+      the progressive leaf-cap gate.
+    * ``GB_SIGHET_REFRESH_EVERY`` ``"0"``, ``GB_SIGHET_REFRESH_DPHASE``
+      ``"0.5"``, ``GB_SIGHET_REFRESH_MIN_BETA`` ``"0.1"``,
+      ``GB_SIGHET_TRUST_DLNA`` ``"1.5"``, ``GB_SIGHET_TRUST_DPHASE``
+      ``"0.5"``, ``GB_SIGHET_TRUST_SNR_C`` ``"30"``,
+      ``GB_SIGHET_TRUST_DLNA_MIN`` ``"0.3"``, ``GB_SIGHET_TRUST_PHASE_C``
+      ``"0"``, ``GB_SIGHET_TRUST_DPHASE_MAX`` ``"20"``,
+      ``GB_SIGHET_ANCHOR_CHECK`` ``"0"``, ``GB_SIGHET_DRIFT_CHECK`` ``"0"``:
+      the sig-het reference refresh, trust region and checks.
+    * ``GB_DEBUG`` ``"0"``, ``GB_DEBUG_DIR`` ``"./gf_output/gb_debug/"``,
+      ``GB_DEBUG_PLOT_WALKER`` ``"0"``, ``GB_DEBUG_PLOT_BAND`` (unset = the
+      central band), ``GB_DEBUG_SEQ_PICK`` ``"first"``: debug
+      instrumentation.
+    * ``GB_WARM_START_COMPONENTS``: unset (``gb.warm_start_components``
+      wins); the refereed warm-start npz, auto-built when missing
+      (``warmstart.build.ensure_warm_start_components``); requires the
+      9-column basis. ``GB_WARM_START_FLOOR_EPS`` ``"0.05"``,
+      ``GB_WARM_START_P_FLOOR`` ``"0"``, ``GB_WARM_START_CIRC_IMAGES``
+      ``"3"`` (PE twin and para search).
+    * ``GB_REPLACE_WARM_PASS``: ``"1"``; ``rj_replace`` also draws from the
+      warm-start mixture (two-pass).
+    * ``GB_RIDGE_GIBBS_LEAF_FRACTION``: ``"1.0"``; leaf fraction of the
+      ridge-Gibbs move.
+    * Through helpers: ``GB_SEARCH_RJ_FLIP_FRACTION``,
+      ``GB_PE_RJ_FLIP_FRACTION``, ``GB_PE_PHASE_MAXIMIZE``,
+      ``GB_RJ_FSTAT_DIST_BIRTH``, ``GB_FSTAT_REFIT_EVERY_PE``,
+      ``GB_FSTAT_REFIT_EVERY_PE_GB_FREE``,
+      ``GB_FSTAT_PEAK_MIN_SNR_PE_GB_FREE``, ``GB_RIDGE_GIBBS``. Logged only:
+      ``GB_PE_RJ_PARA_FRACTION``, ``GB_FSTAT_KEEP_NODES``.
+
+    Settings fields read from ``curr.source_info["gb"]`` (their env names):
+    ``mode`` (``GB_MODE``), ``fstat_fit_in_move`` (``GB_FSTAT_FIT_IN_MOVE``),
+    ``fstat_refit_every`` / ``fstat_fit_dir``, ``search_in_model``
+    (``GB_SEARCH_IN_MODEL``), ``search_prior_removal`` /
+    ``search_prior_removal_only``, ``search_rj_replace`` (``GB_SEARCH_RJ_REPLACE``),
+    the PE-replace switch (``GB_PE_RJ_REPLACE``), ``pe_extrinsic_draw``,
+    ``warm_self*``, ``para_search``, ``search_shutoff_per_walker``
+    (``GB_SEARCH_BAND_SHUTOFF_PER_WALKER``), the cap-cell fields, plus
+    ``band_edges`` / ``band_N_vals`` / ``betas`` / ``transform`` /
+    ``gb_wdm_comp``.
+
+    Args:
+        engine_info: Engine info object exposing ``ndims``.
+        curr: Current run info; reads ``source_info["gb"]`` and
+            ``general_info``.
+        acs: Shared analysis container (passed by reference).
+        priors: Shared priors dict (passed by reference).
+        state: The run's state; its GB sub-state is initialized here and its
+            GB leaves (if any) are subtracted from ``acs``.
+        Tmax: Maximum temperature for ``TemperatureControl``. Default 1e6.
+        include_search: When ``False``, return an empty search-move list
+            (PE-only recipes). Default ``True``.
+        include_refit: When ``False``, never build the GMM-refit moves even if
+            the refit file is present. Default ``True`` (refit is still gated
+            on the file existing).
+        pe_move_names: When given, keep only the PE moves whose ``name`` is in
+            this list (and in this order-preserving subset). ``None`` keeps
+            all PE moves.
+
+    Returns:
+        tuple[list, list]: ``(gb_search_moves, gb_pe_moves)``, GB band moves
+        (:class:`GBSpecialBase` subclasses) plus the ridge-Gibbs move when
+        eligible.
+
+    Raises:
+        ValueError: Starting GB coordinates outside the prior (resume path),
+            a WDM domain without ``gb_info.gb_wdm_comp``, or the warm start /
+            para search on a basis that is not 9-column.
+        NotImplementedError: A domain other than FD / WDM on the subtraction
+            path.
     """
     gb_info: GBSetup = curr.source_info["gb"]
     general_info: GeneralSetup = curr.general_info
@@ -5125,6 +6592,9 @@ def build_gb_moves(
             logger.info("Prior bounds for GB parameters:")
             for param_name, prior in priors["gb"].priors_in.items():
                 logger.info(f"  {param_name}: [{prior.min_val},{prior.max_val}]")
+            # NOTE (docstring audit 2026-10-19): stray debugger call left in a
+            # production path -- on this error path an MPI rank drops into pdb
+            # before the ValueError below. Reported, not removed.
             breakpoint()
             raise ValueError("Starting priors are inf. If injecting, try reducing spread.")
 
@@ -5157,6 +6627,9 @@ def build_gb_moves(
 
         if isinstance(domain_settings, FDSettings):
             #* TODO: add test to make sure the generator matches the general information.
+            # NOTE (docstring audit 2026-10-19): ``waveform_kwargs`` below is
+            # not defined in this function -- an FD resume with GB leaves
+            # raises NameError here. Reported, not fixed.
             template_in = deepcopy(acs.linear_data_arr)
             # acs lays walkers out in contiguous blocks of ``len(gpu_splits[0])`` per
             # GPU, so ``walker % num_per_gpu_walker`` recovers the intra-split residual
@@ -5834,6 +7307,10 @@ def build_gb_moves(
     #:
     #: The first keeps the historical bare name so single-stage recipes, the
     #: ``gb_no_fg`` auto-insertion and every existing runbook still resolve.
+    #:
+    #: ⚠ A LOCAL of build_gb_moves, not a module attribute: there is no
+    #: importable ``recipe.GB_IN_MODEL_SLOTS`` (globalfitmove.py's docstring
+    #: cites it under that name).
     GB_IN_MODEL_SLOTS = ("in_model", "in_model_fstat", "in_model_replace",
                          "in_model_removal")
 
@@ -6127,6 +7604,7 @@ def build_gb_moves(
     _pe_extr_draw = bool(getattr(gb_info, "pe_extrinsic_draw", True))
 
     def _pe_fit_kwargs(cfg):
+        """``_fit_kwargs`` + a :func:`pe_fstat_move_config` cadence (and floor, fit-in-move)."""
         # the PE F-stat grid moves' fit kwargs from pe_fstat_move_config: the
         # cadence (passed as before, fit-in-move or not) and, on the grid
         # class only, the move's own peak floor
@@ -6640,6 +8118,38 @@ def build_vgb_moves(
 
     Returns the PE move list (``["vgb_pe"]``, plus ``"vgb_ridge_gibbs"``
     when the basis carries the (dist, Mc, fdot_astro_ratio) fiber).
+
+    Called by ``stock.erebor.vgb.setup_vgb_moves``. In the 9mo / 12mo runs
+    (``all_sources``, no VGB ``signal_gen``) the seeded VGB templates are
+    subtracted from ``acs`` here on every start, and ``VGB_CHIRP_MASS_BASIS=1``
+    gives both moves (``vgb_pe`` in every ``gb_search*`` stage and ``full_pe``,
+    ``vgb_ridge_gibbs`` in ``gb_search_1`` / ``gb_search_2`` / ``full_pe``).
+
+    Env knobs read here: ``VGB_OPT_SNR_LIMIT`` (default ``"0.0"`` = no SNR
+    gate on the known sources); the same ``GB_SIGHET_REFRESH_*`` /
+    ``GB_SIGHET_TRUST_*`` / ``GB_SIGHET_ANCHOR_CHECK`` /
+    ``GB_SIGHET_DRIFT_CHECK`` knobs and defaults as :func:`build_gb_moves`;
+    ``GB_RIDGE_GIBBS_LEAF_FRACTION`` (``"1.0"``) and, through
+    :func:`ridge_gibbs_eligible`, ``GB_RIDGE_GIBBS``.
+
+    Args:
+        engine_info (EngineInfo): Exposes ``ndims["vgb"]``.
+        curr: Run info; reads ``source_info["vgb"]`` and ``general_info``.
+        acs: Shared analysis containers (residuals modified in place by the
+            seed subtraction).
+        priors: Shared priors dict (``priors["vgb"]``).
+        state: The run's state; ``sub_states["vgb"]`` band tables are
+            initialized and a stored ladder wins over the configured one
+            (``vgb_info.betas`` is then rewritten).
+        Tmax: Maximum temperature for ``TemperatureControl``. Default 1e6.
+
+    Returns:
+        list: ``[vgb_pe]`` or ``[vgb_pe, vgb_ridge_gibbs]``.
+
+    Raises:
+        ValueError: Seeded coordinates outside the VGB prior, or a WDM domain
+            without ``vgb_info.gb_wdm_comp``.
+        NotImplementedError: A domain other than FD / WDM.
     """
     vgb_info = curr.source_info["vgb"]
     general_info: GeneralSetup = curr.general_info
@@ -6966,9 +8476,14 @@ def build_vgb_moves(
 #
 # ``SourceMoveBuilder`` is the installable base class; per-source subclasses
 # carry the design knobs. Settings files construct and ``build()`` these inside
-# ``setup_recipe`` instead of hand-rolling the move construction. GB / PSD keep
-# their richer function form (``build_gb_moves`` / ``build_psd_moves``) and the
-# builder classes wrap them for a uniform ``(search_moves, pe_moves)`` return.
+# ``setup_recipe`` instead of hand-rolling the move construction. GB / VGB /
+# noise keep their richer function form (``build_gb_moves`` /
+# ``build_vgb_moves`` / ``build_noise_moves``), which the stock variants call
+# directly; the wrapper classes ``GBMoveBuilder`` / ``VGBMoveBuilder`` /
+# ``PSDMoveBuilder`` at the end of this module have no callers. Production
+# (9mo / 12mo) builds the source moves through ``MBHBatchedMoveBuilder``,
+# ``EMRIDirectMoveBuilder`` and ``SOBBHChunkedMoveBuilder``
+# (``stock.erebor.source_runtime``).
 # ======================================================================
 
 
@@ -6981,6 +8496,13 @@ class SourceMoveBuilder:
     and returns ``(search_moves, pe_moves)`` — either list may be empty.
     Settings files construct and call a builder inside ``setup_recipe``; the
     repeatable machinery lives here in :mod:`recipe`.
+
+    Args:
+        branch_name: Overrides the class attribute :attr:`branch_name`; one of
+            the two must be set.
+
+    Raises:
+        AssertionError: No branch name on the class or the instance.
     """
 
     #: Branch this builder targets; set on the subclass or via the constructor.
@@ -6992,7 +8514,20 @@ class SourceMoveBuilder:
         assert self.branch_name is not None, "SourceMoveBuilder needs a branch_name"
 
     def build(self, engine_info, curr, acs, priors, state):
-        """Return ``(search_moves, pe_moves)`` for this branch."""
+        """Return ``(search_moves, pe_moves)`` for this branch.
+
+        Args:
+            engine_info (EngineInfo): Engine info (may be ``None`` for the
+                single-source builders, which do not read it).
+            curr (CurrentInfoGlobalFit): Run info (``source_info``,
+                ``general_info``).
+            acs (AnalysisContainerArray): Shared analysis containers.
+            priors (dict): Shared priors dict.
+            state (GFState): The run's state.
+
+        Returns:
+            tuple[list, list]: ``(search_moves, pe_moves)``.
+        """
         raise NotImplementedError
 
 
@@ -7012,6 +8547,19 @@ def resume_ladder_wins(branch_name, info, sub, ntemps):
     reported and ignored, and ``info.ntemps`` / ``info.betas`` are
     rewritten so every later consumer (``run.py::_branch_ntemps``, the
     midit checkpoint gate, the saver) reads the store's count too.
+
+    Args:
+        branch_name (str): Branch label for the WARNING.
+        info (Setup): The branch settings (``ndim``; ``ntemps`` / ``betas``
+            are rewritten on a mismatch).
+        sub (PerLeafLadderState, optional): The branch sub-state
+            (``tempered_initialized``, ``ntemps``, ``betas_all``), or ``None``.
+        ntemps (int): The configured rung count.
+
+    Returns:
+        tuple[int, np.ndarray | None]: ``(ntemps, betas)``; ``betas`` is the
+        store's leaf-0 ladder (or a ``make_ladder`` one of the stored count)
+        on a mismatch, else ``None``.
     """
     if sub is None or not getattr(sub, "tempered_initialized", False):
         return int(ntemps), None
@@ -7088,6 +8636,24 @@ def resolve_resumed_ladders(branch_name, info, sub, betas, ntemps, configured_be
     store's leaf-0 row after a rung-count mismatch); ``configured_betas`` is
     the branch's configured ladder BEFORE ``resume_ladder_wins`` rewrote
     ``info.betas``. Returns a fresh ``(nleaves_max, ntemps)`` array.
+
+    Production (9mo / 12mo): the launchers do not export
+    ``*_LADDER_RESET_ON_RESUME`` (it is a one-off launch-line knob), so a
+    resume normally keeps the stored ladders (one ``[<BRANCH>_LADDER] resume
+    keeps the STORED per-leaf ladders`` line per branch).
+
+    Args:
+        branch_name (str): Branch label for the log tag and the knob name.
+        info (Setup): The branch settings (``nleaves_max``, ``ndim``,
+            ``ladder_reset_on_resume``; ``betas`` is rewritten on a reset).
+        sub (PerLeafLadderState, optional): The branch sub-state as loaded,
+            or ``None``.
+        betas (np.ndarray): The resolved ladder, shape ``(ntemps,)``.
+        ntemps (int): The rung count in force.
+        configured_betas (np.ndarray, optional): See above.
+
+    Returns:
+        np.ndarray: Per-leaf ladders, shape ``(nleaves_max, ntemps)``.
     """
     nleaves = int(info.nleaves_max)
     ntemps = int(ntemps)
@@ -7172,6 +8738,24 @@ def resolve_snr_keyed_ladders(branch_name, info, sub, betas_all, ntemps, *, fres
     Returns ``(betas_all, plan)``: ``plan`` is ``None`` with the knob off
     (``betas_all`` returned untouched, bit-identical) or the move's
     ``snr_ladder_plan`` (``{"ref": {leaf: SNR built at}, "pending": {...}}``).
+
+    Off in the 9mo / 12mo runs (no ``*_LADDER_TOP_SNR`` exported).
+
+    Args:
+        branch_name (str): Branch label (log tag, knob prefix).
+        info (Setup): The branch settings (``ladder_top_snr``,
+            ``ladder_tmax_min``, ``ladder_tmax``, ``ladder_reset_on_resume``,
+            ``ndim``, ``nleaves_max``); each field falls back to its
+            ``{BRANCH}_*`` env knob.
+        sub (PerLeafLadderState, optional): The branch sub-state (recorded
+            SNRs, ``inds``), or ``None``.
+        betas_all (np.ndarray): ``(nleaves_max, ntemps)`` ladders from
+            :func:`resolve_resumed_ladders`.
+        ntemps (int): Rung count.
+        fresh (bool): The store holds no usable per-leaf ladders.
+
+    Returns:
+        tuple[np.ndarray, dict | None]: ``(betas_all, plan)`` as above.
     """
     from ..sampling.snrladder import (
         LADDER_TMAX_MIN_DEFAULT,
@@ -7246,6 +8830,46 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
     differs, :attr:`like_kwargs_from_waveform_kwargs`). Any constructor argument
     left ``None`` falls back to the matching field on
     ``curr.source_info[branch_name]``.
+
+    :meth:`build` resolves the ladder (a resumed store's rung count and
+    per-leaf ladders win; see :func:`resume_ladder_wins`,
+    :func:`resolve_resumed_ladders`, :func:`resolve_snr_keyed_ladders`),
+    writes ``info.betas`` and ``state.sub_states[branch].betas_all``, and
+    returns ``([], [move])`` with ``move`` a :attr:`move_class` instance named
+    ``move_name``, installed on the run's walker fan-out, its eigen tables
+    persisted beside the store (``general_info.main_file_path``).
+
+    Args:
+        branch_name: Overrides the class attribute.
+        wave_gen: The waveform generator the move calls
+            (``fn(*params, **gen_kwargs)`` returning per-walker templates). A
+            bound method of an object with ``.kwargs`` enables the per-device
+            replica path when a shared DCGA exists.
+        waveform_gen_kwargs: Generation kwargs; default
+            ``info.waveform_kwargs``.
+        waveform_like_kwargs: Likelihood kwargs; default per
+            :meth:`assemble_like_kwargs`.
+        num_repeats: In-model repeats per propose; default
+            ``info.num_prop_repeats``.
+        inner_moves: Inner eryn moves; default ``info.inner_moves``.
+        transform (TransformContainer, optional): Default ``info.transform``.
+        betas: Explicit ladder (loses only to a resumed store's rung-count
+            override); default ``info.betas``, then
+            ``make_ladder(ndim, ntemps)``.
+        Tmax: Forwarded to the move. Default ``np.inf``.
+        permute_every: Forwarded to the move. Default 20.
+        move_name: The move's ``name``.
+        **move_kwargs: Extra keyword arguments for :attr:`move_class` (win
+            over the eigen / ladder defaults taken from ``info``).
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.recipe import SOBBHMoveBuilder
+
+            search_moves, pe_moves = SOBBHMoveBuilder(
+                wave_gen=wave_gen, move_name="sobbh_pe",
+            ).build(None, curr, acs, priors, state)
     """
 
     #: EMRI passes ``waveform_kwargs`` as the likelihood kwargs; MBH/SOBBH pass
@@ -7325,6 +8949,20 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
         return like_kw
 
     def build(self, engine_info, curr, acs, priors, state):
+        """Build the branch's PE move (see the class docstring).
+
+        Args:
+            engine_info (EngineInfo): Unused (``None`` is accepted).
+            curr (CurrentInfoGlobalFit): Run info (``source_info[branch_name]``,
+                ``general_info``, ``rank_layout``).
+            acs (AnalysisContainerArray): Shared analysis containers.
+            priors (dict): Shared priors dict.
+            state (GFState): The run's state;
+                ``sub_states[branch_name].betas_all`` is written.
+
+        Returns:
+            tuple[list, list]: ``([], [move])``.
+        """
         info = curr.source_info[self.branch_name]
         gi = curr.general_info
         nwalkers = _body_nwalkers(curr, acs, self.move_class)
@@ -7572,6 +9210,7 @@ class SOBBHChunkedMoveBuilder(SOBBHMoveBuilder):
     use_dcga = False
 
 
+# TODO check: keep/remove/document -- no callers in src/tests/scripts/LATW; the variants call build_gb_moves directly
 class GBMoveBuilder(SourceMoveBuilder):
     """Build the GB search + PE move lists.
 
@@ -7610,6 +9249,7 @@ class GBMoveBuilder(SourceMoveBuilder):
         )
 
 
+# TODO check: keep/remove/document -- no callers in src/tests/scripts/LATW; the vgb setup calls build_vgb_moves directly
 class VGBMoveBuilder(SourceMoveBuilder):
     """Build the VGB in-model stretch move (wraps :func:`build_vgb_moves`).
 
@@ -7629,6 +9269,7 @@ class VGBMoveBuilder(SourceMoveBuilder):
         )
 
 
+# TODO check: keep/remove/document -- no callers in src/tests/scripts/LATW; the variants call build_noise_moves directly
 class PSDMoveBuilder(SourceMoveBuilder):
     """Build a noise search + PE move pair (wraps :func:`build_noise_moves`).
 

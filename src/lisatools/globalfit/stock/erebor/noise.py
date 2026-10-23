@@ -1,4 +1,36 @@
-"""Noise branch blocks (instrumental PSD + galactic foreground) for the Erebor recipe."""
+"""Noise branch blocks (instrumental PSD + galactic foreground) for the Erebor recipe.
+
+The two noise branches of every noise-fitting Erebor variant:
+
+* ``psd`` — :class:`PSDSettings` / :class:`PSDSetup`: the 2-parameter
+  instrument model ``(Soms_d, Sa_a)`` (sqrt units, prior
+  :data:`PSD_PRIOR_RANGE`, linear or ``ln`` basis via ``PSD_LOG_SAMPLING``).
+* ``galfor`` — :class:`GalForSettings` / :class:`GalForSetup`: the
+  5-parameter galactic-confusion foreground ``(amp, fk, alpha, f_1, f_2)``
+  (:data:`GALFOR_BASIS`, prior :func:`galfor_prior_ranges`, linear or
+  ``log10`` basis via ``GALFOR_LOG_SAMPLING``).
+
+Each branch runs its own :class:`~lisatools.globalfit.moves.psdmove.PSDMove`
+(stock names ``psd_pe`` / ``galfor_pe`` and ``*_search``) on its own ladder.
+The shared helpers here prepare both branches for the noise variants and for
+``all_sources`` (:func:`prepare_psd_branch`, :func:`prepare_galfor_branch`,
+:func:`noise_sensitivity_init_kwargs`, :func:`wire_unequal_arm_psd`,
+:func:`validate_coarse_settings`), and the store / monitor readers use
+:func:`read_noise_model_identity`, :func:`galfor_params_to_physical` and
+:func:`psd_truth_levels`.
+
+Production 9mo / 12mo (``all_sources``): ``UNEQUAL_ARM=1`` (unequal-arm
+instrument noise fed by the NOISE brick's link delays), ``PSD_LOG_SAMPLING``
+unset (linear psd basis), ``GALFOR_LOG_SAMPLING=1``,
+``GALFOR_ALPHA_MAX=20``, ``GALFOR_FK_PRIOR`` / ``GALFOR_F1_PRIOR`` /
+``GALFOR_F2_PRIOR`` set, ``GALFOR_MODULATION_PATH`` (a tabulated foreground
+time modulation, ``modulation_unequal.dat``) with ``GALFOR_MODULATION_T0=data``,
+``PSD_NUM_PROP_REPEATS`` / ``GALFOR_NUM_PROP_REPEATS`` = 10. The noise is
+PINNED at launch (``PSD_START_PARAMS`` from ``warmstart.noise_pin`` and a
+hand-set ``GALFOR_START_PARAMS``), so the noise stages are skipped; ``psd_pe``
+/ ``galfor_pe`` sample in ``full_pe`` and inside the ``gb_search_2``
+cycle-end noise search.
+"""
 
 from __future__ import annotations
 
@@ -38,6 +70,14 @@ def psd_prior_dict(log_sampling: bool = False) -> dict:
     over the same physical support (:data:`PSD_PRIOR_RANGE`); pair it with
     :func:`make_psd_log_transform_container` so the likelihood still receives
     linear levels.
+
+    Args:
+        log_sampling: Uniform in ``ln`` instead of linear. Default ``False``.
+
+    Returns:
+        dict: Two :func:`~eryn.prior.uniform_dist` entries keyed by LaTeX
+        labels (``Soms_d`` first, ``Sa_a`` second), ready for
+        :class:`~eryn.prior.ProbDistContainer`.
     """
     (oms_lo, oms_hi), (tm_lo, tm_hi) = PSD_PRIOR_RANGE
     if not log_sampling:
@@ -56,6 +96,15 @@ def check_psd_log_sampling(psd) -> bool:
 
     The log basis is defined for ``(Soms_d, Sa_a)`` only; a spline-style psd
     branch would silently exponentiate its knot positions/amplitudes.
+
+    Args:
+        psd (Settings): The psd block (``log_sampling``, ``ndim`` read).
+
+    Returns:
+        bool: The effective ``log_sampling`` flag.
+
+    Raises:
+        ValueError: ``log_sampling`` with ``ndim`` other than ``None`` / 2.
     """
     log_sampling = bool(getattr(psd, "log_sampling", False))
     if log_sampling and getattr(psd, "ndim", None) not in (None, 2):
@@ -74,6 +123,10 @@ def make_psd_log_transform_container() -> TransformContainer:
     ufuncs) the EMRI/SOBBH ``logm1`` bases use. Lives here rather than in
     ``transforms.py`` so the noise path keeps its import surface -- the
     transform module pulls in ``bbhx`` at import.
+
+    Returns:
+        TransformContainer: Input basis ``logSoms_d, logSa_a``, output basis
+        ``Soms_d, Sa_a``.
     """
     return TransformContainer(
         input_basis=["logSoms_d", "logSa_a"],
@@ -92,8 +145,60 @@ class PSDSettings(Settings):
     other source branches (e.g. instrumental noise levels) and feeds into
     :class:`PSDSetup`.
 
-    # TODO/DOCS: confirm coordination between ``nknots`` and ``ndim`` for
-    # spline-style PSD parameterizations vs. the default 4-parameter setup.
+    The stock prior (:func:`psd_prior_dict`) is the 2-parameter
+    ``(Soms_d, Sa_a)`` model, so the variants use the ``ndim=2`` subclass
+    ``NoisePSDSettings`` (``variants/noise.py``; ``all_sources`` aliases it as
+    ``AllSourcesPSDSettings``). Reached as ``fit.psd``; env knobs ``PSD_<FIELD>``.
+    ``PSD_EIGEN_INFO`` (launchers ``fisher``) is read by the move, not here.
+
+    Attributes:
+        ntemps: The psd move's own ladder size. Env ``PSD_NTEMPS``. Default 12.
+        psd_kwargs: Reserved; the stock path does not read it (the ``None``
+            default branch of :meth:`PSDSetup.init_sampling_info` never fires
+            because the field defaults to ``{}``).
+        nleaves_max: Always 1.
+        nleaves_min: Always 1.
+        ndim: Sampled dimension. Default 4 here, which does NOT match the
+            2-parameter stock prior; ``NoisePSDSettings`` sets 2.
+        transform: Sampling -> linear transform; filled with
+            :func:`make_psd_log_transform_container` under ``log_sampling``.
+        injection: Start/truth row in the SAMPLING basis (``prepare_psd_branch``
+            converts a linear ``[Soms_d, Sa_a]`` injection).
+        nknots: Not read anywhere (spline-PSD placeholder).
+        num_prop_repeats: Inner proposals per PSDMove call. Env
+            ``PSD_NUM_PROP_REPEATS``. Default 50; launchers 10.
+        instrument_component_cls: Instrument-noise component class for the
+            :class:`~lisatools.sensitivity.CompositeSensitivityBackend`;
+            ``None`` -> the backend default (``InstrumentNoise``). Production
+            (``UNEQUAL_ARM=1``) swaps in
+            :class:`~lisatools.sensitivity.UnequalArmInstrumentNoise`.
+        instrument_model_cls: Instrument model class; ``None`` -> the backend
+            default (``LISAModel``).
+        instrument_component_kwargs: Extra constructor kwargs of the component
+            (plain data only: ``ltts_l1_file``, ``ltts_stride``,
+            ``wdm_psd_method`` for the unequal-arm model).
+        model_name: Instrument model name; ``None`` -> the backend default.
+        log_sampling: Sample ``ln(Soms_d), ln(Sa_a)`` over the same support.
+            Env ``PSD_LOG_SAMPLING``. Default ``False`` (launchers unset).
+        inner_move_kind: PSDMove inner proposal, ``"eigen"`` or ``"stretch"``;
+            ``None`` resolves from the walker count. Env
+            ``PSD_INNER_MOVE_KIND``.
+        eigen_refresh_every: Proposes between eigen-table refreshes. Env
+            ``PSD_EIGEN_REFRESH``. Default 10.
+        eigen_eps_rel: Information-matrix finite-difference step (fraction
+            of each prior-box width). Env ``PSD_EIGEN_EPS_REL``. Default 1e-4.
+        ensemble_search: Tiled per-walker inner ensemble in SEARCH stages
+            only. Env ``PSD_ENSEMBLE_SEARCH``. Default ``False``.
+        ensemble_repeats: Tiled copies per walker. Env
+            ``PSD_ENSEMBLE_REPEATS``. Default 10.
+        ensemble_spread_lo: Target lower lnL spread of the tiled ensemble.
+            Env ``PSD_ENSEMBLE_SPREAD_LO``. Default 1.0.
+        ensemble_spread_hi: Target upper lnL spread. Env
+            ``PSD_ENSEMBLE_SPREAD_HI``. Default 10.0.
+        ensemble_scale0: Opening perturbation scale (fraction of the prior
+            box). Env ``PSD_ENSEMBLE_SCALE0``. Default 1e-3.
+        ensemble_scale_tries: Rescale attempts. Env
+            ``PSD_ENSEMBLE_SCALE_TRIES``. Default 4.
     """
 
     # the psd move's OWN ladder size (noise-move split 2026-07: psd, galfor,
@@ -105,6 +210,7 @@ class PSDSettings(Settings):
     ndim: int = 4
     transform: Optional[TransformContainer] = None
     injection: Optional[np.ndarray] = None
+    # TODO check: keep/remove/document -- field has no reader anywhere (spline-PSD placeholder)
     nknots: Optional[int] = None
     num_prop_repeats: int = dataclasses.field(
         default_factory=env_default("PSD_NUM_PROP_REPEATS", 50, int)
@@ -171,6 +277,10 @@ class PSDSettings(Settings):
 class PSDSetup(Setup):
     """:class:`Setup` for the instrumental PSD branch in the Erebor recipe.
 
+    Construction copies the settings, opens the ``psd_setup.log`` logger and
+    runs :meth:`init_setup` (prior / transform / ladder, then the generic
+    module sub-state / sub-backend).
+
     Args:
         psd_settings: Settings dataclass with PSD kwargs, prior, and
             tempering configuration.
@@ -188,7 +298,18 @@ class PSDSetup(Setup):
         self.init_setup()
 
     def init_sampling_info(self):
-        """Build the PSD prior, tempering ladder, and default ``psd_kwargs``."""
+        """Build the PSD prior, tempering ladder, and default ``psd_kwargs``.
+
+        Fills (only when unset): ``initialize_kwargs``, ``priors``
+        (:func:`psd_prior_dict` in the basis :func:`check_psd_log_sampling`
+        allows), ``transform`` (log basis only), ``betas``
+        (``make_ladder(10 * ndim, Tmax=inf, ntemps=ntemps)``) and
+        ``other_tempering_kwargs`` (``permute=False``).
+
+        Raises:
+            ValueError: From :func:`check_psd_log_sampling`.
+            AssertionError: When ``other_tempering_kwargs["permute"]`` is true.
+        """
         if self.psd_kwargs is None:
             self.psd_kwargs = dict(sens_fn="A1TDISens")
 
@@ -352,6 +473,7 @@ def _freq_range_from_env():
 
 
 def _checked_range(label: str, rng) -> tuple:
+    """``(lo, hi)`` as floats, refusing anything but ``0 < lo < hi`` (ValueError)."""
     lo_f, hi_f = (float(rng[0]), float(rng[1]))
     if not (0.0 < lo_f < hi_f):
         raise ValueError(
@@ -385,6 +507,28 @@ def galfor_prior_ranges(*, alpha_max=None, freq_range=None, fk_range=None,
     outside the new support prices at ``log_prior = -inf`` on the next launch,
     and nothing in the noise-model identity covers prior ranges. The 9mo / 1yr
     stores start fresh; the 6mo relaunch keeps the stock box.
+
+    Production launchers: ``GALFOR_ALPHA_MAX=20``,
+    ``GALFOR_FK_PRIOR=0.8e-3,1e-2``, ``GALFOR_F1_PRIOR=1e-4,1e-2``,
+    ``GALFOR_F2_PRIOR=0.8e-3,1e-2`` (``GALFOR_FREQ_PRIOR`` unset).
+
+    Args:
+        alpha_max (float, optional): Upper cap of ``alpha``; ``None`` -> env
+            ``GALFOR_ALPHA_MAX`` -> the stock 5.0.
+        freq_range (tuple, optional): Shared ``(lo, hi)`` (Hz) box for fk,
+            f_1 and f_2; ``None`` -> env ``GALFOR_FREQ_PRIOR``.
+        fk_range (tuple, optional): ``(lo, hi)`` (Hz) for fk alone; ``None``
+            -> env ``GALFOR_FK_PRIOR``.
+        f1_range (tuple, optional): Same for f_1 (``GALFOR_F1_PRIOR``).
+        f2_range (tuple, optional): Same for f_2 (``GALFOR_F2_PRIOR``).
+
+    Returns:
+        tuple: Five ``(lo, hi)`` float pairs in :data:`GALFOR_BASIS` order
+        (linear, physical units: ``amp`` dimensionless, frequencies Hz).
+
+    Raises:
+        ValueError: A malformed ``"lo,hi"`` env value or a box violating
+            ``0 < lo < hi``.
     """
     if alpha_max is None:
         _env = os.environ.get("GALFOR_ALPHA_MAX")
@@ -436,6 +580,19 @@ def galfor_prior_dict(log_sampling: bool = False, *, alpha_max=None,
     stored chains. Uniform-in-log10 and uniform-in-ln are the SAME measure up
     to the constant ``ln 10``, so the posterior is unchanged; only the stored
     numbers and the step scale differ.
+
+    Args:
+        log_sampling: ``log10`` basis for :data:`GALFOR_LOG_PARAMS`. Default
+            ``False``; production ``GALFOR_LOG_SAMPLING=1``.
+        alpha_max (float, optional): See :func:`galfor_prior_ranges`.
+        freq_range (tuple, optional): See :func:`galfor_prior_ranges`.
+        fk_range (tuple, optional): See :func:`galfor_prior_ranges`.
+        f1_range (tuple, optional): See :func:`galfor_prior_ranges`.
+        f2_range (tuple, optional): See :func:`galfor_prior_ranges`.
+
+    Returns:
+        dict: ``{0..4: uniform_dist}`` in :data:`GALFOR_BASIS` order, in the
+        sampling basis.
     """
     # ``freq_range`` (env ``GALFOR_FREQ_PRIOR``): the fk / f_1 / f_2 box, see
     # :func:`galfor_prior_ranges` (the one resolver, shared with the pin checks).
@@ -460,6 +617,17 @@ def read_noise_model_identity(h5_path) -> dict:
     galfor chain, say). A JSON-attribute fallback is kept for any store that
     ever wrote it that way; an unreadable or absent record returns ``{}``,
     which callers must treat as "the defaults", never as "all False".
+
+    Read by the HDF backend / run resume checks, the monitor rank and the
+    LATW store-reading tutorial (keys include ``galfor_log_sampling``,
+    ``unequal_arm``, ``wdm_psd_method``, ``data_t0``, ``coarse_Q``).
+
+    Args:
+        h5_path (str): Path of the global-fit HDF store.
+
+    Returns:
+        dict: ``{key: value}`` (numpy scalars converted with ``.item()``), or
+        ``{}``.
     """
     import h5py
 
@@ -505,6 +673,23 @@ def galfor_params_to_physical(params, log_sampling: bool):
 
     Accepts any shape whose LAST axis is the 5-column basis; returns a float
     array of the same shape. ``log_sampling=False`` is an identity copy.
+
+    Args:
+        params (array_like): Stored galfor coordinates, shape ``(..., 5)``.
+        log_sampling: The store's ``noise_model_identity["galfor_log_sampling"]``.
+
+    Returns:
+        np.ndarray: ``(..., 5)`` float64 copy in the linear
+        ``(amp, fk, alpha, f_1, f_2)`` basis.
+
+    Raises:
+        ValueError: When the last axis is not 5 wide.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.globalfit.stock.erebor.noise import galfor_params_to_physical
+        >>> galfor_params_to_physical(np.array([-44.0, -3.0, 2.0, -3.0, -3.0]), True)[:2]
+        array([1.e-44, 1.e-03])
     """
     out = np.array(params, dtype=float, copy=True)
     if out.shape[-1] != len(GALFOR_BASIS):
@@ -520,7 +705,17 @@ def galfor_params_to_physical(params, log_sampling: bool):
 
 
 def check_galfor_log_sampling(galfor) -> bool:
-    """``galfor.log_sampling``, refused for anything but the 5-param branch."""
+    """``galfor.log_sampling``, refused for anything but the 5-param branch.
+
+    Args:
+        galfor (Settings): The galfor block (``log_sampling``, ``ndim`` read).
+
+    Returns:
+        bool: The effective ``log_sampling`` flag.
+
+    Raises:
+        ValueError: ``log_sampling`` with ``ndim`` other than ``None`` / 5.
+    """
     log_sampling = bool(getattr(galfor, "log_sampling", False))
     if log_sampling and getattr(galfor, "ndim", None) not in (None, 5):
         raise ValueError(
@@ -543,6 +738,16 @@ def make_galfor_log_transform_container() -> TransformContainer:
     ``transforms`` module: both define it, but ``transforms`` imports ``bbhx``
     at module scope and the noise path keeps a narrower import surface. Both
     it and ``np.log10`` are module-level names, so the container pickles.
+
+    Returns:
+        TransformContainer: Input basis ``log10_amp, log10_fk, alpha,
+        log10_f_1, log10_f_2``; output basis :data:`GALFOR_BASIS`.
+
+    Example:
+        .. code-block:: python
+
+            tc = make_galfor_log_transform_container()
+            linear = tc.both_transforms(stored_rows)   # (n, 5) log10 -> linear
     """
     return TransformContainer(
         input_basis=[
@@ -562,6 +767,55 @@ class GalForSettings(Settings):
     Holds the foreground-model kwargs and the leaf / dimension counts used
     by :class:`GalForSetup` to build the prior on the stochastic galactic
     foreground (amplitude, knee, slopes, etc.).
+
+    Reached as ``fit.galfor``; env knobs ``GALFOR_<FIELD>``. The prior box
+    knobs (``GALFOR_ALPHA_MAX``, ``GALFOR_FREQ_PRIOR``, ``GALFOR_FK_PRIOR``,
+    ``GALFOR_F1_PRIOR``, ``GALFOR_F2_PRIOR``) are read by
+    :func:`galfor_prior_ranges`, the modulation knobs
+    (``GALFOR_MODULATION_PATH`` / ``_T0``) by the variant's general block,
+    and ``GALFOR_EIGEN_INFO`` (launchers ``fisher``) by the move.
+
+    Attributes:
+        ntemps: The galfor move's own ladder size. Env ``GALFOR_NTEMPS``.
+            Default 12.
+        galfor_kwargs: Reserved; the stock path does not read it (the field
+            defaults to ``{}``, so the ``None`` branch in
+            :meth:`GalForSetup.init_sampling_info` never fires).
+        transform: Sampling -> linear transform; filled with
+            :func:`make_galfor_log_transform_container` under ``log_sampling``.
+        nleaves_max: Always 1.
+        nleaves_min: Always 1.
+        ndim: 5 (:data:`GALFOR_BASIS`).
+        num_prop_repeats: Inner proposals per PSDMove call. Env
+            ``GALFOR_NUM_PROP_REPEATS``. Default 50; launchers 10.
+        stochastic_fn: Foreground spectral model for the sensitivity backend;
+            ``None`` -> ``HyperbolicTangentGalacticForeground``.
+        modulation: Foreground time modulation object; ``None`` -> the
+            general block's ``galfor_modulation_path`` table, or stationary.
+        log_sampling: Sample ``log10`` of ``amp, fk, f_1, f_2`` (alpha
+            linear). Env ``GALFOR_LOG_SAMPLING``. Default ``False``;
+            launchers 1.
+        inner_move_kind: PSDMove inner proposal, ``"eigen"`` or ``"stretch"``;
+            ``None`` resolves from the walker count. Env
+            ``GALFOR_INNER_MOVE_KIND``.
+        eigen_refresh_every: Proposes between eigen-table refreshes. Env
+            ``GALFOR_EIGEN_REFRESH``. Default 10.
+        eigen_eps_rel: Information-matrix finite-difference step (fraction of
+            each prior-box width). Env ``GALFOR_EIGEN_EPS_REL``. Default 1e-4.
+        ensemble_search: Tiled per-walker inner ensemble in SEARCH stages
+            only. Env ``GALFOR_ENSEMBLE_SEARCH``. Default ``False``.
+        ensemble_repeats: Env ``GALFOR_ENSEMBLE_REPEATS``. Default 10.
+        ensemble_spread_lo: Env ``GALFOR_ENSEMBLE_SPREAD_LO``. Default 1.0.
+        ensemble_spread_hi: Env ``GALFOR_ENSEMBLE_SPREAD_HI``. Default 10.0.
+        ensemble_scale0: Env ``GALFOR_ENSEMBLE_SCALE0``. Default 1e-3.
+        ensemble_scale_tries: Env ``GALFOR_ENSEMBLE_SCALE_TRIES``. Default 4.
+
+    Example:
+        .. code-block:: python
+
+            fit = erebor.all_sources(nwalkers=4)
+            fit.galfor.log_sampling = True     # or env GALFOR_LOG_SAMPLING=1
+            fit.galfor.num_prop_repeats = 10
     """
 
     # the galfor move's OWN ladder size (noise-move split 2026-07)
@@ -639,6 +893,9 @@ class GalForSettings(Settings):
 class GalForSetup(Setup):
     """:class:`Setup` for the galactic-foreground branch in the Erebor recipe.
 
+    Construction copies the settings, opens the ``galfor_setup.log`` logger
+    and runs :meth:`init_setup`.
+
     Args:
         galfor_settings: Settings dataclass with foreground kwargs, prior,
             and tempering configuration.
@@ -656,7 +913,18 @@ class GalForSetup(Setup):
         self.init_setup()
 
     def init_sampling_info(self):
-        """Build the galactic-foreground prior, tempering kwargs, and default ``galfor_kwargs``."""
+        """Build the galactic-foreground prior, tempering kwargs, and default ``galfor_kwargs``.
+
+        Fills (only when unset): ``initialize_kwargs``, ``priors``
+        (:func:`galfor_prior_dict` in the allowed basis), ``transform`` (log
+        basis only), ``betas`` (``make_ladder(10 * ndim, Tmax=inf,
+        ntemps=ntemps)``) and ``other_tempering_kwargs`` (``permute=False``).
+
+        Raises:
+            ValueError: From :func:`check_galfor_log_sampling` or the prior
+                knobs.
+            AssertionError: When ``other_tempering_kwargs["permute"]`` is true.
+        """
         if self.galfor_kwargs is None:
             self.galfor_kwargs = dict(sens_fn="A1TDISens")
 
@@ -699,23 +967,23 @@ class GalForSetup(Setup):
             self.branch_backend = ModuleSubBackend
 
 
+# TODO check: keep/remove/document -- legacy helper; no caller anywhere (erebor re-export only)
 def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
     """Construct the default :class:`GalForSetup` for an Erebor run.
 
     Builds a :class:`GalForSettings` from the run-wide ``Tobs`` / ``dt``
     carried on ``general_set`` and wraps it in a :class:`GalForSetup`.
 
-    # TODO/DOCS: the local ``Tobs = YRSID_SI`` and ``dt = 10.0`` are dead
-    # code (overridden by ``general_set``); confirm whether they should be
-    # used as fallbacks.
+    Note:
+        The local ``Tobs = YRSID_SI`` and ``dt = 10.0`` are never used (the
+        settings take ``general_set.Tobs`` / ``.dt``).
 
     Args:
         general_set: Run-wide :class:`GeneralSetup` providing ``Tobs`` and
             ``dt``.
 
     Returns:
-        Configured :class:`GalForSetup` ready for use in the Erebor
-        pipeline.
+        GalForSetup: Configured setup ready for use in the Erebor pipeline.
     """
     from lisatools.detector import EqualArmlengthOrbits
     from lisatools.utils.constants import YRSID_SI
@@ -747,6 +1015,21 @@ def validate_coarse_settings(gs, *, all_source: bool) -> None:
     Noise-only rules are the historical ones (CPU backend replacement); an
     all-source run must opt into a sidecar mode explicitly, because coarse
     scoring there changes the PSD/GALFOR transition kernel, not just speed.
+    Production (``COARSE_Q=1``, ``COARSE_GPU_MODE=off``) passes trivially.
+
+    Args:
+        gs (EreborGeneralSettings): The general block (``coarse_Q``,
+            ``coarse_fiducial``, ``coarse_gpu_mode``, ``gpus``); ``coarse_Q`` and
+            ``coarse_gpu_mode`` are normalized in place.
+        all_source: ``True`` for ``all_sources`` (sidecar rules), ``False``
+            for the noise-only variants.
+
+    Raises:
+        ValueError: ``coarse_Q`` not an integer >= 1, an unknown
+            ``coarse_fiducial`` / ``coarse_gpu_mode``, a sidecar mode on a
+            noise-only run, ``coarse_Q > 1`` with GPUs on a noise-only run,
+            ``coarse_Q > 1`` with mode ``"off"`` on an all-source run, or a
+            sidecar mode with ``coarse_Q <= 1``.
     """
     import numbers
 
@@ -804,6 +1087,14 @@ def resolve_galfor_modulation(path, t0: float = 0.0):
     (default 0.0 keeps a table already relative to the data start unchanged).
     Construction is lazy, so a deferred anchor may also overwrite ``.t0``
     before first use — see ``GeneralSetup._resolve_deferred_noise_model``.
+
+    Args:
+        path (str | None): Modulation table (``GALFOR_MODULATION_PATH``);
+            falsy -> stationary.
+        t0: Absolute epoch (s) of the table's time origin.
+
+    Returns:
+        GalForTimeModulation | None: The modulation, or ``None``.
     """
     from lisatools.sensitivity import GalForTimeModulation
 
@@ -819,6 +1110,16 @@ def resolve_noise_file(
     must exist; otherwise look for the standard
     ``<mojito_data_path>/data/INSTRUMENT/L1/NOISE_*`` brick. Returns ``None``
     when nothing is found (callers fall back to the analytic stock levels).
+
+    Args:
+        mojito_data_path: Brick-cache root (``MOJITO_DATA_PATH``).
+        explicit: Explicit brick path (``NOISE_FILE``).
+
+    Returns:
+        str | None: The brick path, or ``None``.
+
+    Raises:
+        FileNotFoundError: When ``explicit`` is given but does not exist.
     """
     if explicit:
         if not os.path.isfile(explicit):
@@ -854,6 +1155,22 @@ def wire_unequal_arm_psd(gs, psd) -> None:
     Shared by ``all_sources`` and the noise-only variants so the two paths stay
     in lockstep; reads ``gs.unequal_arm_stride`` / ``gs.wdm_psd_method`` /
     ``gs.mojito_data_path`` / ``gs.noise_file`` and mutates ``psd`` in place.
+    (``all_sources`` actually calls its own identical copy,
+    ``AllSourcesGlobalFit._wire_unequal_arm``; production ``UNEQUAL_ARM=1``,
+    ``UNEQUAL_ARM_STRIDE=200``, ``WDM_PSD_METHOD=layer_calibrated``.)
+
+    Args:
+        gs (EreborGeneralSettings): The general block (``data_mode``,
+            ``mojito_data_path``, ``noise_file``, ``unequal_arm_stride``,
+            ``wdm_psd_method``).
+        psd (PSDSettings): The psd branch block; its ``instrument_component_cls`` (if
+            unset) and ``instrument_component_kwargs`` (``ltts_l1_file``,
+            ``ltts_stride``, ``wdm_psd_method`` via ``setdefault``) are set.
+
+    Raises:
+        ValueError: No psd branch, non-mojito data, or a brick without
+            ``/ltts``.
+        FileNotFoundError: No NOISE brick found.
     """
     import h5py
 
@@ -907,6 +1224,18 @@ def noise_params_from_file(
     warning) if the fit fails, so callers can fall back to the stock levels.
     ``honor_resume_pin=False`` ignores ``MOJITO_PSD_REFERENCE_FIT_UNEQUAL_ARM``
     (diagnostics only; a run's ``general.psd_injection`` keeps honouring it).
+    The production launchers export ``MOJITO_PSD_REFERENCE_FIT_UNEQUAL_ARM=1``.
+
+    Args:
+        noise_file: Mojito NOISE L1 brick path.
+        band: Optional fit band ``(f_lo, f_hi)`` (Hz).
+        tdi_generation: TDI generation of the model (1 or 2). Default 2.
+        honor_resume_pin: Honor the equal-arm resume pin env knob. Default
+            ``True``.
+
+    Returns:
+        list[float] | None: ``[Soms_d, Sa_a]`` (sqrt units), or ``None`` when
+        the fit raised (logged as a warning).
     """
     from lisatools.sensitivity import estimate_noise_params_from_file
 
@@ -973,7 +1302,10 @@ def psd_truth_levels(
             is not present.
 
     Returns:
-        ``(Soms_d, Sa_a)`` in linear (square-root) units.
+        tuple[float, float]: ``(Soms_d, Sa_a)`` in linear (square-root) units.
+
+    Raises:
+        ValueError: When ``PSD_TRUTH`` is set but is not two numbers.
     """
     env = os.environ.get("PSD_TRUTH")
     if env:
@@ -1005,6 +1337,19 @@ def prepare_psd_branch(psd, psd_injection=None):
     and the injection carried into the sampling basis so injection-truth
     overlays stay aligned with the chain. Shared by the noise variants and
     all_sources.
+
+    Args:
+        psd (PSDSettings): The psd block (mutated in place; fields already
+            set win).
+        psd_injection (sequence, optional): Linear ``[Soms_d, Sa_a]``;
+            stored as ``psd.injection`` (``ln`` of it under ``log_sampling``)
+            when ``psd.injection`` is unset.
+
+    Returns:
+        PSDSettings: ``psd``.
+
+    Raises:
+        ValueError: From :func:`check_psd_log_sampling`.
     """
     log_sampling = check_psd_log_sampling(psd)
     if psd.initialize_kwargs is None:
@@ -1026,9 +1371,20 @@ def prepare_galfor_branch(galfor):
     ``log10`` of ``amp, fk, f_1, f_2`` (alpha stays linear) over the same
     physical support, with a ``10**x``
     :class:`~eryn.utils.TransformContainer` back to the foreground model's own
-    basis. Note the base: the psd branch is ``ln``, this one is ``log10``. Filling them here rather than leaving it to
-    :class:`GalForSetup` keeps the knob effective for callers that pass their
-    own Setup. Shared by the noise variants and all_sources.
+    basis. Note the base: the psd branch is ``ln``, this one is ``log10``.
+    Filling them here rather than leaving it to :class:`GalForSetup` keeps the
+    knob effective for callers that pass their own Setup. Shared by the noise
+    variants and all_sources.
+
+    Args:
+        galfor (GalForSettings): The galfor block (mutated in place; fields
+            already set win).
+
+    Returns:
+        GalForSettings: ``galfor``.
+
+    Raises:
+        ValueError: From :func:`check_galfor_log_sampling` or the prior knobs.
     """
     log_sampling = check_galfor_log_sampling(galfor)
     if galfor.initialize_kwargs is None:
@@ -1057,6 +1413,24 @@ def noise_sensitivity_init_kwargs(
     ``fit.psd.instrument_model_cls`` — read off ``galfor``/``psd`` here and
     forwarded to :class:`CompositeSensitivityBackend`. ``extra`` (e.g. the SGWB
     template) is merged last. Shared by the noise variants and all_sources.
+
+    Args:
+        base (dict, optional): Existing ``sensitivity_init_kwargs`` (copied).
+        tdi_generation (int): TDI generation (``setdefault``).
+        galfor (GalForSettings, optional): Supplies ``stochastic_fn`` /
+            ``modulation``.
+        psd (PSDSettings, optional): Supplies the ``instrument_*`` choices and
+            ``model_name``; a ``wdm_psd_method`` in
+            ``instrument_component_kwargs`` is promoted to the backend-wide
+            ``wdm_psd_method``.
+        galfor_modulation_path (str, optional): Modulation table used when the
+            branch carries no ``modulation`` object.
+        galfor_modulation_t0 (float): Epoch of that table. Default 0.0.
+        extra (dict, optional): Merged last (overrides).
+
+    Returns:
+        dict: The kwargs for the run's sensitivity backend
+        (``galfor_modulation`` is always present, ``None`` = stationary).
     """
     out = dict(base or {})
     out.setdefault("tdi_generation", tdi_generation)

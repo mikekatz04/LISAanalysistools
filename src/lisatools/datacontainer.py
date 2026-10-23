@@ -1,4 +1,13 @@
-"""Container for LISA data, residuals, or templates and their basis settings."""
+"""Deprecated container for LISA data, residuals, or templates and their basis settings.
+
+The module holds :class:`DataResidualArray`, the legacy wrapper that tagged an array with its
+domain. Its capabilities now live on :class:`~lisatools.domains.DomainBase` and its concrete
+subclasses (:class:`~lisatools.domains.FDSignal`, :class:`~lisatools.domains.WDMSignal`,
+:class:`~lisatools.domains.TDSignal`, :class:`~lisatools.domains.STFTSignal`), which new code
+passes directly to :class:`~lisatools.analysiscontainer.AnalysisContainer`. The global-fit
+pipeline does not build :class:`DataResidualArray` objects; it only accepts one in
+:func:`lisatools.globalfit.postprocessing.save_residuals`.
+"""
 
 from __future__ import annotations
 
@@ -28,27 +37,78 @@ from .utils.utility import AET, asnumpy, get_array_module
 
 
 class DataResidualArray:
-    """Deprecated container — kept as a thin shim around :class:`~lisatools.domains.DomainBase`.
+    """Deprecated wrapper that tags a data/residual/template array with its domain.
 
-    All capabilities (slicing, add/subtract signals, ``f_arr``/``start_freq_ind``/
-    ``layer_df`` accessors, ``char_strain``, ``loglog``, etc.) have moved onto
+    All capabilities (slicing, add/subtract signals, ``f_arr`` / ``start_freq_ind`` /
+    ``layer_df`` accessors, ``char_strain``, ``loglog``, ...) have moved onto
     :class:`~lisatools.domains.DomainBase` and its concrete subclasses
     (:class:`~lisatools.domains.FDSignal`, :class:`~lisatools.domains.WDMSignal`,
     :class:`~lisatools.domains.TDSignal`, :class:`~lisatools.domains.STFTSignal`).
-    Pass those directly to :class:`~lisatools.analysiscontainer.AnalysisContainer`.
+    Pass those directly to :class:`~lisatools.analysiscontainer.AnalysisContainer`
+    (which still unwraps a :class:`DataResidualArray` transparently).
 
-    This class is retained as a transparent wrapper so existing code keeps
-    working; a :class:`DeprecationWarning` is emitted at construction to flag
-    call sites that should migrate. The constructor still accepts a raw NumPy /
-    CuPy / JAX array (plus ``input_signal_domain``), an existing
-    :class:`~lisatools.domains.DomainBase`, or another :class:`DataResidualArray`.
+    The class is kept so existing code keeps working; every construction emits a
+    :class:`DeprecationWarning`. The input is resolved as follows:
+
+    - another :class:`DataResidualArray`: its instance attributes are copied as they are
+      (no transform, ``signal_domain`` / ``window`` are not applied);
+    - a :class:`~lisatools.domains.DomainBase`: used as the input signal;
+    - a raw numpy / cupy / jax array: promoted with ``atleast_2d`` and wrapped in
+      ``input_signal_domain.associated_class``.
+
+    In the last two cases the signal is transformed to ``signal_domain`` when that differs
+    from the input domain. With ``signal_domain=None`` the input domain is kept, except for
+    :class:`~lisatools.domains.TDSettings` input, which goes to the rfft grid
+    ``FDSettings(N // 2 + 1, 1 / (N * dt))`` (same ``force_backend``).
 
     Args:
-        data_res_in: Data, residual, or template input.
-        signal_domain: Target domain (defaults to ``input_signal_domain``).
-        input_signal_domain: Domain of the raw input array (required for raw arrays).
-        window: Optional window applied during a domain transform.
-        **kwargs: For future compatibility.
+        data_res_in: Data, residual, or template: a raw array (leading axes
+            ``(nbatch?, nchannels)``, trailing axes the basis), a
+            :class:`~lisatools.domains.DomainBase`, or another :class:`DataResidualArray`.
+        signal_domain: Target domain. Default ``None``: keep the input domain (TD input:
+            the matching FD grid, see above).
+        input_signal_domain: Domain of a raw input array. Required for raw arrays; for a
+            :class:`~lisatools.domains.DomainBase` input its ``settings`` are used instead.
+        window: Window forwarded to the input signal's ``transform`` when a transform is
+            needed. Default ``None``.
+        **kwargs: Stored in :attr:`init_kwargs`; otherwise unused.
+
+    Raises:
+        AssertionError: ``data_res_in`` is not an array, DomainBase, or DataResidualArray, or
+            ``input_signal_domain`` is not a :class:`~lisatools.domains.DomainSettingsBase`.
+        ValueError: A raw array is given without ``input_signal_domain``.
+
+    Attributes:
+        nchannels (int): Number of channels of :attr:`data_res_arr`.
+        nbatch (int | None): Batch size of :attr:`data_res_arr` (``None`` if unbatched).
+        is_batched (bool): Whether :attr:`data_res_arr` has a batch axis.
+        data_shape (tuple): ``data_res_arr.settings.basis_shape``.
+        data_res_in_orig_input: The ``data_res_in`` object as passed (for a
+            :class:`DataResidualArray` input, that object's own ``data_res_in_orig_input``,
+            copied with its other attributes).
+
+    Warning:
+        The legacy FD grid accessors :attr:`fmax`, :attr:`dt` and :attr:`Tobs`, and the non-WDM
+        branches of :attr:`f_arr`, :attr:`df` and :attr:`start_freq_ind`, read private
+        attributes (``_f_arr``, ``_df``, ``_dt``, ``_Tobs``, ``_fmax``) that no constructor path
+        sets any more, so they raise :class:`AttributeError`. Use :attr:`frequency_arr`,
+        :attr:`settings`, or the accessors of :attr:`data_res_arr` instead.
+
+    Example:
+        Preferred form, then the legacy wrapper around the same array:
+
+        .. code-block:: python
+
+            import numpy as np
+            from lisatools.domains import FDSettings, FDSignal
+            from lisatools.datacontainer import DataResidualArray
+
+            settings = FDSettings(N=1025, df=1e-5)
+            arr = np.zeros((3, 1025), dtype=complex)   # (nchannels, N)
+            sig = FDSignal(arr, settings)              # pass this to AnalysisContainer
+
+            legacy = DataResidualArray(arr, input_signal_domain=settings)  # DeprecationWarning
+            legacy.data_res_arr                        # the FDSignal it wraps
     """
 
     def __init__(
@@ -124,7 +184,7 @@ class DataResidualArray:
 
     @property
     def init_kwargs(self) -> dict:
-        """Initial keyword arguments passed at construction (``signal_domain``, ``input_signal_domain``, ...)."""
+        """dict: Construction keywords (``signal_domain``, ``input_signal_domain``, kwargs)."""
         return self._init_kwargs
 
     @init_kwargs.setter
@@ -155,11 +215,12 @@ class DataResidualArray:
     
     @property
     def start_freq_ind(self):
-        """Index of the first frequency bin relative to a uniform ``df`` grid (or ``None``).
+        """int | None: Index of the first frequency bin relative to a uniform ``df`` grid.
 
         For WDM data this is the first active *frequency-layer* index
-        (``settings.ind_min_f``); for FD data it is the first bin index
-        ``f_arr[0] / df``. Returns ``None`` when no uniform grid exists.
+        (``settings.ind_min_f``). The non-WDM branch computes ``f_arr[0] / df`` from the
+        legacy private ``_df`` / ``_f_arr`` attributes, which no constructor path sets, so it
+        raises :class:`AttributeError`; use ``data_res_arr.start_freq_ind`` instead.
         """
         if isinstance(self.settings, domains.WDMSettings):
             return int(self.settings.ind_min_f)
@@ -195,13 +256,14 @@ class DataResidualArray:
             return float(self.settings.layer_dt)
         return None
 
+    # TODO check: keep/remove/document -- dead code: no callers; reads self.data_length, never set
     def _store_time_and_frequency_information(
         self,
         dt: Optional[float] = None,
         f_arr: Optional[np.ndarray] = None,
         df: Optional[float] = None,
     ):
-        """Populate ``_dt``, ``_df``, ``_Tobs``, ``_fmax``, and ``_f_arr`` from one of ``dt``/``f_arr``/``df``."""
+        """Set ``_dt``, ``_df``, ``_Tobs``, ``_fmax``, ``_f_arr`` from one of the inputs."""
         if dt is not None:
             self._dt = dt
             self._Tobs = self.data_length * dt
@@ -263,16 +325,20 @@ class DataResidualArray:
 
     @property
     def fmax(self):
-        """Maximum frequency."""
+        """float: Maximum frequency (Hz) from the legacy private ``_fmax``.
+
+        No constructor path sets ``_fmax`` any more, so this raises :class:`AttributeError`;
+        use ``data_res_arr.fmax``.
+        """
         return self._fmax
 
     @property
     def f_arr(self):
-        """Frequency array.
+        """np.ndarray: Frequency array (Hz).
 
-        For WDM data this is the active per-layer frequency grid
-        (``settings.f_arr``); for FD data it is the precomputed FD grid
-        stored at construction.
+        For WDM data this is the active per-layer frequency grid (``settings.f_arr``). The
+        non-WDM branch returns the legacy private ``_f_arr``, which no constructor path sets,
+        so it raises :class:`AttributeError`; use :attr:`frequency_arr` instead.
         """
         if isinstance(self.settings, domains.WDMSettings):
             return self.settings.f_arr
@@ -280,7 +346,11 @@ class DataResidualArray:
 
     @property
     def dt(self):
-        """Time step in seconds."""
+        """float: Time step (s) from the legacy private ``_dt``.
+
+        Raises :class:`ValueError` when ``_dt`` is ``None``. No constructor path sets ``_dt``
+        any more, so in practice this raises :class:`AttributeError`.
+        """
         if self._dt is None:
             raise ValueError("dt cannot be determined from this f_arr input.")
 
@@ -288,7 +358,11 @@ class DataResidualArray:
 
     @property
     def Tobs(self):
-        """Observation time in seconds"""
+        """float: Observation time (s) from the legacy private ``_Tobs``.
+
+        Raises :class:`ValueError` when ``_Tobs`` is ``None``. No constructor path sets
+        ``_Tobs`` any more, so in practice this raises :class:`AttributeError`.
+        """
         if self._Tobs is None:
             raise ValueError("Tobs cannot be determined from this f_arr input.")
 
@@ -296,11 +370,12 @@ class DataResidualArray:
 
     @property
     def df(self):
-        """Delta f.
+        """float: Frequency spacing (Hz).
 
-        For WDM data this is the layer frequency spacing
-        (``settings.layer_df``); for FD data it is the precomputed FD
-        bin spacing.
+        For WDM data this is the layer frequency spacing (``settings.layer_df``). The non-WDM
+        branch returns the legacy private ``_df`` (:class:`ValueError` if it is ``None``),
+        which no constructor path sets, so it raises :class:`AttributeError`; for FD data use
+        ``data_res_arr.df``.
         """
         if isinstance(self.settings, domains.WDMSettings):
             return float(self.settings.layer_df)
@@ -310,12 +385,12 @@ class DataResidualArray:
 
     @property
     def frequency_arr(self) -> np.ndarray:
-        """Frequency array"""
+        """Frequency array of the wrapped signal's basis (``settings.f_arr``), in Hz."""
         return self.settings.f_arr
 
     @property
     def data_res_arr(self) -> DomainBase:
-        """Actual data residual array"""
+        """The wrapped (possibly transformed) :class:`~lisatools.domains.DomainBase` signal."""
         return self._data_res_arr
 
     @data_res_arr.setter
@@ -324,25 +399,25 @@ class DataResidualArray:
         self._data_res_arr = data_res_arr
 
     def __getitem__(self, index: tuple) -> np.ndarray:
-        """Index this class directly in ``self.data_res_arr``."""
+        """Index the underlying array of :attr:`data_res_arr` (``data_res_arr.arr[index]``)."""
         return self.data_res_arr[index]
 
     def __setitem__(self, index: tuple, value: float | np.ndarray) -> np.ndarray:
-        """Index this class directly in ``self.data_res_arr``."""
+        """Assign into the underlying array of :attr:`data_res_arr` in place."""
         self.data_res_arr[index] = value
 
     @property
     def ndim(self) -> int:
-        """Number of dimensions in the `data_res_arr`."""
+        """Number of dimensions of the underlying array of :attr:`data_res_arr`."""
         return self.data_res_arr.ndim
 
     def flatten(self) -> np.ndarray:
-        """Flatten the ``data_res_arr``."""
+        """Return the underlying array of :attr:`data_res_arr` flattened to 1D (a copy)."""
         return self.data_res_arr[:].flatten()
 
     @property
     def shape(self) -> tuple:
-        """Shape of ``data_res_arr``."""
+        """Shape of the underlying array of :attr:`data_res_arr`."""
         return self.data_res_arr.shape
 
     def loglog(
@@ -353,20 +428,28 @@ class DataResidualArray:
         char_strain: Optional[bool] = False,
         **kwargs: dict,
     ) -> Tuple[plt.Figure, plt.Axes]:
-        """Produce a log-log plot of the data.
+        """Plot ``|arr|`` against frequency on log-log axes (FD data only).
+
+        Prefer :meth:`lisatools.domains.DomainBase.loglog` on the wrapped signal.
 
         Args:
-            ax: Matplotlib Axes objects to add plots. Either a list of Axes objects or a single Axes object.
-            fig: Matplotlib figure object.
-            inds: Integer index to select out which data to add to a single access.
-                A list can be provided if ax is a list. They must be the same length.
-            char_strain: If ``True`` return plot in characteristic strain representation.
-            **kwargs: Keyword arguments to be passed to ``loglog`` function in matplotlib.
+            ax: Axes to draw on: a list (length ``prod(shape[:-1])``, one per channel row)
+                or a single Axes. Default ``None`` creates a figure with one panel per entry
+                of ``shape[0]``.
+            fig: Must be ``None``; passing a figure without ``ax`` raises
+                :class:`NotImplementedError`.
+            inds: Rows of the array to draw. With a list ``ax``: a list of the same length
+                (default all rows); with a single Axes: required, an ``int`` or ``tuple``.
+            char_strain: If ``True``, plot ``f * |arr|`` instead of ``|arr|``. Default ``False``.
+            **kwargs: Forwarded to ``Axes.loglog``.
 
         Returns:
-            Matplotlib figure and axes objects in a 2-tuple.
+            tuple[plt.Figure | None, list[plt.Axes]]: The figure (``None`` when ``ax`` was
+            passed) and the axes drawn on.
 
-
+        Raises:
+            AssertionError: The wrapped signal is not FD, or ``ax`` / ``inds`` are inconsistent.
+            NotImplementedError: ``fig`` is given without ``ax``.
         """
 
         assert isinstance(self.data_res_arr.data_res_arr.settings, domains.FDSettings)
@@ -408,5 +491,10 @@ class DataResidualArray:
 
     @property
     def char_strain(self) -> np.ndarray:
-        """Characteristic strain representation of the data."""
+        """np.ndarray: Legacy ``sqrt(f) * |data_res_arr|``.
+
+        This reads :attr:`f_arr` (raises for non-WDM data) and applies ``np.abs`` to the
+        wrapped :class:`~lisatools.domains.DomainBase` object rather than its array; use
+        ``data_res_arr.char_strain`` instead.
+        """
         return np.sqrt(self.f_arr) * np.abs(self.data_res_arr)

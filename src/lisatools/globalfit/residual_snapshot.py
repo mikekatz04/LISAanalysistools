@@ -50,6 +50,16 @@ block at its ``[w0, w1)`` rows; replicas of a block (``R > 1``) are not
 asked. The data comes from the head's own copy.
 
 Nothing here may break the run: :func:`maybe_snapshot` logs and carries on.
+
+Where it runs: the head's :class:`~lisatools.globalfit.recipe.Recipe` calls
+:func:`maybe_snapshot` from its per-iteration hook (``Recipe.__call__``, eryn's
+``stopping_fn``) with the ``snapshot_context`` that
+:meth:`~lisatools.globalfit.run.GlobalFit._build_acs_and_recipe` attaches
+(the head's ACA, the data holder, the store path, the resume row). The
+compute ranks answer the gather through the :data:`RESIDUAL_SNAPSHOT_OP`
+builtin registered in :meth:`~lisatools.globalfit.run.GlobalFit.prepare_compute`.
+The 9mo/12mo launchers leave ``GF_RESIDUAL_SNAPSHOT_EVERY`` unset, so the
+default cadence (every 3rd iteration) applies; the monitor rank reads the file.
 """
 from __future__ import annotations
 
@@ -75,8 +85,16 @@ RESIDUAL_SNAPSHOT_OP = "residual_snapshot"
 
 
 def snapshot_every() -> int:
-    """``GF_RESIDUAL_SNAPSHOT_EVERY`` as an int (default
-    :data:`SNAPSHOT_EVERY_DEFAULT`; 0 when invalid)."""
+    """The snapshot cadence in iterations, read from ``GF_RESIDUAL_SNAPSHOT_EVERY``.
+
+    Read on every call (no caching), so the knob takes effect at the next
+    iteration.
+
+    Returns:
+        int: The cadence; :data:`SNAPSHOT_EVERY_DEFAULT` (3) when the variable
+        is unset, 0 (off) when it is empty, negative or not an integer (the
+        last case logs a warning).
+    """
     try:
         return max(0, int(os.environ.get(SNAPSHOT_EVERY_ENV,
                                          str(SNAPSHOT_EVERY_DEFAULT)) or 0))
@@ -87,7 +105,20 @@ def snapshot_every() -> int:
 
 
 def snapshot_path(store_path: str) -> str:
-    """The sidecar path for the store at ``store_path``."""
+    """The sidecar path for the store at ``store_path``.
+
+    Args:
+        store_path: The run's main HDF store path.
+
+    Returns:
+        str: ``store_path`` with a trailing ``.h5`` replaced by
+        :data:`SNAPSHOT_SUFFIX` (appended when there is no ``.h5``).
+
+    Example:
+        >>> from lisatools.globalfit.residual_snapshot import snapshot_path
+        >>> snapshot_path("/runs/gf_9mo_parameter_estimation_main.h5")
+        '/runs/gf_9mo_parameter_estimation_main_residual_snapshot.npz'
+    """
     stem = store_path[:-3] if store_path.endswith(".h5") else store_path
     return stem + SNAPSHOT_SUFFIX
 
@@ -119,9 +150,22 @@ def _stack_residuals(acs, rows):
 
 
 def walker_residual(model, payload):
-    """Fan-out builtin body: this rank's walkers ``payload["rows"]`` (local
-    ACA rows) stacked, or ``None`` on a rank that was not asked (a replica
-    that is not its block's lead)."""
+    """Fan-out builtin body for :data:`RESIDUAL_SNAPSHOT_OP` on a compute rank.
+
+    Registered by :meth:`~lisatools.globalfit.run.GlobalFit.prepare_compute`.
+
+    Args:
+        model (GlobalFitInfo): The rank's model; its
+            ``analysis_container_arr`` holds this rank's walker block.
+        payload (dict | None): ``{"rows": [local ACA row indices]}``, or
+            ``None`` for a rank that was not asked (a replica that is not its
+            block's lead).
+
+    Returns:
+        np.ndarray | None: ``(len(rows), *residual_shape)`` residual stack in
+        the plotting dtype (float32 / complex64), or ``None`` without a
+        payload.
+    """
     if payload is None:
         return None
     return _stack_residuals(model.analysis_container_arr, payload["rows"])
@@ -177,10 +221,30 @@ def take_snapshot(*, acs, data_holder, store_path, iteration, fanout=None,
                   store_iteration0=0):
     """Write the sidecar (every cold walker's residual); returns its path.
 
-    ``acs`` is the head's AnalysisContainerArray (its own block under the
-    walker-block layout), ``data_holder`` the run's
-    ``general_info.input_data_residual_array``, ``store_iteration0`` the
-    store's iteration when this job resumed (0 for a fresh store).
+    Gathers every walker's lnL (``acs.likelihood`` single-process, else
+    ``fanout.gather_likelihood``), picks the max-lnL walker, gathers every
+    walker's residual, and writes the npz atomically (tmp file +
+    ``os.replace``). The file keys are listed in the module docstring.
+
+    Args:
+        acs (AnalysisContainerArray): The head's container array (its own
+            walker block under the walker-block layout).
+        data_holder: The run's ``general_info.input_data_residual_array``
+            (its ``data_res_arr.arr`` is written as ``data``).
+        store_path (str): The main HDF store path (see :func:`snapshot_path`).
+        iteration (int): This job's index of the iteration that just ran.
+        fanout (WalkerFanout, optional): The head's fan-out; ``None`` in a
+            single-process run.
+        store_iteration0 (int, optional): The store's iteration when this job
+            resumed (0 for a fresh store); ``store_row`` is this plus
+            ``iteration``.
+
+    Returns:
+        str: The sidecar path written.
+
+    Raises:
+        RuntimeError: The gathered residuals do not match the walker count, or
+            the data and residual shapes differ.
     """
     if fanout is None:
         _ll = acs.likelihood(complex=False)
@@ -222,8 +286,17 @@ def maybe_snapshot(*, iteration, acs, data_holder, store_path, fanout=None,
                    store_iteration0=0):
     """Cadence gate + never-raise wrapper around :func:`take_snapshot`.
 
-    ``iteration`` is the index of the iteration that just ran; a snapshot is
-    written after iterations ``N-1, 2N-1, ...``. Returns the path or None.
+    ``iteration`` is the index of the iteration that just ran; with
+    ``N = snapshot_every()`` a snapshot is written after iterations
+    ``N-1, 2N-1, ...``. Any exception from :func:`take_snapshot` is logged as
+    a ``[RESIDUAL_SNAPSHOT]`` warning and swallowed. Arguments are those of
+    :func:`take_snapshot` (all keyword-only), normally passed as the recipe's
+    ``snapshot_context``.
+
+    Returns:
+        str | None: The path written, or ``None`` when the cadence skips this
+        iteration, the cadence is 0, a required input is missing, or the
+        write failed.
     """
     every = snapshot_every()
     if every <= 0 or (int(iteration) + 1) % every:

@@ -1,4 +1,25 @@
-"""GB (galactic-binary) branch blocks for the Erebor recipe."""
+"""GB (galactic-binary) branch blocks for the Erebor recipe.
+
+:class:`GBSettings` is the GB knob block (``fit.gb``; also the base of the
+VGB block) and :class:`GBSetup` turns it into the built branch: the band
+grid (:meth:`GBSetup.init_band_structure`), the sampling transform and
+priors (:meth:`GBSetup.init_sampling_info`) and the GB sub-state / HDF
+sub-backend. The sig-het in-model engine of the GB and VGB moves is built by
+:func:`build_sighet_engine` (configuration from :func:`sighet_engine_kwargs`,
+refusals in :func:`check_sighet_build_config`).
+
+Pipeline position: ``variants/gb_no_fg.prepare_gb_branch`` (shared by
+``gb_no_fg`` and the production ``all_sources``) fills the band, ``f0`` /
+``fdot`` boxes, ``nleaves_max``, TDI setup and the ladder, then
+:meth:`StockGlobalFit.build <lisatools.globalfit.stock.base.StockGlobalFit.build>`
+constructs :class:`GBSetup`; at run start ``setup_gb_moves`` builds the
+WDM comp and ``recipe.build_gb_moves`` the GB move stack. Production knobs
+(9mo / 12mo launchers): ``GB_NTEMPS=24``, ``GB_SUBBAND_DIVISOR=8``
+(uniform WDM edges, 8 sub-bands per layer), ``GB_BAND_UNIT_STRIDE=9``,
+``GB_N_SUBBANDS=4096``, ``GB_CAP_DIVISOR=1`` + ``GB_CAP_STAGGER=1``,
+``GB_WDM_BAND_SLAB_LAYERS=5``, ``GB_PSD_SHARED_MIRROR=1``, warm start + self
+refit on, ``SIGHET_REF_BUILD=lookup`` / ``SIGHET_ANCHOR_ENGINE=lookup``.
+"""
 
 from __future__ import annotations
 
@@ -27,6 +48,7 @@ from ...state import GBState
 from .transforms import make_gb_transform_container
 
 
+# TODO check: keep/remove/document -- only reachable with GB_BAND_EDGES_MODE=get_n (no launcher)
 def get_n_based_band_edges(
     start_freq: float,
     end_freq: float,
@@ -245,6 +267,27 @@ def sighet_engine_kwargs(info) -> dict:
     (``VGBSettings`` had no ``sighet_tukey_alpha`` field), the likely
     source of the ``[GB_CELL_LL]`` growth that had ``VGB_SIGHET_INMODEL``
     pinned to 0 in the 6mo campaign.
+
+    Production: ``SIGHET_REF_BUILD=lookup`` + ``SIGHET_ANCHOR_ENGINE=lookup``
+    (the carrier reference and the anchor read the GB WDM lookup table,
+    resolved by :func:`~lisatools.wdm_lookup_store.resolve_gb_lookup_table`),
+    ``SIGHET_TUKEY_ALPHA=0.01``, ``SIGHET_NT_LAYER`` 180 (9mo) / 240 (12mo),
+    ``SIGHET_N_CP=256``.
+
+    Args:
+        info (Settings): The GB or VGB block; reads the ``sighet_*`` fields
+            and (lookup reference) ``lookup_table_path``,
+            ``lookup_table_dir``, ``lookup_n_nodes``, ``lookup_k_coarse``.
+
+    Returns:
+        dict: ``tukey_alpha``, ``nt_layer``, ``n_sparse_fd``, ``max_r``,
+        ``n_cp_build``, ``v3_n_nodes``, ``v4_knots``, ``v4_band``, plus ``v5``
+        when non-zero and, on the lookup paths, ``lookup_table``,
+        ``lookup_n_nodes``, ``lookup_k_coarse`` and ``anchor_engine``.
+
+    Raises:
+        ValueError: An unknown ``sighet_ref_build`` / ``sighet_anchor_engine``,
+            or a lookup anchor without the lookup reference.
     """
     v5 = int(info.sighet_v5)
     kw = dict(
@@ -301,6 +344,18 @@ def check_sighet_build_config(info, comp, *, branch: str) -> None:
       ``EDGE_CROP_WAVELETS`` or lower ``SIGHET_TUKEY_ALPHA``. (The engine
       carries a last-resort clamp for non-erebor callers, but this
       refusal is the real guard.)
+
+    Args:
+        info (Settings): The GB or VGB block (``sighet_v5``,
+            ``sighet_v4_knots``, ``sighet_v4_band``, ``sighet_tukey_alpha``).
+        comp: The chunked-het comp (its ``wdm_settings.Nt`` / ``ind_min_t``
+            are read).
+        branch: Branch name for the error messages.
+
+    Raises:
+        ValueError: v5 without v4 knots, ``SIGHET_V5=1`` without a v4 band,
+            or a taper of ``ceil(0.5 * alpha * Nt) + 8`` layers exceeding the
+            time crop ``ind_min_t``.
     """
     v5 = int(info.sighet_v5)
     if v5:
@@ -348,6 +403,21 @@ def build_sighet_engine(info, comp, *, branch: str):
     then ``GBSignalHetComputations.for_band_engine`` with
     :func:`sighet_engine_kwargs`. RJ / fills / swaps / information
     matrices keep delegating to ``comp`` (pure type dispatch).
+
+    Called by the variants' ``setup_gb_moves`` / ``setup_vgb_moves`` when the
+    branch's ``sighet_inmodel`` is on (production: GB and VGB both).
+
+    Args:
+        info (Settings): The GB or VGB block.
+        comp: The chunked-het WDM comp to wrap.
+        branch: Branch name for messages and logs.
+
+    Returns:
+        gbgpu.gbsignalhetcomputations.GBSignalHetComputations: The engine.
+
+    Raises:
+        ValueError: From :func:`check_sighet_build_config` /
+            :func:`sighet_engine_kwargs`.
     """
     from gbgpu.gbsignalhetcomputations import GBSignalHetComputations
 
@@ -366,6 +436,280 @@ class GBSettings(Settings):
 
     Mostly holds parameter limits, frequency-band oversampling, and the
     starting frequency / TDI configuration consumed by :class:`GBSetup`.
+
+    The shared GB knob block, reached as ``fit.gb`` (and the base of
+    :class:`~lisatools.globalfit.stock.erebor.vgb.VGBSettings`). Variants
+    subclass it: ``GBNoFgGBSettings`` (``variants/gb_no_fg.py``; band
+    bounds ``min_freq`` / ``max_freq`` / ``center_freq`` / ``n_layers``,
+    ``mode`` / ``start``, the chunked-het and sig-het kernel sizes, the
+    lookup-table paths, env-backed ``num_repeat_proposals`` /
+    ``nleaves_max``, wide default prior boxes) and its production subclass
+    ``AllSourcesGBSettings`` (``GB_MIN_FREQ`` / ``GB_MAX_FREQ``). Many fields
+    are consumed by the GB moves (``moves/gbspecialstretch.py``,
+    ``moves/gbbands.py``) through ``recipe.build_gb_moves``; many more GB
+    knobs (``GB_INMODEL_*``, ``GB_TEMPER_*``, ``GB_FSTAT_*``, ``GB_RJ_*``,
+    ``GB_SIGHET_*``, ...) are read by the moves directly from the environment
+    and are not fields here. Field defaults below are this class's; the
+    launcher values are those of ``submit_gf_9mo_v9.sh`` /
+    ``submit_gf_12mo.sh``.
+
+    Production sampling basis (9 columns, ``use_fdot_astro`` /
+    ``use_distance`` on): ``dist`` (kpc), ``f0`` (mHz), ``Mc`` (Msol),
+    ``phi0``, ``cos_iota``, ``psi``, ``alpha`` (RA, ICRS), ``sin_delta``,
+    ``fdot_astro_ratio``, with the 3-D Milky Way ``(dist, alpha, sin_delta)``
+    prior and the astrophysical ``(f0, Mc)`` GMM prior.
+
+    Attributes:
+        A_lims: ``[A_min, A_max]`` physical amplitude box: the ``ln A`` prior
+            of the legacy (non-distance) bases and the ``ln A`` draw of the
+            F-stat birth container when no distance box applies. Unused by the
+            production distance basis. Default empty (variants fill it).
+        f0_lims: ``[f_min, f_max]`` (Hz) of the ``f0`` prior; OVERWRITTEN by
+            :meth:`GBSetup.init_band_structure` with the interior band edges.
+        build_seed: Per-rank seed of the prior / birth objects, stamped at
+            build by :meth:`StockGlobalFit.prepare_branch_settings
+            <lisatools.globalfit.stock.base.StockGlobalFit.prepare_branch_settings>`;
+            not a user or env knob. ``None`` = OS entropy.
+        ntemps: GB ladder rungs (the engine runs cold-chain only). Env
+            ``GB_NTEMPS``. Default 24; launchers 24.
+        nleaves_max_cap: Ceiling of the automatic ``nleaves_max`` (2 x
+            catalogue sources in band). Env ``GB_NLEAVES_MAX_CAP``. Default
+            20000; bypassed in production (``GB_NLEAVES_MAX=20000`` sets
+            ``nleaves_max`` directly).
+        m_chirp_lims: ``[Mc_min, Mc_max]`` (Msol) chirp-mass box (prior box of
+            the GMM / uniform prior and the transform inverse's clip box);
+            empty -> ``(0.001, 1.0)`` where a default is needed.
+        fdot_lims: ``fdot`` box (Hz/s) of the legacy fdot basis; overwritten by
+            :meth:`GBSetup.init_band_structure` (mojito fdot range at the top
+            band edge).
+        phi0_lims: ``phi0`` box (rad). Default empty (variants:
+            ``[0, 2 pi]``).
+        iota_lims: Inclination box (rad); the prior is uniform in
+            ``cos(iota)`` over it.
+        psi_lims: Polarization box (rad).
+        alpha_lims: Right-ascension box (rad, ICRS).
+        delta_lims: Declination box (rad, ICRS); the prior is uniform in
+            ``sin(delta)``.
+        start_freq: Low edge (Hz) of the GB band; set by the branch prep from
+            the band bounds and clamped to the WDM active band. Default 1e-4.
+        end_freq: High edge (Hz) of the GB band. Default 0.025.
+        band_edges_override: Explicit ascending band edges (Hz); replaces the
+            derived grid when set (``fit.gb.band_edges_override = edges``).
+        subband_divisor: ``uniform`` mode: sub-bands per WDM layer. Env
+            ``GB_SUBBAND_DIVISOR``. Default 1; launchers 8.
+        band_edges_mode: ``"uniform"`` (WDM-layer / divisor grid) or
+            ``"get_n"`` (free-floating minimum-width bands,
+            :func:`get_n_based_band_edges`). Env ``GB_BAND_EDGES_MODE``.
+            Default ``"uniform"`` (launchers unset).
+        band_target_count: ``get_n`` mode: merge bands down to ~this count
+            (0 = maximal packing). Env ``GB_BAND_TARGET_COUNT``. Default 0.
+        band_min_layers: Deprecated; ignored (warned when not 1). Env
+            ``GB_BAND_MIN_LAYERS``.
+        band_unit_stride: Band-unit stride ``k`` of the concurrent band
+            scheduling (bands ``b`` with equal ``b % k`` run together); flows
+            to the moves as ``band_units``. Env ``GB_BAND_UNIT_STRIDE``.
+            Default 2; launchers 9.
+        oversample: FD oversampling of ``get_N`` (band ``N`` values). Default
+            4 (variants: ``None`` -> 4 on WDM, 2 on FD).
+        extra_buffer: FD band-walk buffer (frequency bins). Default 5.
+        start_resample_iter: Not read anywhere.
+        iter_count_per_resample: Not read anywhere.
+        num_repeat_proposals: In-model repeats per proposal. Plain default 100
+            here; ``GBNoFgGBSettings`` makes it env-backed
+            (``GB_NUM_REPEAT_PROPOSALS``; launchers 25).
+        search_kwargs: Per-band serial MCMC search configuration (read only in
+            the ``setup`` of ``GBSpecialRJSerialSearchMCMC`` / the refit move,
+            legacy FD-only moves that no production stage runs); ``None`` ->
+            defaults in :meth:`GBSetup.init_sampling_info`.
+        group_proposal_kwargs: Constructor kwargs of the GB moves; ``None`` ->
+            defaults; the slab / mirror / ``num_band_preload`` / ``band_units``
+            keys are filled from the fields here unless already present.
+        n_subbands: Peak resident (temperature, walker, band) sub-band buffer
+            cells (the move's ``num_band_preload``); bounds peak GPU memory.
+            Env ``GB_N_SUBBANDS``. Default 1024; launchers 4096.
+        use_chirp_mass: Sample ``Mc`` (Msol) at slot 2 instead of ``fdot``.
+            Env ``GB_USE_CHIRP_MASS``. Default ``True``.
+        use_astrophysical_f0_mc_prior: Joint 6-component ``(f0, Mc)`` GMM prior
+            (:class:`~lisatools.sampling.f0_mchirp_prior.F0McGMMSampling`)
+            instead of separate uniforms; with ``use_chirp_mass`` it also turns
+            on :attr:`use_fdot_astro` / :attr:`use_distance`. Env
+            ``GB_USE_ASTROPHYSICAL_F0_MC_PRIOR`` (legacy ``GB_F0MC_GMM_PRIOR``).
+            Default ``True``.
+        fdot_astro_ratio_max: Half-width ``M`` of the ``fdot_astro_ratio ~
+            U[-M, M]`` prior (physical ``fdot = fdot_gr * (1 + r)``). Env
+            ``GB_FDOT_ASTRO_RATIO_MAX``. Default 5.0.
+        dist_lims: Distance box (kpc) of slot 0 in the distance basis (no env;
+            set the field). Default ``[0.001, 40.0]``.
+        sky_dist_distribution: Explicit joint ``(dist, alpha, sin_delta)``
+            prior (eryn duck-typed; must pickle); wins over
+            ``use_galaxy_prior``. Default ``None``.
+        use_galaxy_prior: Build the 3-D Milky Way ``(dist, alpha, sin_delta)``
+            prior (:mod:`lisatools.globalfit.priors.galaxy_sky_dist`) instead of
+            independent uniforms. Env ``GB_USE_GALAXY_PRIOR``. Default ``True``;
+            launchers 1.
+        rj_birth_distribution: Custom birth distribution of the prior RJ
+            moves over the GB sampling basis; ``None`` = global-prior births.
+        warm_start_components: Path of the refereed warm-start components
+            ``.npz`` (from a parent run); non-empty builds the ``rj_warm_search``
+            / ``rj_warm_pe`` births. Env ``GB_WARM_START_COMPONENTS``. Default
+            ``""``; launchers ``<STORE_DIR>/warmstart/<parent>_refereed.npz``
+            (built automatically when missing).
+        warm_start_weight: Reserved, parsed but never read. Env
+            ``GB_WARM_START_WEIGHT``.
+        warm_self: Self refit of the warm-start mixture from the run's own
+            recent cold rows (:mod:`lisatools.globalfit.warmstart.self_refit`).
+            Needs ``warm_start_components``. Env ``GB_WARM_SELF``. Default
+            ``False``; launchers 1.
+        warm_self_every_search: Stored rows between self refits in the
+            numbered search stages (<= 0 = none). Env
+            ``GB_WARM_SELF_EVERY_SEARCH``. Default 1; launchers 1.
+        warm_self_every_pe: Stored rows between self refits in ``full_pe``
+            (<= 0 = none). Env ``GB_WARM_SELF_EVERY_PE``. Default 25;
+            launchers 25.
+        warm_self_at_entry: Build each refit on the head at the warm move's
+            entry (``False`` = on the saver after its saves). Env
+            ``GB_WARM_SELF_AT_ENTRY``. Default ``True``; launchers 1.
+        warm_self_last_k: Latest stored cold rows (x every walker) per refit.
+            Env ``GB_WARM_SELF_LAST_K``. Default 50; launchers 50.
+        warm_self_split_search: ``"original,full,filtered"`` draw weights of
+            the three warm containers in search. Env
+            ``GB_WARM_SELF_SPLIT_SEARCH``. Default ``"0.5,0,0.5"``; launchers
+            the same.
+        warm_self_split_pe: The same weights in PE. Env
+            ``GB_WARM_SELF_SPLIT_PE``. Default ``"1,1,1"``; launchers the same.
+        warm_self_consensus: Fraction above which a cluster held by every
+            walker is dropped from the FILTERED container. Env
+            ``GB_WARM_SELF_CONSENSUS``. Default 0.95; launchers 0.95.
+        warm_self_adopt_lag: The build propose draws from the epoch held
+            BEFORE its own build (one-draw adoption lag). Env
+            ``GB_WARM_SELF_ADOPT_LAG``. Default ``True`` (launchers unset).
+        para_search: Build ``rj_para_search_pe`` (per-band parallel residual
+            search -> GMM births; ``docs/gb-para-search.md``). Env
+            ``GB_PARA_SEARCH``. Default ``False`` (launchers unset: off).
+        para_search_every_pe: PE iterations between searches. Env
+            ``GB_PARA_SEARCH_EVERY_PE``. Default 100.
+        para_search_ntemps: Stage-1 rungs per sub-band. Env
+            ``GB_PARA_SEARCH_NTEMPS``. Default 8.
+        para_search_nwalkers: Walkers per sub-band. Env
+            ``GB_PARA_SEARCH_NWALKERS``. Default 16.
+        para_search_stage2_ntemps: Stage-2 rungs. Env
+            ``GB_PARA_SEARCH_STAGE2_NTEMPS``. Default 4.
+        para_search_snr_min: Detection SNR floor. Env
+            ``GB_PARA_SEARCH_SNR_MIN``. Default 5.0.
+        para_search_det_frac: Minimum detection / optimal SNR ratio. Env
+            ``GB_PARA_SEARCH_DET_FRAC``. Default 0.7.
+        para_search_converge_tol: Convergence tolerance (nats). Env
+            ``GB_PARA_SEARCH_CONVERGE_TOL``. Default 0.5.
+        para_search_converge_window: Convergence window (steps). Env
+            ``GB_PARA_SEARCH_CONVERGE_WINDOW``. Default 50.
+        para_search_min_steps: Env ``GB_PARA_SEARCH_MIN_STEPS``. Default 100.
+        para_search_max_steps: Env ``GB_PARA_SEARCH_MAX_STEPS``. Default 600.
+        para_search_stage2_steps: Env ``GB_PARA_SEARCH_STAGE2_STEPS``.
+            Default 100.
+        para_search_split_bins: Cluster split / merge radius (1/Tobs bins).
+            Env ``GB_PARA_SEARCH_SPLIT_BINS``. Default 4.0.
+        para_search_cluster_rungs: Rungs pooled for clustering. Env
+            ``GB_PARA_SEARCH_CLUSTER_RUNGS``. Default 2.
+        para_search_scorer: Stage-1 F-stat (``"auto"`` / ``"chunked"``). Env
+            ``GB_PARA_SEARCH_SCORER``. Default ``"auto"``.
+        para_search_group_bands: Sub-bands per sampler run (0 = auto). Env
+            ``GB_PARA_SEARCH_GROUP_BANDS``. Default 0.
+        para_search_init: ``"comb"`` or ``"prior"`` stage-1 start. Env
+            ``GB_PARA_SEARCH_INIT``. Default ``"comb"``.
+        para_search_init_nsky_min: Env ``GB_PARA_SEARCH_INIT_NSKY_MIN``.
+            Default 8.
+        para_search_init_nsky_max: Env ``GB_PARA_SEARCH_INIT_NSKY_MAX``.
+            Default 64.
+        para_search_max_finds: Stage-2 finds kept per walker (<= 0 = no cap).
+            Env ``GB_PARA_SEARCH_MAX_FINDS``. Default 512.
+        pe_extrinsic_draw: PE F-stat distance births DRAW ``phi0`` /
+            ``cos_iota`` / ``psi`` around their maximizers (exact densities)
+            instead of pinning them. Env ``GB_PE_EXTRINSIC_DRAW``. Default
+            ``True``; dormant in production (``GB_RJ_FSTAT_DIST_BIRTH=0``).
+        search_rj_replace: Build ``rj_replace`` (exact-MH replacement after the
+            F-stat birth in search). Env ``GB_SEARCH_RJ_REPLACE``. Default
+            ``True``; launchers 0.
+        pe_rj_replace: Build ``rj_replace_pe`` (the PE twin). Env
+            ``GB_PE_RJ_REPLACE``. Default ``True``; launchers 0.
+        search_prior_removal: Build ``rj_prior_removal``. Env
+            ``GB_SEARCH_PRIOR_REMOVAL``. Default ``False``; production 1 (the
+            driver's default).
+        search_prior_removal_only: ``rj_prior_removal`` proposes deaths only
+            (births force-rejected); ``False`` = births and deaths. Env
+            ``GB_SEARCH_PRIOR_REMOVAL_ONLY``. Default ``True``; launchers 1.
+        leaf_cap_iter_only: Leaf caps advance on a fixed iteration schedule
+            only. Env ``GB_LEAF_CAP_ITER_ONLY``. Default ``False``.
+        leaf_cap_per_walker: Per-walker leaf caps. Env
+            ``GB_LEAF_CAP_PER_WALKER``. Default ``False``.
+        search_stage_per_walker: Per-(walker, band) coarse -> fine opt-SNR
+            search schedule. Env ``GB_SEARCH_STAGE_PER_WALKER``. Default
+            ``False``; launchers 0.
+        search_stage_min_iters: Unchanged-count iterations before a (walker,
+            band) promotes. Env ``GB_SEARCH_STAGE_MIN_ITERS``. Default 20.
+        opt_snr_limit_search_coarse: Coarse opt-SNR floor (``None`` = the
+            move's resolved floor). Env ``GB_OPT_SNR_LIMIT_SEARCH_COARSE``.
+        opt_snr_limit_search_fine: Fine opt-SNR floor. Env
+            ``GB_OPT_SNR_LIMIT_SEARCH_FINE``. Default 5.0.
+        search_shutoff_per_walker: Per-(walker, band) search RJ valve (no
+            births / deaths / swaps once that pair's count stops growing in the
+            current step). Env ``GB_SEARCH_BAND_SHUTOFF_PER_WALKER``. Default
+            ``False``; launchers 1 (with ``GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS=1``
+            read by the move).
+        search_shutoff_conv_iter: Window (iterations) of that valve test. Env
+            ``GB_SEARCH_BAND_SHUTOFF_CONV_ITER``. Default 5; launchers 3.
+        cap_divisor: Leaf-cap cells per sub-band (1 = the band grid). Changing
+            it on a store needs ``migrate_gb_cap_grid.py``. Env
+            ``GB_CAP_DIVISOR``. Default 8; launchers 1.
+        cap_stagger: Shift the cap grid half a cell against the band grid; at
+            ``cap_divisor == 1`` this gives the midpoint-to-midpoint grid
+            (one cell per sub-band, each straddling one band seam; see
+            :func:`~lisatools.globalfit.state.make_cap_edges`). Fresh store
+            only. Env ``GB_CAP_STAGGER``. Default ``False``; launchers 1.
+        cap_overlap_frac: Overlap of neighbouring cap cells, in ``[0, 0.5)``
+            (0 = exact partition; forced off at divisor 1). Env
+            ``GB_CAP_OVERLAP_FRAC``. Default 0.0; launchers 0.
+        wdm_band_slab_layers: WDM layers of each per-band buffer slab: 0 =
+            auto (band span + 2 x (leakage + guard)), ``N > 0`` explicit,
+            ``None`` (programmatic only) = full active band. Env
+            ``GB_WDM_BAND_SLAB_LAYERS``. Default 0; launchers 5.
+        wdm_slab_guard_layers: Guard layers per side of the auto slab. Env
+            ``GB_WDM_SLAB_GUARD_LAYERS``. Default 1.
+        psd_shared_mirror: One per-device replica of the per-walker inverse
+            covariance plane instead of a copy per buffer slot (WDM only;
+            needs a matching GBGPU wheel). Env ``GB_PSD_SHARED_MIRROR``.
+            Default ``False``; launchers 1.
+        psd_mirror_parity_proposes: Shadow-check the mirror against the
+            per-slot layout for the first ``N`` fills (0 = off). Env
+            ``GB_PSD_MIRROR_PARITY_PROPOSES``. Default 0; launchers 0.
+        psd_mirror_parity_rows: Rows sampled per parity check. Env
+            ``GB_PSD_MIRROR_PARITY_ROWS``. Default 64.
+        start_freq_ind: FD start index passed to the waveform kwargs. Default 0.
+        t0: Phase / frequency reference epoch (s) of the GB parameters.
+            Default 0.0 here; ``GBNoFgGBSettings`` defaults ``None``, which the
+            branch prep resolves to ``GB_MOJITO_T_REF`` (mojito data) or the
+            synthetic stream start.
+        tdi_setup: TDI channel set (``"XYZ"``; ``"AET"`` / ``"AE"``); set from
+            ``general.tdi_chan`` by the branch prep.
+        use_tdi2: TDI 2nd generation; set from ``general.tdi_chan``.
+        waveform_kwargs: GBGPU waveform kwargs; empty -> built from ``dt``,
+            ``Tobs``, ``oversample``, ``start_freq_ind``, ``tdi_setup``,
+            ``use_tdi2``.
+        domain_settings: The run's analysis domain (filled from the general
+            setup); WDM vs FD selects the band construction.
+        gb_wdm_comp: Runtime WDM likelihood object (chunked-het comp, wrapped
+            in the sig-het engine by :func:`build_sighet_engine` when the
+            branch's ``sighet_inmodel`` is on, as in production); built at run
+            start by the variant's ``setup_gb_moves`` (the branch prep resets
+            it to ``None``).
+
+    Example:
+        .. code-block:: python
+
+            fit = erebor.all_sources(nwalkers=4)
+            fit.gb.ntemps = 24                  # env GB_NTEMPS
+            fit.gb.subband_divisor = 8          # env GB_SUBBAND_DIVISOR
+            fit.gb.cap_divisor = 1              # env GB_CAP_DIVISOR
+            fit.gb.warm_start_components = "parent_refereed.npz"
     """
 
     A_lims: typing.List[float] = dataclasses.field(default_factory=list)
@@ -472,6 +816,7 @@ class GBSettings(Settings):
     )
     oversample: int = 4. # FD
     extra_buffer: int = 5
+    # TODO check: keep/remove/document -- these two fields have no reader anywhere
     start_resample_iter: Optional[typing.Tuple[int]] = (-1,)  # -1 so that it starts right at the start of PE
     iter_count_per_resample: Optional[int] = 10
     num_repeat_proposals: int = 100
@@ -624,6 +969,7 @@ class GBSettings(Settings):
     # (v2). v1 runs them as separate sequential moves (rj_warm_search then
     # rj_fstat_search), so this parses but is unused. Env:
     # GB_WARM_START_WEIGHT.
+    # TODO check: keep/remove/document -- warm_start_weight has no reader anywhere
     warm_start_weight: typing.Optional[float] = dataclasses.field(
         default_factory=env_default("GB_WARM_START_WEIGHT", None, float)
     )
@@ -1084,7 +1430,9 @@ class GBSettings(Settings):
     # F-stat fit interior) decouple, and no source can sit on both at
     # once. Band b still owns cells b*K..b*K+K-1 (sizes, reshapes and
     # storage unchanged); the cell at each band seam physically straddles
-    # it. Requires cap_divisor >= 2 (ignored at 1). Changing it on an
+    # it. At cap_divisor == 1 it is NOT ignored: state.make_cap_edges then
+    # builds the midpoint-to-midpoint grid (one cell per sub-band, each
+    # straddling one band seam; the production setting). Changing it on an
     # existing store is refused by the resume guard -- fresh store only.
     # Env: GB_CAP_STAGGER.
     cap_stagger: bool = dataclasses.field(
@@ -1194,9 +1542,23 @@ class GBSettings(Settings):
 class GBSetup(Setup, GBSettings):
     """:class:`Setup` for galactic binaries in the Erebor recipe.
 
+    Construction copies the settings, opens the ``gb_setup.log`` logger
+    (under ``log_dir``) and runs :meth:`init_setup`: band structure, then
+    sampling info, then the GB sub-state / sub-backend. Built once per
+    branch by :meth:`StockGlobalFit.build
+    <lisatools.globalfit.stock.base.StockGlobalFit.build>` from the block
+    completed by ``prepare_gb_branch``.
+
     Args:
         gb_settings: Settings dataclass holding GB parameter ranges and
             domain configuration.
+
+    Attributes:
+        band_edges: ``(num_sub_bands + 1,)`` ascending sub-band edges (Hz).
+        band_N_vals: ``(num_sub_bands,)`` FD ``get_N`` per band (shape parity
+            only on WDM).
+        num_sub_bands: Number of sub-bands.
+        logger: The branch-setup logger.
     """
 
     def __init__(self, gb_settings: GBSettings):
@@ -1252,7 +1614,28 @@ class GBSetup(Setup, GBSettings):
         (:attr:`GBSettings.use_fdot_astro`): ``r = fdot_astro / fdot_gr ~
         U[-M, M]`` (M = :attr:`GBSettings.fdot_astro_ratio_max`), physical
         ``fdot = fdot_gr(f0, Mc) * (1 + r)`` with ``fddot`` exactly 0 --
-        interacting ``fdot < 0`` systems live at ``r < -1``.
+        interacting ``fdot < 0`` systems live at ``r < -1``. With the
+        distance basis (production) slot 0 is the distance (kpc), the
+        amplitude is derived, and ``(dist, alpha, sin_delta)`` carry the joint
+        sky / distance prior (the 3-D Milky Way prior under
+        :attr:`GBSettings.use_galaxy_prior`).
+
+        Fills, each only when unset: ``transform``
+        (:func:`~lisatools.globalfit.stock.erebor.transforms.make_gb_transform_container`),
+        ``periodic`` (``phi0`` and ``alpha`` period ``2 pi``, ``psi`` period
+        ``pi``), ``priors`` (``{"gb": ProbDistContainer}``), ``betas``,
+        ``other_tempering_kwargs`` (``adaptation_time=2, permute=True``),
+        ``initialize_kwargs``, ``waveform_kwargs``, ``group_proposal_kwargs``
+        (plus its ``setdefault`` keys) and ``search_kwargs``. The ``betas``
+        fallback (a 24-rung ladder with the ``GB_LADDER_*`` env knobs) is
+        never reached on the stock paths, because ``prepare_gb_branch`` /
+        ``prepare_vgb_branch`` always fill ``betas`` first (the GB stock
+        ladder: ``GB_NTEMPS`` rungs at ratio 1.2 with the top rung pinned to
+        ``beta = 1e-4``).
+
+        Raises:
+            ValueError: ``use_chirp_mass`` without the astrophysical prior and
+                with empty ``m_chirp_lims``.
         """
         third_name = "Mc" if self.use_chirp_mass else "fdot"
         # Slot 0 is the luminosity DISTANCE (kpc) in the distance basis --
@@ -1403,6 +1786,7 @@ class GBSetup(Setup, GBSettings):
             self.priors = {"gb": _gb_prior}
 
         if self.betas is None:
+            # TODO check: keep/remove/document -- unreachable on stock paths; GB_LADDER_* inert
             # snrs_ladder = np.array(
             #     [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0,
             #      15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2]
@@ -1571,7 +1955,7 @@ class GBSetup(Setup, GBSettings):
         self.init_state_backend_info()
 
     def init_state_backend_info(self):
-        """Default :attr:`branch_state` to :class:`GBState` and :attr:`branch_backend` to :class:`GBHDFBackend`."""
+        """Default the branch state / backend to :class:`GBState` / :class:`GBHDFBackend`."""
         if self.branch_state is None:
             self.branch_state = GBState
 
@@ -1587,6 +1971,23 @@ class GBSetup(Setup, GBSettings):
         per-band ``band_N_vals`` is unused by the WDM likelihood engine
         (which sizes its buffers from ``WDMSettings.Nf_active`` /
         ``Nt_active``) but is preserved for shape parity.
+
+        Order of precedence on WDM: ``band_edges_override``, else
+        ``band_edges_mode`` (``"uniform"``: edges at multiples of
+        ``layer_df / subband_divisor`` inside ``[start_freq, end_freq]``,
+        production 8 per layer; ``"get_n"``: :func:`get_n_based_band_edges`);
+        the GB band is first clamped to the WDM active band. On FD the bands
+        are walked down from ``end_freq`` in ``2 N + extra_buffer`` bins. A
+        support-separation check at ``band_unit_stride`` is logged (not
+        enforced) for the WDM ``uniform`` grid; the ``get_n`` builder enforces
+        it itself, and an override grid is not checked. Sets ``band_edges``,
+        ``band_N_vals``, ``num_sub_bands``, and overwrites ``f0_lims``
+        (interior edges) and ``fdot_lims`` (mojito fdot range at the top
+        edge).
+
+        Raises:
+            ValueError: No overlap with the WDM active band, an unknown
+                ``band_edges_mode``, or a band narrower than one sub-band.
         """
         # band separation setup
         if self.oversample is None and self.Tobs < YRSID_SI / 2.0:

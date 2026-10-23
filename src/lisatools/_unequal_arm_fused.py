@@ -4,6 +4,11 @@ The generated closed forms in :mod:`lisatools._unequal_arm_expressions` are a
 fully expanded version of the same calculation.  This module keeps the
 factorisation instead: six link-delay phases are shared by all XYZ elements,
 then the OMS and test-mass mixing matrices are projected once each.
+
+Entry point: :func:`unequal_arm_tdi2_unit_covariances`, called by the unequal-arm instrument
+noise in :mod:`lisatools.sensitivity` (the production noise model, ``UNEQUAL_ARM=1``) once per
+locally stationary WDM time column to build the unit OMS / acceleration bases that each PSD
+proposal rescales by ``Soms_d`` and ``Sa_a``. numpy only.
 """
 
 from __future__ import annotations
@@ -13,6 +18,8 @@ import numpy as np
 from .utils.constants import C_SI
 
 
+# Directed link order of the ``ltts`` argument (link ``ij`` = light travelling
+# from spacecraft j to spacecraft i); same order as lisatools.detector.LINKS.
 LINKS = (12, 23, 31, 13, 32, 21)
 _LINK_INDEX = {link: i for i, link in enumerate(LINKS)}
 
@@ -40,6 +47,7 @@ _X2_TERMS = (
 
 
 def _cyclic_link(link: int, permutation: int) -> int:
+    """Shift both spacecraft indices of link ``ij`` cyclically by ``permutation`` (1->2->3->1)."""
     first, second = divmod(int(link), 10)
     first = (first - 1 + permutation) % 3 + 1
     second = (second - 1 + permutation) % 3 + 1
@@ -65,19 +73,36 @@ _REVERSE_INDEX = np.asarray(
 def unequal_arm_tdi2_unit_covariances(f, ltts):
     """Return unit OMS and acceleration XYZ covariances on ``f``.
 
-    Parameters
-    ----------
-    f : array-like, shape (Nf,)
-        Frequencies in Hz.
-    ltts : array-like, shape (6,)
-        Directed light travel times in :data:`LINKS` order.
+    Builds the TDI-2 Michelson transfer from the six link noises with all six light travel
+    times independent (no equal-arm assumption), in relative-frequency units with the same
+    OMS / test-mass shapes as :mod:`lisatools._unequal_arm_expressions`. Grids longer than
+    4096 points use the compact X/Y/Z factorisation of the 16 TDI-2 terms, with the phases
+    from a blockwise recurrence (re-anchored every 1024 samples) when the grid is also
+    regularly spaced; grids of at most 4096 points evaluate the 16 terms directly with
+    explicit phases. Diagonal elements are made exactly real and the lower triangle is the
+    conjugate of the upper one, so the result is Hermitian by construction.
 
-    Returns
-    -------
-    tuple of ndarray
-        ``(B_oms, B_acc)``, each with shape ``(3, 3, Nf)``.  Multiplying by
-        ``LISAModel.Soms_d`` and ``LISAModel.Sa_a`` respectively gives the
-        physical covariance.
+    Args:
+        f (array-like): Frequencies in Hz, shape ``(Nf,)``. ``f = 0`` yields non-finite
+            values (divide warnings suppressed).
+        ltts (array-like): Directed light travel times in seconds, shape ``(6,)``, in
+            :data:`LINKS` order.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``(B_oms, B_acc)``, complex128, each with shape
+        ``(3, 3, Nf)`` (XYZ x XYZ x frequency). Multiplying by ``LISAModel.Soms_d`` and
+        ``LISAModel.Sa_a`` respectively and summing gives the physical covariance.
+
+    Raises:
+        ValueError: If ``f`` is not one-dimensional or ``ltts`` does not have shape ``(6,)``.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools._unequal_arm_fused import unequal_arm_tdi2_unit_covariances
+        >>> f = np.linspace(1e-4, 1e-2, 50)
+        >>> b_oms, b_acc = unequal_arm_tdi2_unit_covariances(f, np.full(6, 8.34))
+        >>> b_oms.shape
+        (3, 3, 50)
     """
     f = np.asarray(f, dtype=float)
     ltts = np.asarray(ltts, dtype=float)

@@ -1,4 +1,14 @@
-"""Misc utilities used by the global-fit setup code."""
+"""Misc utilities used by the global-fit setup code.
+
+Only :class:`BasicResidualacsLikelihood` is on the run path: every rank's
+:meth:`~lisatools.globalfit.run.GlobalFit._build_acs_and_recipe` wraps its
+:class:`~lisatools.analysiscontainer.AnalysisContainerArray` in one and hands
+it to :class:`~lisatools.globalfit.engine.GlobalFitEngine` as eryn's
+``log_like_fn``. The other names (:class:`NewSensitivityMatrix`,
+:func:`new_sens_mat`, :class:`AllSetupInfoTransfer`,
+:class:`SetupInfoTransfer`) are legacy helpers from the settings-file era
+with no remaining caller.
+"""
 
 import typing as tp
 from copy import deepcopy
@@ -14,23 +24,51 @@ from ..sensitivity import SensitivityMatrix, get_sensitivity
 
 
 class BasicResidualacsLikelihood:
-    """Minimal residual-driven likelihood that delegates to an
-    :class:`AnalysisContainerArray`.
+    """Minimal residual-driven likelihood that delegates to an AnalysisContainerArray.
+
+    The engine's ``log_like_fn`` placeholder: the likelihood of the global fit
+    is the residual held in the containers, so the call ignores the sampled
+    parameters and returns :meth:`AnalysisContainerArray.likelihood` picked at
+    the requested walkers. Built once per rank by
+    :meth:`~lisatools.globalfit.run.GlobalFit._build_acs_and_recipe`.
 
     Args:
-        acs: The analysis-container array whose ``likelihood()`` method is
+        acs (AnalysisContainerArray): The rank's container array (its walker
+            block under the multi-rank layout); its ``likelihood()`` method is
             invoked on each call.
+
+    Note:
+        The global-fit moves compute their own likelihoods from the residual,
+        and :meth:`~lisatools.globalfit.run.GlobalFit.prepare_main` sets
+        ``state.log_like`` before sampling, so eryn's
+        :meth:`~eryn.ensemble.EnsembleSampler.compute_log_like` (the only
+        caller of ``log_like_fn``) is not expected to reach :meth:`__call__`
+        during a run. A call needs ``supps["overal_inds"]`` (sic); the run's
+        state supplemental carries ``walker_inds`` only.
     """
 
     def __init__(self, acs):
         self.acs = acs
 
     def __call__(self, *args, supps=None, **kwargs):
+        """Return ``acs.likelihood()`` at the walkers named by ``supps``.
+
+        Args:
+            *args: Ignored (eryn passes the sampled coordinates).
+            supps (dict): Supplemental data; must hold ``"overal_inds"``, the
+                walker indices to return.
+            **kwargs: Ignored.
+
+        Returns:
+            ``xp.ndarray``: The per-walker log-likelihoods at
+            ``supps["overal_inds"]`` (numpy or cupy, following the containers).
+        """
         ll_temp = self.acs.likelihood()
         overall_inds = supps["overal_inds"]
         return ll_temp[overall_inds]
 
 
+# TODO check: keep/remove/document -- legacy settings-file helper; no caller in src/, scripts/, tests/ or LATW
 class NewSensitivityMatrix:
     """Builder that returns a :class:`SensitivityMatrix` for given PSD parameters.
 
@@ -117,6 +155,7 @@ class NewSensitivityMatrix:
             return SensitivityMatrix(f_arr.copy(), sens_arr)
 
 
+# TODO check: keep/remove/document -- legacy equal-arm (sangria A1/E1) builder; no caller in src/, scripts/, tests/ or LATW
 def new_sens_mat(name, psd_params, f_arr, galfor_params=None):
     """Build a 2-channel ``A1``/``E1`` :class:`SensitivityMatrix` for given PSD/galfor params.
 
@@ -187,6 +226,7 @@ def new_sens_mat(name, psd_params, f_arr, galfor_params=None):
 from dataclasses import dataclass
 
 
+# TODO check: keep/remove/document -- legacy move-list transfer; only commented-out uses remain (run.py _build_acs_and_recipe) plus unused imports in the legacy global_fit_input/ and mojito_input/ settings files
 class AllSetupInfoTransfer:
     """Aggregate of two :class:`SetupInfoTransfer` instances.
 
@@ -300,6 +340,7 @@ class AllSetupInfoTransfer:
 
 # TODO: this was not working?
 # @dataclass
+# TODO check: keep/remove/document -- legacy move-list transfer; only commented-out uses remain (run.py _build_acs_and_recipe) plus unused imports in the legacy global_fit_input/ and mojito_input/ settings files
 class SetupInfoTransfer:
     """Container for a single source's MCMC moves and identifying name.
 

@@ -1,3 +1,16 @@
+"""Time-delay interferometry (TDI) configuration for the LISA response.
+
+Holds :class:`TDIConfig`, which turns a TDI generation string or an explicit
+list of delayed link terms into the flat index arrays the C++/CUDA response
+kernels read (``pyTDIConfig`` / ``TDIConfigWrap``). In the global fit it is
+built by :mod:`lisatools.globalfit.stock.erebor.source_runtime` (from the
+general block's ``tdi_gen_str``) and passed to the source wrappers of
+:mod:`lisatools.globalfit.stock.erebor.wrappers`; it is consumed by
+:class:`~lisatools.response.directresponse.pyResponseTDI` and the
+TDI-on-the-fly generators of :mod:`lisatools.response.tdionfly`. The 9mo /
+12mo runs use ``"2nd generation"`` (XYZ TDI-2).
+"""
+
 from multiprocessing.sharedctypes import Value
 import numpy as np
 from typing import Optional, List
@@ -17,24 +30,70 @@ from ..utils.parallelbase import LISAToolsParallelModule
 
 
 class TDIConfig(LISAToolsParallelModule):
-    """
+    """Time-delay interferometry combination (Michelson X, Y, Z) for the LISA response.
+
+    The combination is given as the list of terms of the X channel; Y and Z
+    are its cyclic permutations of the spacecraft indices (1 -> 2 -> 3 -> 1),
+    so there are always three channels. ``"1st generation"`` is the 8-term
+    first-generation Michelson X; ``"2nd generation"`` adds the 8 extra terms
+    of second-generation X (16 terms). Each term is one link projection
+    :math:`y_{ij}` with a sign and the ordered list of links whose delays are
+    applied to it. The class flattens the 3 x ``len(terms)`` permuted terms
+    ("units") into the index arrays the C++ ``pyTDIConfig`` class takes
+    (:attr:`pytdiconfig_args`).
 
     Args:
-        tdi (str or list, optional): TDI setup. Currently, the stock options are
-            :code:`'1st generation'` and :code:`'2nd generation'`. Or the user can provide
-            a list of tdi_combinations of the form
-            :code:`{"link": 12, "links_for_delay": [21, 13, 31], "sign": 1, "type": "delay"}`.
-            :code:`'link'` (`int`) the link index (12, 21, 13, 31, 23, 32) for the projection (:math:`y_{ij}`).
-            :code:`'links_for_delay'` (`list`) are the link indexes as a list used for delays
-            applied to the link projections.
-            ``'sign'`` is the sign in front of the contribution to the TDI observable. It takes the value of `+1` or `-1`.
-            ``type`` is either ``"delay"`` or ``"advance"``. It is optional and defaults to ``"delay"``.
-            (default: ``"1st generation"``)
-    
+        tdi: ``"1st generation"``, ``"2nd generation"``, or a list of term
+            dicts for the X channel, each of the form
+            ``{"link": 12, "links_for_delay": [21, 13, 31], "sign": 1}``.
+            ``"link"`` (int) is the link index (12, 21, 13, 31, 23, 32) of the
+            projection :math:`y_{ij}`; ``"links_for_delay"`` (list of int) the
+            links whose delays are applied, in order (empty for none);
+            ``"sign"`` (``+1`` or ``-1``) the sign of the term. Any other key
+            (e.g. a ``"type"``) is ignored: every term is a delay. Required
+            (no default).
+        force_backend: Backend name (``"cpu"``, ``"cuda12x"``, ``"cuda13x"``,
+            ...; prefixed with ``"lisatools_"`` when needed). ``None``
+            (default) takes the first available backend.
+
+    Raises:
+        ValueError: ``tdi`` is neither a supported string nor a list.
+
+    Attributes:
+        nchannels (int): ``3``.
+        num_units (int): Number of (channel, term) units, ``3 * len(terms)``.
+        tdi_base_links (xp.ndarray): ``(num_units,)`` int32 projected link per unit.
+        tdi_link_combinations (xp.ndarray): int32 delay links, units
+            concatenated (``-11`` for a unit with no delay).
+        tdi_operation_index (xp.ndarray): int32 unit index of each entry of
+            ``tdi_link_combinations``.
+        tdi_signs (xp.ndarray): ``(num_units,)`` float64 signs.
+        channels (xp.ndarray): ``(num_units,)`` int32 channel (0 X, 1 Y, 2 Z).
+        unit_starts (xp.ndarray): int32 start of each unit in
+            ``tdi_link_combinations``.
+        unit_lengths (xp.ndarray): int32 number of delay entries per unit.
+
+    Example:
+        >>> from lisatools.response.tdiconfig import TDIConfig
+        >>> tdi = TDIConfig("2nd generation", force_backend="cpu")
+        >>> tdi.num_units, tdi.nchannels
+        (48, 3)
+        >>> terms = [
+        ...     {"link": 12, "links_for_delay": [], "sign": 1},
+        ...     {"link": 21, "links_for_delay": [12], "sign": -1},
+        ... ]
+        >>> TDIConfig(terms, force_backend="cpu").num_units
+        6
     """
 
     @classmethod
     def supported_backends(cls):
+        """Return the backend names this class can run on, in preference order.
+
+        Returns:
+            list[str]: ``"lisatools_<tag>"`` for ``cuda13x``, ``cuda12x``,
+            ``cuda11x``, ``cpu`` and ``jax``.
+        """
         # Phase 3L.7l holdout (fixed 2026-06-05): use `_BACKEND_PREFIX`
         # ("lisatools" via LISAToolsParallelModule).
         return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED_WITH_JAX()]
@@ -109,7 +168,13 @@ class TDIConfig(LISAToolsParallelModule):
 
     @property
     def pytdiconfig(self) -> object:
-        """C++ class"""
+        """object: A new backend ``pyTDIConfig`` C++ object built from :attr:`pytdiconfig_args`.
+
+        A fresh object is constructed (and cached on ``_pytdiconfig``) on every
+        access. Raises ``ValueError`` when the arguments are ``None`` (the
+        message names a ``linear_interp_setup`` flag that this class does not
+        have).
+        """
         if self._pytdiconfig_args is None:
             raise ValueError(
                 "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
@@ -119,7 +184,12 @@ class TDIConfig(LISAToolsParallelModule):
 
     @property
     def pytdiconfig_args(self) -> tuple:
-        """args for the c++ class."""
+        """list: Constructor arguments of the C++ class.
+
+        ``[unit_starts, unit_lengths, tdi_base_links, tdi_link_combinations,
+        tdi_signs, channels, num_units, nchannels]``, the arrays as copies in
+        the backend's array module.
+        """
         return self._pytdiconfig_args
 
     @pytdiconfig_args.setter
@@ -128,12 +198,12 @@ class TDIConfig(LISAToolsParallelModule):
         
     @property
     def tdi_combinations(self) -> List:
-        """TDI Combination setup"""
+        """list[dict]: The X-channel TDI term list; setting it rebuilds the index arrays."""
         return self._tdi_combinations
 
     @tdi_combinations.setter
     def tdi_combinations(self, tdi_combinations: List) -> None:
-        """Set TDI combinations and fill out setup."""
+        """Set the TDI terms and rebuild the flat index arrays (see the class Attributes)."""
 
         self._tdi_combinations = tdi_combinations
         tdi_base_links = []
@@ -199,7 +269,17 @@ class TDIConfig(LISAToolsParallelModule):
         self.unit_lengths = unit_lengths.astype(np.int32)
 
     def _cyclic_permutation(self, link, permutation):
-        """permute indexes by cyclic permutation"""
+        """Cyclically permute the two spacecraft digits of a link index.
+
+        Each digit ``d`` becomes ``d + permutation``, wrapped into 1..3.
+
+        Args:
+            link (int): Two-digit link index, e.g. ``12``.
+            permutation (int): Shift, 0, 1 or 2 (the channel).
+
+        Returns:
+            int: The permuted link, e.g. ``12 -> 23`` for ``permutation=1``.
+        """
         link_str = str(link)
 
         out = ""
@@ -214,7 +294,7 @@ class TDIConfig(LISAToolsParallelModule):
 
     @property
     def ptr(self) -> int:
-        """pointer to c++ class"""
+        """int: Pointer of a newly built ``pyTDIConfig`` object (see :attr:`pytdiconfig`)."""
         return self.pytdiconfig.ptr
     
     

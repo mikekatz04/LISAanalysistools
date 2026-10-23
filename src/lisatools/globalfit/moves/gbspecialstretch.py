@@ -1,4 +1,56 @@
-"""Galactic-binary specialized stretch / RJ moves and supporting infrastructure."""
+"""Galactic-binary (GB / VGB) in-model and reversible-jump moves of the global fit.
+
+Every GB and VGB move of the production global fit lives here. The moves are built by
+:func:`lisatools.globalfit.recipe.build_gb_moves` / ``build_vgb_moves`` and driven once per
+iteration by :class:`~lisatools.globalfit.moves.globalfitmove.GFCombineMove`. The 9mo / 12mo
+production runs (``erebor.all_sources``) compose them as follows:
+
+- :class:`GBSpecialStretchMove`: ``in_model``, ``in_model_fstat``, ``in_model_removal``
+  (pure in-model moves; ``in_model_replace`` is built but never staged).
+- :class:`VGBSpecialStretchMove`: ``vgb_pe`` (verification binaries).
+- :class:`GBSpecialRJPriorMove`: ``rj_prior_removal``, ``rj_prior_pe``, and the warm-start
+  twins ``rj_warm_search`` / ``rj_warm_pe``.
+- :class:`GBSpecialRJFStatGridMove`: ``rj_fstat_search``, ``rj_fstat_pe``,
+  ``rj_fstat_pe_residual`` (F-stat grid births; owns the F-stat epoch fit, the per-walker
+  valve judge and the empty-band valve).
+- :class:`GBSpecialRJSerialSearchMCMC` (built, never proposes in production),
+  :class:`GBParaSearchRJMove` (``GB_PARA_SEARCH``, off by default), and
+  :class:`GBSpecialRJRefitMove` (``rj_refit``; not requested by the production recipe,
+  so not built there).
+
+All of them inherit :class:`GBSpecialBase`, which holds the shared machinery. Call chain of
+one propose under the multi-rank walker-block fan-out:
+
+- head rank: :meth:`GBSpecialBase.propose` -> ``_propose_dispatch`` ->
+  ``_propose_orchestrated`` (draws the band-unit scan schedule, ships ``gb_*`` fan-out
+  commands, merges the replies, ticks the valves);
+- compute ranks: ``gf_serve`` -> ``_gb_serve_run_proposal`` (a :class:`GBRankSession`) ->
+  :meth:`GBSpecialBase.run_proposal` -> :meth:`GBSpecialBase._run_band_unit` ->
+  ``_run_rj_step`` (births / deaths) and ``_run_in_model_repeats`` (in-model proposals,
+  all-rung vertical swaps);
+- single process (``fit.sample`` or one compute rank): ``_propose_legacy``.
+
+Module-level contents, in file order: the propose timer (:class:`_ProposeTimer`,
+``[GB_TIMING]`` lines, ``GB_PROP_TIMING_SYNC``), the band-unit scan schedule
+(``GB_BAND_UNIT_STRIDE``, ``GB_BAND_UNIT_START_PER_WALKER``, ``GB_BAND_UNIT_DIR_PER_WALKER``),
+leaf-cap / cap-cell helpers (``GB_CAP_*``, off in production), F-stat per-walker band-skip
+and fingerprint readers, the in-model proposal selectors (``GB_INMODEL_PROPOSAL``,
+``GB_INMODEL_OBSERVABLE_*``), the GB eigen-axis shims (``GB_INMODEL_EIGEN_AXIS``, off), the
+level-1 / level-2 in-model convergence knobs and states (``GB_INMODEL_CONVERGE*``,
+:class:`_InModelConvergeState`; ``GB_INMODEL_GROUP*``, :class:`_InModelGroupState`), the
+per-(walker, band) valve statistic (:class:`_ColdBandLnL`,
+``GB_SEARCH_BAND_SHUTOFF_PER_WALKER`` / ``_ALL_WALKERS`` / ``_CONV_ITER`` / ``_LL_TOL``), the
+vertical-tempering readers and all-rung swap helpers (``GB_TEMPER_*``, ``GB_VERT_*``), the
+replica-mode merge (:func:`merge_owned_sources`, ``GF_GPU_ROUTING=1`` only) and the per-rank
+session (:class:`GBRankSession`).
+
+Band-level infrastructure (:class:`~lisatools.globalfit.moves.gbbands.BandSorter`,
+``SubBandBuffer``, ``BandScheduler``, the routed band engine) lives in
+:mod:`lisatools.globalfit.moves.gbbands` and is re-exported here. The production values
+of the knobs are set in the launchers (``scripts/fstat_proposal/submit_gf_9mo_v9.sh``,
+``scripts/flagship/submit_gf_12mo.sh``); ``docs/global-fit-navigation.md`` describes
+where knobs are read and how to find them.
+"""
 
 from __future__ import annotations
 
@@ -125,12 +177,18 @@ __all__ = ["GBSpecialStretchMove"]
 logger = logging.getLogger(__name__)
 
 class _NoOpMempool:
-    """CPU stand-in for ``cupy.get_default_memory_pool()`` — calls become no-ops."""
+    """CPU stand-in for cupy's default memory pool: calls become no-ops.
+
+    Installed as the move's ``mempool`` by :class:`GBSpecialBase` when the backend does
+    not use cupy (CPU runs and tests); a GPU run gets the real cupy pool.
+    """
 
     def free_all_blocks(self):
+        """Do nothing (the cupy method of the same name frees cached device blocks)."""
         return
 
 
+# TODO check: keep/remove/document -- parked; share_proposal_tables True raises NotImplementedError
 class _SharedProposalTables:
     """PARKED, NOT IN USE -- cold-chain proposal tables shared across proposals.
 
@@ -172,9 +230,15 @@ class _SharedProposalTables:
         self.infomat_chol_sorted = None
 
     def needs_friends(self, iteration) -> bool:
+        """Return True when the friend table was not built at ``iteration``."""
         return self.friends_iteration != iteration
 
     def needs_infomat(self, iteration, every) -> bool:
+        """Return True when the Cholesky table is missing, or due at ``iteration``.
+
+        Due means: not already built at ``iteration`` and ``iteration`` is a multiple of
+        ``every`` (taken as at least 1).
+        """
         if self.infomat_chol_sorted is None:
             return True
         if self.infomat_iteration == iteration:
@@ -182,8 +246,13 @@ class _SharedProposalTables:
         return iteration % max(int(every), 1) == 0
 
 
+# TODO check: keep/remove/document -- no call sites; plumbing of the parked _SharedProposalTables
 def _shared_proposal_tables(acs, branch_name) -> _SharedProposalTables:
-    """The run's ONE :class:`_SharedProposalTables` for ``branch_name``."""
+    """The run's ONE :class:`_SharedProposalTables` for ``branch_name``.
+
+    Lazily attaches a ``{branch_name: _SharedProposalTables}`` dict to ``acs`` as
+    ``acs._gb_shared_proposal_tables`` on first use.
+    """
     store = getattr(acs, "_gb_shared_proposal_tables", None)
     if store is None:
         store = {}
@@ -247,6 +316,19 @@ class _ProposeTimer:
     diagnostic: if host time dominates in stages with tiny kernels
     (``inmodel_repeats`` with few cells), the run is launch-overhead-bound
     (too few sub-bands/cells per launch to keep the GPU busy).
+
+    Built once per propose by the orchestrator, the legacy propose and the
+    per-rank session; also used by :mod:`~lisatools.globalfit.moves.gbbands` and
+    :mod:`~lisatools.globalfit.moves.psdmove`.
+
+    Args:
+        sync_fn (callable, optional): Called with no arguments at every span
+            boundary (from :func:`_prop_timer_sync_fn`). Default ``None`` = no
+            device sync (production).
+
+    Attributes:
+        stages (dict): ``{stage name: accumulated seconds}``.
+        counts (dict): ``{counter name: accumulated int}``.
     """
 
     __slots__ = ("stages", "counts", "_sync")
@@ -258,6 +340,13 @@ class _ProposeTimer:
 
     @contextmanager
     def span(self, name: str):
+        """Context manager that adds the wall time of its body to ``stages[name]``.
+
+        Calls the sync function (if any) on entry and on exit.
+
+        Args:
+            name: Stage name; repeated spans of one name accumulate.
+        """
         if self._sync is not None:
             self._sync()
         t0 = time.perf_counter()
@@ -271,11 +360,15 @@ class _ProposeTimer:
             )
 
     def count(self, name: str, n: int = 1) -> None:
+        """Add ``n`` (as an int) to the counter ``name`` (e.g. ``"cells"``)."""
         self.counts[name] = self.counts.get(name, 0) + int(n)
 
     def add(self, name: str, dt: float) -> None:
-        """Checkpoint-style accumulation (span-free callers, e.g. the
-        ``_mark`` boundaries inside ``_run_rj_step``)."""
+        """Add ``dt`` seconds to ``stages[name]``.
+
+        Checkpoint-style accumulation for span-free callers, e.g. the ``_mark``
+        boundaries inside ``_run_rj_step`` and :func:`_tmark_end`.
+        """
         self.stages[name] = self.stages.get(name, 0.0) + float(dt)
 
     def snapshot(self) -> dict:
@@ -288,9 +381,24 @@ class _ProposeTimer:
         return {"stages": dict(self.stages), "counts": dict(self.counts)}
 
     def report(self, total: float, top=None) -> str:
+        """Format the ``[GB_TIMING]`` line body.
+
+        Every stage is printed (sorted by descending time), but only the stages
+        named in ``top`` count toward ``tracked``; ``untracked`` is
+        ``total`` minus ``tracked``, clipped at 0. Counters follow after a ``|``.
+
+        Args:
+            total: Wall time of the whole propose (s).
+            top (tuple[str, ...], optional): Top-level stage names. Default
+                ``None`` uses the built-in tuple below (nested spans such as the
+                F-stat centre sub-stages are excluded so they are not counted twice).
+
+        Returns:
+            str: ``"total=..s tracked=..s untracked=..s | stage=..s ... | counter=n ..."``.
+        """
         # Top-level stages only: nested spans (buffer_build inside
         # run_proposal, ...) are reported but excluded from the
-        # tracked/untracked accounting via the ``_TOP`` list.
+        # tracked/untracked accounting via the default ``top`` tuple.
         top = top or (
             "sorter_build", "friend_index", "resid_open_close", "ll_checks",
             "run_proposal", "run_tempering", "write_back", "sorter_rebuild",
@@ -330,7 +438,17 @@ def _assert_labels_flushed(band_sorter, where: str) -> None:
     several test fixtures pass a ``SimpleNamespace`` stub, which carries no
     deferral state and therefore nothing to check. Real
     :class:`~lisatools.globalfit.moves.gbbands.BandSorter` instances always
-    have the method. Host-side only -- no device sync.
+    have the method. Host-side only -- no device sync. Called by
+    ``_pick_sources`` and ``_write_back_state`` (``GB_CELL_LABEL_DEFERRED=1`` in
+    production).
+
+    Args:
+        band_sorter (BandSorter): The sorter whose cell labels are about to be read.
+        where: Caller name, quoted in the assertion message.
+
+    Raises:
+        AssertionError: From ``BandSorter._assert_cell_labels_flushed`` when
+            deferred relabels are still pending.
     """
     fn = getattr(band_sorter, "_assert_cell_labels_flushed", None)
     if fn is not None:
@@ -338,7 +456,15 @@ def _assert_labels_flushed(band_sorter, where: str) -> None:
 
 
 def _tspan(tm, name: str):
-    """Timer span or no-op when the propose-level timer is absent."""
+    """Return the timer's span for ``name``, or a ``nullcontext`` when ``tm`` is None.
+
+    Args:
+        tm (_ProposeTimer or None): The propose-level timer.
+        name: Stage name.
+
+    Returns:
+        contextlib.AbstractContextManager: The span (or a no-op context).
+    """
     return tm.span(name) if tm is not None else nullcontext()
 
 
@@ -347,10 +473,16 @@ def _tmark_start(tm):
 
     For stages whose body is too large to re-indent into a ``with``, or
     that straddle an if/else. Mirrors :meth:`_ProposeTimer.span` exactly,
-    including its sync discipline (a no-op unless GB_PROP_TIMING_SYNC=1,
-    so by default the mark carries HOST time -- the quantity a
-    launch-overhead change is meant to move). Returns ``None`` when the
-    timer is absent; pair with :func:`_tmark_end`.
+    including its sync discipline (a no-op unless ``GB_PROP_TIMING_SYNC`` is
+    ``1`` or ``all``, so by default the mark carries HOST time -- the quantity a
+    launch-overhead change is meant to move). Pair with :func:`_tmark_end`.
+
+    Args:
+        tm (_ProposeTimer or None): The propose-level timer.
+
+    Returns:
+        float or None: The ``time.perf_counter`` reading at the mark, ``None`` when ``tm``
+        is None.
     """
     if tm is None:
         return None
@@ -360,7 +492,15 @@ def _tmark_start(tm):
 
 
 def _tmark_end(tm, name: str, t0):
-    """Close a :func:`_tmark_start` mark, accumulating into ``name``."""
+    """Close a :func:`_tmark_start` mark, accumulating into ``name``.
+
+    No-op when ``tm`` or ``t0`` is None.
+
+    Args:
+        tm (_ProposeTimer or None): The propose-level timer.
+        name: Stage name to accumulate into.
+        t0 (float or None): The value :func:`_tmark_start` returned.
+    """
     if tm is None or t0 is None:
         return
     if tm._sync is not None:
@@ -371,6 +511,10 @@ def _tmark_end(tm, name: str, t0):
 # ---------------------------------------------------------------------------
 # rj_fstat_centers INTERIOR decomposition (2026-08-29)
 # ---------------------------------------------------------------------------
+# (Measured on the v7 configuration. The centre precompute belongs to the
+# F-stat distance-birth chain, which is OFF in the v9 production runs:
+# GB_RJ_FSTAT_DIST_BIRTH defaults off and the launchers export 0.)
+#
 # THE BUCKET IS REAL, AND IT IS ALREADY ACCOUNTED FOR. Record the
 # arithmetic here, because it has been mis-read once already:
 #
@@ -424,10 +568,10 @@ def _tmark_end(tm, name: str, t0):
 #
 # All of these are NESTED inside ``run_proposal`` (or, for the per-round
 # marks, inside the ``rj_fstat_centers`` window itself), so they are
-# deliberately kept OUT of ``_ProposeTimer.report``'s ``_TOP`` list --
+# deliberately kept OUT of ``_ProposeTimer.report``'s default ``top`` tuple --
 # adding them there would double-count seconds ``run_proposal`` already
 # carries and drive ``untracked`` negative-then-clamped. ``report`` prints
-# every stage it holds regardless of ``_TOP``, so they are visible in
+# every stage it holds regardless of ``top``, so they are visible in
 # ``[GB_TIMING]`` without being tracked.
 _FSTAT_CTR_SUBSTAGES = (
     # -- unit-open precompute (_precompute_fstat_centers) ------------------
@@ -485,7 +629,18 @@ def _prop_timer_sync_fn(xp, gpus, mode):
       current-device sync when no device list is available.
 
     Kept as a module-level function (not a lambda in ``propose``) so the
-    three modes are unit-testable without a GPU.
+    three modes are unit-testable without a GPU. Called at every timer build
+    (orchestrated propose, legacy propose, rank session) with the value of
+    ``GB_PROP_TIMING_SYNC`` (default ``"0"``); the launchers leave it unset.
+
+    Args:
+        xp (module): Array module; ``xp.cuda.runtime.deviceSynchronize`` is used
+            for modes ``"1"`` / ``"all"`` (so those need cupy).
+        gpus (list[int] or None): Run devices (``model.analysis_container_arr.gpus``).
+        mode (str): The knob value; ``""``, ``"0"``, ``"off"``, ``"false"`` mean off.
+
+    Returns:
+        callable or None: The sync callable, or ``None`` when off.
     """
     mode = str(mode).strip().lower()
     if mode in ("", "0", "off", "false"):
@@ -498,6 +653,7 @@ def _prop_timer_sync_fn(xp, gpus, mode):
         return _cur
 
     def _sync_all_devices():
+        """Drain every device in ``devs`` (``GB_PROP_TIMING_SYNC=all``)."""
         for _d in devs:
             with xp.cuda.Device(_d):
                 _cur()
@@ -505,6 +661,7 @@ def _prop_timer_sync_fn(xp, gpus, mode):
     return _sync_all_devices
 
 
+# TODO check: keep/remove/document -- only caller needs GB_SEARCH_CAP_HEADROOM>0 (default 0, launchers unset)
 def _cap_headroom_short_mask(cap, occ, ceiling, headroom):
     """Occupied cap cells short of ``headroom`` free slots, below the ceiling.
 
@@ -526,7 +683,17 @@ def _compact_index_ranges(indices, max_groups: int = 12) -> str:
 
     The leaf-cap log used to print every incremented band; on the cap-cell
     grid that is ``K`` times as many numbers (hundreds to thousands per
-    line). Runs stay readable and still identify exactly what moved.
+    line). Runs stay readable and still identify exactly what moved. Used by
+    the leaf-cap increment log (``_update_band_leaf_caps``; leaf caps are a
+    stock default, off in the v9 launchers) and ``_log_stage_promotions``.
+
+    Args:
+        indices (array-like of int): Indices to collapse (sorted internally).
+        max_groups: Runs shown before the tail is summarized. Default ``12``.
+
+    Returns:
+        str: e.g. ``"[0-3, 17, 40-44]"``, or ``"[..., ... +n more runs]"``; ``"[]"``
+        for an empty input.
     """
     idx = np.asarray(indices, dtype=np.int64)
     if idx.size == 0:
@@ -552,14 +719,27 @@ def _resolve_rj_flip_fraction(branch_name, kwarg_value, default=1.0):
     passes ``_search_rj_flip_default()`` for search-cycle RJ moves and
     ``_pe_rj_flip_default()`` for PE-cycle ones -- the 0.2 code constants
     unless ``GB_SEARCH_RJ_FLIP_FRACTION`` / ``GB_PE_RJ_FLIP_FRACTION`` are
-    exported, 2026-09-11); a user env
+    exported, 2026-09-11; the v9 launchers export 1.0 / 0.1); a user env
     ``{BRANCH}_RJ_FLIP_FRACTION`` overrides it, an explicit kwarg overrides
     both. NOTE the env var is GLOBAL across stages -- one exported value
     lands on every RJ move in every stage, so setting it to force a search
-    value also clobbers the PE one. Leave it unset to get both. VGB is fixed-leaf (``nleaves_min == nleaves_max``, no
-    RJ), so it gets NO RJ knob surface: the fraction is pinned to 1.0 and
-    the env/default are never consulted (an explicit kwarg on a vgb move
-    is rejected rather than silently ignored).
+    value also clobbers the PE one. Leave it unset to get both. VGB is
+    fixed-leaf (``nleaves_min == nleaves_max``, no RJ), so it gets NO RJ knob
+    surface: the fraction is pinned to 1.0 and the env/default are never
+    consulted (an explicit kwarg on a vgb move is rejected rather than
+    silently ignored). Called once by the :class:`GBSpecialBase` constructor.
+
+    Args:
+        branch_name (str): Move branch (``"gb"`` / ``"vgb"``); names the env knob.
+        kwarg_value (float or None): The ``rj_flip_fraction`` constructor kwarg.
+        default (float): The builder's ``rj_flip_fraction_default``. Default ``1.0``.
+
+    Returns:
+        float: Fraction of the RJ-eligible slots that receive a birth/death flip
+        attempt per proposal, in ``(0, 1]``.
+
+    Raises:
+        ValueError: On a ``vgb`` move given a kwarg, or a value outside ``(0, 1]``.
     """
     if str(branch_name).lower() == "vgb":
         if kwarg_value is not None:
@@ -593,7 +773,18 @@ def _resolve_band_unit_stride(branch_name, ctor_value):
     members are scheduled CONCURRENTLY, so same-unit bands always have
     ``k - 1`` closed bands between them. ``2`` (the default) is the
     legacy odd/even parity scheduling, bit-identical to the historical
-    behavior. Values ``< 1`` are rejected.
+    behavior. Values ``< 1`` are rejected. The v9 launchers export
+    ``GB_BAND_UNIT_STRIDE=9``.
+
+    Args:
+        branch_name (str): Move branch; names the env knob.
+        ctor_value (int): The ``band_units`` constructor kwarg (default ``2``).
+
+    Returns:
+        int: The stride, ``>= 1``.
+
+    Raises:
+        ValueError: When the resolved stride is ``< 1``.
     """
     env_val = os.environ.get(
         f"{str(branch_name).upper()}_BAND_UNIT_STRIDE", None
@@ -605,7 +796,17 @@ def _resolve_band_unit_stride(branch_name, ctor_value):
 
 
 def _env_flag(name: str, default: bool = False) -> Optional[bool]:
-    """Tri-state read of a boolean env knob (``None`` when unset/blank)."""
+    """Tri-state read of a boolean env knob (``None`` when unset/blank).
+
+    Args:
+        name: Environment variable name.
+        default: Unused (kept for the signature); the caller applies its own
+            fallback when ``None`` comes back.
+
+    Returns:
+        bool or None: ``True`` for ``1/true/yes/on`` (case-insensitive), ``False``
+        for any other non-blank value, ``None`` when unset or blank.
+    """
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return None
@@ -626,7 +827,15 @@ def _resolve_band_unit_start_per_walker(branch_name, ctor_value) -> bool:
     ``b % units`` for every walker, ``band_edges`` stays one global 1-D
     array, and band ``b`` means the same Hz for everyone. ONLY the phase
     of the rotation becomes per-walker. Default OFF = today's single
-    global start, bit-identical.
+    global start, bit-identical. The v9 launchers export
+    ``GB_BAND_UNIT_START_PER_WALKER=1``.
+
+    Args:
+        branch_name (str): Move branch; names the env knob.
+        ctor_value (bool): The constructor kwarg, used when the knob is unset.
+
+    Returns:
+        bool: Whether each walker draws its own start class.
     """
     env_val = _env_flag(
         f"{str(branch_name).upper()}_BAND_UNIT_START_PER_WALKER"
@@ -649,7 +858,15 @@ def _resolve_band_unit_dir_per_walker(branch_name, ctor_value) -> bool:
 
     Meaningless at ``units <= 2`` (the two directions trace the same
     cycle), where the draw is skipped. Default OFF = direction ``+1``
-    for every walker, bit-identical.
+    for every walker, bit-identical. The v9 launchers export
+    ``GB_BAND_UNIT_DIR_PER_WALKER=1``.
+
+    Args:
+        branch_name (str): Move branch; names the env knob.
+        ctor_value (bool): The constructor kwarg, used when the knob is unset.
+
+    Returns:
+        bool: Whether each walker draws its own rotation direction.
     """
     env_val = _env_flag(f"{str(branch_name).upper()}_BAND_UNIT_DIR_PER_WALKER")
     if env_val is not None:
@@ -685,7 +902,20 @@ def _draw_unit_scan_schedule(
     one legacy ``randint(units)``, keeping the RNG stream -- and hence
     the whole propose -- bit-identical.
 
-    Returns ``(starts, directions)``, both ``(nwalkers,)`` int arrays.
+    Called by the multi-rank orchestrator on the head (the full N-walker
+    schedule, shipped to the ranks as ``scan_schedule``) and by
+    :meth:`GBSpecialBase.run_proposal` when no schedule was shipped.
+
+    Args:
+        random_state (numpy.random.RandomState): ``model.random``.
+        nwalkers (int): Walkers in the schedule.
+        units (int): Number of band classes (the band-unit stride).
+        per_walker_start (bool): Draw one start per walker (else one shared start).
+        per_walker_dir (bool): Draw a ``+1`` / ``-1`` direction per walker (else all ``+1``).
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``(starts, directions)``, both ``(nwalkers,)``
+        int arrays.
     """
     units = int(units)
     nwalkers = int(nwalkers)
@@ -713,7 +943,19 @@ def _assert_unit_scan_partition(starts, directions, units):
     argument. The schedule now runs in PE as well as search, so a silent
     scheduling bug would corrupt the POSTERIOR, not merely slow mixing --
     cheap to verify (``units x nwalkers`` ints per propose), so verify it
-    rather than trust it.
+    rather than trust it. Called by every :meth:`GBSpecialBase.run_proposal`.
+
+    Args:
+        starts (np.ndarray): ``(nwalkers,)`` start classes.
+        directions (np.ndarray): ``(nwalkers,)`` directions (``+1`` / ``-1``).
+        units (int): Number of band classes.
+
+    Returns:
+        np.ndarray: ``(units, nwalkers)`` int schedule; row ``i`` is the class each
+        walker has open at sweep position ``i``.
+
+    Raises:
+        RuntimeError: When some walker does not visit every class exactly once.
     """
     units = int(units)
     schedule = np.stack(
@@ -743,6 +985,15 @@ def _unit_pass_remainder(starts, directions, unit_i, units):
 
     ``(start_w + unit_i * d_w) % units`` -- the classes in order, from a
     per-walker start, in a per-walker direction.
+
+    Args:
+        starts (array-like of int): ``(nwalkers,)`` start classes.
+        directions (array-like of int): ``(nwalkers,)`` directions.
+        unit_i (int): Sweep position, ``0 <= unit_i < units``.
+        units (int): Number of band classes.
+
+    Returns:
+        np.ndarray: ``(nwalkers,)`` int open class per walker.
     """
     return (
         np.asarray(starts, dtype=int)
@@ -758,6 +1009,15 @@ def _unit_residue_mask(band_inds, walker_inds, units, remainder):
     applies the PER-WALKER rule ``band_inds % units ==
     remainder[walker_inds]``. Vectorized -- no python loop over walkers --
     and array-module agnostic (numpy or cupy, following ``band_inds``).
+
+    Args:
+        band_inds (xp.ndarray): Per-source band index (numpy or cupy).
+        walker_inds (xp.ndarray): Per-source walker index, same shape.
+        units (int): Number of band classes.
+        remainder (int or np.ndarray): Open class, scalar or ``(nwalkers,)``.
+
+    Returns:
+        xp.ndarray: Boolean mask, shape of ``band_inds``.
     """
     xp = get_array_module(band_inds)
     rem = np.asarray(remainder)
@@ -774,6 +1034,7 @@ FStatFitSlot = collections.namedtuple(
 )
 
 
+# TODO check: keep/remove/document -- no src callers (tests/test_fstat_multiwalker_plan.py only)
 def fstat_fit_plan(layout, refs):
     """Map reference walkers onto compute ranks: ``(FStatFitSlot, ...)``.
 
@@ -785,10 +1046,12 @@ def fstat_fit_plan(layout, refs):
 
     The decomposition is two nested axes: OUTER = the walker (W independent
     fits, one per reference residual), INNER = the existing contiguous range
-    split over that walker's ranks. Everything downstream reads this object:
-    the reference row's ``owner_rank`` and ``root``, ``n_parts`` and the
-    group-local rank index in the comb and stage-B runners, the per-slot
-    cache directory, and the release order.
+    split over that walker's ranks. The design is for everything downstream
+    to read this object (the reference row's ``owner_rank`` and ``root``,
+    ``n_parts`` and the group-local rank index in the comb and stage-B
+    runners, the per-slot cache directory, the release order); as of
+    2026-10-19 nothing in ``src`` calls it -- the multi-walker F-stat fit is
+    not wired and the production epoch fits one reference walker.
 
     ``needs_bcast`` is per SLOT but must be decided per COMMAND -- see
     :func:`fstat_plan_is_collective`.
@@ -816,6 +1079,7 @@ def fstat_fit_plan(layout, refs):
     return tuple(slots)
 
 
+# TODO check: keep/remove/document -- no src callers (tests/test_fstat_multiwalker_plan.py only)
 def fstat_plan_is_collective(plan) -> bool:
     """Whether the epoch's commands must be communicator-wide.
 
@@ -845,6 +1109,22 @@ def replica_band_ranges(num_bands, n_replicas, weights=None):
     whose catalogue is empty this propose) carry no information, and balancing
     against them would put every cut at 0 and hand the whole grid to the last
     replica. They fall back to the plain count split.
+
+    Used by the head orchestrator in replica mode only (``GF_GPU_ROUTING=1``,
+    opt-in: the launchers leave it unset by default; their documented replica
+    line is ``NGPUS=8 GF_GPU_ROUTING=1``).
+
+    Args:
+        num_bands (int): Number of bands on the grid.
+        n_replicas (int): Number of replicas (taken as at least 1).
+        weights (array-like, optional): ``(num_bands,)`` non-negative per-band
+            weights. Default ``None`` = split by count.
+
+    Returns:
+        list[tuple[int, int]]: ``n_replicas`` half-open ``(start, stop)`` ranges.
+
+    Raises:
+        ValueError: When ``weights`` does not have ``num_bands`` entries.
     """
     num_bands = int(num_bands)
     n_replicas = max(1, int(n_replicas))
@@ -868,7 +1148,15 @@ def replica_band_ranges(num_bands, n_replicas, weights=None):
 
 
 def _unit_class_label(remainder) -> str:
-    """Single-line label for the class(es) a sweep pass has open."""
+    """Single-line label for the class(es) a sweep pass has open.
+
+    Args:
+        remainder (int or np.ndarray): Open class, scalar or ``(nwalkers,)``.
+
+    Returns:
+        str: The class number when every walker has the same class open, else
+        ``"per-walker[...]"`` with the per-walker classes.
+    """
     rem = np.asarray(remainder)
     if rem.ndim == 0:
         return str(int(rem))
@@ -885,9 +1173,18 @@ def _format_unit_scan_schedule(starts, directions, units, name=""):
 
     Names the whole sweep schedule on ONE greppable line: the per-walker
     ``start`` and rotation ``direction`` (``3+`` = start 3 going up,
-    ``3-`` = start 3 going down) and the stride. Large walker counts
-    fall back to a stable digest plus the
-    first few walkers so the line never wraps.
+    ``3-`` = start 3 going down) and the stride, plus an 8-hex md5 digest of
+    the schedule. More than 32 walkers print only the first four pairs, so
+    the line never wraps.
+
+    Args:
+        starts (array-like of int): ``(nwalkers,)`` start classes.
+        directions (array-like of int): ``(nwalkers,)`` directions.
+        units (int): Number of band classes.
+        name (str): Move name added to the tag. Default ``""``.
+
+    Returns:
+        str: The log line (``[GB_UNIT_SCAN <name>] band-class sweep: mode=...``).
     """
     starts = np.asarray(starts, dtype=int).ravel()
     directions = np.asarray(directions, dtype=int).ravel()
@@ -941,27 +1238,7 @@ def tempering_swap_cap_ok(occ_a, occ_b, from_band_a, from_band_b, cap,
 
     Arrays are per candidate swap pair, shape ``(npair, ncells_affected)``
     -- at ``cap_divisor == 1`` a band touches exactly the two cells that
-    share its edges, so ``ncells_affected == 2``:
-
-    * ``occ_a`` / ``occ_b`` -- current occupancy of those cells on each
-      side of the swap (side A = one ``(temp, walker)``, side B = the
-      other);
-    * ``from_band_a`` / ``from_band_b`` -- how many of those come from the
-      band being swapped. Everything else in the cell stays put, which is
-      the whole point: the NEIGHBOUR band's contribution does not move.
-    * ``cap`` -- side A's per-cell cap. Caps are per cell and not per
-      rung, so with a SHARED cap one array serves both sides and
-      ``cap_b`` is left ``None``.
-    * ``cap_b`` -- side B's per-cell cap, when the two sides can differ.
-      That is the PER-WALKER case (``GB_LEAF_CAP_PER_WALKER``,
-      2026-09-22): caps are still temperature-uniform, but they are now
-      indexed by walker, and the permuted swap path pairs two DIFFERENT
-      walker indices. The vertical sweep shares a walker, so there
-      ``cap_b is cap`` and this function's behaviour is unchanged --
-      which is the reason the bulk of dimension transport into the cold
-      chain (the T0-T1 vertical swaps) is untouched by per-walker caps.
-      ``None`` (default) means "same on both sides" and keeps every
-      pre-2026-09-22 call site and test working verbatim.
+    share its edges, so ``ncells_affected == 2``.
 
     Post-swap each side keeps its non-swapped remainder and receives the
     partner's band contribution. Both sides are checked because search
@@ -984,7 +1261,35 @@ def tempering_swap_cap_ok(occ_a, occ_b, from_band_a, from_band_b, cap,
     ``post <= -1`` and reject EVERY swap in PE. Negative caps are treated
     as no limit.
 
-    Returns a per-pair bool: True = the swap is admissible.
+    Reached only through ``GBSpecialBase._swap_cap_ok`` when the tempering
+    cap gate is on (cap divisor 1 AND ``cap_stagger`` AND leaf caps
+    armed). Off in the stock default (``GB_CAP_DIVISOR`` default 8) and in the
+    v9 launchers (``GB_LEAF_CAP_START`` exported empty).
+
+    Args:
+        occ_a (xp.ndarray): Current occupancy of the affected cells on side A
+            (one ``(temp, walker)``), ``(npair, ncells_affected)``.
+        occ_b (xp.ndarray): Same for side B (the other ``(temp, walker)``).
+        from_band_a (xp.ndarray): How many of side A's occupants come from the
+            band being swapped. Everything else in the cell stays put, which is
+            the whole point: the NEIGHBOUR band's contribution does not move.
+        from_band_b (xp.ndarray): Same for side B.
+        cap (xp.ndarray): Side A's per-cell cap. Caps are per cell and not per
+            rung, so with a SHARED cap one array serves both sides and
+            ``cap_b`` is left ``None``.
+        cap_b (xp.ndarray, optional): Side B's per-cell cap, when the two sides
+            can differ. That is the PER-WALKER case (``GB_LEAF_CAP_PER_WALKER``,
+            2026-09-22): caps are still temperature-uniform, but they are now
+            indexed by walker, and the permuted swap path pairs two DIFFERENT
+            walker indices. The vertical sweep shares a walker, so there
+            ``cap_b is cap`` and this function's behaviour is unchanged --
+            which is the reason the bulk of dimension transport into the cold
+            chain (the T0-T1 vertical swaps) is untouched by per-walker caps.
+            ``None`` (default) means "same on both sides" and keeps every
+            pre-2026-09-22 call site and test working verbatim.
+
+    Returns:
+        xp.ndarray: ``(npair,)`` bool; True = the swap is admissible.
     """
     xp = get_array_module(occ_a)
     if cap_b is None:
@@ -1031,10 +1336,18 @@ def _cap_diag_on() -> bool:
     exonerated and the leaves arrive by some third route.
 
     Read-only: counters only, no proposal, density or acceptance touched.
+    Evaluated every RJ accept round. The v9 launchers export ``GB_CAP_DIAG=1``,
+    but the census it audits (the move's ``_diag_gate``) is only stashed inside the
+    leaf-cap birth gate, and leaf caps are off in v9, so the probe records
+    nothing there.
+
+    Returns:
+        bool: True when ``GB_CAP_DIAG == "1"``.
     """
     return os.environ.get("GB_CAP_DIAG", "0") == "1"
 
 
+# TODO check: keep/remove/document -- GB_CAP_DIAG diagnostic; needs leaf caps armed (off in v9)
 def cap_diag_birth_violations(counts, cap_per_cell, flat, cells):
     """``(n_births, n_into_at_cap, n_same_flat_repeats)``.
 
@@ -1069,7 +1382,13 @@ def _inmodel_cap_headroom() -> int:
     a source can relocate across a band/cell edge toward higher
     likelihood even where the cap binds. RJ BIRTH gates are unaffected --
     they read the at-cap masks, not this. ``0`` restores the strict
-    destination gate.
+    destination gate. Read by :func:`_cap_with_inmodel_headroom` and
+    ``_cap_new_entry_veto``, i.e. only inside the cap drift gate
+    (``GB_CAP_DRIFT_GATE``, stock default on); the v9 launchers export
+    ``GB_CAP_DRIFT_GATE=0`` and ``GB_CAP_INMODEL_HEADROOM=0``.
+
+    Returns:
+        int: Leaves over cap an in-model move may carry into a foreign cell.
     """
     return int(os.environ.get("GB_CAP_INMODEL_HEADROOM", "2") or 0)
 
@@ -1113,6 +1432,12 @@ def _cap_dest_band() -> bool:
     replacement move keeps today's source-attributed behaviour bit-for-bit
     (user ruling 2026-08-29: "keep this but we are not using replace right
     now"); it is inert in v7 anyway (``GB_SEARCH_RJ_REPLACE=0``).
+
+    Read only inside the in-model cap drift gate. The v9 launchers export
+    ``GB_CAP_DEST_BAND=1`` but ``GB_CAP_DRIFT_GATE=0``, so it is inert there.
+
+    Returns:
+        bool: True unless ``GB_CAP_DEST_BAND`` is set to something other than ``"1"``.
     """
     return os.environ.get("GB_CAP_DEST_BAND", "1") == "1"
 
@@ -1121,7 +1446,15 @@ def _cap_with_inmodel_headroom(cap):
     """``cap`` widened by the in-model headroom, ARMED CELLS ONLY.
 
     Disarmed cells carry ``cap < 0`` and must stay disarmed -- adding the
-    headroom to ``-1`` would arm them at ``+1``.
+    headroom to ``-1`` would arm them at ``+1``. Used by the in-model cap
+    drift gate (off in v9: ``GB_CAP_DRIFT_GATE=0``).
+
+    Args:
+        cap (xp.ndarray): Per-cell caps (int; ``< 0`` = disarmed).
+
+    Returns:
+        xp.ndarray: ``cap`` itself when the headroom is 0, else a new array of
+        the same dtype with :func:`_inmodel_cap_headroom` added to armed cells.
     """
     h = _inmodel_cap_headroom()
     if h == 0:
@@ -1138,7 +1471,16 @@ def _tempering_open_remainder(start: int, units: int) -> int:
     (start + 1) % units`` (tempering begins at band 1). The residual
     open/close for the unit must expose the SAME class, so this mapping
     is the single source of truth. At ``units == 2`` it reproduces the
-    legacy ``bool_remainder = 1 if start == 0 else 0``.
+    legacy ``bool_remainder = 1 if start == 0 else 0``. Used by
+    ``run_tempering`` (permuted swaps; only ``vgb_pe`` runs them in v9, since
+    ``GB_RUN_FANCY_TEMPERING=0`` turns them off on the gb moves).
+
+    Args:
+        start: Tempering unit index.
+        units: Band-unit stride.
+
+    Returns:
+        int: ``(start + 1) % units``.
     """
     return (int(start) + 1) % int(units)
 
@@ -1155,9 +1497,17 @@ def _ortho_ll_summary(direct, credited, tol):
     ``credited`` is the sum of the per-buffer (per-cell) lnL deltas the
     ledger accumulated for the same unit. Bilinearity/orthogonality
     failing (concurrent cells' windows interfering) makes them disagree.
+    Called per band unit by :meth:`GBSpecialBase.run_proposal` when
+    ``GB_ORTHO_LL_CHECK`` is on (default ``"1"``; the v9 launchers export 1).
 
-    Returns ``dict(mean_abs=..., max_abs=..., worst_walker=...,
-    flagged=bool)`` with ``flagged = max_abs > tol``.
+    Args:
+        direct (array-like of float): ``(nwalkers,)`` realized lnL deltas.
+        credited (array-like of float): ``(nwalkers,)`` ledger-credited deltas.
+        tol (float): Flag threshold on ``max_abs``.
+
+    Returns:
+        dict: ``{"mean_abs": float, "max_abs": float, "worst_walker": int,
+        "flagged": bool}`` with ``flagged = max_abs > tol``.
     """
     direct = np.asarray(direct, dtype=float)
     credited = np.asarray(credited, dtype=float)
@@ -1173,6 +1523,7 @@ def _ortho_ll_summary(direct, credited, tol):
     }
 
 
+# TODO check: keep/remove/document -- only _run_ortho_premise_check; GB_ORTHO_CHECK=0 (default, launchers)
 def _ortho_boundary_pairs(
     f0, walker_inds, band_inds, eligible, units, remainder, max_pairs=8
 ):
@@ -1258,6 +1609,14 @@ def _eigen_axis_on() -> bool:
     ``sin_delta`` through the pole would also have to shift ``alpha`` by pi,
     and a "physical" reflection that moved ``sin_delta`` alone would land on
     the wrong sky point and silently corrupt sky posteriors.
+
+    Read only by ``GBSpecialBase._eigen_axis_ready``; the v9 launchers leave
+    ``GB_INMODEL_EIGEN_AXIS`` unset (off). This GB eigen-axis switch is
+    separate from the observable proposal's eigen mode
+    (``GB_INMODEL_OBSERVABLE_EIGEN``, :func:`_observable_eigen_mode`).
+
+    Returns:
+        bool: True when ``GB_INMODEL_EIGEN_AXIS == "1"``.
     """
     return os.environ.get("GB_INMODEL_EIGEN_AXIS", "0") == "1"
 
@@ -1266,11 +1625,12 @@ def _eigen_axis_on() -> bool:
 #:
 #: ``"observable"`` since 2026-09-01. The two legacy components it
 #: replaces are, in practice, one: GB sets ``stretch_probability = 0.0``
-#: (:1885), so ``infomat`` is the only in-model proposal that actually
-#: runs -- confirmed in the v7 log, where every GB line reads
-#: ``in-model by proposal type -- infomat:`` and only VGB (which sets
-#: ``stretch_probability = 1.0`` in its own ctor and overrides
-#: ``in_model_proposal`` outright) reports ``stretch:``.
+#: (the :class:`GBSpecialBase` constructor default), so ``infomat`` is the
+#: only in-model proposal that actually runs -- confirmed in the v7 log,
+#: where every GB line reads ``in-model by proposal type -- infomat:`` and
+#: only VGB (then on a stretch probability of 1.0; since 2026-09-15 the VGB
+#: default ``VGB_INMODEL_PROPOSAL=observable`` sets 0.0, see
+#: ``_vgb_inmodel_defaults``) reported ``stretch:``.
 #:
 #: And ``infomat`` is the measured-broken one. On the real flagship Fisher
 #: its joint draw walks an ``f0``-``fdot`` ridge of slope ``-0.898 T``
@@ -1325,6 +1685,18 @@ def fstat_band_min_F_for(move):
 
     ⚠ THE FLOOR IS PART OF WHAT A CACHED EPOCH MEANS -- see
     :func:`fstat_stage_fingerprint_for`.
+
+    The per-walker search-stage table (``move._stage_table``) is bound only
+    with ``GB_SEARCH_STAGE_PER_WALKER=1``; the v9 launchers export 0, so every
+    production F-stat fit gets ``None`` here.
+
+    Args:
+        move (GBSpecialBase): The F-stat move (or a duck-typed rank stub).
+
+    Returns:
+        np.ndarray or None: ``(num_bands,)`` F floors from
+        :func:`lisatools.sampling.fstat_proposal.fstat_band_min_F`, or ``None``
+        when no stage table is bound.
     """
     from lisatools.sampling.fstat_proposal import fstat_band_min_F
 
@@ -1347,6 +1719,18 @@ def fstat_stage_fingerprint_for(move) -> str:
     OLD floor -- silently, and for the rest of the run. A changed floor is
     a new epoch; the comb npz is keyed separately and is reused, so the
     cost is a re-selection plus stage B, never a re-sweep.
+
+    The band-skip set (:func:`fstat_band_skip_for`) is appended the same way;
+    unlike the floor, it also re-keys the comb (see the comment in the body).
+    In v9 the floor term is always empty (no per-walker stage table) and the
+    ``bandskip=`` term is live on ``rj_fstat_search``.
+
+    Args:
+        move (GBSpecialBase): The F-stat move (or a duck-typed rank stub).
+
+    Returns:
+        str: ``""``, or ``"|stagefloor=<sha1[:12]>"`` and / or
+        ``"|bandskip=<sha1[:12]>"``.
     """
     out = ""
     mf = fstat_band_min_F_for(move)
@@ -1383,6 +1767,18 @@ def _obs_axis_accum_for(move, a, d_fmid, d_lnfd, ok, xp):
     method on ``self`` from there broke four of them. A getattr
     degrades to "no per-axis census here", which is the right answer
     for an object that never had one.
+
+    Called from ``GBSpecialBase._obs_motion_accum`` once per in-model repeat;
+    all array arguments are per-row device arrays, forwarded unchanged to
+    ``move._obs_axis_accum``.
+
+    Args:
+        move (GBSpecialBase): The move (or a stub).
+        a (xp.ndarray): Accepted-and-finite mask as float64.
+        d_fmid (xp.ndarray): ``|d f_mid|`` per row, in frequency bins.
+        d_lnfd (xp.ndarray): ``|d ln fdot|`` per row.
+        ok (xp.ndarray): Finite-row mask (bool).
+        xp (module): Array module.
     """
     fn = getattr(move, "_obs_axis_accum", None)
     if fn is not None:
@@ -1412,6 +1808,18 @@ def _obs_axis_mult_for(move, source_ids, n_z):
     healthy. A multiplier fixed before any draw and changed only
     BETWEEN blocks does not. Anything that reads the current point
     must not enter here.
+
+    As of 2026-10-19 no move defines ``_obs_axis_mult``, so this returns
+    ``None`` on every production propose (the seam is in place, the table is
+    not).
+
+    Args:
+        move (GBSpecialBase): The move (or a stub).
+        source_ids: Per-row source ids, forwarded to ``move._obs_axis_mult``.
+        n_z (int): Number of observable axes, forwarded.
+
+    Returns:
+        xp.ndarray or None: The multipliers, or ``None`` when the move has no table.
     """
     fn = getattr(move, "_obs_axis_mult", None)
     return None if fn is None else fn(source_ids, n_z)
@@ -1420,9 +1828,6 @@ def _obs_axis_mult_for(move, source_ids, n_z):
 def _rj_band_shutoff_live_for(move):
     """The per-BAND empty-band valve's shut set, if it is LIVE on ``move``.
 
-    Returns a host ``(num_bands,)`` bool array, or ``None`` when the move
-    holds no valve state or the valve is not live on it.
-
     LIVE is exactly the condition ``run_proposal``'s RJ freeze tests before
     it freezes a band: the move holds ``_rj_band_shutoff`` AND
     ``_band_shutoff_enabled()`` -- the designated (``leaf_cap_update``) RJ
@@ -1430,7 +1835,18 @@ def _rj_band_shutoff_live_for(move):
     search-named moves only, so never ``rj_fstat_pe``). A stale array on a
     move whose valve is not live freezes nothing, so it must skip nothing
     either. getattr-only, for the duck-typed-stub reason of
-    :func:`fstat_band_skip_for`.
+    :func:`fstat_band_skip_for`. In v9 the valve is live on ``rj_fstat_search``
+    only (``GB_RJ_BAND_SHUTOFF_SCOPE=search``, ``GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0``).
+
+    Args:
+        move (GBSpecialBase): The F-stat move (or a duck-typed rank stub).
+
+    Returns:
+        np.ndarray or None: Host ``(num_bands,)`` bool array (True = births off),
+        or ``None`` when the move holds no valve state or the valve is not live on it.
+
+    Raises:
+        ValueError: When the valve array does not cover ``move.num_bands`` bands.
     """
     shut = getattr(move, "_rj_band_shutoff", None)
     if shut is None:
@@ -1482,7 +1898,19 @@ def fstat_band_skip_for(move):
     MODULE-LEVEL and taking the move, for the same reason
     :func:`fstat_band_min_F_for` is: ``_run_fstat_fit`` runs on
     duck-typed rank stubs, and a getattr degrades to "the feature is off
-    here" instead of crashing the fit path.
+    here" instead of crashing the fit path. Called by every F-stat epoch fit
+    and by :func:`fstat_stage_fingerprint_for`.
+
+    Args:
+        move (GBSpecialBase): The F-stat move (or a duck-typed rank stub).
+
+    Returns:
+        np.ndarray or None: ``(num_bands,)`` bool skip mask, or ``None`` when no
+        valve applies or when every band (or every interior band) would be
+        skipped (a warning is logged in that case).
+
+    Raises:
+        ValueError: From :func:`_rj_band_shutoff_live_for` on a mis-sized valve.
     """
     from lisatools.sampling.fstat_proposal import fstat_band_skip
 
@@ -1521,7 +1949,11 @@ def _rj_amp_maximize_on() -> bool:
     Deliberately INDEPENDENT of ``phase_maximize`` (user ruling
     2026-09-02) and default OFF. A knob that silently follows another is
     how a config change in one place rearms machinery in another with no
-    line saying so.
+    line saying so. Read once by the :class:`GBSpecialBase` constructor; the
+    v9 launchers export ``GB_RJ_AMP_MAXIMIZE=0``.
+
+    Returns:
+        bool: True when ``GB_RJ_AMP_MAXIMIZE == "1"``.
     """
     return os.environ.get("GB_RJ_AMP_MAXIMIZE", "0").strip() == "1"
 
@@ -1533,6 +1965,14 @@ def _proposal_kind_from_env(var, kinds, default) -> str:
     unknown env var is otherwise ignored without a trace (see
     ``CLAUDE.md``), which is exactly how a typo downgrades a production
     run to the proposal it was launched to replace.
+
+    Args:
+        var (str): Environment variable name.
+        kinds (tuple[str, ...]): Accepted (lower-case) values.
+        default (str): Returned when unset, blank or unrecognised.
+
+    Returns:
+        str: The lower-cased value, or ``default``.
     """
     kind = os.environ.get(var, "").strip().lower()
     if not kind:
@@ -1551,8 +1991,14 @@ def _inmodel_proposal_kind() -> str:
 
     Two spellings of one decision. ``GB_INMODEL_PROPOSAL`` is the master
     switch; ``GB_INMODEL_OBSERVABLE_BASIS`` is the per-feature arm and
-    WINS when set, so a runbook that armed the feature explicitly keeps
-    meaning what it meant after the default flips.
+    WINS when set (``"1"`` = observable, any other non-blank value = legacy),
+    so a runbook that armed the feature explicitly keeps meaning what it
+    meant after the default flips. The v9 launchers export
+    ``GB_INMODEL_PROPOSAL=observable`` and leave ``GB_INMODEL_OBSERVABLE_BASIS``
+    unset.
+
+    Returns:
+        str: ``"observable"`` (default) or ``"legacy"``.
     """
     explicit = os.environ.get("GB_INMODEL_OBSERVABLE_BASIS")
     if explicit is not None and explicit.strip() != "":
@@ -1571,7 +2017,12 @@ def _vgb_inmodel_proposal_kind() -> str:
     observable step with ``VGB_INMODEL_OBSERVABLE_EIGEN`` exactly as GB
     composes its own pair. ``eigen`` is the previous default (the plain
     SAMPLING-basis one-axis eigen draw) and ``stretch`` the pure-stretch
-    legacy; both remain reachable as escapes.
+    legacy; both remain reachable as escapes. Read by
+    ``_vgb_inmodel_defaults`` and the :class:`VGBSpecialStretchMove`
+    constructor; the v9 launchers export ``VGB_INMODEL_PROPOSAL=observable``.
+
+    Returns:
+        str: ``"observable"`` (default), ``"eigen"`` or ``"stretch"``.
     """
     return _proposal_kind_from_env(
         "VGB_INMODEL_PROPOSAL", _VGB_INMODEL_PROPOSAL_KINDS,
@@ -1579,7 +2030,22 @@ def _vgb_inmodel_proposal_kind() -> str:
 
 
 def _observable_knob(name, default):
-    """``float`` env knob that refuses to fail silently on a bad value."""
+    """``float`` env knob that refuses to fail silently on a bad value.
+
+    Reads the observable in-model step knobs: ``GB_INMODEL_OBSERVABLE_SHEAR``
+    (default 0.5), ``GB_`` / ``VGB_INMODEL_OBSERVABLE_JUMP`` (default 1.0; v9
+    exports GB 1.5, VGB 1.0), ``GB_INMODEL_OBSERVABLE_MC_STEP`` (default 0.05),
+    ``GB_INMODEL_OBSERVABLE_FIBER_WEIGHT`` (default 0.0) and
+    ``GB_INMODEL_OBSERVABLE_EIGEN_SMAX`` (default 10.0).
+
+    Args:
+        name (str): Environment variable name.
+        default (float): Value when unset, blank, or not parseable (a warning is
+            logged in the last case).
+
+    Returns:
+        float: The knob value.
+    """
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return float(default)
@@ -1597,6 +2063,12 @@ def _eigen_mode_from_env(var) -> str:
     ``0`` / ``off`` (default) | ``1`` / ``axis`` | ``full``; anything else
     warns and stays off. Shared verbatim by the GB and VGB knobs so their
     semantics cannot drift apart.
+
+    Args:
+        var (str): Environment variable name.
+
+    Returns:
+        str: ``"off"``, ``"axis"`` or ``"full"``.
     """
     raw = os.environ.get(var, "0").strip().lower()
     if raw in ("", "0", "off"):
@@ -1630,7 +2102,11 @@ def _observable_eigen_mode() -> str:
     (RNG stream included). ``full``: one joint correlated step across all
     axes per repeat -- the modern, whitened version of the legacy
     full-covariance draw, all coordinates moving per repeat like today.
-    ``1`` / ``axis``: ONE whitened eigen-axis per repeat.
+    ``1`` / ``axis``: ONE whitened eigen-axis per repeat. The v9 launchers
+    export ``GB_INMODEL_OBSERVABLE_EIGEN=axis``.
+
+    Returns:
+        str: ``"off"``, ``"axis"`` or ``"full"``.
     """
     return _eigen_mode_from_env("GB_INMODEL_OBSERVABLE_EIGEN")
 
@@ -1643,11 +2119,16 @@ def _vgb_observable_eigen_mode() -> str:
     diagonal observable draw, ``axis`` one whitened eigen-axis per repeat,
     ``full`` one joint correlated step. Separate knob because the two
     branches are validated separately -- a knob that silently follows
-    another is how machinery gets rearmed with no line saying so.
+    another is how machinery gets rearmed with no line saying so. The v9
+    launchers export ``VGB_INMODEL_OBSERVABLE_EIGEN=axis``.
+
+    Returns:
+        str: ``"off"``, ``"axis"`` or ``"full"``.
     """
     return _eigen_mode_from_env("VGB_INMODEL_OBSERVABLE_EIGEN")
 
 
+# TODO check: keep/remove/document -- needs GB_INMODEL_EIGEN_AXIS=1 (default off, launchers unset)
 def gb_fiber_tangent(coords, dist_col, mc_col, r_col):
     """Unit tangent of the EXACT ``(dist, Mc, r)`` likelihood fiber.
 
@@ -1679,6 +2160,7 @@ def gb_fiber_tangent(coords, dist_col, mc_col, r_col):
     return t / xp.where(nrm > 0, nrm, xp.ones_like(nrm))
 
 
+# TODO check: keep/remove/document -- no src callers (tests only)
 def gb_lnfdot_gradient(coords, f0_col, mc_col, r_col):
     """``grad ln(fdot)`` in the sampling basis.
 
@@ -1703,6 +2185,7 @@ def gb_lnfdot_gradient(coords, f0_col, mc_col, r_col):
     return g
 
 
+# TODO check: keep/remove/document -- only via eigen_axis_set; needs GB_INMODEL_EIGEN_AXIS=1 (off)
 def gb_shear_ridge_axis(coords, f0_col, mc_col, r_col, dist_col, tobs):
     """Unit tangent of the ANALYTIC ``f0``-``fdot`` ridge. ``(n, ndim)``.
 
@@ -1750,6 +2233,7 @@ def gb_shear_ridge_axis(coords, f0_col, mc_col, r_col, dist_col, tobs):
     return a / xp.where(nrm > 0, nrm, xp.ones_like(nrm))
 
 
+# TODO check: keep/remove/document -- "no longer installed" (own docstring); no src callers
 def gb_ridge_axis(evals, evecs, grad):
     """The direction that buys the most ``fdot`` motion per unit lnL cost.
 
@@ -1791,6 +2275,7 @@ def gb_ridge_axis(evals, evecs, grad):
                     fallback)
 
 
+# TODO check: keep/remove/document -- GB shim; only _eigen_axes_from_info under GB_INMODEL_EIGEN_AXIS=1 (off)
 def eigen_axis_set(info, t_fiber, coords, f0_col, mc_col, r_col,
                    dist_col, tobs, sigma_max=1.0):
     """Per-source proposal axes and their own 1-sigma widths (GB shim).
@@ -1833,7 +2318,23 @@ def _resolve_inmodel_repeats(branch_name, class_name, kwarg_value, default):
     (``inmodel_repeats_newborn`` / ``inmodel_repeats_survivor``)
     overrides both. Budgets are FIXED — never adaptive or early-exit —
     so the per-class chunk sequences keep the rigid shapes CUDA-graph
-    capture needs.
+    capture needs (the level-1 convergence rule, ``GB_INMODEL_CONVERGE``,
+    is the separate mechanism that may retire rows early). Called twice by
+    the :class:`GBSpecialBase` constructor; the v9 launchers export
+    ``GB_INMODEL_REPEATS_NEWBORN=100`` / ``GB_INMODEL_REPEATS_SURVIVOR=50``
+    (``recipe.apply_inmodel_repeats`` sets 25 / 25 at the ``full_pe`` entry).
+
+    Args:
+        branch_name (str): Move branch; names the env knob.
+        class_name (str): ``"newborn"`` or ``"survivor"``.
+        kwarg_value (int or None): The explicit constructor kwarg.
+        default (int): The mode default (:func:`_inmodel_repeats_mode_defaults`).
+
+    Returns:
+        int: Repeats per pass for that class, ``>= 1``.
+
+    Raises:
+        ValueError: When the resolved value is ``< 1``.
     """
     value = kwarg_value
     if value is None:
@@ -1879,6 +2380,23 @@ def _resolve_converge_knob(branch_name, knob, kwarg_value, default, cast,
     all claimed it was on. The documented spelling is now the real one, and
     the old one is still honoured (with a warning) so no draft runbook
     written against it silently does nothing either.
+
+    Called by the :class:`GBSpecialBase` constructor for the whole
+    ``GB_INMODEL_CONVERGE*`` / ``GB_INMODEL_GROUP*`` surface, and by the
+    launcher preflight heredoc, which resolves the exported knobs against
+    sentinel defaults and refuses to launch if a value does not come back.
+
+    Args:
+        branch_name (str): Move branch; the env prefix (``GB`` / ``VGB``).
+        knob (str): Suffix, e.g. ``"iters"`` -> ``GB_INMODEL_CONVERGE_ITERS``;
+            ``""`` for the family's master switch.
+        kwarg_value: Explicit constructor kwarg, or ``None``.
+        default: Value used when neither the kwarg nor the env var is set.
+        cast (callable): Applied to the chosen value.
+        family: ``"INMODEL_CONVERGE"`` (default) or ``"INMODEL_GROUP"``.
+
+    Returns:
+        object: The cast value (its type is set by ``cast``).
     """
     value = kwarg_value
     if value is None:
@@ -1915,7 +2433,18 @@ def _converge_cast_mode(value):
     the same thing for free.
 
     ``0``/``false`` and ``1``/``true`` are accepted for ``off``/``on`` so
-    the knob reads like every other switch in this file.
+    the knob reads like every other switch in this file. Cast of the
+    ``GB_INMODEL_CONVERGE`` master switch (stock default ``off``; the v9
+    launchers export ``on``).
+
+    Args:
+        value (str or bool): Raw value.
+
+    Returns:
+        str: ``"off"``, ``"observe"`` or ``"on"``.
+
+    Raises:
+        ValueError: On any other value.
     """
     if isinstance(value, bool):
         return "on" if value else "off"
@@ -1950,7 +2479,16 @@ def _converge_stage_allows(move) -> bool:
     ``rj_prior_removal`` is one, and recipe.py documents whole campaigns
     doing it) -- a knob that quietly does nothing is worse here than one
     that arms a move the user did not picture, because the user exports it
-    per RUN and the log line below names every move that armed.
+    per RUN and the log line below names every move that armed. Called by
+    the level-1 convergence and level-2 group gates, and imported by the
+    launcher preflight.
+
+    Args:
+        move (GBSpecialBase): Any object with a ``name`` attribute.
+
+    Returns:
+        bool: False when the lower-cased name ends in ``_pe`` or contains
+        ``_pe_`` (e.g. ``rj_fstat_pe``, ``rj_fstat_pe_residual``), else True.
     """
     name = str(getattr(move, "name", "") or "").lower()
     if name.endswith("_pe") or "_pe_" in name:
@@ -1960,7 +2498,20 @@ def _converge_stage_allows(move) -> bool:
 
 def _converge_cast_classes(value):
     """``"newborn,mature"`` -> ``frozenset``, validated against the two
-    provenance classes :func:`_split_by_newborn` can emit."""
+    provenance classes :func:`_split_by_newborn` can emit.
+
+    Cast of ``GB_INMODEL_CONVERGE_CLASSES`` (constructor default ``"newborn"``;
+    the v9 launchers export ``newborn,mature``).
+
+    Args:
+        value (str or iterable of str): Comma-separated string or names.
+
+    Returns:
+        frozenset[str]: Non-empty subset of ``{"newborn", "mature"}``.
+
+    Raises:
+        ValueError: On an empty set or an unknown class name.
+    """
     if isinstance(value, str):
         names = [v.strip().lower() for v in value.split(",") if v.strip()]
     else:
@@ -1975,7 +2526,22 @@ def _converge_cast_classes(value):
 
 
 def _converge_cast_refill(value):
-    """0/1/true/false -> bool for the column-refill switch."""
+    """0/1/true/false -> bool for the column-refill switch.
+
+    Also the cast of the ``GB_INMODEL_GROUP`` master switch. The v9 launchers
+    export ``GB_INMODEL_GROUP=1`` and ``GB_INMODEL_CONVERGE_REFILL=1`` (the
+    refill is used only by the direct RJ batch path, which v9 turns off with
+    ``GB_RJ_DIRECT_BATCH=0``, so it is inert there).
+
+    Args:
+        value (str or bool): Raw value.
+
+    Returns:
+        bool: The switch.
+
+    Raises:
+        ValueError: On a string other than ``0`` / ``1`` / ``true`` / ``false``.
+    """
     if isinstance(value, str):
         v = value.strip().lower()
         if v not in ("0", "1", "true", "false"):
@@ -1987,7 +2553,20 @@ def _converge_cast_refill(value):
 
 
 def _converge_cast_scale(value):
-    """``flat`` | ``per_source`` for the group threshold's normalization."""
+    """``flat`` | ``per_source`` for the group threshold's normalization.
+
+    Cast of ``GB_INMODEL_GROUP_SCALE`` (default ``flat``; v9 exports ``flat``).
+    See :class:`_InModelGroupState` for what each mode does.
+
+    Args:
+        value (str): Raw value.
+
+    Returns:
+        str: ``"flat"`` or ``"per_source"``.
+
+    Raises:
+        ValueError: On any other value.
+    """
     v = str(value).strip().lower()
     if v not in ("flat", "per_source"):
         raise ValueError(
@@ -2017,13 +2596,18 @@ class _ColdBandLnL:
 
     TWO CADENCES, deliberately separated:
 
-    * :meth:`observe` -- end of EVERY in-model repeat group, immediately
+    * accumulation -- end of EVERY in-model repeat group, immediately
       after ``add_sources_to_band_buffer`` puts the picked source back,
       when the slab is the complete cold-chain residual for those
       sub-bands. Pure accumulation: one ``maximum`` into a slice, no
-      decisions, no allocation.
+      decisions. In production this is done inline in
+      ``_run_in_model_repeats`` (``np.maximum.at`` into a BLOCK-LOCAL peak)
+      and folded into :attr:`peak` on the head by ``_fold_local_cold_peak``
+      and the orchestrator's reply merge. :meth:`observe` implements the
+      same fold as a method but has no caller outside the tests.
     * :meth:`judge` -- ONCE per full iteration, at the designated
-      updater. The only place gate logic lives.
+      updater (``_update_search_band_shutoff``). The only place gate logic
+      lives.
 
     WHY THE PEAK EXISTS AT ALL. The gate used to read the statistic once
     per iteration, at ``rj_fstat_search`` -- move 4 of 6. Everything
@@ -2031,6 +2615,32 @@ class _ColdBandLnL:
     invisible to the running max, so the reference was permanently one
     partial cycle stale and ``cur > max + tol`` fired on refinement the
     max had simply never been shown. The peak spans the whole cycle.
+
+    Live in v9 with ``GB_SEARCH_BAND_SHUTOFF_PER_WALKER=1``,
+    ``GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS=1``, ``GB_SEARCH_BAND_SHUTOFF_CONV_ITER=3``
+    and ``GB_SEARCH_BAND_SHUTOFF_LL_TOL=20``. Build it with
+    :func:`cold_band_lnl` (read-only lookup) or
+    :func:`cold_band_lnl_from_band_info` (allocating).
+
+    Args:
+        band_info (dict): The GB sub-state's ``band_info``; must hold
+            ``band_cold_logl_peak_w``, ``band_cold_logl_w``,
+            ``band_cold_logl_max_w``, ``band_shutoff_streak_w``,
+            ``band_shutoff_reset_w`` and optionally ``band_rj_shutoff_w``.
+
+    Attributes:
+        peak (np.ndarray): ``(nwalkers, num_bands)`` float64, best cold band lnL
+            this cycle (``-inf`` = not observed); reset by :meth:`judge`.
+        value (np.ndarray): ``(nwalkers, num_bands)`` float64, the last judged ``cur``.
+        max (np.ndarray): ``(nwalkers, num_bands)`` float64, all-time best; never reset.
+        streak (np.ndarray): ``(nwalkers, num_bands)`` int64, consecutive judges
+            without an improvement above ``max + tol``.
+        resets (np.ndarray): ``(nwalkers, num_bands)`` int64, streak resets.
+        shut (np.ndarray or None): ``(nwalkers, num_bands)`` bool, the
+            ``band_rj_shutoff_w`` valve (True = RJ shut on that pair).
+        held_open (int): Last judge (all-walker rule): occupied pairs converged on
+            their own streak but kept open.
+        reopened (int): Last judge (all-walker rule): shut pairs reopened.
     """
 
     __slots__ = ("peak", "value", "max", "streak", "resets", "shut",
@@ -2052,8 +2662,10 @@ class _ColdBandLnL:
 
     @property
     def shape(self):
+        """tuple: ``(nwalkers, num_bands)``, the shape of :attr:`peak`."""
         return self.peak.shape
 
+    # TODO check: keep/remove/document -- no src callers (fold is inline in _run_in_model_repeats); tests only
     def observe(self, w_idx, b_idx, lls) -> int:
         """Fold one repeat group's cold band lnLs into the peak.
 
@@ -2115,6 +2727,27 @@ class _ColdBandLnL:
         no RJ, so walker 0 could never take the 185 leaves it lacked and
         fell 3,750 nats behind, its own foreground absorbing the missing
         power.
+
+        Side effects: updates :attr:`value`, :attr:`max`, :attr:`streak`,
+        :attr:`resets`, :attr:`held_open`, :attr:`reopened` in place; under the
+        all-walker rule clears :attr:`shut` on reopened pairs; resets
+        :attr:`peak` to ``-inf``. Shutting the newly converged pairs is the
+        caller's job (``_update_search_band_shutoff``).
+
+        Args:
+            tol (float): Improvement threshold (``GB_SEARCH_BAND_SHUTOFF_LL_TOL``,
+                v9: 20).
+            conv_iter (int): Streak length that counts as converged
+                (``GB_SEARCH_BAND_SHUTOFF_CONV_ITER``, v9: 3).
+            occ (array-like): ``(nwalkers, num_bands)`` cold occupancy counts.
+            require_occ (bool): Empty pairs never converge and do not vote.
+                Default True.
+            all_walkers (bool): Apply the all-walker rule
+                (``GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS``, v9: 1). Default True.
+
+        Returns:
+            np.ndarray: ``(nwalkers, num_bands)`` bool, pairs to shut now
+            (converged, occupied, and not already shut).
         """
         cur = np.where(np.isfinite(self.peak), self.peak, -np.inf)
         self.value[:] = cur
@@ -2162,13 +2795,19 @@ class _ColdBandLnL:
 
         ``max`` is deliberately untouched -- it outlives steps, restarts
         and saves by design. Clearing it "for symmetry" would restore the
-        resetting-reference behaviour this class exists to remove.
+        resetting-reference behaviour this class exists to remove. Resets
+        :attr:`peak` to ``-inf`` and :attr:`streak` / :attr:`resets` to 0 in place;
+        :attr:`shut` is not touched here. Called at recipe-step release by
+        ``recipe.release_band_shutoff_window`` and
+        ``GBSpecialBase._release_search_band_shutoff`` (both clear the shut
+        flags themselves).
         """
         self.peak[:] = -np.inf
         self.streak[:] = 0
         self.resets[:] = 0
 
 
+# TODO check: keep/remove/document -- galfor-ratchet shutoff floor only; GALFOR_RATCHET=0 (dropped 2026-10-03)
 def apply_shutoff_floor(converged, shut, streak, exempt):
     """Keep the exempt bands open: clear their verdict, reopen their shut
     pairs, zero their streaks. All arrays are ``(nwalkers, num_bands)``
@@ -2187,15 +2826,27 @@ def apply_shutoff_floor(converged, shut, streak, exempt):
 
 
 def cold_band_lnl_from_band_info(bi, shape):
-    """Ensure the six arrays exist in ``bi`` at ``shape``, return the view.
+    """Ensure the five window arrays exist in ``bi`` at ``shape``, return the view.
 
     The ALLOCATING twin of :func:`cold_band_lnl`. Writes into ``band_info``
     rather than into locals, because a local array works perfectly for the
     rest of the process and is then silently dropped at the save -- the
     exact failure this whole family exists to remove.
 
-    ``band_cold_logl_max_w`` is preserved when it is already the right
-    shape: it is the ALL-TIME max and must survive a window reseat.
+    Any of ``band_cold_logl_peak_w``, ``band_cold_logl_w``,
+    ``band_cold_logl_max_w`` (``-inf`` fill, float64) and
+    ``band_shutoff_streak_w``, ``band_shutoff_reset_w`` (0 fill, int64) that is
+    missing or of the wrong shape is (re)allocated; an array already of the
+    right shape is kept as is. In particular ``band_cold_logl_max_w``, the
+    ALL-TIME max, survives a window reseat. The optional shut array
+    ``band_rj_shutoff_w`` is not allocated here.
+
+    Args:
+        bi (dict): The GB sub-state's ``band_info``.
+        shape (tuple[int, int]): ``(nwalkers, num_bands)``.
+
+    Returns:
+        _ColdBandLnL or None: The view, or ``None`` when ``bi`` is not a dict.
     """
     if not isinstance(bi, dict):
         return None
@@ -2219,7 +2870,18 @@ def cold_band_lnl(state, branch_name="gb"):
 
     Built fresh on every call -- it is six attribute bindings, cheaper
     than any cache would be to invalidate, and caching it on a move is
-    the exact thing the ruling forbids.
+    the exact thing the ruling forbids. Non-allocating: returns ``None``
+    unless all five window arrays are already present. Called at the start
+    of the orchestrated and legacy propose bodies, and by the head-side peak
+    fold (``_fold_local_cold_peak``) and the orchestrator's reply merge.
+
+    Args:
+        state (GFState): The global-fit state.
+        branch_name (str): Sub-state to read. Default ``"gb"``.
+
+    Returns:
+        _ColdBandLnL or None: The view over
+        ``state.sub_states[branch_name].band_info``, or ``None``.
     """
     try:
         bi = state.sub_states[branch_name].band_info
@@ -2264,7 +2926,19 @@ def relearn_valve_window(band_info, current, rule=VALVE_WINDOW_RULE):
     Returns None when the stamp already reads ``rule``, when ``band_info``
     carries no valve window, or when ``current`` is absent or the wrong
     shape (nothing is stamped then; the next judge retries). The stamp is
-    saved with the band info, so a store is re-based exactly once.
+    saved with the band info, so a store is re-based exactly once. Called
+    at each judge through ``GBSpecialBase._relearn_valve_window_once``; on a
+    store already stamped with the covering rule it returns ``None`` at once.
+
+    Args:
+        band_info (dict): The GB sub-state's ``band_info`` (edited in place).
+        current (np.ndarray or None): ``(nwalkers, num_bands)`` gains under ``rule``.
+        rule (int): Target window rule. Default ``state.VALVE_WINDOW_RULE``
+            (the covering rule, 2).
+
+    Returns:
+        tuple[int, int, int, int] or None: ``(stored_rule, n_pairs, n_shut,
+        n_rebased)`` when a re-base happened, else ``None``.
     """
     if not isinstance(band_info, dict) or not isinstance(
             band_info.get("band_cold_logl_max_w"), np.ndarray):
@@ -2324,7 +2998,22 @@ def wdm_window_layers(edges_hz, layer_df, ind_min_f, n_layers, cover=True,
 
     ``eps`` (layer units) keeps an edge on a tile boundary (cover) or on a
     centre (centres) from gaining a layer on float noise. Clipped to
-    ``[0, n_layers]``; ``k1 >= k0``.
+    ``[0, n_layers]``; ``k1 >= k0``. Used by the valve's window geometry
+    (``GBSpecialBase._window_bins``) and its one-off re-base diagnostic.
+
+    Args:
+        edges_hz (array-like): ``(nwin + 1,)`` window edges in Hz (numpy or cupy).
+        layer_df (float): WDM layer spacing in Hz.
+        ind_min_f (int): Index of the first ACTIVE layer (subtracted from the
+            absolute layer index).
+        n_layers (int): Number of active layers (upper clip).
+        cover (bool): Covering rule (True, the valve's) or centres rule.
+            Default True.
+        eps (float): Edge tolerance in layer units. Default ``1e-9``.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``(k0, k1)``, each ``(nwin,)`` int, the
+        half-open active-layer range of every window.
     """
     be = np.asarray(_to_numpy(edges_hz), dtype=float)
     x_lo = be[:-1] / float(layer_df)
@@ -2348,7 +3037,15 @@ def _valve_data_array(acs):
     ``acs.input_data_residual_array`` is ``general_info.input_data_residual_array``
     (set by ``setup_acs``): a DataResidualArray -> ``.data_res_arr`` (a
     DomainBase, whose own ``data_res_arr`` is itself) -> ``.arr``, the chain
-    ``residual_snapshot`` reads. A bare array is taken as is.
+    ``residual_snapshot`` reads. A bare array is taken as is. Used by
+    ``GBSpecialBase._window_data_lls`` for the valve's band gain.
+
+    Args:
+        acs (AnalysisContainerArray): The run's analysis containers.
+
+    Returns:
+        xp.ndarray or None: The data array, or ``None`` when ``acs`` has no
+        ``input_data_residual_array``.
     """
     holder = getattr(acs, "input_data_residual_array", None)
     if holder is None:
@@ -2358,7 +3055,20 @@ def _valve_data_array(acs):
 
 
 def _env_int(name, default):
-    """``int`` from the environment, falling back loudly-enough on junk."""
+    """``int`` from the environment, falling back loudly-enough on junk.
+
+    Used for ``{BRANCH}_INMODEL_POST_GATE_NEWBORN`` (default 100) and
+    ``{BRANCH}_INMODEL_POST_GATE_SURVIVOR`` (default 0) in
+    ``GBSpecialBase._converge_state_for``; the launchers leave both unset.
+
+    Args:
+        name (str): Environment variable name.
+        default (int): Value when unset, blank or not an integer (a warning is
+            logged in the last case).
+
+    Returns:
+        int: The knob value.
+    """
     v = os.environ.get(name)
     if v is None or not str(v).strip():
         return int(default)
@@ -2380,7 +3090,15 @@ def _scale_dll_with_window(branch_name=None) -> bool:
     rows keep clearing the valve's tolerance.
 
     ``{BRANCH}_INMODEL_CONVERGE_DLL_SCALE_WITH_WINDOW=1`` (or the
-    unprefixed name) restores the old behaviour.
+    ``GB_``-prefixed or unprefixed name, checked in that order) restores the
+    old behaviour. Unset in the v9 launchers.
+
+    Args:
+        branch_name (str, optional): Move branch for the first lookup.
+
+    Returns:
+        bool: True when the first set name holds a value other than
+        ``0`` / ``""`` / ``false`` / ``no`` / ``off``; False when none is set.
     """
     for _n in ((f"{branch_name.upper()}_INMODEL_CONVERGE_DLL_SCALE_WITH_WINDOW",)
                if branch_name else ()) + (
@@ -2393,6 +3111,15 @@ def _scale_dll_with_window(branch_name=None) -> bool:
 
 
 def _converge_cast_window(value):
+    """Cast a patience window (``*_ITERS`` knobs) to ``int >= 1``.
+
+    Used for ``GB_INMODEL_CONVERGE_ITERS`` (v9: 250; ``gb_search_2``: 100) and
+    ``GB_INMODEL_GROUP_ITERS`` (v9: 3; ``gb_search_2``: 1, from
+    ``GB_SEARCH_2_INMODEL_GROUP_ITERS``); imported by the launcher preflight.
+
+    Raises:
+        ValueError: When the value is ``< 1``.
+    """
     value = int(value)
     if value < 1:
         raise ValueError(
@@ -2402,6 +3129,14 @@ def _converge_cast_window(value):
 
 
 def _converge_cast_swap_frac(value):
+    """Cast a fraction knob to ``float`` in ``(0, 1]``.
+
+    Used for ``GB_INMODEL_CONVERGE_STOP_FRAC`` and
+    ``GB_INMODEL_CONVERGE_GATE_FRAC`` (both 0.5 in v9).
+
+    Raises:
+        ValueError: When the value is outside ``(0, 1]``.
+    """
     value = float(value)
     if not (0.0 < value <= 1.0):
         raise ValueError(
@@ -2419,9 +3154,27 @@ def _resolve_temper_vertical(branch_name, kwarg_value, default=False):
     ``False`` reproduces today's behavior exactly.
 
     Vertical swaps are ADDITIVE to -- never a replacement for -- the
-    permuted ("fancy") swaps in :meth:`run_tempering`, and they never
-    touch the temperature ladder: ``_adapt_band_temps`` stays driven by
-    the permuted swap counters alone (user ruling 2026-08-18).
+    permuted ("fancy") swaps in :meth:`run_tempering` (user ruling
+    2026-08-18). That ruling also kept the ladder off the vertical counters;
+    since 2026-09-24 ``GBSpecialBase._vertical_adapt_ladder`` adapts the band
+    ladder from the vertical census too, because with
+    ``{BRANCH}_RUN_FANCY_TEMPERING=0`` (the v9 GB setting) ``run_tempering``
+    no longer runs and the ladder would otherwise freeze.
+
+    The v9 launchers export ``GB_TEMPER_VERTICAL=1`` (``VGB_TEMPER_VERTICAL``
+    unset, so ``vgb_pe`` stays non-vertical). Called once by the
+    :class:`GBSpecialBase` constructor.
+
+    Args:
+        branch_name (str): Move branch; names the env knob.
+        kwarg_value (bool or str or None): The ``temper_vertical`` kwarg.
+        default (bool): Fallback. Default ``False``.
+
+    Returns:
+        bool: Whether the vertical swap runs inside the in-model repeats.
+
+    Raises:
+        ValueError: On a string other than ``0`` / ``1`` / ``true`` / ``false``.
     """
     value = kwarg_value
     if value is None:
@@ -2453,7 +3206,19 @@ def _resolve_temper_cell_order(branch_name, kwarg_value, default="band"):
     and no contiguous staging slice keeps them together, so
     ``BandScheduler.column_atomic`` switches itself off. The default was
     ``"count"`` until 2026-09-25, which made the invariant an opt-in env
-    var; it is now the default and ``"count"`` warns.
+    var; it is now the default and ``"count"`` warns. The v9 launchers
+    export ``GB_TEMPER_CELL_ORDER=band``.
+
+    Args:
+        branch_name (str): Move branch; names the env knob.
+        kwarg_value (str or None): The ``temper_cell_order`` kwarg.
+        default (str): Fallback. Default ``"band"``.
+
+    Returns:
+        str: One of ``BandScheduler.CELL_ORDERS`` (lower-cased).
+
+    Raises:
+        ValueError: On a value not in ``BandScheduler.CELL_ORDERS``.
     """
     value = kwarg_value
     if value is None:
@@ -2492,7 +3257,11 @@ def _inmodel_accept_kernel_on() -> bool:
     ``cutils/gf_routing_kernels.cu``).
 
     Read per call so tests can flip it; the read is nanoseconds against a
-    block of kernel launches.
+    block of kernel launches. The v9 launchers export
+    ``GB_INMODEL_ACCEPT_KERNEL=0`` (python chain).
+
+    Returns:
+        bool: True when ``GB_INMODEL_ACCEPT_KERNEL == "1"``.
     """
     return os.environ.get("GB_INMODEL_ACCEPT_KERNEL", "0") == "1"
 
@@ -2532,7 +3301,11 @@ def _temper_census_hoist_on() -> bool:
     computed for itself. Guarded at the unit boundary by an
     ``inds.sum()`` invariant check (one reduction per unit).
 
-    Read per call so tests can flip it.
+    Read per call so tests can flip it. The v9 launchers export 1; it acts
+    only where ``run_tempering`` runs (``vgb_pe`` in v9).
+
+    Returns:
+        bool: True when ``GB_TEMPER_CENSUS_HOIST == "1"``.
     """
     return os.environ.get("GB_TEMPER_CENSUS_HOIST", "0") == "1"
 
@@ -2560,7 +3333,10 @@ def _temper_batch_perms_on() -> bool:
     decision -- differ draw for draw. Distribution-identical, not
     bit-identical.
 
-    Read per call so tests can flip it.
+    Read per call so tests can flip it. Unset in the v9 launchers (off).
+
+    Returns:
+        bool: True when ``GB_TEMPER_BATCH_PERMS == "1"``.
     """
     return os.environ.get("GB_TEMPER_BATCH_PERMS", "0") == "1"
 
@@ -2594,7 +3370,11 @@ def _temper_compact_rows_on() -> bool:
     contribution is added back analytically (``bincount`` of the dropped
     rows' bands, broadcast over all ``ntemps - 1`` rungs).
 
-    Read per call so tests can flip it.
+    Read per call so tests can flip it. The v9 launchers export 1 (acts in
+    ``run_tempering``, i.e. ``vgb_pe`` in v9).
+
+    Returns:
+        bool: True when ``GB_TEMPER_COMPACT_ROWS == "1"``.
     """
     return os.environ.get("GB_TEMPER_COMPACT_ROWS", "0") == "1"
 
@@ -2631,11 +3411,17 @@ def _temper_skip_shutoff_bands_on() -> bool:
     ``GB_RJ_BAND_SHUTOFF_RESET_ITERS``): a frozen band is released
     periodically. Do not disable revival without reconsidering this.
 
-    Read per call so tests can flip it.
+    Read per call so tests can flip it. The v9 launchers export 1; it acts in
+    ``run_tempering`` (``vgb_pe`` in v9, where the barren-band valve is not
+    enabled, so nothing is skipped there).
+
+    Returns:
+        bool: True when ``GB_TEMPER_SKIP_SHUTOFF_BANDS == "1"``.
     """
     return os.environ.get("GB_TEMPER_SKIP_SHUTOFF_BANDS", "0") == "1"
 
 
+# TODO check: keep/remove/document -- only reached with GB_INMODEL_ACCEPT_KERNEL=1 (default 0, launchers 0)
 def _inmodel_trace_knobs_active() -> bool:
     """Whether either per-repeat MH trace is armed (``GB_INMODEL_TRACE`` / ``GB_JUMP_TRACE``).
 
@@ -2664,7 +3450,17 @@ def _inmodel_repeats_mode_defaults(branch_name, num_repeat_proposals):
     read from ``{BRANCH}_MODE`` (the same env that seeds the stock
     ``gb.mode`` field; default ``"pe"``); a builder that sets the mode
     programmatically should pass ``inmodel_repeats_*_default`` kwargs
-    instead (see the ctor resolution).
+    instead (see the ctor resolution). In v9 the driver sets
+    ``GB_MODE=search``, so the defaults are ``(200, 25)``, then overridden by
+    ``GB_INMODEL_REPEATS_NEWBORN`` / ``_SURVIVOR`` (100 / 50) in
+    :func:`_resolve_inmodel_repeats`.
+
+    Args:
+        branch_name (str): Move branch; names ``{BRANCH}_MODE``.
+        num_repeat_proposals (int): The move's ``num_repeat_proposals``.
+
+    Returns:
+        tuple[int, int]: ``(newborn, survivor)`` default repeat counts.
     """
     if os.environ.get(f"{str(branch_name).upper()}_MODE", "pe") == "search":
         return 200, 25
@@ -2677,11 +3473,17 @@ def _split_by_newborn(merged, xp):
 
     ``merged`` must carry a boolean ``"newborn"`` entry (True = the row
     was DEAD at pick time, i.e. an accepted birth; False = mature /
-    death-rejected survivor). Returns ``[(class_name, class_dict), ...]``
-    for the non-empty classes, newborns first, with the ``"newborn"`` key
-    stripped from the class dicts and row order preserved within each
-    class. Compression is one ``xp.where`` per class (a single device
-    sync each on CuPy) followed by integer gathers.
+    death-rejected survivor). Compression is one ``xp.where`` per class (a
+    single device sync each on CuPy) followed by integer gathers.
+
+    Args:
+        merged (dict): Parallel per-row arrays, including ``"newborn"``.
+        xp (module): Array module of the arrays.
+
+    Returns:
+        list[tuple[str, dict]]: ``[(class_name, class_dict), ...]`` for the
+        non-empty classes (``"newborn"`` first, then ``"mature"``), with the
+        ``"newborn"`` key stripped and row order preserved within each class.
     """
     nb_mask = merged["newborn"]
     rest = {k: v for k, v in merged.items() if k != "newborn"}
@@ -2712,6 +3514,18 @@ def _picked_batches(picked, cap):
     ``cap <= 0`` or a pool already within the cap yields the ORIGINAL dict
     (identity -- the unbatched path is untouched); otherwise yields
     contiguous slices of every parallel array, order preserved.
+
+    Used by ``_run_in_model_repeats`` for NON-vertical blocks only (vertical
+    / converge blocks use :func:`_column_chunks`). In v9
+    (``GB_INMODEL_SETUP_BATCH=2048``) that is ``vgb_pe``; the split fires only
+    when one of its blocks exceeds the cap.
+
+    Args:
+        picked (dict): Parallel per-row arrays (must hold ``"ids"``).
+        cap (int): Maximum rows per sub-block; ``<= 0`` disables.
+
+    Yields:
+        dict: The original dict, or contiguous row slices of it.
     """
     n = int(picked["ids"].shape[0])
     if cap <= 0 or n <= cap:
@@ -2727,6 +3541,13 @@ def _pool_column_key(pool, num_bands):
     A vertical ladder column is every temperature of one walker's one
     sub-band; the in-model vertical swap pairs rows within a column only
     (``_vertical_pairs``: same walker, same band, adjacent temps).
+
+    Args:
+        pool (dict): Must hold ``"walker_inds"`` and ``"band_inds"`` (xp arrays).
+        num_bands (int): Number of sub-bands.
+
+    Returns:
+        xp.ndarray: Per-row int64 column id.
     """
     w = pool["walker_inds"]
     b = pool["band_inds"]
@@ -2746,6 +3567,16 @@ def _order_pool_by_column(pool, xp, num_bands):
     Row order carries no meaning for the repeat block itself: every
     per-row array is gathered by row, and the RNG stream is re-shaped per
     block exactly as it is by the staging cap.
+
+    Args:
+        pool (dict): Parallel per-row arrays with ``"ids"``, ``"temp_inds"``,
+            ``"walker_inds"``, ``"band_inds"``.
+        xp (module): Array module.
+        num_bands (int): Number of sub-bands (unused by the sort itself).
+
+    Returns:
+        dict: ``pool`` itself when already ordered (or ``<= 1`` row), else a new
+        dict with every array reordered.
     """
     n = int(pool["ids"].shape[0])
     if n <= 1:
@@ -2769,7 +3600,16 @@ def _column_chunks(pool, width, num_bands):
     column wider than ``width`` (impossible once the caller floors
     ``width`` to a multiple of ``ntemps``, since a column holds at most
     one row per rung) is taken whole rather than split. Yields the
-    original dict when it already fits.
+    original dict when it already fits. Used for the staging batch cap
+    (``GB_INMODEL_SETUP_BATCH``, v9: 2048) on vertical / converge blocks.
+
+    Args:
+        pool (dict): Column-ordered parallel per-row arrays.
+        width (int): Maximum rows per chunk; ``<= 0`` disables.
+        num_bands (int): Number of sub-bands.
+
+    Yields:
+        dict: The original dict, or contiguous column-aligned row slices.
     """
     n = int(pool["ids"].shape[0])
     if width <= 0 or n <= width:
@@ -2797,7 +3637,18 @@ def _column_atomic_newborn(pool, xp, num_bands):
     the two classes would strand its rungs in different blocks; with
     vertical swaps on, a column with ANY newborn row is polished as a
     whole in the newborn class (the mature rungs simply get the newborn
-    budget). Returns a new dict with the lifted flag.
+    budget). Also used by the grouped flush (:func:`_grouped_flush_classes`),
+    the production path.
+
+    Args:
+        pool (dict): Parallel per-row arrays with ``"newborn"``,
+            ``"walker_inds"``, ``"band_inds"``.
+        xp (module): Array module.
+        num_bands (int): Number of sub-bands.
+
+    Returns:
+        dict: Shallow copy of ``pool`` with ``"newborn"`` replaced by the
+        per-column OR of the flag.
     """
     nb = xp.asarray(pool["newborn"]).astype(bool)
     key = xp.asarray(_pool_column_key(pool, num_bands))
@@ -2832,6 +3683,17 @@ def _grouped_flush_classes(merged, xp, num_bands, column_atomic):
     column-disjoint and no block can relabel a cell another block's rows
     still name. A mature rung in a newborn column takes the newborn budget
     (equal in PE, 25/25).
+
+    Args:
+        merged (dict): The pooled survivors (parallel per-row arrays with
+            ``"newborn"``).
+        xp (module): Array module.
+        num_bands (int): Number of sub-bands.
+        column_atomic (bool): Order by column and lift the newborn flag first
+            (the caller passes ``temper_vertical and ntemps > 1``).
+
+    Returns:
+        list[tuple[str, dict]]: As :func:`_split_by_newborn`.
     """
     if column_atomic:
         merged = _order_pool_by_column(merged, xp, num_bands)
@@ -2867,6 +3729,18 @@ def _vert_all_rung_pairs(carrier, occupied, parity, ntemps, xp):
     Disjointness (the contract ``exchange_cell_labels_batch`` requires):
     one parity of ``t_cold`` yields pairs (p, p+1), (p+2, p+3), ... so a
     rung is in at most one pair, and columns are distinct by construction.
+
+    Args:
+        carrier (xp.ndarray): ``(n_cols, ntemps)`` carrier row per rung (shape
+            only is read here).
+        occupied (xp.ndarray): ``(n_cols, ntemps)`` bool, rung holds a live source.
+        parity (int): ``0`` or ``1``, the parity of ``t_cold``.
+        ntemps (int): Ladder length.
+        xp (module): Array module.
+
+    Returns:
+        tuple[xp.ndarray, xp.ndarray, xp.ndarray]: ``(col_idx, t_cold, t_hot)``
+        int64 arrays, one entry per kept pair.
     """
     n_pair = max((int(ntemps) - 1 - int(parity) + 1) // 2, 0)
     n_cols = int(carrier.shape[0])
@@ -2888,7 +3762,11 @@ def _vert_all_rungs_on() -> bool:
     behind an env knob, default OFF"), because both of its silent-corruption
     routes are invisible in aggregate logs. The instrument that catches them
     is ``[GB_CELL_LL]``'s sampled-vs-realized reconciliation: require a
-    clean line on a real run before considering this default.
+    clean line on a real run before considering this default. The v9
+    launchers export ``GB_TEMPER_ALL_RUNGS=1`` (all-rung sweep live).
+
+    Returns:
+        bool: True for ``1`` / ``true`` / ``yes`` / ``on``.
     """
     return os.environ.get("GB_TEMPER_ALL_RUNGS", "0").strip() in (
         "1", "true", "True", "yes", "on")
@@ -2911,7 +3789,11 @@ def _vert_exact_price_on() -> bool:
     (and the all-rungs frozen-row cache) prices the picked rows with an
     exact ``get_add_ll`` through the chunked engine, one batched call per
     sweep; ``ll_ref`` itself, and so every in-rung MH ratio, is untouched.
-    DEFAULT OFF until the cluster comparison confirms it (2026-10-04).
+    DEFAULT OFF until the cluster comparison confirms it (2026-10-04). The
+    v9 launchers export ``GB_VERT_EXACT_PRICE=0``.
+
+    Returns:
+        bool: True for ``1`` / ``true`` / ``yes`` / ``on``.
     """
     return os.environ.get("GB_VERT_EXACT_PRICE", "0").strip() in (
         "1", "true", "True", "yes", "on")
@@ -2943,6 +3825,19 @@ def _drop_shut_specials(specials, shut_w, nwalkers, xp):
     staging -- only picking. That is why in_model got cheaper (its
     pick-driven work vanished) while buffer_build / cell_ll /
     unit_open_close on shut cells did not.
+
+    Called through ``GBSpecialBase._staged_specials`` (search mode, with the
+    per-walker valve on). Any exception is logged and the list is returned
+    unfiltered (staging never breaks on it).
+
+    Args:
+        specials (xp.ndarray or None): Packed cell labels (``pack_special_index``).
+        shut_w (xp.ndarray or None): ``(nwalkers, num_bands)`` bool shut mask.
+        nwalkers (int): Walkers (needed to unpack the labels).
+        xp (module): Array module.
+
+    Returns:
+        tuple: ``(kept_specials, n_dropped)``; ``(specials, 0)`` when nothing is shut.
     """
     if shut_w is None or specials is None:
         return specials, 0
@@ -2986,7 +3881,11 @@ def _vert_at_refit_on() -> bool:
     ⚠ The refresh condition carries ``move_i + 1 < n_rep``, so the LAST
     repeat of a block never refits and therefore never swaps under this
     knob. That is harmless: the next block opens with fresh references
-    and its own tick follows 25 repeats later.
+    and its own tick follows 25 repeats later. The v9 launchers export
+    ``GB_TEMPER_VERTICAL_AT_REFIT=1`` with ``GB_SIGHET_REFRESH_EVERY=25``.
+
+    Returns:
+        bool: True for ``1`` / ``true`` / ``yes`` / ``on``.
     """
     return os.environ.get("GB_TEMPER_VERTICAL_AT_REFIT", "0").strip() in (
         "1", "true", "True", "yes", "on")
@@ -2998,7 +3897,14 @@ _CELL_LL_BRACKET_FIELDS = ("spec", "ll0", "led0", "rep0")
 def _ar_slot_of_rung(carrier_col, ar_slot_col, slots, xp):
     """One authoritative slot per rung: the carrier's, else the map.
 
-    ``-1`` where the cell is not in the buffer at all.
+    Args:
+        carrier_col (xp.ndarray): Carrier block row per rung (``-1`` = none).
+        ar_slot_col (xp.ndarray): The all-rung slot map for the same rungs.
+        slots (xp.ndarray): Buffer slot of every block row.
+        xp (module): Array module.
+
+    Returns:
+        xp.ndarray: Slot per rung; ``-1`` where the cell is not in the buffer at all.
     """
     rows = xp.asarray(carrier_col)
     have = rows >= 0
@@ -3034,6 +3940,21 @@ def _ar_rebase_slot_labels(ar, slots, spec_final, get_special, num_bands, xp):
     label is ``get_special(t, w, b)``. The carrier entries are merged with
     ``(slots, spec_final)`` and must AGREE where both name a slot -- a
     disagreement means the table and the rows diverged, and is refused.
+
+    Args:
+        ar (tuple): The block's all-rung state (see above).
+        slots (xp.ndarray): Carrier rows' buffer slots.
+        spec_final (xp.ndarray): Carrier rows' final labels.
+        get_special (callable): ``(t, w, b) -> label`` (the sorter's packer).
+        num_bands (int): Number of sub-bands (to split column ids).
+        xp (module): Array module.
+
+    Returns:
+        tuple[xp.ndarray, xp.ndarray]: ``(slots, specials)``, one entry per
+        distinct slot, sorted by slot.
+
+    Raises:
+        RuntimeError: When two entries name one slot with different labels.
     """
     cols, carrier, _occ, _cached, _scor, _frozen, ar_slot = ar
     slots = xp.asarray(slots)
@@ -3072,7 +3993,17 @@ def _assert_active_slot_labels_unique(scheduler, name, xp):
     ``(temp, walker, band)``, so a duplicate is always a stale slot map --
     exactly the state that routes later picks into the wrong slab (see
     :func:`_ar_rebase_slot_labels`). Checked once per block after the
-    re-base; a few thousand labels."""
+    re-base; a few thousand labels.
+
+    Args:
+        scheduler (BandScheduler or None): No-op when None or lacking
+            ``active_slot_specials``.
+        name (str): Move name for the message.
+        xp (module): Array module.
+
+    Raises:
+        AssertionError: On a duplicated active label.
+    """
     if scheduler is None or not hasattr(scheduler, "active_slot_specials"):
         return
     act = xp.asarray(scheduler.active_slot_specials)
@@ -3111,6 +4042,13 @@ def _ar_trade_cell_ll(st, s_a, s_b, xp):
     swaps fell 26x, and ~0.005-0.009 on moves where no sweep runs at
     all. The 2026-09-28 two-sided ``spec`` re-point was necessary -- two
     slots must not claim one label -- but it was not sufficient.
+
+    Args:
+        st (dict): The cell-ll state; the ``spec`` / ``ll0`` / ``led0`` / ``rep0``
+            arrays present in it are swapped in place.
+        s_a (xp.ndarray): Slots on one side of the accepted swaps.
+        s_b (xp.ndarray): Partner slots (same length).
+        xp (module): Array module (unused).
     """
     for key in _CELL_LL_BRACKET_FIELDS:
         a = st.get(key)
@@ -3152,6 +4090,14 @@ def _ar_repoint_cell_ll(spec_of_slot, rows, slot_of_rung, slots, labels, xp):
 
     A rung with neither a carrier nor a resident slot is skipped, and
     that is still correct: there is no bracket to relabel.
+
+    Args:
+        spec_of_slot (xp.ndarray): Per-slot open-bracket label, edited in place.
+        rows (xp.ndarray): Carrier block row per swapped rung (``-1`` = none).
+        slot_of_rung (xp.ndarray or None): All-rung slot per swapped rung.
+        slots (xp.ndarray): Buffer slot of every block row.
+        labels (xp.ndarray): New label per swapped rung.
+        xp (module): Array module.
     """
     rows = xp.asarray(rows)
     m = rows >= 0
@@ -3168,7 +4114,7 @@ def _ar_repoint_cell_ll(spec_of_slot, rows, slot_of_rung, slots, labels, xp):
 def _vert_all_rung_cached(cols, carrier, occupied, n_alive, vert_base,
                           t_i, w_i, b_i, num_bands, xp,
                           buffer_obj=None, nwalkers=None, scheduler=None):
-    """``(cached, scorable)`` totals for EVERY rung with no picked row.
+    """``(cached, scorable, ar_slot)`` for EVERY rung with no picked row.
 
     USER RULING 2026-09-27: "all of the rungs should perform vertical
     tempering swaps everywhere that happens. The likelihood for non-active
@@ -3224,7 +4170,27 @@ def _vert_all_rung_cached(cols, carrier, occupied, n_alive, vert_base,
 
     Falls back to the old inference when ``buffer_obj`` or ``scheduler``
     is missing (unit tests, an exotic harness), so the previous behaviour
-    is still reachable and still tested.
+    is still reachable and still tested. Called once per vertical block by
+    the all-rung sweep (``GB_TEMPER_ALL_RUNGS=1`` in v9).
+
+    Args:
+        cols (xp.ndarray): ``(n_cols,)`` column ids (``walker * num_bands + band``).
+        carrier (xp.ndarray): ``(n_cols, ntemps)`` carrier row per rung (``-1`` = none).
+        occupied (xp.ndarray): ``(n_cols, ntemps)`` bool.
+        n_alive (xp.ndarray): ``(n_cols, ntemps)`` alive-source counts.
+        vert_base (xp.ndarray or None): Per-row bare-slab values (inference path).
+        t_i, w_i, b_i (xp.ndarray): Per-row temperature / walker / band indices.
+        num_bands (int): Number of sub-bands.
+        xp (module): Array module.
+        buffer_obj (SubBandBuffer, optional): Source of ``band_likelihoods``.
+        nwalkers (int, optional): Walkers (for label packing).
+        scheduler (BandScheduler, optional): Source of the slot labels.
+
+    Returns:
+        tuple[xp.ndarray, xp.ndarray, xp.ndarray]: ``cached`` ``(n_cols, ntemps)``
+        float64 block-constant totals, ``scorable`` ``(n_cols, ntemps)`` bool, and
+        ``ar_slot`` ``(n_cols, ntemps)`` int64 rung -> slot map (all ``-1`` on the
+        inference path).
     """
     n_cols, ntemps = int(carrier.shape[0]), int(carrier.shape[1])
     cached = xp.zeros((n_cols, ntemps), dtype=xp.float64)
@@ -3335,6 +4301,18 @@ def _vert_all_rung_tables(t_i, w_i, b_i, ntemps, nwalkers, num_bands,
     scored live; only ``occupied`` may be used to decide whether a pair
     is a real move. Conflating them is how the empty<->empty hazard gets
     back in.
+
+    Args:
+        t_i, w_i, b_i (xp.ndarray): Per-row temperature / walker / band indices.
+        ntemps (int): Ladder length.
+        nwalkers (int): Walkers (for label packing).
+        num_bands (int): Number of sub-bands.
+        alive_counts (callable): ``packed labels -> alive-source counts``.
+        xp (module): Array module.
+
+    Returns:
+        tuple: ``(cols, carrier, occupied, n_alive)``; ``cols`` ``(n_cols,)``,
+        the others ``(n_cols, ntemps)``.
     """
     n = int(t_i.shape[0])
     col_key = (w_i.astype(xp.int64) * int(num_bands)
@@ -3371,7 +4349,7 @@ def _ar_freeze_rows(ar, rows, t_i, w_i, b_i, cell_ll_base, ll_ref,
 
     ⚠ PRICING FLAG ONLY. The row REMAINS the carrier, so an accepted swap
     still rewrites its ``t_i``/``beta``. Three readers depend on that
-    being current for frozen rows: the cold-lnL ``observe`` at the
+    being current for frozen rows: the cold-lnL peak fold at the
     add-back (it selects cold slots with ``t_i == 0``, and a stale label
     would fold a hot slab into the cold peak), and
     ``_converge_gate_mask`` both at the poll and in ``absorb``. Setting
@@ -3385,6 +4363,21 @@ def _ar_freeze_rows(ar, rows, t_i, w_i, b_i, cell_ll_base, ll_ref,
 
     Idempotent: a rung already frozen is left alone, so repeated polls
     cost nothing and cannot re-pin a value.
+
+    Args:
+        ar (tuple): The block's all-rung state ``(cols, carrier, occupied,
+            cached, scorable, frozen, ar_slot)``; ``cached`` / ``frozen`` /
+            ``scorable`` are edited in place.
+        rows (xp.ndarray): Block rows to freeze.
+        t_i, w_i, b_i (xp.ndarray): Per-row temperature / walker / band indices.
+        cell_ll_base (xp.ndarray): Per-row cell-ll base.
+        ll_ref (xp.ndarray): Per-row running sig-het ``ll_ref``.
+        num_bands (int): Number of sub-bands.
+        xp (module): Array module.
+        name (str): Move name for the warning. Default ``"?"``.
+
+    Returns:
+        int: Number of rungs newly frozen.
     """
     cols, carrier, occupied, cached, scorable, frozen, _ = ar
     rows = xp.asarray(rows)
@@ -3427,6 +4420,20 @@ def _vert_all_rung_L(carrier, cached, cell_ll_base, ll_ref, ci, t, xp,
     ``cached`` total. ``cached`` is authoritative only where
     ``carrier < 0``; the two are kept in step by permuting BOTH on an
     accepted swap.
+
+    Args:
+        carrier (xp.ndarray): ``(n_cols, ntemps)`` carrier row per rung.
+        cached (xp.ndarray): ``(n_cols, ntemps)`` cached totals.
+        cell_ll_base (xp.ndarray): Per-row cell-ll base.
+        ll_ref (xp.ndarray): Per-row running ``ll_ref``.
+        ci (xp.ndarray): Column index per query.
+        t (xp.ndarray): Rung per query.
+        xp (module): Array module.
+        frozen (xp.ndarray, optional): ``(n_cols, ntemps)`` bool; frozen rungs are
+            priced from ``cached``.
+
+    Returns:
+        xp.ndarray: float64 whole-cell lnL per query.
     """
     c = carrier[ci, t]
     live = c >= 0
@@ -3461,6 +4468,21 @@ def _converge_column_spans(pool, num_bands):
     contiguous row range it occupies. The pool must have been through
     :func:`_order_pool_by_column`; a column that is not contiguous is a
     staging bug, not something to paper over, so it raises.
+
+    Helper of ``GBSpecialBase._converge_refill_loop`` (direct RJ batch path,
+    ``GB_RJ_DIRECT_BATCH`` stock default 1, with ``GB_INMODEL_CONVERGE`` on and
+    refill); the v9 launchers run the grouped path (``GB_RJ_DIRECT_BATCH=0``),
+    so it is not reached there.
+
+    Args:
+        pool (dict): Column-ordered parallel per-row arrays.
+        num_bands (int): Number of sub-bands.
+
+    Returns:
+        list[tuple[int, int, int]]: ``(col_id, start, stop)`` per column.
+
+    Raises:
+        RuntimeError: When a column appears in more than one contiguous run.
     """
     key = np.asarray(_to_numpy(_pool_column_key(pool, num_bands)))
     n = int(key.shape[0])
@@ -3490,7 +4512,16 @@ def _converge_refill(active, queue, width):
     a single column wider than ``width`` is taken whole (the rule
     :func:`_column_chunks` already uses) but only into an EMPTY active set,
     so it never evicts carried-over work. Returns new lists; the inputs are
-    not mutated.
+    not mutated. Helper of ``_converge_refill_loop`` (direct RJ batch path
+    only; not reached in v9).
+
+    Args:
+        active (list[tuple[int, int, int]]): Spans being polished.
+        queue (list[tuple[int, int, int]]): Pending spans.
+        width (int): Row budget of the active set.
+
+    Returns:
+        tuple[list, list]: The new ``(active, queue)``.
     """
     active = list(active)
     queue = list(queue)
@@ -3507,7 +4538,19 @@ def _converge_refill(active, queue, width):
 
 
 def _converge_take(pool, spans, xp):
-    """The sub-pool holding exactly the rows of ``spans``, in span order."""
+    """The sub-pool holding exactly the rows of ``spans``, in span order.
+
+    Helper of ``_converge_refill_loop`` (direct RJ batch path only; not
+    reached in v9).
+
+    Args:
+        pool (dict): Parallel per-row arrays.
+        spans (list[tuple[int, int, int]]): ``(col_id, start, stop)`` spans.
+        xp (module): Array module.
+
+    Returns:
+        dict or None: Gathered sub-pool, or ``None`` for no spans.
+    """
     if not spans:
         return None
     idx = np.concatenate(
@@ -3528,7 +4571,17 @@ def _converge_gate_mask(t_i, n_gate, xp):
     block happens to hold no gated row both fall back to "every row
     gates", so the gate can only ever shorten a block that has a cold rung
     to shorten it on -- never end one early because the pool's columns
-    happen to be hot-only.
+    happen to be hot-only. ``n_gate`` comes from
+    ``GB_INMODEL_CONVERGE_GATE_RUNGS`` (v9: 4). Imported by the launcher
+    preflight.
+
+    Args:
+        t_i (xp.ndarray): Per-row current rung.
+        n_gate (int or None): Number of gating rungs from the cold end.
+        xp (module): Array module.
+
+    Returns:
+        xp.ndarray: Boolean mask, shape of ``t_i``.
     """
     if n_gate is None:
         return xp.ones(t_i.shape, dtype=bool)
@@ -3606,6 +4659,29 @@ class _InModelGroupState:
     live cold source count before the test, making the threshold a per-source
     rate instead. Default ``"flat"`` (the literal reading of the spec); both
     numbers are logged every pass so the choice can be made from data.
+
+    Built fresh per propose by ``GBSpecialBase._group_state_or_none`` for the
+    PURE in-model moves (``in_model``, ``in_model_fstat``, ``in_model_removal``)
+    when ``GB_INMODEL_GROUP=1`` (v9) and the move is not PE-named. v9 values:
+    ``GB_INMODEL_GROUP_ITERS=3`` (``gb_search_2``: 1), ``GB_INMODEL_GROUP_DLL=4.0``,
+    ``GB_INMODEL_GROUP_MAX_PASSES=1000``, ``GB_INMODEL_GROUP_SCALE=flat``.
+    Imported by the launcher preflight.
+
+    Args:
+        window (int): Patience window ``W`` in passes.
+        thresh (float): Gain threshold over the window (lnL).
+        max_passes (int): Pass ceiling for the group (read by the caller).
+        scale (str): ``"flat"`` (default) or ``"per_source"``.
+
+    Attributes:
+        passes (int): Passes folded so far.
+        shut (xp.ndarray or None): ``(nwalkers, num_bands)`` bool, pairs retired.
+        shut_at (xp.ndarray or None): ``(nwalkers, num_bands)`` int64, pass index
+            (1-based) at which each pair shut.
+        occupied (xp.ndarray or None): ``(nwalkers, num_bands)`` bool, last census.
+        occ_count (xp.ndarray or None): ``(nwalkers, num_bands)`` live cold counts.
+        static_shut (int): Pairs shut by the one-pass fast path on the last
+            :meth:`update` (set there).
     """
 
     def __init__(self, window, thresh, max_passes, scale="flat"):
@@ -3623,6 +4699,7 @@ class _InModelGroupState:
         self.occ_count = None  # (nwalkers, num_bands) live cold counts
 
     def _alloc(self, xp, shape):
+        """Allocate the per-pair arrays at ``shape`` on the first :meth:`update`."""
         self._best = xp.full(shape, -xp.inf)
         self._ring = xp.full((self.window,) + tuple(shape), -xp.inf)
         self._gain = xp.zeros(shape)
@@ -3687,6 +4764,17 @@ class _InModelGroupState:
         ⚠ It can only shut a pair EARLIER, never later, and only when
         nothing moved -- so it cannot change which pairs eventually
         converge, only when the dead ones stop being swept.
+
+        Args:
+            xp (module): Array module.
+            cold_delta (xp.ndarray): ``(nwalkers, num_bands)`` cold-rung accepted
+                ``delta_ll`` of the pass.
+            occ_count (xp.ndarray): ``(nwalkers, num_bands)`` live cold counts.
+            all_temp_delta (xp.ndarray, optional): ``(ntemps, nwalkers, num_bands)``;
+                arms the one-pass fast path (first pass only).
+
+        Returns:
+            int: Pairs newly shut by this pass.
         """
         if self._best is None:
             self._alloc(xp, tuple(cold_delta.shape))
@@ -3732,6 +4820,7 @@ class _InModelGroupState:
         return int(xp.count_nonzero(self.shut & ~was))
 
     def all_shut(self, xp):
+        """Return True when every pair is shut (False before the first update)."""
         return bool(xp.all(self.shut)) if self.shut is not None else False
 
     def census(self, xp):
@@ -3811,6 +4900,31 @@ class _InModelConvergeState:
     It PERSISTS across generations, ring buffer included, or a carried-over
     row would have to re-earn the ``seen >= window`` warm-up before it
     could ever be retired.
+
+    Built per provenance class by ``GBSpecialBase._converge_state_for`` for
+    the search-stage RJ moves (grouped flush) when ``GB_INMODEL_CONVERGE`` is
+    ``on`` or ``observe`` and the move is not PE-named. v9 values:
+    ``GB_INMODEL_CONVERGE_ITERS=250`` (``gb_search_2``: 100),
+    ``_ITERS_SURVIVOR=25``, ``_DLL=4.0``, ``_MAX=20000``, ``_STOP_FRAC=0.5``,
+    ``_GATE_RUNGS=4``. Imported by the launcher preflight.
+
+    Args:
+        window (int): Patience window in repeats.
+        thresh (float): Gain threshold over the window (lnL).
+        max_repeats (int): Per-row repeat ceiling.
+        stop_frac (float): Block stop fraction (read by the driver). Default ``1.0``.
+        observe (bool): Observe-only mode (report, never freeze). Default False.
+        n_gate (int, optional): Gating rungs from the cold end; ``None`` = all.
+        refill (bool): Column refill (direct batch path only). Default False.
+        cls_name (str, optional): Provenance class of this block.
+        post_gate_repeats (int, optional): Repeats owed to an ungated row once
+            its column's gated rungs are done; ``None`` = pre-2026-09-27 behaviour.
+
+    Attributes:
+        converged (set): Row ids retired by the rule.
+        capped (set): Row ids retired by the ``max_repeats`` ceiling.
+        released (set): Ungated row ids the block ended under (not judged).
+        generations (int): Set by the driver, for the report.
     """
 
     def __init__(self, window, thresh, max_repeats, stop_frac=1.0,
@@ -3870,7 +4984,16 @@ class _InModelConvergeState:
 
     # -- block plumbing -------------------------------------------------
     def gather(self, rows):
-        """Host arrays for ``rows`` (source ids), in that order."""
+        """Host arrays for ``rows`` (source ids), in that order.
+
+        Args:
+            rows (list[int]): Source ids.
+
+        Returns:
+            tuple[np.ndarray, ...]: ``(best, ring, seen, gain, done, at)``; ``ring``
+            is ``(window, n)``, the rest ``(n,)``. Unseen rows get ``-inf`` /
+            0 / False.
+        """
         n = len(rows)
         best = np.empty(n, dtype=np.float64)
         ring = np.empty((self.window, n), dtype=np.float64)
@@ -3898,6 +5021,14 @@ class _InModelConvergeState:
         recorded as RELEASED rather than converged or capped: the block
         stopped because the cold half was done, and nothing was concluded
         about them.
+
+        Args:
+            rows (list[int]): Source ids, aligned with the arrays.
+            best, ring, seen, gain, done (array-like): As :meth:`gather` returns
+                them, after the block (numpy or cupy).
+            at (array-like, optional): Repeat at which each row froze (0 = not).
+            gated (array-like, optional): Block-end ladder-gate mask; default
+                all True.
         """
         best = np.asarray(_to_numpy(best), dtype=np.float64)
         ring = np.asarray(_to_numpy(ring), dtype=np.float64)
@@ -3960,6 +5091,7 @@ class _InModelConvergeState:
         return self.clock(row)
 
     def gain(self, row):
+        """Return the running sum of accepted ``delta_ll`` for ``row`` (0.0 if unseen)."""
         return float(self._gain.get(row, 0.0))
 
     def report(self, name, cls_name, col_of_row, rows, budget,
@@ -3969,7 +5101,16 @@ class _InModelConvergeState:
         ``col_of_row`` maps each row id to its ``(walker, band)`` column id,
         so the line can say how many COLUMNS fully retired (the unit the
         user's "all temperatures travel together" rule is about) alongside
-        the per-row repeat distribution.
+        the per-row repeat distribution. Emitted from the grouped RJ flush
+        (and a calibration line follows the headline). Logging only.
+
+        Args:
+            name (str): Move name.
+            cls_name (str): Provenance class.
+            col_of_row (dict): ``{row id: column id}``.
+            rows (list[int]): Row ids of the phase; no-op when empty.
+            budget (int): The fixed repeat budget the mode replaces.
+            observe (bool): Tag the line OBSERVE-ONLY. Default False.
         """
         if not rows:
             return
@@ -3987,6 +5128,7 @@ class _InModelConvergeState:
         floor = self.window + 1          # the earliest the rule can fire
 
         def _pc(a, q):
+            """``q``-th percentile of ``a`` as a float (NaN when empty)."""
             return float(np.percentile(a, q)) if a.size else float("nan")
 
         # ---- LINE 1: what happened, and what it cost -------------------
@@ -4099,7 +5241,16 @@ class _InModelConvergeState:
 
     @staticmethod
     def _hist(reps, budget):
-        """Compact repeat histogram -- a pile-up is obvious at a glance."""
+        """Compact repeat histogram -- a pile-up is obvious at a glance.
+
+        Args:
+            reps (np.ndarray): Per-row repeat counts (non-empty).
+            budget (int): Unused (kept for the call signature).
+
+        Returns:
+            str: ``"lo-hi:n ..."`` over fixed edges up to the largest repeat count,
+            or ``"-"``.
+        """
         edges = [0, 25, 50, 75, 100, 150, 200, 300, 400]
         edges = sorted({e for e in edges if e <= max(int(reps.max()), 1)}
                        | {max(int(reps.max()), 1)})
@@ -4127,7 +5278,24 @@ class _InModelConvergeState:
         Frozen rows are still stepped here. Their ``gain`` cannot move (no
         proposal is made for them), so the update is a no-op that keeps
         every per-row array the same length as the block -- cheaper and far
-        less error-prone than compacting the state arrays mid-block.
+        less error-prone than compacting the state arrays mid-block. Called
+        once per in-model repeat by ``_run_in_model_repeats``.
+
+        Args:
+            xp (module): Array module.
+            gain (xp.ndarray): ``(n,)`` running gain.
+            best (xp.ndarray): ``(n,)`` running max of the gain.
+            ring (xp.ndarray): ``(window, n_total)`` ring, updated in place at
+                ``rows_ar``.
+            seen (xp.ndarray): ``(n,)`` int repeats present, incremented in place.
+            rows_ar (xp.ndarray): Column indices of these rows in ``ring``.
+            window (int): Patience window.
+            thresh (float): Gain threshold over the window.
+            done (xp.ndarray): ``(n,)`` bool latch.
+            at (xp.ndarray, optional): ``(n,)`` repeat at which each row froze.
+
+        Returns:
+            tuple: ``(best, done)``, or ``(best, done, at)`` when ``at`` is given.
         """
         best = xp.maximum(best, gain)
         slot = seen % int(window)
@@ -4161,7 +5329,15 @@ def _buffer_fixed_capacity_active(sorter, kwargs) -> bool:
     (tempering audit F3, 2026-08-27; ``_cached_get_buffer`` picks the
     capacity per signature). ``GB_BUFFER_FIXED_CAPACITY_TWIN=0`` restores
     the twin exclusion alone; ``GB_BUFFER_FIXED_CAPACITY=0`` restores the
-    drop+rebuild-on-size-change behavior for everything.
+    drop+rebuild-on-size-change behavior for everything. The v9 launchers
+    export ``GB_BUFFER_FIXED_CAPACITY=1`` and leave the twin knob unset (on).
+
+    Args:
+        sorter (BandSorter): The sorter the buffer is built for.
+        kwargs (dict): The buffer-build kwargs (``use_template_arr`` is read).
+
+    Returns:
+        bool: Whether to use a fixed-capacity buffer.
     """
     if os.environ.get("GB_BUFFER_FIXED_CAPACITY", "1") != "1":
         return False
@@ -4210,7 +5386,8 @@ GB_OPS = ("gb_run_proposal", "gb_run_tempering", "gb_finish", "gb_sync",
 #: The GB parallel residual search's build command (``rj_para_search_pe``,
 #: issued from the head's ``setup()`` with no session open, like the F-stat
 #: fit ops). Kept OUT of :data:`GB_OPS`, whose exact contents three suites
-#: pin as the session + F-stat protocol; ``gf_serve`` dispatches it first.
+#: pin as the session + F-stat protocol; ``gf_serve`` dispatches it after the
+#: four session ops and before the F-stat ops.
 GB_PARA_SEARCH_OP = "gb_para_search"
 
 #: Head-set knobs every compute rank must follow PER PROPOSE.
@@ -4227,8 +5404,8 @@ GB_PARA_SEARCH_OP = "gb_para_search"
 #: ``births 0`` on the other three -- the stage-3 ``prior_births`` reached
 #: one walker in four, and so did ``opt_snr`` 8 -> 5 and ``phase_maximize``
 #: True -> False. Shipped in ``clock_vals`` on every ``gb_run_proposal``,
-#: installed by :meth:`GBSpecialStretchMove._enter_rank_block` and restored
-#: by :meth:`GBSpecialStretchMove._exit_rank_block`, so the ranks' bodies
+#: installed by :meth:`GBSpecialBase._enter_rank_block` and restored
+#: by :meth:`GBSpecialBase._exit_rank_block`, so the ranks' bodies
 #: run under the head's live values and the rank object keeps its own
 #: between commands.
 GB_RANK_LIVE_ATTRS = (
@@ -4254,7 +5431,17 @@ GB_RANK_LIVE_ATTRS = (
 
 
 def gb_rank_live_attrs(move) -> dict:
-    """``{name: value}`` of :data:`GB_RANK_LIVE_ATTRS` the move carries (host scalars)."""
+    """``{name: value}`` of :data:`GB_RANK_LIVE_ATTRS` the move carries (host scalars).
+
+    Built by the head for every ``gb_run_proposal`` command. Values that are
+    not plain Python scalars are converted with their ``item`` method when they have one.
+
+    Args:
+        move (GBSpecialBase): The head's move.
+
+    Returns:
+        dict: Attribute name -> value, for the attributes the move has.
+    """
     out = {}
     for k in GB_RANK_LIVE_ATTRS:
         if hasattr(move, k):
@@ -4287,6 +5474,12 @@ def _gb_host(obj):
     A namedtuple is rebuilt POSITIONALLY (``type(obj)(*values)``) -- its
     constructor takes the fields, not one iterable, so the plain
     ``type(obj)(gen)`` a tuple takes would raise for it.
+
+    Args:
+        obj: Any reply value (scalar, str, dict, list/tuple, numpy or cupy array).
+
+    Returns:
+        object: The same structure with every array leaf converted to ``np.ndarray``.
     """
     if obj is None or isinstance(obj, (bool, int, float, str, np.generic)):
         return obj
@@ -4341,13 +5534,31 @@ def merge_owned_sources(work_coords, work_inds, replies, ranks, band_ranges,
 
     A NEUTRAL block ships ``block_band_inds=None`` and contributes nothing.
 
+    Replica mode only (``GF_GPU_ROUTING=1``, opt-in; the launchers leave it unset
+    by default). Called by the head's replica finish merge.
+
     Args:
-        work_coords, work_inds: the head's ``(ntemps, 1, nleaves_max, ndim)`` /
-            ``(ntemps, 1, nleaves_max)`` branch arrays, written in place.
-        replies: ``{rank: gb_finish reply}``.
-        ranks: the compute ranks to merge, in order.
-        band_ranges: ``{rank: (b0, b1)}`` half-open owned band range.
-        f0_col: the sampling-basis frequency column to sort on.
+        work_coords (np.ndarray): The head's ``(ntemps, nw, nleaves_max, ndim)``
+            branch coords (``nw`` = the block width), written in place.
+        work_inds (np.ndarray): ``(ntemps, nw, nleaves_max)`` bool, written in place.
+        replies (dict): ``{rank: gb_finish reply}``; each carries ``block_coords``,
+            ``block_inds``, ``block_band_inds`` and optionally ``d_h`` / ``h_h`` /
+            ``block_source_uid``.
+        ranks (list[int]): The compute ranks to merge, in order.
+        band_ranges (dict): ``{rank: (b0, b1)}`` half-open owned band range.
+        f0_col (int): The sampling-basis frequency column to sort on.
+        d_h (np.ndarray, optional): ``(nwalkers, nleaves_max)`` cold ``<d|h>``,
+            written in place.
+        h_h (np.ndarray, optional): ``(nwalkers, nleaves_max)`` cold ``<h|h>``,
+            written in place.
+        preserve_leaf_identity (bool): Write owned sources back at their own
+            slots (fixed-dimension branches such as VGB). Default False.
+        source_uid (np.ndarray, optional): ``(ntemps, nw, nleaves_max)`` int64
+            ``GB_CHOL_CACHE`` source-ID column, written in place.
+
+    Raises:
+        RuntimeError: On a shape mismatch in a reply, an alive source labelled
+            outside the band grid, or more owned sources than leaves.
     """
     # ``nw`` IS THE BLOCK WIDTH (2026-09-23), not the literal 1. Under
     # ``n_compute = n_blocks x R`` a replicated block can hold several
@@ -4488,7 +5699,14 @@ def _bcast_dtype(arr):
     complex64 row would otherwise make the owner's buffer and theirs
     disagree in size. It never crosses the real/complex boundary -- casting
     a complex residual down to float64 would discard the imaginary part of
-    every sample, silently.
+    every sample, silently. Used by the collective F-stat reference-row
+    broadcast (``_gb_serve_fstat_ref_row``).
+
+    Args:
+        arr (np.ndarray): The host row.
+
+    Returns:
+        type: ``np.complex128`` for complex input, else ``np.float64``.
     """
     return np.complex128 if np.iscomplexobj(arr) else np.float64
 
@@ -4546,12 +5764,29 @@ class GBRankSession:
 
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
 class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModule):
-    """Base class for GB-specific stretch / reversible-jump moves.
+    """Base class of every GB / VGB in-model and reversible-jump move of the global fit.
 
-    Combines :class:`GlobalFitMove`, :class:`eryn.moves.GroupStretchMove`,
-    :class:`Move`, and :class:`LISAToolsParallelModule` so each GB move can
-    use try-force rejection, optional phase maximization, and GPU-resident
-    band-aware buffers (:class:`Buffer`, :class:`BandSorter`).
+    Combines :class:`~lisatools.globalfit.moves.globalfitmove.GlobalFitMove`,
+    :class:`eryn.moves.GroupStretchMove`, :class:`eryn.moves.Move` and
+    :class:`~lisatools.utils.parallelbase.LISAToolsParallelModule`. It holds everything the
+    concrete moves share: the band-unit sweep (:meth:`run_proposal`,
+    :meth:`_run_band_unit`), the RJ step and in-model repeats, the sub-band buffers
+    (:class:`~lisatools.globalfit.moves.gbbands.BandSorter`, ``SubBandBuffer``,
+    ``BandScheduler``), the vertical and permuted temperature swaps, the per-(walker, band)
+    and per-band RJ valves, the level-1 / level-2 in-model convergence rules, the F-stat
+    reference-walker selection, the multi-rank fan-out (``propose`` on the head,
+    ``gf_serve`` on the compute ranks) and the leaf-cap / cap-cell machinery (off in v9).
+    ``GroupStretchMove.__init__`` is NOT chained (the MRO would double-init ``Move``); the
+    stretch state it would set (``a``, ``nfriends``) is set here from ``kwargs``.
+
+    The concrete moves are :class:`GBSpecialStretchMove`, :class:`VGBSpecialStretchMove`,
+    :class:`GBSpecialRJPriorMove`, :class:`GBSpecialRJFStatGridMove`,
+    :class:`GBSpecialRJSerialSearchMCMC`, :class:`GBParaSearchRJMove` and
+    :class:`GBSpecialRJRefitMove`; they are built by
+    :func:`lisatools.globalfit.recipe.build_gb_moves` / ``build_vgb_moves``, which fill
+    most arguments below from the ``GBSettings`` fields and ``GB_*`` env knobs. Many
+    behaviours are also switched by env knobs read here, at construction: see the
+    ``Args`` entries and the module docstring.
 
     ``sequential_parity_repeats`` (class flag, default ``False``): when
     ``True``, :meth:`_run_in_model_repeats` runs each repeat as TWO
@@ -4566,34 +5801,35 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     its complement from ``band_sorter.coords``
     (:class:`VGBSpecialStretchMove`).
 
-    # TODO/DOCS: full argument list — many constructor kwargs are passed
-    through unmodified to ``GroupStretchMove``. Intended use is via the
-    concrete subclasses :class:`GBSpecialStretchMove`,
-    :class:`GBSpecialRJPriorMove`,
-    :class:`GBSpecialRJSerialSearchMCMC`, and
-    :class:`GBSpecialRJRefitMove`.
-
     Args:
-        gb: :class:`gbgpu.GBGPU` instance.
-        priors: :class:`ProbDistContainer` for in-model GB parameters.
-        start_freq_ind: Inclusive starting index into the global ``f_arr``
-            (FD path); ignored on the WDM path.
-        data_length: Length of the data array per channel (FD path); the
-            WDM path sizes its per-band buffers from
-            ``WDMSettings.Nf_active`` / ``Nt_active`` instead.
-        acs: :class:`AnalysisContainerArray` used for SETUP ONLY: the
+        gb: The :class:`gbgpu.gbgpu.GBGPU` waveform generator.
+        priors (dict): Branch-keyed priors (``ProbDistContainer`` / ``GBPriorWrap``)
+            for the GB parameters.
+        start_freq_ind (int): Inclusive starting index of the parent window into the
+            global ``f_arr`` (FD path: the parent engine's per-row start and the
+            cold-chain bounds checks); not meaningful on the WDM path.
+        data_length (int): Length of the data array per channel. Stored only; the
+            run-time engines read the length from the ACA.
+        acs (AnalysisContainerArray): Used for SETUP ONLY: the
             basis-domain settings on ``acs.settings`` drive every
             domain-dependent choice (FD vs WDM) and the initial parent
             binding. It is not stored -- at run time everything reads
             from / fills into the ACA that arrives with the model in
             :meth:`propose` (re-binding if it changed).
-        band_edges: Frequency-band edges.
-        band_N_vals: Per-band waveform sample counts.
-        gpu_priors: Branch-keyed GPU-resident priors.
-        waveform_kwargs: Forwarded to ``gb`` waveform calls.
-        parameter_transforms: :class:`TransformContainer` for GBs.
-        snr_lim: Optional SNR cut.
-        opt_snr_rej_samp_limit: GB SNR PRIOR BOUNDARY (user policy,
+        band_edges (array-like): ``(num_bands + 1,)`` sub-band edges in Hz.
+        band_N_vals (array-like): ``(num_bands,)`` per-band waveform sample counts.
+        gpu_priors (dict): Branch-keyed device-side priors (``logpdf`` of proposed
+            points in the RJ gates).
+        *args: Forwarded positionally to :class:`eryn.moves.Move`.
+        waveform_kwargs (dict): Forwarded to every template fill; its
+            ``tdi_channel_setup`` entry also picks the FD comp's TDI type.
+            Default ``{}``.
+        parameter_transforms: Sampling -> physical transform; its ``input_basis``
+            fixes the column roles (``f0``, ``fdot`` / ``Mc``, ``phi0``, ``dist``,
+            ``fdot_astro_ratio``), and per-leaf fills (VGB) are honoured. ``None``
+            assumes the legacy layout (f0 at 1, fdot at 2, phi0 at 3).
+        snr_lim (float): Stored only (legacy; not read). Default ``1e-10``.
+        opt_snr_rej_samp_limit (float, optional): GB SNR PRIOR BOUNDARY (user policy,
             default 5.0; applies in SEARCH AND PE -- it is a boundary in
             the high-dimensional prior): any proposed GB state -- RJ
             birth, replacement NEW side, or IN-MODEL update -- whose
@@ -4601,36 +5837,57 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             force-rejected (delta lnL -> -1e300) before the accept step;
             moving OUT of the violating region remains allowed
             (new-point test only). ONE limit shared with the optional
-            detected test below.
-        snr_rej_detected: Also test the DETECTED SNR ``d_h/sqrt(h_h)``
-            against the same limit. Default OFF (user 2026-08-02: the
-            observed-SNR gate is adjustable but not wanted by default --
-            it fluctuates with the noise realization near threshold).
+            detected test below. ``None`` resolves from ``GB_OPT_SNR_LIMIT``
+            (default 5.0); the stock recipe passes 8.0 to search-cycle moves
+            (``GB_OPT_SNR_LIMIT_SEARCH``) and 5.0 to PE-cycle moves
+            (``GB_OPT_SNR_LIMIT_PE``), and the v9 stage profiles reset it per
+            search stage (8 in ``gb_search_1``, 5 in ``gb_search_2``).
+        snr_rej_detected (bool, optional): Also test the DETECTED SNR
+            ``d_h/sqrt(h_h)`` against the same limit. Default OFF (user
+            2026-08-02: the observed-SNR gate is adjustable but not wanted by
+            default -- it fluctuates with the noise realization near threshold).
             ``None`` resolves from env ``GB_SNR_REJ_DETECTED``.
             Threaded through the BandSorter into the SubBandBuffer (single
             source of truth; the buffer's own default matches). NOT the
             same knob as ``snr_lim`` above.
-        rj_proposal_distribution: Distribution used to draw RJ proposals.
-        is_rj_prop: Marks this move as a reversible-jump proposal.
-        num_repeat_proposals: Inner repeat count per call.
-        name: Move name (used for logging and bookkeeping).
-        branch_name: Eryn branch this move operates on. Default ``"gb"``;
+        rj_proposal_distribution: Distribution (or branch-keyed dict of them)
+            that RJ births are drawn from: the F-stat grid container, the prior,
+            or the warm-start mixture. Default ``None``.
+        is_rj_prop (bool): Marks this move as a reversible-jump proposal; also
+            implied by a non-None ``rj_proposal_distribution``. Default False.
+        num_repeat_proposals (int): In-model repeats per pass (pure in-model
+            moves) / per pick round. Default ``100``; the recipe passes
+            ``GBSettings.num_repeat_proposals`` (``GB_NUM_REPEAT_PROPOSALS``, the
+            launchers export 25); at the ``gb_search_2`` entry
+            ``recipe.apply_inmodel_budget`` applies ``GB_SEARCH_2_NUM_REPEAT_PROPOSALS``
+            (launchers: 30) to the pure in-model moves, and at ``full_pe``
+            ``recipe.apply_inmodel_repeats`` applies ``PE_INMODEL_REPEATS`` (launchers: 25).
+        name (str, optional): Move name (logging, bookkeeping, and the
+            search / PE scoping of several gates, e.g. ``"search" in name``).
+        branch_name (str): Eryn branch this move operates on. Default ``"gb"``;
             the VGB move passes ``"vgb"``. All state / prior / periodic
-            dict keys go through this.
-        use_info_mat_proposal: When ``False``, the in-model repeats never
+            dict keys and the ``{BRANCH}_*`` env knobs go through this, except
+            the ``_STRETCH_PROBABILITY`` / ``_JUMP_FACTOR`` overrides, which are
+            read with the ``GB_`` prefix for every branch (see those entries).
+        use_info_mat_proposal (bool): When ``False``, the in-model repeats never
             build the information-matrix Cholesky proposal (pure stretch).
             Default ``True`` (GB behavior).
-        swap_on_in_model: Run the band-temperature swap stage even when this
-            move is not an RJ proposal. Default ``False`` (GB reference
+        swap_on_in_model (bool): Run the band-temperature swap stage even when
+            this move is not an RJ proposal. Default ``False`` (GB reference
             recipe runs swaps on its RJ moves); the fixed-dimensional VGB
             move sets ``True`` since it has no RJ move to carry the swaps.
-        preserve_leaf_identity: Write accepted coordinates back to each
-            source's ORIGINAL leaf index instead of re-indexing leaves
+        preserve_leaf_identity (bool, optional): Write accepted coordinates back
+            to each source's ORIGINAL leaf index instead of re-indexing leaves
             densely in frequency order. ``None`` (default) auto-resolves to
             ``True`` when ``f0`` is a per-leaf transform fill (leaf i is a
             specific physical source, e.g. VGBs) and ``False`` otherwise.
-        use_prior_removal: If ``True``, draw RJ proposals from the prior.
-        rj_removal_only: Search-mode pruning heuristic (2026-08-01). When
+        use_prior_removal (bool): Build the move's band sorter ALIVE-ONLY
+            (``keep_all_inds`` False, as for ``rj_replace``): no dead-slot birth
+            candidates, so the move is not a birth engine (an all-empty block is
+            neutral). That is its only effect here. Default False; every move the
+            stock recipe builds passes False (pruning is done by
+            ``rj_prior_removal`` through ``rj_removal_only``).
+        rj_removal_only (bool): Search-mode pruning heuristic (2026-08-01). When
             ``True`` every BIRTH row of the RJ step is force-rejected
             (``curr_logp = -inf`` routes it through the existing ``keep``
             machinery, so it never reaches the likelihood kernel); DEATH
@@ -4660,10 +5917,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             On accept the standard swap (subtract old's template, add
             new's) is applied and ``inds`` is untouched; dead slots are
             never drawn for. Mutually exclusive with
-            ``rj_removal_only``.
-        phase_maximize: If ``True``, marginalize over phase in the
-            likelihood.
-        pe_extrinsic_draw: PE-mode extrinsic DRAW (user design ruling
+            ``rj_removal_only`` (``ValueError``). Replace moves are a stock
+            default (``GB_SEARCH_RJ_REPLACE`` / ``GB_PE_RJ_REPLACE``); the v9
+            launchers export 0, so none is built there.
+        phase_maximize (bool): Phase-maximized RJ births (two-quadrature analytic
+            maximization in the band engines; the accepted phi0 is rotated to
+            the maximum). A search heuristic: the recipe seeds it from
+            ``GB_RJ_PHASE_MAXIMIZE`` (v9: 1) and the v9 stage profiles keep it on
+            in ``gb_search_seed`` / ``gb_search_1`` only. Default False.
+        pe_extrinsic_draw (bool): PE-mode extrinsic DRAW (user design ruling
             2026-08-25). STAGE SPLIT of the F-stat distance-birth path's
             extrinsic handling: SEARCH stages (rj_fstat_search /
             rj_prior_removal / rj_replace, and pe-named moves running a
@@ -4683,8 +5945,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             CONCRETE drawn phi0 (no phase-max, no write-back). See
             :meth:`_pe_or_pin_extrinsics` / :meth:`_pe_death_extr_corr`
             and ``lisatools.sampling.fstat_proposal.pe_extrinsic_rvs``.
-        gpus: GPU device list for this move (intra-node knob).
-        band_units: Band-unit stride for the concurrent sub-band
+            Inert unless the F-stat distance birth (``GB_RJ_FSTAT_DIST_BIRTH``,
+            off by default; v9: 0) or a replace move is active.
+        gpus (list[int]): Stored only; the per-device buffer budget reads the
+            devices of ``gb`` instead. Default ``[]``.
+        band_units (int): Band-unit stride for the concurrent sub-band
             scheduling (env ``{BRANCH}_BAND_UNIT_STRIDE`` wins). Stride k
             partitions bands into k units by ``band_index % k``; a unit's
             bands are opened/scored CONCURRENTLY, so same-unit bands keep
@@ -4699,14 +5964,151 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             Hard enforcement lives at band-grid build time (the get_n
             builder, whose 2*get_N width rule guarantees stride 2); the
             ctor logs the verdict + minimum safe stride on WDM grids.
-        num_band_preload: Staged-buffer slots PER RUN DEVICE
-            (``GB_N_SUBBANDS``; total residency = this x n_gpus).
-        run_swaps: Whether to run band-temperature swaps.
-        max_data_store_size: Cap on the per-iteration data store size.
-        force_backend: Optional backend override.
+            Resolved by :func:`_resolve_band_unit_stride` (v9: 9).
+        band_unit_start_per_walker (bool, optional): Per-walker start class of
+            the sweep (env ``{BRANCH}_BAND_UNIT_START_PER_WALKER`` wins; v9: 1).
+            ``None`` = off.
+        band_unit_dir_per_walker (bool, optional): Per-walker rotation direction
+            (env ``{BRANCH}_BAND_UNIT_DIR_PER_WALKER`` wins; v9: 1). ``None`` = off.
+        num_band_preload (int): Staged-buffer slots PER RUN DEVICE
+            (``GB_N_SUBBANDS``, ``GBSettings.n_subbands``, stock 1024, v9 4096;
+            total residency = this x n_gpus). Default ``20000``; the
+            ``n_subbands`` kwarg is an alias and wins when given.
+        wdm_band_slab_layers (int, optional): Per-band WDM slab extent in
+            layers: ``None`` = the full active band, ``0`` = auto-size, ``N > 0``
+            explicit (v9: ``GB_WDM_BAND_SLAB_LAYERS=5``). Forwarded to every
+            BandSorter / SubBandBuffer.
+        wdm_slab_guard_layers (int): Guard layers used by the auto-size. Default 1.
+        psd_shared_mirror (bool): Shared PSD mirror in the sub-band buffers
+            (``GB_PSD_SHARED_MIRROR``, v9: 1). Default False.
+        psd_mirror_parity_proposes (int): Proposes on which the mirror parity
+            gate runs (debug; v9: 0). Default 0.
+        psd_mirror_parity_rows (int): Rows the parity gate checks. Default 64.
+        run_swaps (bool): Run the permuted ("fancy") band-temperature swaps
+            (:meth:`run_tempering`). Forced False for every move of the branch by
+            ``{BRANCH}_RUN_FANCY_TEMPERING=0`` (v9 GB: 0, so only ``vgb_pe`` runs
+            them). Default True.
+        temper_every_proposes (int): Tempering cadence in branch proposes
+            (``GB_TEMPER_EVERY_PROPOSES``, v9: 1); values below 1 act as 1.
+        max_data_store_size (int): Forwarded to every BandSorter. Default 6000.
+        force_backend (str, optional): Backend for
+            :class:`~lisatools.utils.parallelbase.LISAToolsParallelModule`
+            (``"cpu"``, ``"cuda12x"``, ...).
         gb_wdm_comp: Optional :class:`gbgpu.gbcomps.GBWDMComputations`
-            instance. Required when ``acs.settings`` is a
+            instance (or its sig-het wrapper, ``GBSignalHetComputations``, under
+            ``GB_SIGHET_INMODEL=1``). Required when ``acs.settings`` is a
             :class:`~lisatools.domains.WDMSettings`; ignored otherwise.
+        gb_fd_comp: Optional FD comp (``GBFDComputations``). ``None`` builds one
+            from the ACA's :class:`~lisatools.domains.FDSettings` (FD basis only).
+        orbits: Orbits for the FD comp build (default: those of ``gb``).
+        tdi_config: TDI configuration; required for the FD comp build.
+        t_ref (float): Phase reference time of the FD comp (s). Default 0.0.
+        search_kwargs (dict, optional): Per-band serial-search configuration,
+            read by :class:`GBSpecialRJSerialSearchMCMC` /
+            :class:`GBSpecialRJRefitMove` setup.
+        stretch_probability (float): Probability that an in-model repeat round
+            draws the band-aware group stretch instead of the info-matrix jump.
+            Default 0.0 (off for GB since 2026-08-18; VGB passes 0.0 except under
+            ``VGB_INMODEL_PROPOSAL=stretch``). Env ``GB_STRETCH_PROBABILITY``
+            overrides it (see the ctor note: the GB prefix is read for every
+            branch).
+        jump_factor (float): Scale of the info-matrix Gaussian jump. Default 0.005;
+            env ``GB_JUMP_FACTOR`` overrides it (v9: 1.2; GB prefix for every
+            branch, as above). The observable proposal scales its own step with
+            ``GB_`` / ``VGB_INMODEL_OBSERVABLE_JUMP``.
+        leaf_cap_start (int, optional): Arms the per-band / per-cap-cell progressive
+            leaf cap at this starting cap (search mode). ``None`` = off; the v9
+            launchers export ``GB_LEAF_CAP_START`` empty, so caps are off there.
+        leaf_cap_ll_improve (bool): lnL-improvement cap gate (the default rule).
+        leaf_cap_ndim (float): ``D`` of the ``D/2`` improvement threshold; also the
+            default of the in-model convergence / group thresholds. Default 8.0.
+        leaf_cap_min_iters (int): Cap patience in iterations. Default 50 (the
+            recipe passes ``GB_LEAF_CAP_MIN_ITERS``, default 3).
+        leaf_cap_ll_nsigma (float): Legacy nsigma-spread gate. Default 3.0.
+        leaf_cap_require_occupancy (bool): Legacy occupancy gate. Default True.
+        leaf_cap_iter_only (bool): Iteration-only cap advancement. Default False.
+        leaf_cap_update (bool): Marks the ONE designated GB move per iteration
+            that advances the cap state; it also designates the per-band barren
+            valve (:meth:`_band_shutoff_enabled`). Default True (the recipe sets
+            it on one move only).
+        leaf_cap_per_walker (bool): Per-walker leaf caps
+            (``GB_LEAF_CAP_PER_WALKER``). Default False.
+        search_stage_per_walker (bool): Per-(walker, band) search stage
+            (``GB_SEARCH_STAGE_PER_WALKER``, v9: 0). Default False.
+        search_stage_min_iters (int, optional): Stage patience; ``None`` reads
+            ``GB_SEARCH_STAGE_MIN_ITERS`` (default 20).
+        opt_snr_limit_search_coarse (float, optional): COARSE-stage floor;
+            ``None`` reads ``GB_OPT_SNR_LIMIT_SEARCH_COARSE``, else the resolved
+            ``opt_snr_rej_samp_limit``.
+        opt_snr_limit_search_fine (float, optional): FINE-stage floor; ``None``
+            reads ``GB_OPT_SNR_LIMIT_SEARCH_FINE`` (default 5.0).
+        search_shutoff_per_walker (bool): The per-(walker, band) RJ valve
+            (``GB_SEARCH_BAND_SHUTOFF_PER_WALKER``, v9: 1; see :class:`_ColdBandLnL`).
+            Default False.
+        search_shutoff_conv_iter (int, optional): Valve patience in judges;
+            ``None`` reads ``GB_SEARCH_BAND_SHUTOFF_CONV_ITER`` (default 5; v9: 3).
+        search_mode (bool): The recipe's mode (``gb.mode == "search"``; v9: True).
+            Default False.
+        cap_divisor (int, optional): Cap cells per sub-band (``GB_CAP_DIVISOR``,
+            stock 8, v9 1). ``None`` = 1.
+        cap_stagger (bool, optional): Staggered (midpoint-to-midpoint) cap grid
+            (``GB_CAP_STAGGER``, v9: 1). ``None`` = False.
+        cap_overlap_frac (float, optional): Cap-cell overlap fraction in
+            ``[0, 0.5)`` (``GB_CAP_OVERLAP_FRAC``, v9: 0). ``None`` = 0.
+        sighet_refresh_every (int): Mid-block sig-het reference refresh period in
+            repeats; 0 = never. Default 0 (v9: ``GB_SIGHET_REFRESH_EVERY=25``).
+        sighet_refresh_dphase (float): Refresh drift threshold (rad). Default 0.5
+            (v9: 0, i.e. every source refreshes).
+        sighet_refresh_min_beta (float): Rungs below this beta never refresh.
+            Default 0.1 (v9: 0).
+        sighet_trust_dlna (float): Sig-het trust-region amplitude gate (e-folds);
+            0 disables. Default 1.5.
+        sighet_trust_dphase (float): Trust-region carrier-phase gate (rad).
+            Default 0.5.
+        sighet_trust_snr_c (float): SNR scaling ``C`` of the amplitude gate.
+            Default 30.0.
+        sighet_trust_dlna_min (float): Lower clip of the scaled amplitude gate.
+            Default 0.3.
+        sighet_trust_phase_c (float): SNR scaling of the phase gate; 0 = uniform.
+            Default 0.0 (v9: ``GB_SIGHET_TRUST_PHASE_C=49``).
+        sighet_trust_dphase_max (float): Upper clip of the scaled phase gate.
+            Default 20.0.
+        sighet_anchor_check (bool): Debug anchor-offset check. Default False.
+        sighet_drift_check (bool): Log the end-of-block drift metric. Default
+            False (v9: 1).
+        debug_seq_pick (str): ``GB_DEBUG`` sequence-figure source pick
+            (``"first"``, ``"loudest"``, or an f0 in mHz). Default ``"first"``.
+        debug (bool): ``GB_DEBUG`` verification hooks (off in v9). Default False.
+        debug_plot_dir (str): ``GB_DEBUG`` figure directory.
+        debug_plot_walker (int): ``GB_DEBUG`` plotted walker. Default 0.
+        debug_plot_band (int, optional): ``GB_DEBUG`` plotted band; ``None`` = the
+            central band.
+        **kwargs: Read here: ``a`` (stretch scale, 2.0), ``nfriends`` (32),
+            ``infomat_table_batch`` (2048), ``share_proposal_tables`` (must stay
+            False), ``n_subbands``, ``rj_flip_fraction`` /
+            ``rj_flip_fraction_default`` (:func:`_resolve_rj_flip_fraction`),
+            ``inmodel_repeats_newborn`` / ``_survivor`` and their ``*_default``
+            (:func:`_resolve_inmodel_repeats`), the ``inmodel_converge*`` and
+            ``inmodel_group*`` families with their ``*_default`` partners
+            (:func:`_resolve_converge_knob`), ``temper_vertical``
+            (:func:`_resolve_temper_vertical`) and ``temper_cell_order``
+            (:func:`_resolve_temper_cell_order`). All of ``kwargs`` is also
+            forwarded to :class:`eryn.moves.Move` (``temperature_control``,
+            ``periodic``, ``skip_supp_names_update``, ``random_seed``, ...).
+
+    Raises:
+        ValueError: When ``rj_removal_only`` and ``rj_replace`` are both set, on an
+            out-of-range cap overlap fraction, on invalid per-walker stage /
+            valve patience settings, when ``f0`` is neither a sampled column nor
+            a per-leaf fill, or on any invalid value caught by the
+            ``_resolve_*`` / ``_converge_cast_*`` helpers.
+
+    Note:
+        Built by the recipe; not meant to be constructed by hand. The
+        ``GB_INMODEL_CONVERGE*`` / ``GB_INMODEL_GROUP*`` / ``GB_TEMPER_*``
+        knobs are resolved once here; per-stage changes (stage profiles, PE
+        declarations) are applied to the built objects by the recipe and shipped
+        to the compute ranks through :data:`GB_RANK_LIVE_ATTRS`.
     """
 
     # See the class docstring; True only on VGBSpecialStretchMove.
@@ -4730,6 +6132,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return self.backend.xp
 
     def __getstate__(self):
+        """Pickle / deepcopy state without the per-device ``_device_copy_cache``."""
         # the per-device copies of the cap-cell tables (_cap_table) never
         # pickle: a copy restored on another device would sit under the
         # wrong device key
@@ -5192,7 +6595,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # (``fstat_maximized_extrinsics``) applied identically to either
         # domain's (N, M). Never the legacy SharedMemoryGBGPU
         # ``gb.get_fstat_ll`` (FD-only; floods a WDM buffer). Defaults to
-        # follow ``rj_amp_maximize`` (on under the search config); when on it
+        # follow ``rj_amp_maximize`` (GB_RJ_AMP_MAXIMIZE, default OFF since
+        # 2026-09-02, so this is OFF by default too); when on it
         # replaces the d_h/h_h pin. ``GB_RJ_FSTAT_DIST_BIRTH=0`` falls back to
         # that pin. NOTE: the (N,M)->F path is validated (the proposal grid
         # finds the real source), but the A_max inversion on those pieces is
@@ -5618,8 +7022,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # skips the friend-table build entirely, and ``in_model_proposal``
         # never takes its stretch branch.
         #
-        # VGB is UNAFFECTED -- it sets stretch_probability=1.0 in its own
-        # ctor and runs pure stretch (use_info_mat_proposal=False).
+        # VGB: its ctor (``_vgb_inmodel_defaults``) passes 0.0 under the
+        # default VGB_INMODEL_PROPOSAL=observable / eigen and 1.0 only under
+        # ``stretch`` (the pre-2026-09-15 pure-stretch configuration).
+        #
+        # NOTE (as the code stands): the ``branch_name`` attribute is not assigned
+        # until further down this ctor, so the ``getattr`` below always
+        # resolves to ``"gb"`` and reads GB_STRETCH_PROBABILITY for every
+        # move, VGB included. The same holds for the ``_JUMP_FACTOR`` read
+        # below (v9 exports GB_JUMP_FACTOR=1.2).
         self.stretch_probability = float(stretch_probability)
         _sp_env = os.environ.get(
             getattr(self, "branch_name", "gb").upper() + "_STRETCH_PROBABILITY")
@@ -5722,7 +7133,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # them. 1.0 (default) = every slot, the historical behavior.
         # Kwarg ``rj_flip_fraction`` wins; env ``{BRANCH}_RJ_FLIP_FRACTION``
         # next; then the builder's ``rj_flip_fraction_default`` (the stock
-        # recipe passes 1.0 for search-cycle RJ moves, 0.1 for PE-cycle).
+        # recipe passes GB_SEARCH_RJ_FLIP_FRACTION for search-cycle RJ moves
+        # and GB_PE_RJ_FLIP_FRACTION for PE-cycle ones, each 0.2 when unset;
+        # the v9 launchers export 1.0 / 0.1).
         # VGB is fixed-leaf (nleaves_min == nleaves_max, NO RJ), so it gets
         # no RJ knob surface: pinned to 1.0, env/default ignored.
         self.rj_flip_fraction = _resolve_rj_flip_fraction(
@@ -5768,13 +7181,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # CONVERGENCE-DRIVEN in-model polish (user design 2026-09-24,
         # GB_INMODEL_CONVERGE, default OFF = a hard no-op). Instead of
         # spending the fixed per-class budget on every source, the
-        # newborn phase of the grouped RJ direct-batch path runs each
+        # in-model phase of a search RJ move runs each
         # (walker, band) COLUMN until its cell likelihood stops improving
-        # by D/2 over ``inmodel_converge_iters`` in-model repeats, retires
-        # it, and refills the freed slots from the pending pool. See
-        # ``_InModelConvergeState`` for the rule (and for why the cap
+        # by D/2 over ``inmodel_converge_iters`` in-model repeats and
+        # retires it. On the direct RJ batch path the freed slots are also
+        # refilled from the pending pool (``_converge_refill_loop``); the v9
+        # launchers run the GROUPED path (GB_RJ_DIRECT_BATCH=0), where the
+        # rule applies per class at the grouped flush and there is no refill.
+        # See ``_InModelConvergeState`` for the rule (and for why the cap
         # gate's literal form does NOT port to a per-repeat clock) and
-        # ``_run_in_model_converge`` for the driver.
+        # ``_converge_state_for`` / ``_run_in_model_repeats`` for the driver.
         self.inmodel_converge = _resolve_converge_knob(
             branch_name, "", kwargs.get("inmodel_converge", None),
             kwargs.get("inmodel_converge_default", "off"),
@@ -5945,8 +7361,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
         # Per-repeat VERTICAL band-temperature swaps inside the in-model
         # loop (default OFF = today's behavior). Additive to -- never a
-        # replacement for -- the permuted swaps in ``run_tempering``, which
-        # remain the ONLY thing that adapts the ladder.
+        # replacement for -- the permuted swaps in ``run_tempering``. Since
+        # 2026-09-24 the ladder also adapts from the vertical census
+        # (``_vertical_adapt_ladder``), which is what keeps it moving when
+        # {BRANCH}_RUN_FANCY_TEMPERING=0 turns ``run_tempering`` off (v9 GB).
         self.temper_vertical = _resolve_temper_vertical(
             branch_name, kwargs.get("temper_vertical", None)
         )
@@ -6023,7 +7441,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # Shared info-matrix Cholesky table (cold-chain, frequency-sorted).
         # Persists ACROSS proposals -- unlike the friend table, rebuilding it
         # costs ~17 waveform evaluations per cold-chain source, so it is
-        # refreshed on a cadence rather than every proposal.
+        # refreshed on a cadence rather than every proposal. Not built at all
+        # under GB_INFOMAT_PER_BLOCK=1 (the v9 setting: exact per-block
+        # matrices, see ``_ensure_proposal_tables``).
         self._infomat_freqs_sorted = None
         self._infomat_chol_sorted = None
         # Set per proposal; guards the once-per-sorter table indexing.
@@ -6042,6 +7462,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         The band-index math uses ``df = 1 / Tobs`` consistently across FD
         and WDM (FD: equals ``acs.df``; WDM: ``acs.df == layer_df`` differs,
         so we recompute). ``self.fd`` is only meaningful in the FD path.
+        Called by the constructor and again at every propose.
+
+        Args:
+            acs (AnalysisContainerArray): Its ``settings`` must be
+                :class:`~lisatools.domains.FDSettings` or
+                :class:`~lisatools.domains.WDMSettings`.
+
+        Raises:
+            NotImplementedError: For any other domain settings class.
         """
 
         # TODO: make this more generic
@@ -6067,6 +7496,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         (``GBFDComputations(fd_settings, t_ref, ...)``) -- data holders are
         passed at get_ll/fill_global time, so an ACA change only refreshes
         the engine wiring here, never any C-side data pointers.
+
+        No-op when ``acs`` (and its first linear data array) is the one already
+        bound. On the FD basis it (re)builds the move's ``gb_fd_comp`` unless one was
+        user-supplied; on both bases it rebuilds the move's ``_likelihood_engine``
+        (:func:`~lisatools.globalfit.moves.gbbands.make_routed_band_engine`), used
+        for the cold-chain parent-residual fills.
+
+        Args:
+            acs (AnalysisContainerArray): The ACA to bind.
+
+        Raises:
+            ValueError: On the FD basis with no ``tdi_config`` and no ``gb_fd_comp``.
         """
         token = (id(acs), id(acs.linear_data_arr[0]))
         if getattr(self, "_parent_acs_token", None) == token:
@@ -6143,12 +7584,30 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._parent_acs_token = token
 
     def setup(self, model, branches):
+        """Per-propose setup hook; a no-op here.
+
+        Called at the start of every propose. Overridden by
+        :class:`GBSpecialRJFStatGridMove` (advance the F-stat refit clock and run
+        the epoch fit) and by :class:`GBSpecialRJSerialSearchMCMC`,
+        :class:`GBParaSearchRJMove` and :class:`GBSpecialRJRefitMove`.
+
+        Args:
+            model (eryn.model.Model): The sampler model.
+            branches (dict): The state's branches.
+        """
         return
 
     @classmethod
     def supported_backends(cls):
+        """Backends this module can run on, GPU first.
+
+        Returns:
+            list[str]: ``lisatools_<tag>`` for each tag ``GPU_RECOMMENDED`` returns
+            (e.g. ``lisatools_cuda13x`` ... ``lisatools_cpu``).
+        """
         return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
+    # TODO check: keep/remove/document -- stretch branch only; stretch probability is 0 for GB and VGB
     def find_friends(self, name, s, s_inds=None, branch_supps=None):
         """Complement points for the band-aware group stretch.
 
@@ -6170,7 +7629,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Domain-agnostic: uses ``self._likelihood_engine.fill_template`` to
         work with both FD and WDM domains. The ``factor`` controls whether
         sources are added (``-1``, reducing the residual) or removed (``+1``,
-        restoring them to the residual).
+        restoring them to the residual). Writes into
+        ``model.analysis_container_arr`` in place; a selection with no alive
+        source is a no-op.
+
+        Args:
+            factor (int): ``+1`` or ``-1``.
+            model (eryn.model.Model): Carries ``analysis_container_arr``.
+            band_sorter (BandSorter): Source table.
+            *args: Forwarded to ``band_sorter.get_subset``.
+            **kwargs: Forwarded to ``band_sorter.get_subset`` (``units``,
+                ``remainder``, ``temp``, ``walker``, ``leaf``, ``band``,
+                ``apply_inds``, ``special_band_inds``, ``extra_bool``, ``full_bool``).
+
+        Raises:
+            AssertionError: On a ``factor`` other than ``+-1``, or (FD basis) a
+                source window outside the parent data range.
         """
         assert isinstance(factor, int) and (factor == -1 or factor == +1)
 
@@ -6205,19 +7679,47 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
 
     def remove_cold_chain_sources_from_residual(self, *args, **kwargs) -> None:
+        """:meth:`remove_sources_from_residual` restricted to alive cold-chain rows.
+
+        Forces ``temp`` to 0 and ``apply_inds`` to True. Called at every band-unit open.
+
+        Args:
+            *args: ``(model, band_sorter, ...)``, forwarded.
+            **kwargs: Forwarded (``temp`` / ``apply_inds`` are overwritten).
+        """
         kwargs["temp"] = 0
         kwargs["apply_inds"] = True
         self.remove_sources_from_residual(*args, **kwargs)
 
     def remove_sources_from_residual(self, *args, **kwargs) -> None:
+        """Restore the selected sources' templates to the residual (factor ``+1``).
+
+        Args:
+            *args: Forwarded to :meth:`adjust_sources_in_residual_buffer`.
+            **kwargs: Forwarded to :meth:`adjust_sources_in_residual_buffer`.
+        """
         self.adjust_sources_in_residual_buffer(+1, *args, **kwargs)
 
     def add_cold_chain_sources_to_residual(self, *args, **kwargs) -> None:
+        """:meth:`add_sources_to_residual` restricted to alive cold-chain rows.
+
+        Forces ``temp`` to 0 and ``apply_inds`` to True. Called at every band-unit close.
+
+        Args:
+            *args: ``(model, band_sorter, ...)``, forwarded.
+            **kwargs: Forwarded (``temp`` / ``apply_inds`` are overwritten).
+        """
         kwargs["temp"] = 0
         kwargs["apply_inds"] = True
         self.add_sources_to_residual(*args, **kwargs)
 
     def add_sources_to_residual(self, *args, **kwargs) -> None:
+        """Subtract the selected sources' templates from the residual (factor ``-1``).
+
+        Args:
+            *args: Forwarded to :meth:`adjust_sources_in_residual_buffer`.
+            **kwargs: Forwarded to :meth:`adjust_sources_in_residual_buffer`.
+        """
         self.adjust_sources_in_residual_buffer(-1, *args, **kwargs)
 
     # ---- one-walker replica mode: per-unit residual reconciliation ----------
@@ -6241,6 +7743,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         ``sel`` must already be on the sorter's device (see
         ``_ledger_snapshot``): every gather here is into a device array.
+        Replica mode only (``GF_GPU_ROUTING=1``), like the rest of the
+        ``_ledger_*`` family.
+
+        Args:
+            band_sorter (BandSorter): The sorter.
+            sel (xp.ndarray): Row indices on the sorter's device.
+
+        Returns:
+            xp.ndarray: ``(n_sel, ndim_phys)`` physical coords.
         """
         if not hasattr(band_sorter, "transform_fn"):
             return band_sorter.coords_in[sel]
@@ -6256,7 +7767,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         into the sorter goes through ``band_sorter.xp.asarray(sel)``: on a real
         run those arrays live on the GPU, and cupy raises on a host numpy
         index. A raise on one rank between here and the allgather would
-        deadlock every other rank.
+        deadlock every other rank. Taken at unit open in replica mode.
+
+        Args:
+            band_sorter (BandSorter): The sorter.
+            sel (array-like of int): Row indices (host or device).
+
+        Returns:
+            dict: Host arrays ``rows``, ``coords_in``, ``alive``, ``N``, ``walker``.
         """
         sel = np.asarray(asnumpy(sel)).reshape(-1).astype(int)
         if sel.size == 0:
@@ -6288,7 +7806,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         }
 
     def _ledger_delta(self, before, band_sorter):
-        """Rows of ``before`` whose alive flag or physical coords changed since the snapshot."""
+        """Rows of ``before`` whose alive flag or physical coords changed since the snapshot.
+
+        Taken at unit close in replica mode.
+
+        Args:
+            before (dict): A :meth:`_ledger_snapshot` result.
+            band_sorter (BandSorter): The same sorter, after the unit.
+
+        Returns:
+            dict: Host arrays ``rows``, ``old_coords_in``, ``old_alive``,
+            ``new_coords_in``, ``new_alive``, ``N``, ``walker`` for the changed rows.
+        """
         rows = before["rows"]
         if rows.size == 0:
             # empty snapshot: every field is already the empty answer
@@ -6337,6 +7866,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         At ``R == 1`` there is no one to exchange with, so it returns an
         empty list without touching a communicator at all; that is the
         walker-block layout's behaviour and it must stay free.
+
+        Args:
+            delta (dict): This rank's :meth:`_ledger_delta`.
+
+        Returns:
+            list[dict]: The other group members' deltas (empty for a group of one).
         """
         fanout = self.fanout
         # The GROUP comm when the run built one, else the fan-out comm --
@@ -6354,8 +7889,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return [p for i, p in enumerate(parts) if i != me]
 
     def _ledger_apply(self, model, deltas):
-        """Apply remote deltas to this replica's residual: add back the old alive
-        templates (factor +1), subtract the new alive ones (factor -1)."""
+        """Apply remote deltas to this replica's residual.
+
+        Adds back the old alive templates (factor +1) and subtracts the new
+        alive ones (factor -1), in place on ``model.analysis_container_arr``.
+
+        Args:
+            model (eryn.model.Model): Carries ``analysis_container_arr``.
+            deltas (list[dict]): From :meth:`_ledger_exchange`.
+
+        Raises:
+            ValueError: When a delta's walker column does not match its rows.
+        """
         acs = model.analysis_container_arr
         xp = getattr(acs, "xp", np)
         for d in deltas:
@@ -6416,6 +7961,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """
         return self.debug and isinstance(self._basis_settings, WDMSettings)
 
+    # TODO check: keep/remove/document -- GB_DEBUG hook; no-op unless GB_DEBUG=1 (no launcher sets it)
     def _debug_cold_chain_residual_loaded(self, model, remainder) -> None:
         """At the cold-chain residual load site: log the neighbour cold-chain
         residual baseline ll for this band unit ("load neighbouring residual")."""
@@ -6431,6 +7977,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         except Exception as e:  # debug-only: never break the sampler
             logger.warning("[GB_DEBUG %s] cold-chain snapshot skipped: %r", self.name, e)
 
+    # TODO check: keep/remove/document -- used only by the GB_DEBUG verify hooks (GB_DEBUG unset in launchers)
     @staticmethod
     def _debug_slab_kwargs(buffer_obj):
         """Slab-layout kwargs for DIRECT engine.fill_template calls in the
@@ -6444,6 +7991,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         slab_min_f=buffer_obj.slab_min_f)
         return {}
 
+    # TODO check: keep/remove/document -- GB_DEBUG hook; no-op unless GB_DEBUG=1 (no launcher sets it)
     def _debug_verify_rj_step(self, buffer_obj, params, alive, slots, N_vals,
                               delta_ll, keep, picked, round_i, scheduler) -> None:
         """At the RJ scoring site: independently re-verify the birth/death
@@ -6526,6 +8074,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         except Exception as e:  # debug-only: never break the sampler
             logger.warning("[GB_DEBUG %s] verify_rj_step skipped: %r", self.name, e)
 
+    # TODO check: keep/remove/document -- GB_DEBUG hook; no-op unless GB_DEBUG=1 (no launcher sets it)
     def _debug_verify_in_model(self, buffer_obj, curr, new, slots, N_vals,
                                delta_ll, keep, map_cpu, move_i) -> None:
         """At the in-model repeat site: on the first repeat run the residual
@@ -6548,6 +8097,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         except Exception as e:  # debug-only: never break the sampler
             logger.warning("[GB_DEBUG %s] verify_in_model skipped: %r", self.name, e)
 
+    # TODO check: keep/remove/document -- GB_DEBUG helper (debug verify hooks only; GB_DEBUG unset in launchers)
     def _debug_residual_round_trip(self, buffer_obj, params_add, data_index,
                                    swap_N_vals, d_h_a, h_h_a) -> None:
         """Add the proposed template to the band residual (factor=-1), confirm
@@ -6582,6 +8132,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                               factor=+1, waveform_kwargs=self.waveform_kwargs,
                               **self._debug_slab_kwargs(buffer_obj))
 
+    # TODO check: keep/remove/document -- GB_DEBUG tile hook (WDM, GB_DEBUG=1 only; unset in launchers)
     def _debug_seq_select(self, buffer_obj, band_sorter, ids, t_i, w_i, b_i,
                           slots, curr):
         """Pick the entry of this repeat batch to trace with the 3x3
@@ -6655,6 +8206,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             logger.warning("[GB_DEBUG %s] seq select skipped: %r", self.name, e)
             return None
 
+    # TODO check: keep/remove/document -- GB_DEBUG tile helper (GB_DEBUG=1 only; unset in launchers)
     def _debug_slab_snapshot(self, buffer_obj, slot):
         """Copy one cell's residual slab as ``(nchannels, Nf_band, Nt_active)``.
 
@@ -6687,6 +8239,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
             return None
 
+    # TODO check: keep/remove/document -- GB_DEBUG tile helper (GB_DEBUG=1 only; unset in launchers)
     def _debug_cell_total_template(self, buffer_obj, band_sorter, seq):
         """Sum of ALL modeled templates of the traced cell (scratch fill).
 
@@ -6760,6 +8313,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
             return None
 
+    # TODO check: keep/remove/document -- GB_DEBUG tile helper (GB_DEBUG=1 only; unset in launchers)
     def _debug_walker_true_data(self, acs, walker):
         """The traced walker's TRUE data slab: injection data minus non-GB
         models, from the move's block-start snapshot
@@ -6788,6 +8342,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
             return None
 
+    # TODO check: keep/remove/document -- GB_DEBUG tile helper (GB_DEBUG=1 only; unset in launchers)
     def _debug_band_source_only_ll(self, buffer_obj, arr, slot, band):
         """Source-only ll ``-1/2 <a|a>`` of ``arr`` (nc, Nf_a, Nt_a), sliced
         to the WDM layers whose centers lie in ``band``'s edge interval
@@ -6816,6 +8371,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ic = psd_np.reshape(nc, Nf_a, -1)[:, k0:k1]
         return -0.5 * 4.0 * dc * float(np.sum(r * ic.real * r))
 
+    # TODO check: keep/remove/document -- GB_DEBUG plot hook (GB_DEBUG=1 only; unset in launchers)
     def _debug_plot_band_sequence(self, buffer_obj, seq) -> None:
         """Four 3x3 figures (rows = X/Y/Z channels; columns =
         |TOTAL template| / |TOTAL data| / |buffer residual|) at the four
@@ -6989,6 +8545,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             logger.warning("[GB_DEBUG %s] sequence plots skipped: %r",
                            self.name, e)
 
+    # TODO check: keep/remove/document -- GB_DEBUG tile hook (GB_DEBUG=1 only; unset in launchers)
     def _debug_rj_select(self, buffer_obj, picked):
         """Arm the RJ before/after trace for the chosen (walker, band) cell
         (coldest temperature present in this pick round), once per step."""
@@ -7028,6 +8585,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             logger.warning("[GB_DEBUG %s] rj select skipped: %r", self.name, e)
             return None
 
+    # TODO check: keep/remove/document -- GB_DEBUG plot hook (GB_DEBUG=1 only; unset in launchers)
     def _debug_plot_rj_pair(self, buffer_obj, rj_seq) -> None:
         """After the RJ step: if the traced cell's RJ proposal was ACCEPTED
         (per the accept bookkeeping recorded by ``_run_rj_step``), save ONE
@@ -7122,6 +8680,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             logger.warning("[GB_DEBUG %s] rj pair plot skipped: %r",
                            self.name, e)
 
+    # TODO check: keep/remove/document -- GB_DEBUG tile hook; no-op unless GB_DEBUG=1 (unset in launchers)
     def _debug_log_band_null(self, buffer_obj) -> None:
         """Log the CHOSEN band's source-only residual log-likelihood per
         temperature, once per sampler step (right after the first buffer
@@ -7201,6 +8760,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         except Exception as e:
             logger.warning("[GB_DEBUG %s] band-null log skipped: %r", self.name, e)
 
+    # TODO check: keep/remove/document -- GB_DEBUG plot hook (GB_DEBUG=1 only; unset in launchers)
     def _debug_plot_band(self, buffer_obj, params_add, data_index, swap_N_vals,
                          ll_diff_kept, map_to_update_cpu, keep2, move_i,
                          stage: str = "in-model") -> None:
@@ -7337,24 +8897,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def _fstat_reference_walker(self, model):
         """Reference walker for the F-stat distance-birth center.
 
-        Max-likelihood, or MIN-likelihood under
-        :attr:`fstat_search_residual` (user ruling 2026-09-21) -- the same
-        selector the epoch fit uses, :meth:`_fstat_fit_ref_from`.
+        The MIN-likelihood cold walker of this process's ACA: it calls
+        :meth:`_fstat_fit_ref_from` without an epoch, which always takes the
+        ``argmin`` (search since 2026-09-21, PE since 2026-09-26).
 
         Mirrors the serial-search move: the F-stat centers are computed
         against the residual of the reference walker. Computed once per
         ``run_proposal`` (the residual drifts within a proposal, but the
         reference only sets the proposal CENTER, not the accept test).
+        Reached in ``run_proposal`` only with the F-stat distance birth on
+        (``GB_RJ_FSTAT_DIST_BIRTH``, off in v9), and as the no-fan-out fallback
+        of :meth:`_fstat_global_reference` (single-process ``fit.sample``).
 
-        TODO (fstat refit cadence): the F-stat PEAK GRID
-        (fstat_grid_peaks_stacked.npz, driving the birth container's
-        intrinsics) is built ONCE up front against the initial residual, so it
-        goes stale as sources are
-        subtracted. Examine refitting the F-stat (grid + this reference) at the
-        BEGINNING OF EACH PROPOSAL so births track the evolving residual --
-        gated on the wall-time cost of the refit (grid rebuild was ~7s comb +
-        ~13s stage-B; per-proposal that may or may not pay for itself vs. the
-        ~130s/iter dominated by in-model repeats). Measure before adopting.
+        Historical note (fstat refit cadence): an earlier TODO here asked whether
+        the peak grid, then built ONCE up front, should be refitted per proposal.
+        The grid is now refitted in F-stat EPOCHS on a cadence
+        (``GB_FSTAT_REFIT_EVERY`` / ``GB_FSTAT_REFIT_EVERY_PE``, v9: 2 / 150)
+        by ``GBSpecialRJFStatGridMove``.
+
+        Args:
+            model (eryn.model.Model): Carries ``analysis_container_arr``.
+
+        Returns:
+            int: Walker index (0 when the ranking fails; a warning is logged).
         """
         try:
             return self._fstat_fit_ref_from(
@@ -7369,12 +8934,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     @property
     def fstat_search_residual(self) -> bool:
-        """SEARCH-mode F-stat refit: fit the LIVE residual, MIN-lnL walker.
+        """SEARCH-mode F-stat refit: fit the LIVE residual.
 
         ``True`` (search): sweep the residual as it stands, i.e. **with the
-        GBs subtracted** -- the peaks are what is left to find.
+        GBs subtracted** -- the peaks are what is left to find; the reference
+        walker follows ``GB_FSTAT_SEARCH_REF`` (default ``rotate``, see
+        :meth:`_fstat_fit_ref_rule`).
         ``False`` (PE, the pre-existing method): **add the GBs back in**
-        first so the data looks un-subtracted, and rank by max lnL. See
+        first so the data looks un-subtracted (unless :attr:`fstat_pe_residual`),
+        reference walker per ``GB_FSTAT_PE_REF`` (default ``random``). See
         :meth:`_gb_free_residual` for the two modes side by side.
 
         Set per move instance by
@@ -7437,7 +9005,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Single source of truth for all three readers -- the window itself
         (:meth:`_gb_free_residual`), the fan-out payload's ``gb_free``
         request, and the epoch FINGERPRINT -- which must agree or a cache
-        key stops describing the residual that was actually swept.
+        key stops describing the residual that was actually swept. In v9
+        (``GB_FSTAT_GB_FREE`` unset) only ``rj_fstat_pe`` opens the window.
+
+        Returns:
+            bool: Whether the sweep restores the GB templates first.
         """
         if self.fstat_search_residual or getattr(self, "fstat_pe_residual", False):
             return False
@@ -7485,6 +9057,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``GB_FSTAT_FORCE_REFIT=1`` to refit the PE grid on a walker other
         than the min-lnL one the earlier epochs used). ``rotate`` is accepted
         there too, for symmetry; the ruled PE default stays ``random``.
+        The v9 launchers export ``GB_FSTAT_SEARCH_REF=rotate`` and leave
+        ``GB_FSTAT_PE_REF`` unset (``random``).
+
+        Returns:
+            str: ``"rotate"`` / ``"min"`` (search) or ``"random"`` / ``"min"`` /
+            ``"max"`` / ``"rotate"`` (PE).
+
+        Raises:
+            ValueError: On a value outside those sets.
         """
         if self.fstat_search_residual and not getattr(self, "fstat_pe_residual", False):
             rule = os.environ.get("GB_FSTAT_SEARCH_REF", "rotate").strip().lower()
@@ -7503,22 +9084,28 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def _fstat_fit_ref_from(self, lls, epoch=None):
         """Index of the walker whose residual an F-stat EPOCH is fitted to.
 
-        With ``epoch`` given and :meth:`_fstat_fit_ref_rule` ``"random"``
-        (PE, the default there since 2026-10-06): a uniformly random cold
-        walker among those with a finite lnL. The draw is seeded by
-        ``(GB_FSTAT_PE_REF_SEED, epoch)`` (seed default 0), so it is random
-        across epochs but the SAME walker for a given epoch on every
-        process and after a restart: the in-flight checkpoint fingerprint
-        (``wref=``) and the centre table on a load path both re-derive the
-        fit's walker instead of drawing a new one.
+        The rule is :meth:`_fstat_fit_ref_rule` when ``epoch`` is given, and
+        ``"min"`` when it is not:
 
-        Otherwise (search; PE under ``GB_FSTAT_PE_REF=min``; any caller that
-        passes no epoch, e.g. the per-propose distance-birth centre
-        :meth:`_fstat_reference_walker`): ``argmin`` -- the MIN-lnL cold
-        walker (user ruling 2026-09-21 for search, extended to PE
-        2026-09-26, superseded for the PE fit by the random rule above).
+        - ``"rotate"`` (search default since 2026-10-16): epoch ``k`` fits entry
+          ``k`` modulo the pool size of the pool of walkers with a finite lnL,
+          in walker order.
+        - ``"random"`` (PE default since 2026-10-06): a uniformly random cold
+          walker among those with a finite lnL. The draw is seeded by
+          ``(GB_FSTAT_PE_REF_SEED, epoch)`` (seed default 0), so it is random
+          across epochs but the SAME walker for a given epoch on every
+          process and after a restart: the in-flight checkpoint fingerprint
+          (``wref=``) and the centre table on a load path both re-derive the
+          fit's walker instead of drawing a new one.
+        - ``"max"``: the max-lnL walker (non-finite lnLs never win).
+        - ``"min"`` (``GB_FSTAT_SEARCH_REF=min``, ``GB_FSTAT_PE_REF=min``, or no
+          epoch, e.g. the per-propose distance-birth centre
+          :meth:`_fstat_reference_walker`): ``argmin`` -- the MIN-lnL cold
+          walker (user ruling 2026-09-21 for search, extended to PE
+          2026-09-26; superseded as the default by ``random`` for the PE fit
+          and by ``rotate`` for the search fit).
 
-        **Why the min in search.** The search fit no longer opens the
+        **Why the min in search (2026-09-21 reasoning).** The search fit no longer opens the
         GB-free window, so it sweeps a walker's residual exactly as it
         stands. The MIN-lnL cold walker is the one with the most signal
         still IN its residual, so its peaks are the ones the search has yet
@@ -7552,6 +9139,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the live-residual move (:attr:`fstat_pe_residual`) draws from
         ``(seed, epoch, _FSTAT_PE_RESIDUAL_REF_TAG)``, so its epoch-k walker
         is independent of the galaxy's epoch-k walker instead of equal to it.
+
+        Args:
+            lls (array-like): Per-walker cold lnL, ``(nwalkers,)``.
+            epoch (int, optional): The F-stat epoch number; ``None`` forces ``"min"``.
+
+        Returns:
+            int: The walker index.
         """
         lls = np.asarray(lls, dtype=float).reshape(-1)
         rule = self._fstat_fit_ref_rule() if epoch is not None else "min"
@@ -7580,6 +9174,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return int(pool[rng.integers(pool.size)])
         return int(np.argmin(lls))
 
+    # TODO check: keep/remove/document -- no src callers (multi-walker F-stat fit not wired); tests only
     def _fstat_fit_refs_from(self, lls, n):
         """The ``n`` walkers an F-stat epoch is fitted to, best first.
 
@@ -7612,9 +9207,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """``(w_global, owner_rank, local_index, lls)`` for the F-stat fit.
 
         The GLOBAL reference walker chosen by :meth:`_fstat_fit_ref_from`
-        over ALL cold walkers -- min-lnL in search, a random one per
-        ``epoch`` in PE (``epoch=None`` keeps the min) -- not a pick over
-        this rank's local block. Under
+        over ALL cold walkers -- by default rotating with the ``epoch`` in
+        search and a random one per ``epoch`` in PE (no ``epoch`` takes the
+        min) -- not a pick over this rank's local block. Under
         the walker-block layout ``_fstat_reference_walker`` ranks only the
         HEAD'S OWN block, so the epoch would be fitted against the best of B
         walkers instead of the best of N -- and the index it returns is used
@@ -7628,6 +9223,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         With ONE compute rank this is a direct call that returns
         ``(w, head_rank, w, lls)`` -- the same walker
         ``_fstat_reference_walker`` picks today, with the same local index.
+        Called on the head at every F-stat epoch fit.
+
+        Args:
+            model (eryn.model.Model): Carries ``analysis_container_arr``.
+            epoch (int, optional): The F-stat epoch number.
+
+        Returns:
+            tuple: ``(w_global, owner_rank, local_index, lls)``; with no fan-out
+            (or off the head) ``owner_rank`` is 0, ``local_index == w_global`` and
+            ``lls`` is a one-element NaN array; when the ranking raises, walker 0 and
+            its owner from the layout.
         """
         fanout = getattr(self, "fanout", None)
         if fanout is None or not fanout.is_head:
@@ -7745,9 +9351,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         would hand it a partially-refreshed population within the
         iteration; re-derive it per walker or hoist it back out.
 
-        Returns ``(ll_change_log, prop_counts, acc_counts)``; the count
-        arrays have shape ``(2, ntemps, nwalkers, num_bands)`` with row 0 =
-        RJ proposals and row 1 = in-model proposals.
+        Called for every GB / VGB move: by ``_gb_serve_run_proposal`` on each
+        compute rank (fan-out) and by ``_propose_legacy`` (single process), and
+        once per pass by ``_run_group_passes`` under the level-2 group rule.
+        Knobs read here include ``GB_ORTHO_LL_CHECK`` (default 1, v9: 1),
+        ``GB_ORTHO_CHECK`` (premise check, v9: 0), the band-unit schedule knobs
+        above, ``GB_RJ_LIVE_CAP_PICK`` / ``GB_RJ_SKIP_CAPPED`` (leaf caps only;
+        off in v9) and the barren-band freeze of
+        ``GB_RJ_BAND_SHUTOFF_*`` / per-walker valve.
+
+        Args:
+            model (eryn.model.Model): Carries ``analysis_container_arr`` (the
+                parent residual, edited in place) and ``random``.
+            state (GFState): The working state (this rank's walker block).
+            band_sorter (BandSorter): The propose's source table (RJ sorters
+                include dead slots).
+            band_temps (xp.ndarray): Per-band temperature ladder.
+            scan_schedule (tuple, optional): ``(unit_starts, unit_dirs)`` drawn by
+                the head; ``None`` draws it here.
+
+        Returns:
+            tuple[xp.ndarray, xp.ndarray, xp.ndarray]: ``(ll_change_log,
+            prop_counts, acc_counts)``; ``ll_change_log`` is ``(ntemps,
+            nwalkers, num_bands)`` accepted lnL change, the count arrays are
+            ``(2, ntemps, nwalkers, num_bands)`` with row 0 = RJ proposals and
+            row 1 = in-model proposals.
         """
         ll_change_log = cp.zeros((self.ntemps, self.nwalkers, self.num_bands))
         prop_counts = cp.zeros((2, self.ntemps, self.nwalkers, self.num_bands), dtype=int)
@@ -7819,6 +9447,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # invisible. units*nwalkers ints per propose.
         _assert_unit_scan_partition(_unit_starts, _unit_dirs, units)
 
+        # (HISTORICAL -- this variant was REMOVED; every class is visited
+        # exactly once per sweep, see the docstring. The reasoning is kept
+        # for whoever revisits it.)
         # SEARCH-ONLY unit repeats. N consecutive passes over each class
         # before advancing, the WHOLE block (open -> RJ -> in-model
         # repeats -> close) each time.
@@ -7843,15 +9474,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         #      them across passes would score later passes against a
         #      stale census.
         # OBSERVABILITY: one greppable line per propose naming the whole
-        # schedule (per-walker start/direction pairs + stride + repeats).
+        # schedule (per-walker start/direction pairs + stride + digest).
         logger.info(
             _format_unit_scan_schedule(
                 _unit_starts, _unit_dirs, units, name=self.name
             )
         )
 
-        # [GB_ORTHO_LL] bilinearity bookkeeping check (default OFF,
-        # GB_ORTHO_LL_CHECK (default ON, user ruling 2026-08-15 -- the
+        # [GB_ORTHO_LL] bilinearity bookkeeping check
+        # (GB_ORTHO_LL_CHECK, default ON, user ruling 2026-08-15 -- the
         # cost is two extra parent-residual likelihood() evals per unit,
         # ~1.5 s/propose, negligible; =0 disables): per concurrent group
         # (one unit's simultaneously-scored cells), compare the sum of
@@ -8297,6 +9928,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # and flip-fraction tuning were blocked on.
         try:
             def _sum(a):
+                """Host ``int`` sum of a counter array."""
                 return int(_to_numpy(a).sum())
             rj_p, rj_a = _sum(prop_counts[0]), _sum(acc_counts[0])
             im_p, im_a = _sum(prop_counts[1]), _sum(acc_counts[1])
@@ -8459,7 +10091,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """Find the StackedFStatProposal4D inside the rj birth container.
 
         Cached per install (``_install`` resets it); returns None when the
-        births come from the prior (no census surface).
+        births come from the prior (no census surface). Searches the
+        ``rj_proposal_distribution`` (or its entry for this branch) up to depth
+        5 through ``priors_in`` / ``priors`` / ``components`` / ``base`` /
+        ``dist`` / ``distribution`` for an object with ``pop_draw_counts``.
+        Feeds the ``[FSTAT_PEAKS]`` census at the end of :meth:`run_proposal`.
+
+        Returns:
+            object or None: The first object found with ``pop_draw_counts``.
         """
         obj = getattr(self, "_stacked_census_obj", "unset")
         if obj != "unset":
@@ -8468,6 +10107,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         seen = set()
 
         def walk(o, depth=0):
+            """Depth-first search for the census surface (sets ``found``)."""
             nonlocal found
             if o is None or depth > 5 or id(o) in seen or found is not None:
                 return
@@ -8495,6 +10135,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._stacked_census_obj = found
         return found
 
+    # TODO check: keep/remove/document -- debug fence; returns at once unless GB_MULTIGPU_SYNC_DEBUG=1 (unset)
     def _debug_sync_all_devices(self, model):
         """GB_MULTIGPU_SYNC_DEBUG=1: fence EVERY run device.
 
@@ -8602,6 +10243,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         body always took (3), so the two bodies drew DIFFERENT vertical-swap
         streams at one rank and the legacy side was not even reproducible
         against itself there.
+
+        Args:
+            move (GBSpecialBase): The move (``_rank_rng_seed``,
+                ``gf_temper_seed_base`` and ``num_proposals`` are read).
+
+        Returns:
+            numpy.random.Generator: The vertical-swap generator.
         """
         seed = getattr(move, "_rank_rng_seed", None)
         if seed is not None:
@@ -8615,12 +10263,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     @property
     def _buffer_cache_scope(self):
+        """int: Shared-buffer cache key, the ``id`` of the WDM comp (else the FD comp)."""
         comp = (self.gb_wdm_comp if getattr(self, "gb_wdm_comp", None)
                 is not None else getattr(self, "gb_fd_comp", None))
         return id(comp)
 
     @property
     def _prop_buffer_cache(self):
+        """The class-level shared ``SubBandBuffer`` cache entry for this move's scope.
+
+        Setting ``None`` drops the entry; any other value stores it.
+        """
         return GBSpecialBase._shared_buffer_caches.get(
             self._buffer_cache_scope)
 
@@ -8635,10 +10288,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     @property
     def num_band_preload_total(self) -> int:
-        """Total staged-buffer slots: ``GB_N_SUBBANDS`` is PER RUN DEVICE
-        (user ruling 2026-08-14). The buffer is band-sharded across the
+        """Total staged-buffer slots: ``GB_N_SUBBANDS`` is PER RUN DEVICE.
+
+        User ruling 2026-08-14. The buffer is band-sharded across the
         run devices, so the knob states each GPU's residency/memory
-        budget and total residency scales with the allocation."""
+        budget and total residency scales with the allocation. With vertical
+        swaps on the total is floored to a multiple of ``ntemps`` (never below
+        one column). v9: ``GB_N_SUBBANDS=4096``, ``GB_NTEMPS=24`` -> 4080 per GPU.
+
+        Returns:
+            int: ``num_band_preload`` x number of run GPUs (1 on CPU), floored as above.
+        """
         gpus = (getattr(self.gb, "gpus", None)
                 if self.backend.uses_cupy else None)
         total = int(self.num_band_preload) * (len(gpus) if gpus else 1)
@@ -8691,6 +10351,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         / PSD copy and the template-twin reset. It is deliberately NOT part
         of the cache signature -- neither the allocation nor the binding
         depends on it, only the per-slot slab traffic does.
+
+        Knobs: ``GB_BUFFER_FIXED_CAPACITY`` (v9: 1), ``GB_TEMPER_PRELOAD_CELLS``
+        (twin capacity, default 1200; v9: 4800), ``GB_BUFFER_CACHE_PER_SIZE``
+        (default 0) and ``GB_BUFFER_CACHE_MAX`` (default 8, per-size mode only).
+        Called for every band unit and every tempering chunk.
+
+        Args:
+            sorter (BandSorter): Builds / rebinds the buffer.
+            acs (AnalysisContainerArray): The parent ACA (residual / PSD source).
+            specials (xp.ndarray): Packed cell labels to bind, ``(k,)``.
+            fill_slots (xp.ndarray, optional): Slot subset to fill.
+            **kwargs: Buffer-construction kwargs forwarded to
+                ``BandSorter.get_buffer`` (part of the cache signature).
+
+        Returns:
+            SubBandBuffer: The bound buffer (its ``_prop_timer`` set to this
+            propose's timer).
         """
         cache = getattr(self, "_prop_buffer_cache", None)
         if cache is None:
@@ -8815,6 +10492,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Device-wide truth, unlike the cupy pool stats: includes the other
         devices' pools, raw C++/CUDA allocations (sig-het stashes, kernel
         scratch), and other processes on the card.
+
+        Returns:
+            str: ``"device used/total GB: dev0 a/b, ..."``, or ``"cpu"`` without cupy.
         """
         if not self.backend.uses_cupy:
             return "cpu"
@@ -8847,7 +10527,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         at every proposal exit so the memory is available to the other
         modules' moves between GB proposals. Engine bindings and shard
         views cache on the buffers themselves and follow the cache's
-        lifetime in both modes.
+        lifetime in both modes. The v9 launchers leave ``GB_BUFFER_PERSIST``
+        unset (persist). Called at every propose exit.
         """
         persist = os.environ.get("GB_BUFFER_PERSIST", "1") == "1"
         cache = getattr(self, "_prop_buffer_cache", None)
@@ -8884,7 +10565,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self.xp.cuda.runtime.setDevice(main_dev)
 
     def _cell_ll_state_init(self, scheduler, band_temps=None):
-        """Per-unit state for buffer before/after cell ll crediting."""
+        """Per-unit state for buffer before/after cell ll crediting.
+
+        Cell-ll crediting (``GB_CELL_LL_CREDIT``, default on; unset in v9)
+        credits each slot's realized slab lnL change into ``ll_change_log``
+        when the slot switches out (:meth:`_cell_ll_finalize`).
+
+        Args:
+            scheduler (BandScheduler): Supplies ``xp``, ``n_slots`` and
+                ``slot_specials`` (dtype of the label column).
+            band_temps (xp.ndarray, optional): Per-band ladder, kept for the
+                temperature-scaled tolerance at finalize.
+
+        Returns:
+            dict: Per-slot baselines (``ll0``, ``led0``, ``rep0``, ``rj0``, ``spec``,
+            ``open``) plus report accumulators.
+        """
         xp = scheduler.xp
         n = scheduler.n_slots
         spec = scheduler.slot_specials
@@ -8911,7 +10607,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     def _cell_ll_open(self, st, buffer_obj, slots, specials,
                       ll_change_log, prop_counts):
-        """Snapshot slab ll + ledger/repeat baselines for freshly filled slots."""
+        """Snapshot slab ll + ledger/repeat baselines for freshly filled slots.
+
+        Args:
+            st (dict): The :meth:`_cell_ll_state_init` state (edited in place).
+            buffer_obj (SubBandBuffer): Supplies the source-only ``band_likelihoods``.
+            slots (xp.ndarray): Freshly filled slots; no-op when empty.
+            specials (xp.ndarray): Their packed cell labels.
+            ll_change_log (xp.ndarray): ``(ntemps, nwalkers, num_bands)`` ledger.
+            prop_counts (xp.ndarray): ``(2, ntemps, nwalkers, num_bands)`` counts.
+        """
         if len(slots) == 0:
             return
         lls = buffer_obj.band_likelihoods(source_only=True)
@@ -8949,7 +10654,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``fast_wired`` records whether the caller supplied the slot-space
         routing the fast leg needs; a sig-het comp with the reference NOT
         live still answers, just via its chunked delegate, which is exactly
-        the silent case this exists to surface.
+        the silent case this exists to surface. Called after each
+        information-matrix build; re-armed per propose in :meth:`run_proposal`.
+
+        Args:
+            dt (float): Wall time of the build (s).
+            nrows (int): Sources in the build (silent below ``_INFOMAT_MIN_ROWS``).
+            fast_wired (bool): Whether slot routing was supplied.
+            comp: The in-model comp (a sig-het comp has a ``chunked`` attribute).
         """
         if nrows <= 0 or getattr(self, "_infomat_warned", False):
             return
@@ -8999,6 +10711,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # GB_INMODEL_TRACE=N traces the first N repeats of the loudest COLD row.
     # Cost when unset: one getattr.
 
+    # TODO check: keep/remove/document -- debug trace; returns at once unless GB_INMODEL_TRACE>0 (launchers 0)
     def _inmodel_trace(self, rep, kind, curr, new, chol, factors, beta,
                        ll_ref, new_ll, delta_ll, curr_prior, new_logp,
                        lnpdiff, accept, t_i, w_i, b_i, keep_idx, buf):
@@ -9132,13 +10845,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     "[GB_INMODEL_TRACE %s] disabled after %r -- diagnostic "
                     "only, sampling is unaffected.", self.name, exc)
 
+    # TODO check: keep/remove/document -- GB_JUMP_TRACE census only (unset in launchers)
     def _jump_trace_new(self, nt):
+        """Fresh zeroed ``GB_JUMP_TRACE`` accumulators for ``nt`` rungs."""
         xp = self.xp
         z = lambda k: xp.zeros(k, dtype=xp.float64)
         return dict(nt=nt, n=z(nt), n_acc=z(nt), s_d=z(nt), s_d_acc=z(nt),
                     s_d2=z(nt), snr_n=z(self._JT_NSNR),
                     snr_acc=z(self._JT_NSNR), snr_d=z(self._JT_NSNR))
 
+    # TODO check: keep/remove/document -- returns at once unless GB_JUMP_TRACE=1 (unset in launchers)
     def _jump_trace_accum(self, new, cur, accept, t_idx, keep_idx, h_h):
         """One repeat's (|df0|, accepted) into the census; device-only.
 
@@ -9180,6 +10896,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         S["snr_acc"] += xp.bincount(b, weights=ak[:k], minlength=self._JT_NSNR)
         S["snr_d"] += xp.bincount(b, weights=dk[:k], minlength=self._JT_NSNR)
 
+    # TODO check: keep/remove/document -- GB_JUMP_TRACE report; no-op when the census is empty (knob unset)
     def _jump_trace_report(self):
         """Pull the census to host, log it, and clear. Once per propose."""
         S = self._jt
@@ -9226,6 +10943,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         lls in ``ll_change_log``, so the ledger tracks the residual the
         buffer actually holds; the sampled-vs-realized difference is checked
         per in-model repeat right here (and only here).
+
+        Knobs: ``GB_CELL_LL_REP_TOL`` (per-repeat tolerance, default 0.05) and
+        ``GB_CELL_LL_TEMP_SCALED`` (default 1: allowance ``tol / beta``); both
+        unset in v9.
+
+        Args:
+            st (dict): The :meth:`_cell_ll_state_init` state (edited in place).
+            buffer_obj (SubBandBuffer): Supplies the source-only ``band_likelihoods``.
+            slots (xp.ndarray): Slots switching out; no-op when empty.
+            ll_change_log (xp.ndarray): ``(ntemps, nwalkers, num_bands)`` ledger,
+                overwritten in place for the credited cells.
+            prop_counts (xp.ndarray): ``(2, ntemps, nwalkers, num_bands)`` counts.
         """
         if len(slots) == 0:
             return
@@ -9295,7 +11024,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         st["open"][slots] = False
 
     def _cell_ll_report(self, st):
-        """One line per unit: sampled-vs-realized stats over finished cells."""
+        """One line per unit: sampled-vs-realized stats over finished cells.
+
+        Emits ``[GB_CELL_LL <move>]`` (plus the COLD saw-RJ / no-RJ breakdown and
+        a warning when the worst per-repeat rate exceeds its allowance).
+
+        Args:
+            st (dict): The unit's :meth:`_cell_ll_state_init` state.
+        """
         if st["n_done"] == 0 or st["worst"] is None:
             return
         t_i, w_i, b_i, nrep, mm, rate, allowed = st["worst"]
@@ -9335,6 +11071,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 " residual disagree beyond the expected floor for this rung."
             )
 
+    # TODO check: keep/remove/document -- diagnostic; returns at once unless GB_ORTHO_CHECK=1 (launchers 0)
     def _run_ortho_premise_check(self, model, band_sorter, units, remainder):
         """[GB_ORTHO] orthogonality premise check (default OFF).
 
@@ -9479,6 +11216,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Search mode only; outside it the valve does not exist and this
         is the identity.
+
+        Args:
+            specials (xp.ndarray): Packed cell labels.
+            nwalkers (int): The sorter's walker count (the packing width).
+
+        Returns:
+            xp.ndarray: ``specials`` without the cells of shut ``(walker, band)``
+            pairs (the move's ``_rj_band_shutoff_w``).
         """
         if not getattr(self, "search_mode", False):
             return specials
@@ -9493,7 +11238,43 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     def _run_band_unit(self, model, band_sorter, subset, band_temps,
                        ll_change_log, prop_counts, acc_counts):
-        """Drive one parity unit's cells through the sub-band buffer."""
+        """Drive one parity unit's cells through the sub-band buffer.
+
+        Builds the unit's :class:`BandScheduler` (shut pairs removed by
+        :meth:`_staged_specials`; the at-cap birth reserve is left out of the
+        finish budget under the live-cap pick), binds a shared buffer
+        (:meth:`_cached_get_buffer`), opens the cell-ll brackets, applies the
+        group / per-walker shut masks to the pick eligibility, and then runs
+        one of three schedules:
+
+        - DIRECT batch (RJ moves, ``GB_RJ_GROUPED_INMODEL=1`` and
+          ``GB_RJ_DIRECT_BATCH=1``, the code default): rigid cell batches, RJ
+          rounds until exhausted, then one in-model phase over the pooled
+          survivors (with the convergence refill loop when armed).
+        - GROUPED (RJ moves, ``GB_RJ_DIRECT_BATCH=0``, the v9 setting): RJ rounds
+          accumulate survivors into a pending pool whose cells are frozen,
+          flushed through :meth:`_run_in_model_repeats` per provenance class
+          (:func:`_grouped_flush_classes`, level-1 convergence per class).
+        - PER-ROUND (pure in-model moves, or ``GB_RJ_GROUPED_INMODEL`` set to 0): each
+          pick round runs its RJ step (if any) then the in-model repeats.
+
+        RJ steps go to ``_run_rj_step`` (or ``_run_replace_step`` for
+        ``rj_replace``). Other knobs read here: ``GB_RJ_LIVE_CAP_PICK``,
+        ``GB_FSTAT_NM_MULTIDEV`` (per-unit lane build, only with >1 GPU per
+        rank), ``GB_UNIT_POOL_LOG_EVERY`` (default 25), ``GB_CELL_LL_CREDIT``,
+        ``GB_MEMPOOL_FREE_EACH_ROUND``, ``GB_RJ_INMODEL_CHUNK``.
+
+        Args:
+            model (eryn.model.Model): Carries the parent ACA.
+            band_sorter (BandSorter): The propose's main sorter.
+            subset (BandSorter): This unit's subset of ``band_sorter``.
+            band_temps (xp.ndarray): Per-band temperature ladder.
+            ll_change_log (xp.ndarray): ``(ntemps, nwalkers, num_bands)``, updated
+                in place.
+            prop_counts (xp.ndarray): ``(2, ntemps, nwalkers, num_bands)``, updated
+                in place.
+            acc_counts (xp.ndarray): Same shape, updated in place.
+        """
         tm = getattr(self, "_prop_timer", None)
         _sched_specials = subset.special_band_inds
         _cap_m = getattr(self, "_rj_at_cap_mask", None)
@@ -9733,6 +11514,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return int(len(inds_fill))
 
         def _free_mempool_each_round():
+            """Free the cupy pool after a pick round (``GB_MEMPOOL_FREE_EACH_ROUND=1`` only)."""
             # GPU efficiency (parallel-resources plan P1): freeing the WHOLE
             # CuPy pool every pick round forces cudaFree/cudaMalloc churn
             # for every allocation in the next round, so it is now OPT-IN —
@@ -9840,6 +11622,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     self.active_slot_specials = specials
 
                 def add_counts(self, specials, deltas):
+                    """No-op (no finish budgets on the direct path)."""
                     return
 
             pending = []
@@ -9863,7 +11646,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             #
             # The staged-scheduler path (``blocked_specials=pending_specials``
             # at the other call site) always had this. The DIRECT-BATCH path
-            # -- GB_RJ_DIRECT_BATCH=1, the production default -- did not, so
+            # -- GB_RJ_DIRECT_BATCH=1, the code default (then the production
+            # setting; the v9 launchers export 0) -- did not, so
             # the freeze was silently absent wherever it actually mattered.
             _pooled_dev = None
             all_cells = scheduler.cell_specials
@@ -10046,6 +11830,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     )
 
                 def _chunk_iter(_cls):
+                    """Width-capped chunks of one class (column-atomic when vertical)."""
                     if _vert_stage:
                         return _column_chunks(_cls, _im_w, self.num_bands)
                     return (
@@ -10442,7 +12227,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         transitions. The pre-accept per-cell counts are stashed on
         ``self._live_cap_state`` for the same round's transition budget
         adjustment and the in-model pool gate (BOTH must see the
-        pre-accept state).
+        pre-accept state). The live-cap gate needs leaf caps armed, so it is
+        inert in v9 (``GB_LEAF_CAP_START`` exported empty).
+
+        Args:
+            band_sorter (BandSorter): The main sorter (``has_run_rj`` is set for
+                the picked rows).
+            buffer_obj (SubBandBuffer): Resolves each pick's slot (``get_index``).
+            scheduler (BandScheduler): Supplies ``active_slot_specials``.
+            eligible (xp.ndarray): ``(num_sources,)`` bool unit eligibility.
+            blocked_specials (xp.ndarray, optional): Cells frozen by the pending pool.
+
+        Returns:
+            dict or None: Per-pick arrays ``ids``, ``specials``, ``slot_index``,
+            ``temp_inds``, ``walker_inds``, ``band_inds``, ``cap_inds``, ``N_vals``
+            (+ ``cap_nb_inds`` / ``cap_has_nb`` in overlap mode); ``None`` when no
+            candidate is left.
         """
         # Reads special_band_inds / temp_inds / walker_inds directly (and
         # snapshots them into ``picked``), so it must never run with a
@@ -10528,6 +12328,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             out["cap_has_nb"] = _pk_hn
         return out
 
+    # TODO check: keep/remove/document -- dist-birth chain; GB_RJ_FSTAT_DIST_BIRTH off (default + launchers)
     def _log_dist_range(self, band_sorter):
         """``log(width)`` of the birth container's uniform distance (slot 0).
 
@@ -10576,6 +12377,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         replicated reference row, scored at row 0). The per-unit lane
         adapter is bypassed under an override: it is armed for a walker's
         ACA row, not for a shipped row pair.
+
+        The chunked per-row F-stat scorer. The epoch fit uses it (through
+        ``GBSpecialRJFStatGridMove._fstat_call``) only when the sig-het scorer
+        is unavailable: ``FSTAT_USE_SIGHET=0``, an FD basis, or a WDM comp
+        without the sig-het F-stat surface. The v9 runs (WDM, sig-het,
+        ``FSTAT_USE_SIGHET`` unset = 1) score epochs with
+        ``route_sighet_fstat`` instead; the distance-birth centres (off in v9)
+        are the other caller.
+
+        Args:
+            model (eryn.model.Model): Carries the parent ACA.
+            params_phys (xp.ndarray): ``(num_bin, 9)`` physical parameters.
+            walker_ref (int): Reference walker (ACA row when ``holder`` is None).
+            holder (optional): One-row residual / PSD holder to score at row 0.
+
+        Returns:
+            tuple[xp.ndarray, xp.ndarray]: ``(N, M_upper)``, shapes ``(num_bin, 4)``
+            and ``(num_bin, 10)``.
         """
         xp = self.xp
         # Multi-device fan-out (2026-08-27, GPU-imbalance autopsy): when the
@@ -10633,7 +12452,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         heterodyne reference, so the chunked delegate is the correct target
         whether or not a sig-het reference is currently active. The router
         takes the comp OBJECT plus the NAME (not a bound method) so it can
-        resolve each shard's device-local replica before binding.
+        resolve each shard's device-local replica before binding. Used by
+        :meth:`_fstat_NM` and by the per-unit NM lane build in
+        :meth:`_run_band_unit` (only with more than one GPU per rank).
+
+        Returns:
+            tuple: ``(gb_fd_comp, "get_fstat_ll_fd")`` on the FD basis, else
+            ``(wdm_comp, "get_fstat_ll_wdm")`` with the sig-het wrapper unwrapped.
         """
         wdm_comp = getattr(self.gb_wdm_comp, "chunked", self.gb_wdm_comp)
         return (
@@ -10642,6 +12467,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             else (wdm_comp, "get_fstat_ll_wdm")
         )
 
+    # TODO check: keep/remove/document -- dist-birth / replace centres; GB_RJ_FSTAT_DIST_BIRTH off
     def _fstat_dist_centers(self, model, rows_params, walker_ref):
         """F-stat 4-parameter extrinsic maxima for a set of birth/death rows.
 
@@ -10680,6 +12506,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         _tmark_end(tm, "fstat_nm_invert", _t)
         return out
 
+    # TODO check: keep/remove/document -- dist-birth chain; GB_RJ_FSTAT_DIST_BIRTH off (default + launchers)
     def _dist_center_and_width(self, rows_params, A_max, F):
         """``(ln_center, sigma)`` of the slot-0 log proposal from the F-stat.
 
@@ -10712,6 +12539,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # the actual opt_snr clamp exactly as before.
     _SNR_TRUNC_ALPHA_FLOOR = -6.0
 
+    # TODO check: keep/remove/document -- dist-birth chain; GB_RJ_FSTAT_DIST_BIRTH off (default + launchers)
     def _snr_trunc_alpha(self, ln_snr, sigma, snr_limit):
         """Standardized SNR-truncation boundary ``alpha``, floored.
 
@@ -10727,6 +12555,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         alpha = (ln_snr - float(np.log(snr_limit))) / sigma
         return xp.clip(alpha, self._SNR_TRUNC_ALPHA_FLOOR, None)
 
+    # TODO check: keep/remove/document -- only the distance-birth truncnorm / slot-0 density (dist birth off)
     def _std_norm_cdf(self, x):
         """Standard normal CDF ``Phi`` on ``self.xp`` arrays."""
         xp = self.xp
@@ -10736,6 +12565,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             from cupyx.scipy.special import erf
         return 0.5 * (1.0 + erf(xp.asarray(x) / np.sqrt(2.0)))
 
+    # TODO check: keep/remove/document -- only _truncnorm_std_draw (distance birth off)
     def _std_norm_ppf(self, p):
         """Standard normal inverse CDF ``Phi^-1`` on ``self.xp`` arrays."""
         xp = self.xp
@@ -10745,6 +12575,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             from cupyx.scipy.special import erfinv
         return np.sqrt(2.0) * erfinv(2.0 * xp.asarray(p) - 1.0)
 
+    # TODO check: keep/remove/document -- dist-birth / replace draw; GB_RJ_FSTAT_DIST_BIRTH off
     def _truncnorm_std_draw(self, n, alpha):
         """SNR-truncated standardized draw — ONE uniform per row.
 
@@ -10768,6 +12599,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         z = self._std_norm_ppf(p)
         return z if _gb_use_distance(self) else -z
 
+    # TODO check: keep/remove/document -- dist-birth density; GB_RJ_FSTAT_DIST_BIRTH off
     def _slot0_log_proposal(self, slot0_vals, ln_center, sigma, alpha=None):
         """``log g`` of the slot-0 value under the F-stat lognormal proposal.
 
@@ -10808,6 +12640,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             logg = xp.where(side > alpha + 1e-10, -1e300, logg)
         return logg
 
+    # TODO check: keep/remove/document -- replace dist-birth centre block only (rj_replace + dist birth; off)
     def _replace_slot0_floor_eps(self) -> float:
         """Uniform-floor mixture weight for the REPLACE move's slot-0 proposal.
 
@@ -10826,6 +12659,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """
         return float(os.environ.get("GB_REPLACE_SLOT0_FLOOR_EPS", "0.05"))
 
+    # TODO check: keep/remove/document -- replace dist-birth centre block only (rj_replace + dist birth; off)
     def _slot0_range(self, band_sorter):
         """``(lo, hi)`` support of the birth container's uniform slot-0 prior.
 
@@ -10852,6 +12686,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._slot0_range_cache = val
         return val
 
+    # TODO check: keep/remove/document -- replace dist-birth centre block only (rj_replace + dist birth; off)
     def _slot0_log_proposal_floored(self, slot0_vals, ln_center, sigma,
                                     alpha, band_sorter, eps):
         """``log g`` of slot 0 under the FLOOR-MIXED (truncated) lognormal.
@@ -10894,6 +12729,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     _LOG_EXTR_UNIFORM_VOL = float(
         np.log(2.0 * np.pi) + np.log(2.0) + np.log(np.pi))
 
+    # TODO check: keep/remove/document -- read only inside the dist-birth / replace centre blocks (both off in v9)
     def _pe_extr_active(self) -> bool:
         """True when THIS move draws the birth extrinsics in PE mode.
 
@@ -10905,10 +12741,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         (GB_PE_EXTRINSIC_DRAW, default ON), and only in their strict-PE
         flavor. Everything the flag changes routes through this single
         gate, so False (the constructor default) is bit-identical to the
-        pre-flag code path.
+        pre-flag code path. Its readers sit inside the F-stat distance-birth
+        block of ``_run_rj_step`` and the replace step's centre block, so the
+        flag is inert unless ``GB_RJ_FSTAT_DIST_BIRTH`` (or ``rj_replace``) is
+        on; neither is in the v9 runs.
         """
         return bool(getattr(self, "pe_extrinsic_draw", False))
 
+    # TODO check: keep/remove/document -- PE extrinsic draw helper (dist birth / replace only; off in v9)
     def _pe_extr_floor_eps(self) -> float:
         """Uniform-floor mixture weight of the PE extrinsic proposal.
 
@@ -10921,6 +12761,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """
         return float(os.environ.get("GB_PE_EXTRINSIC_FLOOR_EPS", "0.05"))
 
+    # TODO check: keep/remove/document -- PE extrinsic draw helper (dist birth / replace only; off in v9)
     def _pe_extr_sigma_geom(self) -> float:
         """O(1) geometric factor of the extrinsic proposal widths.
 
@@ -10935,6 +12776,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """
         return float(os.environ.get("GB_PE_EXTRINSIC_SIGMA_GEOM", "2.0"))
 
+    # TODO check: keep/remove/document -- PE extrinsic draw helper (dist birth / replace only; off in v9)
     def _pe_extr_draw(self, phi0_c, iota_c, psi_c, ln_snr):
         """Draw ``(phi0, cos_iota, psi)`` about the per-row maximizers."""
         from ...sampling.fstat_proposal import pe_extrinsic_rvs
@@ -10942,6 +12784,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         xp = self.xp
 
         def _rand(m):
+            """``m`` uniforms from the cupy/numpy global RNG, on ``xp``."""
             return xp.asarray(cp.random.rand(m))
 
         return pe_extrinsic_rvs(
@@ -10949,6 +12792,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             eps=self._pe_extr_floor_eps(), geom=self._pe_extr_sigma_geom(),
             rand=_rand)
 
+    # TODO check: keep/remove/document -- PE extrinsic draw helper (dist birth / replace only; off in v9)
     def _pe_extr_logg(self, phi0, cos_iota, psi, phi0_c, iota_c, psi_c,
                       ln_snr):
         """Log density of the PE extrinsic proposal (forward or reverse)."""
@@ -10958,6 +12802,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             phi0, cos_iota, psi, phi0_c, iota_c, psi_c, ln_snr,
             eps=self._pe_extr_floor_eps(), geom=self._pe_extr_sigma_geom())
 
+    # TODO check: keep/remove/document -- dist-birth / replace extrinsics only; GB_RJ_FSTAT_DIST_BIRTH off
     def _pe_or_pin_extrinsics(self, params, rows, phi0_max, iota_max,
                               psi_max, ln_snr, active=None):
         """Write the birth extrinsics for ``rows`` in place; return the RJ
@@ -10998,6 +12843,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         params[rows, 3] = phi0_max % (2 * np.pi)
         return 0.0
 
+    # TODO check: keep/remove/document -- dist-birth / replace extrinsics only; GB_RJ_FSTAT_DIST_BIRTH off
     def _pe_death_extr_corr(self, params, rows, phi0_max, iota_max,
                             psi_max, ln_snr, active=None):
         """Death-side mirror of :meth:`_pe_or_pin_extrinsics`.
@@ -11024,6 +12870,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             phi0_max, iota_max, psi_max, ln_snr)
         return lg + self._LOG_EXTR_UNIFORM_VOL
 
+    # TODO check: keep/remove/document -- replace dist-birth centre block only (rj_replace + dist birth; off)
     def _replace_pe_extr_active(self) -> bool:
         """Does the REPLACE move DRAW-and-price its extrinsics?
 
@@ -11050,6 +12897,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return (bool(getattr(self, "replace_pe_stage", False))
                 and self._pe_extr_active())
 
+    # TODO check: keep/remove/document -- replace dist-birth centre block only (rj_replace + dist birth; off)
     def _replace_ctr_mode(self) -> str:
         """Extrinsic-center machinery for the REPLACE move: ``"perrow"``
         (the SEARCH default) or ``"table"`` (the PE default).
@@ -11120,7 +12968,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         densities evaluated from the same law inside one mode block —
         detailed balance stays exact. ``GB_REPLACE_INCELL=uniform``
         restores the historical draw. Read ONLY by
-        :meth:`_run_replace_step`; births/deaths always keep uniform.
+        :meth:`_run_replace_step`; births/deaths always keep uniform. The
+        replace moves are a stock default (``GB_SEARCH_RJ_REPLACE`` /
+        ``GB_PE_RJ_REPLACE`` default on) but the v9 launchers export 0, so
+        no replace move exists there.
+
+        Returns:
+            str: ``"trilinear"`` or ``"uniform"``.
+
+        Raises:
+            ValueError: On any other ``GB_REPLACE_INCELL`` value.
         """
         mode = os.environ.get("GB_REPLACE_INCELL", "trilinear").strip().lower()
         if mode not in ("trilinear", "uniform"):
@@ -11170,7 +13027,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         :meth:`_replace_phase_max_scoring`: this knob's answer is vetoed
         when the extrinsics were DRAWN and priced, because the rotation
         would overwrite an angle whose proposal density is charged in the
-        RJ factors. Read ONLY by :meth:`_run_replace_step`.
+        RJ factors. Read ONLY by :meth:`_run_replace_step` (through
+        :meth:`_replace_phase_max_scoring`). The v9 launchers export
+        ``GB_REPLACE_PHASE_MAX=auto`` but build no replace move.
+
+        Returns:
+            bool: Whether the operator asks for phase-maximized replace scoring.
         """
         mode = os.environ.get("GB_REPLACE_PHASE_MAX", "auto").strip().lower()
         if mode in ("0", "off", "false"):
@@ -11194,6 +13056,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         exactly the reason the PE birth path sets
         ``_pin_mode = not self._pe_extr_active()``. The draw wins; the
         rotation is dropped (and the operator told once).
+
+        Args:
+            pe_extr_active: Whether this replace round DREW its extrinsics
+                (:meth:`_replace_pe_extr_active`).
+
+        Returns:
+            bool: The scoring mode (False whenever the draw is active).
         """
         if not self._replace_phase_max():
             return False
@@ -11210,6 +13079,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return False
         return True
 
+    # TODO check: keep/remove/document -- returns False without rj_fstat_dist_birth (off by default, launchers 0)
     def _replace_fstat_max(self) -> bool:
         """SEARCH-mode maximize-and-pretend-uniform replace candidates?
 
@@ -11256,6 +13126,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             or bool(getattr(self, "replace_search_stage", False))
         )
 
+    # TODO check: keep/remove/document -- only under _replace_fstat_max (needs dist birth; off in v9)
     def _replace_slot0_pin(self, ln_center, xp):
         """Slot-0 value pinned AT the F-stat center, in the sampling basis.
 
@@ -11279,7 +13150,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         budget when every other gate already passed. n <= 1 is the
         legacy every-eligible-propose behavior. On a fresh process the
         first eligible propose always fires (ladder adaptation starts
-        immediately after any restart).
+        immediately after any restart). In v9 only ``vgb_pe`` reaches it (the
+        gb moves have ``run_swaps`` False), and the recipe passes
+        ``temper_every_proposes`` from ``GB_TEMPER_EVERY_PROPOSES=1``, so it
+        always fires.
+
+        Returns:
+            bool: Whether the swap stage runs on this propose.
         """
         n = getattr(self, "temper_every_proposes", 1)
         if n <= 1:
@@ -11303,6 +13180,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         untouched -- v8 stays bit-identical. Search-only: a PE replace move is
         pe-named (no "search"), so it is never a host (deterministic injection
         stays out of detailed-balance PE, per the search-waiver policy).
+        Checked at every propose; False in v9 (``GB_COLD_RESEED_EVERY`` unset and
+        no replace move).
+
+        Returns:
+            bool: ``GB_COLD_RESEED_EVERY > 0`` and ``rj_replace`` and "search" in
+            the move name.
         """
         try:
             n = int(os.environ.get("GB_COLD_RESEED_EVERY", "0"))
@@ -11310,6 +13193,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             n = 0
         return n > 0 and bool(self.rj_replace) and ("search" in self.name)
 
+    # TODO check: keep/remove/document -- needs GB_COLD_RESEED_EVERY>0 + a search rj_replace (neither in the launchers)
     def _cold_reseed_fire(self) -> bool:
         """Firing gate for the reseed+replace host: True on every Nth propose.
 
@@ -11326,6 +13210,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._cold_reseed_count = c
         return (c % n) == 0
 
+    # TODO check: keep/remove/document -- only when the reseed host fires (GB_COLD_RESEED_EVERY unset in launchers)
     def _cold_reseed_replace_passes(self) -> int:
         """How many multi-pass replace sweeps per firing (``GB_COLD_RESEED_REPLACE_PASSES``).
 
@@ -11363,7 +13248,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         iterations. 6-mo TODO: reassess search+pe vs search-only.
         Counters persist through restarts via the stored band record
         (see :meth:`_update_band_shutoff`); only an unstored process
-        re-earns from scratch.
+        re-earns from scratch. In v9 (``GB_RJ_BAND_SHUTOFF_SCOPE=search``) it is
+        True only on ``rj_fstat_search``, the designated (``leaf_cap_update``)
+        search RJ move.
+
+        Returns:
+            bool: Whether this move ticks and enforces the per-band valve.
         """
         # DESIGNATION: ``leaf_cap_update`` marks the single per-iteration
         # designated GB move (it is True in exactly one place, the base
@@ -11419,7 +13309,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         permanently, with the status line reading "1/100 iters since
         revive" forever after. A valve that resets faster than it can arm
         is not a valve. The epoch trigger is now OFF by default
-        (``GB_RJ_BAND_SHUTOFF_EPOCH_REVIVE=1`` restores it).
+        (``GB_RJ_BAND_SHUTOFF_EPOCH_REVIVE=1`` restores it). The v9 launchers
+        export ``GB_RJ_BAND_SHUTOFF_RESET_ITERS=10``.
+
+        Returns:
+            int: The check interval (``>= 0``; 10 on an unparseable value).
         """
         try:
             n = int(os.environ.get("GB_RJ_BAND_SHUTOFF_RESET_ITERS", "10"))
@@ -11433,7 +13327,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Default OFF (user ruling 2026-09-27). See
         :meth:`_band_shutoff_reset_iters` for the measurement that
-        retired it.
+        retired it. Unset in the v9 launchers.
+
+        Returns:
+            bool: True unless ``GB_RJ_BAND_SHUTOFF_EPOCH_REVIVE`` is ``0`` / ``""`` / ``no``.
         """
         return os.environ.get(
             "GB_RJ_BAND_SHUTOFF_EPOCH_REVIVE", "0") not in ("0", "", "no")
@@ -11443,7 +13340,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         ``GB_RJ_BAND_SHUTOFF_NOISE_TOL``, default 1e-3 (0.1%). Compared
         against the largest RELATIVE move of any cold-chain instrument or
-        foreground parameter since the last revival check.
+        foreground parameter since the last revival check. Unset in v9.
+
+        Returns:
+            float: ``abs`` of the knob (1e-3 on an unparseable value).
         """
         try:
             return abs(float(os.environ.get(
@@ -11463,6 +13363,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         any walker's noise counts. The band-shutoff question is
         "could a source here be detectable now", and that is answered
         against whichever noise realisation the walker carries.
+
+        Args:
+            state (GFState): The global-fit state (``branches_coords`` is read).
+
+        Returns:
+            np.ndarray or None: Concatenated cold-row ``psd`` then ``galfor`` coords.
         """
         parts = []
         for name in ("psd", "galfor"):
@@ -11491,7 +13397,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``changed`` is True when the fingerprint is unavailable or its
         shape moved (both mean "cannot prove the noise is fixed", and the
         permissive direction is to revive -- a band wrongly reopened costs
-        proposals, a band wrongly held shut costs sources).
+        proposals, a band wrongly held shut costs sources). In v9 the noise
+        is pinned except during ``gb_search_2``'s cycle-end noise search, so
+        revivals happen only while the noise moves.
+
+        Args:
+            state (GFState): The global-fit state.
+
+        Returns:
+            tuple[bool, float]: ``(changed, max_rel)``; ``max_rel`` is NaN when
+            there is no comparable baseline.
         """
         cur = self._band_shutoff_noise_fingerprint(state)
         d = self.__dict__
@@ -11525,6 +13440,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         valve would be unable to revive for its first
         ``GB_RJ_BAND_SHUTOFF_RESET_ITERS`` iterations no matter how fast
         the noise was moving.
+
+        Args:
+            state (GFState): The global-fit state.
         """
         if self.__dict__.get("_band_shutoff_noise_ref") is None:
             fp = self._band_shutoff_noise_fingerprint(state)
@@ -11554,7 +13472,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         an unrecognised environment variable is simply ignored, so an old
         runbook exporting the legacy name would quietly fall back to the
         default instead of failing -- the exact downgrade the repo's
-        ENV_ALIASES policy exists to prevent.
+        ENV_ALIASES policy exists to prevent. The v9 launchers export
+        ``GB_RJ_BAND_SHUTOFF_ITERS=2``.
+
+        Returns:
+            int: The streak length (``<= 0`` disables the valve).
         """
         v = os.environ.get("GB_RJ_BAND_SHUTOFF_ITERS")
         if v is None:
@@ -11585,9 +13507,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         permanent property of the band, so when that evidence goes stale
         the OFF flag has to go with it.
 
-        The two triggers live in :meth:`_band_shutoff_epoch_sync` (a new
-        F-stat epoch) and :meth:`_update_band_shutoff` (elapsed
-        iterations). This method is the shared effect and is deliberately
+        The triggers live in :meth:`_band_shutoff_epoch_sync` (a new
+        F-stat epoch; off by default since 2026-09-27) and
+        :meth:`_update_band_shutoff` (every ``GB_RJ_BAND_SHUTOFF_RESET_ITERS``
+        iterations, only if the noise moved); the recipe also calls it at a
+        stage entry with ``reset_valves``. This method is the shared effect and is deliberately
         ALL-OR-NOTHING: the streaks of bands that were still ON are
         cleared too, because they were accumulated against the same stale
         evidence.
@@ -11610,6 +13534,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the monitor's cap-plot overlay parses that prefix
         (``\\[GB_BAND_SHUTOFF[^\\]]*\\] band (\\d+)``) to paint band rows
         red, so a revival must not read to it as one more shutoff.
+
+        Args:
+            reason (str): Quoted in the ``[GB_BAND_REVIVE <move>]`` line.
+
+        Returns:
+            int: Number of bands whose births came back on.
         """
         d = self.__dict__
         shut = d.get("_rj_band_shutoff")
@@ -11677,6 +13607,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         still advances (the bookkeeping below is unconditional) so that
         turning the trigger back on mid-run cannot fire a spurious
         revival for an epoch that was adopted while it was off.
+
+        Returns:
+            int: Bands revived (always 0 with the trigger off, the v9 setting).
         """
         d = self.__dict__
         epoch = d.get("_fstat_epoch")
@@ -11703,6 +13636,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         a tempered sub-state (simple-API branches) or a direct unit-test
         call. The valve then behaves exactly as it did before persistence
         existed: in-memory counters for the life of the process.
+
+        Args:
+            state (GFState or None): The global-fit state.
+
+        Returns:
+            dict or None: The ``band_info`` of this move's branch sub-state.
         """
         if state is None:
             return None
@@ -11716,6 +13655,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Copies OUT of ``band_info`` rather than aliasing it: the update
         rebinds ``_band_occ_streak`` with ``np.where``, so an alias would
         silently stop tracking after the first tick.
+
+        Args:
+            bi (dict): The GB ``band_info`` (missing fields are created by
+                :func:`~lisatools.globalfit.state.ensure_band_shutoff_fields`).
+
+        Returns:
+            str: The origin token ``ensure_band_shutoff_fields`` returns.
         """
         origin = ensure_band_shutoff_fields(bi, self.num_bands)
         self._band_occ_streak = np.array(bi["band_occ_streak"], dtype=np.int64)
@@ -11742,6 +13688,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         propose-END tick (:meth:`_update_band_shutoff`). A ``state`` with no
         GB ``band_info`` (no persistence channel) adopts nothing and leaves
         the guard unset.
+
+        Args:
+            state (GFState or None): The global-fit state.
+
+        Returns:
+            bool: True when this call restored the record.
         """
         bi = self._band_shutoff_band_info(state)
         if bi is None or getattr(self, "_band_shutoff_loaded", False):
@@ -11786,6 +13738,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ADOPTED epoch, so (with the epoch trigger armed) an epoch that
         advanced while the process was down revives the stale valve before
         the first RJ step, not after it.
+
+        Args:
+            state (GFState): The global-fit state.
+
+        Returns:
+            bool: True when this call restored the record.
         """
         if not self._band_shutoff_enabled() or self._band_shutoff_iters() <= 0:
             return False
@@ -11795,7 +13753,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """Write the valve record back to ``band_info`` (-> sub_backend/gb).
 
         Plain numpy only -- ``band_info`` is deepcopied and pickled with the
-        state, so no device array or array module may land here.
+        state, so no device array or array module may land here. Writes
+        ``band_occ_streak``, ``band_occ_last``, ``band_rj_shutoff``,
+        ``band_shutoff_since_revive`` and ``band_shutoff_epoch``.
+
+        Args:
+            bi (dict): The GB ``band_info`` (edited in place).
         """
         d = self.__dict__
         bi["band_occ_streak"] = np.asarray(self._band_occ_streak, dtype=np.int64)
@@ -11816,8 +13779,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         propose end of the (single) designated move. Rules, exactly as
         ruled:
 
-        - occupancy == 0 for ``GB_RJ_BAND_SHUTOFF_ITERS`` (default 5)
-          consecutive iterations -> the band is shut off (nothing ever
+        - occupancy == 0 for ``GB_RJ_BAND_SHUTOFF_ITERS`` (default 2 since
+          2026-09-27, v9: 2) consecutive iterations -> the band is shut off (nothing ever
           sticks). **This is the ONLY qualifying state.**
         - ANY occupancy >= 1, or ANY occupancy change, resets the streak.
           A band that holds a source is never shut off, whatever its cap
@@ -11837,15 +13800,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Shutoff is NO LONGER permanent for the process (USER RULING
         2026-08-28, superseding "revival semantics deliberately not
-        implemented"): the shut-off set and the streaks are cleared
-        whenever a NEW F-stat epoch is adopted (new proposal grid AND a
-        new noise/foreground profile, so a previously unreachable band
-        may now be reachable) or after ``GB_RJ_BAND_SHUTOFF_RESET_ITERS``
-        iterations without one. See :meth:`_band_shutoff_revive`. A
-        restart still re-earns from scratch (counters are in-memory).
+        implemented"): the shut-off set and the streaks are cleared by
+        :meth:`_band_shutoff_revive`. Since 2026-09-27 the triggers are a
+        check every ``GB_RJ_BAND_SHUTOFF_RESET_ITERS`` iterations that
+        revives only if the noise model moved (:meth:`_band_shutoff_noise_changed`),
+        plus the new-F-stat-epoch trigger when ``GB_RJ_BAND_SHUTOFF_EPOCH_REVIVE``
+        is armed (off by default). The counters persist across restarts
+        through the GB ``band_info`` record (adopted once per process,
+        written back every tick).
         Emits the LOG CONTRACT prefix the monitor's cap-plot overlay
         parses (``[GB_BAND_SHUTOFF <move>] band <b> ...``); revivals use
-        the distinct ``[GB_BAND_REVIVE <move>] ...`` prefix.
+        the distinct ``[GB_BAND_REVIVE <move>] ...`` prefix. Ticked once per
+        propose at propose end on ``rj_fstat_search`` in v9
+        (``GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0``, ``_ITERS=2``, ``_RESET_ITERS=10``).
+
+        Args:
+            occ_max (array-like of int): ``(num_bands,)`` cold-chain occupancy,
+                max over walkers.
+            state (GFState, optional): Supplies the persistence channel; ``None``
+                keeps the counters in memory only.
         """
         occ_max = np.asarray(occ_max)
         # ---- PERSISTENCE (user proposal 2026-08-29) ----------------------
@@ -11975,8 +13948,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # drift can carry a leaf across an edge INTO a frozen band. That
         # entry is not a birth, so the freeze does not gate it; and since
         # the freeze blocks deaths too, no move could then remove it. It
-        # would sit there until the next global revival (up to
-        # RESET_ITERS=100 iterations).
+        # would sit there until the next global revival (RESET_ITERS was 100
+        # when this was written; the default is 10 since 2026-09-27, and a
+        # check revives only if the noise moved).
         #
         # So make the invariant STANDING: any frozen band found holding a
         # cold leaf is released on the spot. Its streak is already 0 (the
@@ -12069,6 +14043,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Leaves are binned by their OWN f0 (searchsorted on band_edges,
         same convention as the BandSorter); alive leaves outside the
         band range are ignored.
+
+        The occupancy input of the high-f barren-band birth shutoff
+        (:meth:`_update_band_shutoff`): called by
+        :meth:`_propose_orchestrated`, :meth:`_propose_legacy` and
+        :meth:`_propose_zero_peak_skip` whenever
+        :meth:`_band_shutoff_enabled` holds.
+
+        Args:
+            state (GFState): State whose work branch is read (temperature 0
+                only; ``coords[..., 1]`` is f0 in mHz).
+
+        Returns:
+            np.ndarray: Shape ``(num_bands,)``, int64: for each band, the
+            largest number of alive cold-chain leaves any one walker holds
+            in it.
         """
         work_b = self._work_branch(state)
         inds0 = np.asarray(_to_numpy(work_b.inds[0]), dtype=bool)
@@ -12109,6 +14098,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``epoch`` silently degrades to ``unit`` for any move that has no
         table (an RJ fstat-birth move that never fits a grid, or an epoch
         whose support was empty) — see :meth:`_fstat_ctr_table_active`.
+
+        Read from ``GB_FSTAT_CTR_MODE`` (default ``epoch``; the 9mo / 12mo
+        launchers export ``epoch``) by :meth:`_fstat_ctr_table_active`,
+        :meth:`_fstat_ctr_smear`, ``GBSpecialRJFStatGridMove._install_ctr_table``
+        and the [FSTAT_CTR] log lines of the propose bodies. The centre
+        tables matter only to the distance-birth / replace paths
+        (``GB_RJ_FSTAT_DIST_BIRTH``, off in the launchers).
+
+        Returns:
+            str: ``"epoch"`` or ``"unit"`` (lower-cased, stripped).
+
+        Raises:
+            ValueError: When ``GB_FSTAT_CTR_MODE`` is anything else.
         """
         mode = os.environ.get("GB_FSTAT_CTR_MODE", "epoch").strip().lower()
         if mode not in ("epoch", "unit"):
@@ -12132,12 +14134,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         (:meth:`_slot0_log_proposal`), so the proposal stays an exactly
         normalized (truncated) lognormal — just broader — and detailed
         balance is untouched.
+
+        In the 9mo / 12mo runs (``GB_FSTAT_CTR_SMEAR`` unset, epoch mode)
+        this is 2.0 and its only live reader is the [FSTAT_CTR] install line
+        of ``GBSpecialRJFStatGridMove._install_ctr_table``; the smeared-sigma
+        consumers sit behind ``GB_RJ_FSTAT_DIST_BIRTH`` (off).
+
+        Returns:
+            float: The sigma multiplier.
         """
         raw = os.environ.get("GB_FSTAT_CTR_SMEAR", "").strip()
         if raw:
             return float(raw)
         return 2.0 if self._fstat_ctr_mode() == "epoch" else 1.5
 
+    # TODO check: keep/remove/document -- unit-open centre cache only; needs GB_RJ_FSTAT_DIST_BIRTH=1 (off by default and in the launchers)
     def _unit_cache_smear(self) -> float:
         """Smear for the UNIT-OPEN cache path specifically.
 
@@ -12161,11 +14172,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``None`` means "fall back to the unit hoist / per-round compute":
         either the mode knob selects ``unit``, or this move has no table
         (it never fitted a grid, or the epoch had no drawable f0 support).
+
+        Called every orchestrated propose to fill the ``ctr_table`` flag of
+        the rank directive, and by :meth:`_fstat_ctr_hoist_wanted`,
+        :meth:`_flush_epoch_artifacts`, the [FSTAT_CTR] log lines and the
+        distance-birth / replace centre blocks.
+
+        Returns:
+            dict or None: The installed table (device-resident arrays keyed
+            ``f0_mHz``, ``ln_snr``, ``ln_A_max``, ``phi0``, ``iota``,
+            ``psi``, ...), or ``None``.
         """
         if self._fstat_ctr_mode() != "epoch":
             return None
         return getattr(self, "_fstat_ctr_table", None)
 
+    # TODO check: keep/remove/document -- distance-birth / replace centres only; GB_RJ_FSTAT_DIST_BIRTH off (default and launchers)
     def _fstat_ctr_table_lookup(self, rows_params):
         """Per-row centers from the epoch table — NEAREST node in f0.
 
@@ -12209,6 +14231,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return (t["phi0"][pos], t["iota"][pos], t["psi"][pos],
                 ln_center, sigma, ln_snr)
 
+    # TODO check: keep/remove/document -- distance-birth / replace centre solve (precompute + miss fallback); GB_RJ_FSTAT_DIST_BIRTH off
     def _fstat_ctr_compute(self, model, params, smear=None):
         """Batched F-stat center computation for a set of rows.
 
@@ -12270,12 +14293,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                    _t_map)
         return phi0, iota, psi, ln_center, sigma, ln_snr
 
+    # TODO check: keep/remove/document -- _fstat_ctr_audit helper only; GB_FSTAT_CTR_AUDIT unset (launchers keep it absent)
     @staticmethod
     def _circ_absdiff(a, b, period, xp):
         """Shortest-arc |a-b| on a circle of the given period."""
         d = xp.abs(a - b) % period
         return xp.minimum(d, period - d)
 
+    # TODO check: keep/remove/document -- _fstat_ctr_audit helper only; GB_FSTAT_CTR_AUDIT unset (launchers keep it absent)
     @staticmethod
     def _absdiff_summary(d, xp):
         """``(median, p90, max)`` of a delta array; NaNs on an empty one."""
@@ -12284,6 +14309,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return (float(xp.median(d)), float(xp.percentile(d, 90)),
                 float(d.max()))
 
+    # TODO check: keep/remove/document -- GB_FSTAT_CTR_AUDIT reader; only _fstat_ctr_audit; the knob is unset in the launchers
     def _fstat_ctr_audit_rows(self) -> int:
         """How many rows to audit table-vs-per-row (0 = off, the default).
 
@@ -12300,6 +14326,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         except ValueError:
             return 0
 
+    # TODO check: keep/remove/document -- diagnostic; only _precompute_fstat_centers (distance birth off); GB_FSTAT_CTR_AUDIT unset
     def _fstat_ctr_audit(self, params, phi0, iota, psi, ln_center, ln_snr):
         """DIAGNOSTIC: how far is the epoch TABLE from the per-row solve?
 
@@ -12395,6 +14422,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             f(d_lnc), f(d_lnsnr), f(d_f0), f(d_mc),
         )
 
+    # TODO check: keep/remove/document -- only _run_band_unit under _fstat_ctr_hoist_wanted, which is False without GB_RJ_FSTAT_DIST_BIRTH (off)
     def _precompute_fstat_centers(self, model, band_sorter, subset):
         """Unit-open F-stat center cache for the distance-birth proposal.
 
@@ -12550,6 +14578,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             tm.count("fstat_ctr_atcap_excluded", _n_unit - _n_rows)
         return out
 
+    # TODO check: keep/remove/document -- unit-cache gather of the distance-birth / replace blocks only; GB_RJ_FSTAT_DIST_BIRTH off
     def _fstat_ctr_lookup(self, rows_ids, model=None, band_sorter=None):
         """Cache positions of main-sorter ``rows_ids`` (verified gather).
 
@@ -12641,6 +14670,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         same lifetime as ``has_run_rj``). Returns the filtered ``picked``
         dict, or ``None`` when nothing survives. Fraction 1.0 is a
         pass-through (bit-identical to the historical behavior).
+
+        Called at the top of every :meth:`_run_rj_step`. The fraction is the
+        move's ``rj_flip_fraction`` (search moves: ``GB_SEARCH_RJ_FLIP_FRACTION``,
+        launchers 1.0, so a pass-through; PE moves: set to
+        ``GB_PE_RJ_FLIP_FRACTION`` = 0.1 at the full_pe entry by the
+        recipe). The allowed mask keeps ``max(1, round(fraction * n))``
+        sorter rows, drawn by a device permutation.
+
+        Args:
+            band_sorter (BandSorter): The per-propose sorter; its
+                ``_rj_flip_allowed`` mask is created on the first call.
+            picked (dict): Pick-round rows (``ids``, ``slot_index``,
+                ``N_vals``, ...; every value indexed along the picked rows).
+
+        Returns:
+            dict or None: ``picked`` itself (fraction >= 1, or every row
+            kept), a filtered copy, or ``None`` when no row survives.
         """
         if self.rj_flip_fraction >= 1.0:
             return picked
@@ -12668,15 +14714,65 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``<r|h> - 0.5<h|h>``; deaths (``inds == True``) score the removal
         delta ``-<r|h> - 0.5<h|h>`` (see
         :meth:`SubBandBuffer.get_removal_ll`). Detailed-balance factors are
-        the pre-computed ±logpdf of the RJ proposal distribution. On accept,
-        ``inds`` flips and the cell residual is updated through
-        ``fill_template`` with the appropriate sign.
+        the pre-computed ±logpdf of the RJ proposal distribution (the
+        sorter's ``factors``), plus the distance-birth density correction
+        when that path is on. On accept, ``inds`` flips, the source uid is
+        issued / retired (:meth:`_rj_flip_uids`), the (phase-rotated)
+        coordinates are written back to the sorter, and the cell residual is
+        updated through the buffer's add / remove-sources calls.
 
         ``rj_flip_fraction`` < 1: births are thinned EARLY (unit-open
         subset exclusion — gated dead rows never enter the pick pool), so
         only the DEATH attempts of picked alive rows are gated here (see
         :meth:`_apply_rj_flip_fraction`); the in-model repeats that follow
         are NOT restricted (gated alive rows still pool).
+
+        Step order: flip-fraction gate; prior gate (global prior, removal-only
+        births forced to -inf, births whose drawn f0 leaves the cell window,
+        per-cell leaf cap when armed); scoring (distance-birth centres when
+        ``rj_fstat_dist_birth``, else phase-maximized births when
+        ``phase_maximize``); death-side capture harvest
+        (:meth:`_harvest_death_capture`); the opt-SNR prior floor on births
+        (:meth:`_snr_lim_for_rows`, detected SNR too when
+        ``snr_rej_detected``); the MH test
+        ``beta * dll + dlogp + factors >= ln u``, with out-of-prior accepts
+        rejected; the [GB_ACCEPT rj-split] census; the accept block (cap
+        diagnostics, live cap-transition budget updates of ``scheduler``,
+        buffer residual updates). Timed with ``rj_*`` marks of the propose
+        timer. Debug env knobs read: ``GB_RJ_BIRTH_DEBUG``, ``GB_RJ_TRACE``,
+        ``GB_RJ_SNR_TRUNC_DIST`` (default 1, distance birth only).
+
+        In the 9mo / 12mo runs the distance birth is off
+        (``GB_RJ_FSTAT_DIST_BIRTH=0``), leaf caps are off, births are
+        phase-maximized when the move's ``phase_maximize`` is set (the
+        search stage profiles set it per stage), and ``GB_RJ_AMP_MAXIMIZE=0``
+        keeps the legacy amplitude pin off. Called by :meth:`_run_band_unit`
+        (all three schedules).
+
+        Args:
+            model (eryn.model.Model): Carries the parent ACA (distance-birth
+                centre solve only).
+            band_sorter (BandSorter): The propose's main sorter; ``inds``,
+                ``coords`` and the source uids are updated in place.
+            buffer_obj (SubBandBuffer): The bound sub-band buffer that
+                scores rows and holds the cell residuals.
+            band_temps (xp.ndarray): Inverse temperatures, indexed
+                ``[band, temp]``.
+            picked (dict): The pick round's rows (``ids``, ``slot_index``,
+                ``N_vals``, ``temp_inds``, ``walker_inds``, ``band_inds``,
+                ``cap_inds``, ``specials``, ...).
+            ll_change_log (xp.ndarray): ``(ntemps, nwalkers, num_bands)``
+                accepted-dll accumulator, updated in place.
+            prop_counts (xp.ndarray): ``(2, ntemps, nwalkers, num_bands)``;
+                row 0 (RJ) is incremented in place.
+            acc_counts (xp.ndarray): Same shape; row 0 incremented on accept.
+            round_i (int): Pick-round index (debug hooks only).
+            scheduler (BandScheduler or None): The unit's scheduler, whose
+                finish budget follows live cap transitions; ``None`` skips
+                that update.
+
+        Returns:
+            None: Everything is written in place.
         """
         picked = self._apply_rj_flip_fraction(band_sorter, picked)
         if picked is None:
@@ -12693,6 +14789,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         _t_mark = time.perf_counter()
 
         def _mark(_name):
+            """Add the wall time since the previous mark to stage ``_name``."""
             nonlocal _t_mark
             if _tm_rj is None:
                 return
@@ -12896,6 +14993,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _t_kg = None
 
             def _eval(rows, phase_maximize):
+                """Score ``rows`` into ``d_h`` / ``h_h``; return the rows the kernel dropped."""
                 buffer_obj.get_ll(
                     params[rows], slots[rows], slots[rows], N_vals[rows],
                     phase_maximize=phase_maximize,
@@ -13543,6 +15641,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ~0.2%, could never be checked at full band). Device arrays in,
         small host scalars stored; printed + reset by
         :meth:`_replace_census_report` at propose end.
+
+        Called once per round by :meth:`_run_replace_step` (stock default
+        ``rj_replace`` / ``rj_replace_pe``; the 9mo / 12mo launchers build
+        neither: ``GB_SEARCH_RJ_REPLACE=0``, ``GB_PE_RJ_REPLACE=0``).
+
+        Args:
+            t_i (xp.ndarray): Temperature index of each proposed swap.
+            accept (xp.ndarray): Bool accept mask, same length.
+            delta_ll (xp.ndarray): Swap log-likelihood change, same length
+                (summed / maxed over the cold accepts).
+            n_snr_gated (int): Candidates rejected by the opt-SNR floor.
+            n_nonfinite (int): Other bad-mask rejections (out-of-prior or
+                floored score), the SNR-gated rows excluded.
         """
         t_h = np.asarray(asnumpy(t_i))
         a_h = np.asarray(asnumpy(accept), dtype=bool)
@@ -13566,7 +15677,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 sp["dll_cold_max"], float(d_acc_cold.max()))
 
     def _replace_census_report(self):
-        """Print + reset the replace census (one line per propose)."""
+        """Print + reset the replace census (one line per propose).
+
+        Called at the end of every :meth:`run_proposal`; returns at once
+        when no replace step ran (no census, the 9mo / 12mo case). Emits
+        ``[GB_ACCEPT replace-split <move>]``; under the walker fan-out it
+        also keeps a copy in ``_replace_split_last`` for the rank finish to
+        ship back.
+        """
         sp = getattr(self, "_replace_split", None)
         if not sp:
             return
@@ -13625,6 +15743,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
           the SAME center machinery the pe-named F-stat RJ moves use, so
           one shared table serves the whole PE cycle.
           ``GB_REPLACE_CTR_MODE`` forces either mode explicitly.
+
+        The F-stat centre branch (the extrinsics bullet above, the slot-0
+        lognormal and floor mix, the PE extrinsic draw and the
+        maximize-then-pretend exception below) runs ONLY when
+        ``rj_fstat_dist_birth`` is set (``GB_RJ_FSTAT_DIST_BIRTH``, off by
+        default). Without it the whole candidate, extrinsics and slot 0
+        included, is the container draw, and the proposal term is the
+        container's logpdf difference alone.
 
         PE EXTRINSICS — DRAW, NEVER PIN (user general rule 2026-08-28,
         *"no maximizing over parameters during PE"*): in a PE stage the
@@ -13721,6 +15847,46 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         outside this cell's frequency window (band edges widened by N/4 on
         RJ buffers -- the same window the in-model repeats respect) is
         forbidden with ``-inf``.
+
+        New candidates also face the opt-SNR prior floor of births
+        (:meth:`_snr_lim_for_rows`; detected SNR too when
+        ``snr_rej_detected``). The accept mask, lifted to ``picked``, is left
+        in ``_last_replace_accept`` so the in-model pool polishes accepted
+        swaps as newborn. Census: :meth:`_replace_census_add`. Debug knobs
+        read here: ``GB_REPLACE_DEBUG`` (expose/score/restore and swap
+        residual identity checks, default 0), ``GB_REPLACE_FORCE_ACCEPT``
+        (smoke tests only, default 0), ``GB_RJ_SNR_TRUNC_DIST`` (default 1,
+        centre branch only).
+
+        Called by :meth:`_run_band_unit` in place of :meth:`_run_rj_step` for
+        a move built with ``rj_replace`` (stock: ``rj_replace`` /
+        ``rj_replace_pe`` under ``GB_SEARCH_RJ_REPLACE`` /
+        ``GB_PE_RJ_REPLACE``, default on). The 9mo / 12mo launchers set both
+        to 0, so this step does not run there.
+
+        Args:
+            model (eryn.model.Model): Carries the parent ACA (per-row F-stat
+                centres only).
+            band_sorter (BandSorter): The propose's alive-only sorter;
+                ``coords`` and source uids of accepted rows are updated in
+                place (``inds`` never changes).
+            buffer_obj (SubBandBuffer): The bound buffer; scores both sides
+                and applies accepted swaps to the cell residuals.
+            band_temps (xp.ndarray): Inverse temperatures, indexed
+                ``[band, temp]``.
+            picked (dict): The pick round's rows (dead rows are skipped).
+            ll_change_log (xp.ndarray): ``(ntemps, nwalkers, num_bands)``,
+                accepted swap dll added in place.
+            prop_counts (xp.ndarray): ``(2, ntemps, nwalkers, num_bands)``;
+                row 0 incremented per proposed swap.
+            acc_counts (xp.ndarray): Same shape; row 0 incremented on accept.
+            round_i (int): Pick-round index (unused here; same signature as
+                :meth:`_run_rj_step`).
+            scheduler (BandScheduler or None): Unused here (the alive-only
+                subset stages no birth rows).
+
+        Returns:
+            None: Everything is written in place.
         """
         xp = self.xp
         # PROVENANCE FOR THE IN-MODEL POLISH. A replace writes brand-new
@@ -14230,6 +16396,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             ll_change_log[t_i[accept], w_i[accept], b_i[accept]] += delta_ll[accept]
             acc_counts[0][t_i[accept], w_i[accept], b_i[accept]] += 1
 
+    # TODO check: keep/remove/document -- GB_DEBUG replace verifier; no-op unless the move's debug flag is set (GB_DEBUG unset in launchers)
     def _debug_verify_replace_step(self, buffer_obj, params_old, params_new,
                                    slots, N_vals, leaf_inds,
                                    delta_old_actual, delta_new, keep) -> None:
@@ -14431,6 +16598,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             logger.warning(
                 "[GB_DEBUG %s] verify_replace_step skipped: %r", self.name, e)
 
+    # TODO check: keep/remove/document -- GB_REPLACE_DEBUG=1 check inside the replace accept path; replace not built by the launchers
     def _debug_verify_replace_swap(self, buffer_obj, slot, r_before,
                                    p_old, p_new, slot_arr, n_arr, l_arr):
         """GB_REPLACE_DEBUG=1: assert an accepted replacement changed the
@@ -14482,6 +16650,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         (temp, walker) block -- roughly a factor ``ntemps`` fewer information
         matrices per proposal, while each RJ proposal still gets factors built
         at its own post-RJ parameters.
+
+        Which products are built: the friend table only when the move builds
+        one and ``stretch_probability > 0``; the info-matrix table only with
+        the info-matrix proposal and neither ``GB_INFOMAT_PER_BLOCK=1`` nor
+        ``infomat_per_block`` set. Under ``GB_INFOMAT_PER_BLOCK=1`` (the
+        9mo / 12mo setting, where the GB stretch probability is 0) neither
+        table is built: the borrowed table is cleared, every block computes
+        exact factors for its own sources, and the only work here is the
+        ``GB_CHOL_CACHE`` refresh of the :meth:`_chol_cache` cache when its
+        propose ticker says it is due.
+        Called by :meth:`_run_in_model_repeats` before the first block's
+        repeats; the per-propose ``_tables_indexed`` flag makes later calls
+        no-ops.
+
+        Args:
+            model (eryn.model.Model): Carries the parent ACA (factor builds).
+            band_sorter (BandSorter): The propose's main sorter; the friend
+                and info-matrix indices are attached to it.
+
+        Raises:
+            NotImplementedError: When ``share_proposal_tables`` is True.
         """
         if self._tables_indexed:
             return
@@ -14570,6 +16759,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # scales with amplitude, so a loud neighbour hands a quiet source a
         # badly-sized jump); and whether the cold-chain table should be
         # temperature-corrected before the hot rungs borrow from it.
+
+        The stock default path (``GB_INFOMAT_PER_BLOCK`` default 0); the
+        9mo / 12mo launchers export 1, which skips this table. Called by
+        :meth:`_ensure_proposal_tables` once per proposal; factors are built
+        by :meth:`_compute_proposal_cholesky` in chunks of
+        ``infomat_table_batch`` sources.
+
+        Args:
+            model (eryn.model.Model): Carries the parent ACA.
+            band_sorter (BandSorter): The propose's main sorter (cold-chain
+                rows are read from it).
+
+        Returns:
+            bool: True when a table was built; False when the cold chain
+            holds no live source (both table attributes set to ``None``).
         """
         cold = band_sorter.inds & (band_sorter.temp_inds == 0)
         n_cold = int(cold.sum())
@@ -14619,6 +16823,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         forwarded as the router's ``slot_holder`` so multi-shard runs
         partition ``slots`` by the BUFFER's slot shards -- the shard layout
         ``setup_in_model`` actually stashed references under.
+
+        Called once per in-model block by :meth:`_run_in_model_repeats`
+        (VGB overrides it). In the 9mo / 12mo runs (``GB_INFOMAT_PER_BLOCK=1``,
+        ``GB_CHOL_CACHE=1``) GB factors come from the cache's ``take``.
+        Side effect on the table path: sets ``_proposal_param_scales`` (the
+        direct path sets it inside :meth:`_compute_proposal_cholesky`).
+
+        Args:
+            model (eryn.model.Model): Carries the parent ACA.
+            band_sorter (BandSorter): The propose's main sorter.
+            ids (xp.ndarray): Sorter row indices of the block's sources.
+            slots (xp.ndarray, optional): Buffer slots aligned with ``ids``.
+                Default ``None``.
+            buffer_obj (SubBandBuffer, optional): The bound buffer. Default
+                ``None``.
+
+        Returns:
+            xp.ndarray: Proposal factors, one ``(ndim, ndim)`` matrix per row
+            of ``ids``.
         """
         if getattr(band_sorter, "infomat_take_inds", None) is None:
             cache = self._chol_cache()
@@ -14645,6 +16868,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         observable eigen mode, eigen-axis flag)`` and lives in the module
         registry of :mod:`.gb_chol_cache`, never on the move, so the move
         deep-copies and pickles without it.
+
+        The 9mo / 12mo launchers export ``GB_CHOL_CACHE=1`` (refresh every
+        ``GB_CHOL_CACHE_EVERY=40`` proposes, tolerance ``GB_CHOL_CACHE_TOL=5``;
+        both read in :mod:`.gb_chol_cache`). Read by
+        :meth:`_ensure_proposal_tables`, :meth:`_proposal_cholesky` and the
+        block close of :meth:`_run_in_model_repeats` (re-keys the block's
+        entries at their final coordinates).
+
+        Returns:
+            gb_chol_cache._CholCache or None: The shared cache, or ``None``
+            (cache off, no info-matrix proposal, or a per-leaf-fill branch).
         """
         if (not chol_cache_enabled()
                 or not self.use_info_mat_proposal
@@ -14665,7 +16899,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     def _state_source_uid(self, state):
         """The sub-state's ID column for this propose's sorter, or ``None``
-        (cache off, rollback switch, or no tempered GB sub-state)."""
+        (cache off, rollback switch, or no tempered GB sub-state).
+
+        Passed as the sorter's ``source_uid`` by :meth:`_gb_serve_run_proposal`
+        and :meth:`_propose_legacy` (``GB_CHOL_CACHE=1`` and
+        ``GB_CHOL_CACHE_UID`` unset or 1 in the 9mo / 12mo runs).
+
+        Args:
+            state (GFState): The propose's state (rank part or full state).
+
+        Returns:
+            np.ndarray or None: The sub-state's per-leaf int64 ID array
+            (same shape as the sub-state's ``inds``; ``-1`` = no ID).
+        """
         if not (chol_cache_enabled() and source_uid_enabled()):
             return None
         sub = (getattr(state, "sub_states", None) or {}).get(self.branch_name)
@@ -14681,6 +16927,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         steady state it issues nothing: only the first use after a load or
         relaunch (every alive leaf, once -- the repack writes them back), a
         reseeded rung, or an older pickle have alive rows without an ID.
+        Called by :meth:`_gb_serve_run_proposal` and :meth:`_propose_legacy`.
+
+        Args:
+            band_sorter (BandSorter): The freshly built sorter; its
+                ``source_uid`` column is filled in place.
+
+        Returns:
+            int: Number of IDs issued (0 when the sorter carries no IDs).
         """
         uid = getattr(band_sorter, "source_uid", None)
         if uid is None:
@@ -14696,7 +16950,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     @staticmethod
     def _rj_flip_uids(band_sorter, acc_ids):
         """After the RJ accept flip of ``acc_ids``: a birth gets a new ID, a
-        death's ID is retired."""
+        death's ID is retired.
+
+        Called by :meth:`_run_rj_step` right after the accept flip (so
+        ``inds`` already holds the post-flip state). No-op when the sorter
+        carries no IDs.
+
+        Args:
+            band_sorter (BandSorter): The propose's sorter.
+            acc_ids (xp.ndarray): Sorter rows whose RJ proposal was accepted.
+        """
         uid = getattr(band_sorter, "source_uid", None)
         if uid is None:
             return
@@ -14708,7 +16971,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     @staticmethod
     def _replace_uids(band_sorter, acc_ids):
-        """An accepted replacement is a different source: a new ID."""
+        """An accepted replacement is a different source: a new ID.
+
+        Called by :meth:`_run_replace_step` on its accepted rows; no-op when
+        the sorter carries no IDs or nothing was accepted.
+
+        Args:
+            band_sorter (BandSorter): The propose's sorter.
+            acc_ids (xp.ndarray): Sorter rows whose replacement was accepted.
+        """
         uid = getattr(band_sorter, "source_uid", None)
         n = int(acc_ids.shape[0])
         if uid is None or not n:
@@ -14718,7 +16989,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def _write_back_uids(self, new_state, band_sorter, alive, inds_new) -> None:
         """Repack: each alive row's ID lands at its source's new leaf slot,
         every other slot carries none (a sorter without the column leaves
-        the state without IDs -- nothing stale survives)."""
+        the state without IDs -- nothing stale survives).
+
+        Called by :meth:`_write_back_state` with the same ``alive`` /
+        ``inds_new`` it uses for the coordinates.
+
+        Args:
+            new_state (GFState): The state being written back.
+            band_sorter (BandSorter): The propose's sorter.
+            alive (xp.ndarray): Bool mask over sorter rows that are alive.
+            inds_new (tuple): Index arrays of the new leaf slots of those
+                rows in the sub-state's ID array.
+
+        Returns:
+            None: The sub-state's ID array is overwritten in place.
+        """
         sub = (getattr(new_state, "sub_states", None) or {}).get(self.branch_name)
         if (getattr(sub, "ensure_source_uid", None) is None
                 or not getattr(sub, "tempered_initialized", False)):
@@ -14757,6 +17042,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         9-column one has both slots, the 8-column ``(A, fdot)`` one has
         ``fddot`` as a scalar fill and never in ``test_inds``), so this is
         one implementation serving both branches rather than a VGB fork.
+        Called by :meth:`_compute_proposal_cholesky`.
+
+        Returns:
+            np.ndarray: Integer output-slot indices, one per sampled column.
         """
         ti = [int(i) for i in
               np.asarray(self.parameter_transforms.fill_dict["test_inds"])]
@@ -14811,6 +17100,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         leaf's f0/sky, so a row differentiated against another leaf's fills
         is differentiating the wrong source. ``None`` (GB, whose fills are
         scalar) leaves both calls below byte-identical.
+
+        Central differences with step ``1e-6 * max(|x_i|, 1e-3)`` per row and
+        column.
+
+        Args:
+            coords (xp.ndarray): Sampling-basis rows, shape ``(n_src, ndim)``.
+            test_inds (np.ndarray): Physical output slots, from
+                :meth:`_infomat_phys_inds`.
+            s (xp.ndarray): Per-column conditioning scales, shape ``(ndim,)``.
+            leaf_inds (xp.ndarray, optional): Per-row leaf indices for
+                per-leaf fills (VGB). Default ``None``.
+
+        Returns:
+            xp.ndarray: ``J``, shape ``(n_src, ndim, ndim)`` (axis 1 runs
+            over ``test_inds``, which has ``ndim`` entries).
         """
         xp = self.xp
         n_src, ndim = coords.shape
@@ -14831,7 +17135,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     @property
     def _axis_acc(self):
-        """``[proposed, accepted]`` per axis for the eigen-axis path."""
+        """``[proposed, accepted]`` per axis for the eigen-axis path.
+
+        Lazily allocated pair of length-``_eigen_axis_min_dim`` device arrays,
+        filled by :meth:`_run_in_model_repeats` only for the legacy
+        ``eigen_axis`` in-model kind (``GB_INMODEL_EIGEN_AXIS=1``, or the VGB
+        eigen draw; neither runs in the 9mo / 12mo runs) and drained by
+        :meth:`_report_axis_acceptance`.
+        """
         acc = getattr(self, "_axis_acc_store", None)
         if acc is None:
             n = int(getattr(self, "_eigen_axis_min_dim", 9))
@@ -14847,6 +17158,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         -- which is precisely how a direction stepping 95x too short stayed
         invisible. The last axis is the f0-fdot ridge; watch its rate and
         its share of accepted moves.
+
+        Called at the end of every :meth:`run_proposal`; returns at once when
+        no eigen-axis tally exists (the 9mo / 12mo case). Emits
+        ``[GB_EIGEN_AXIS <move>]``.
         """
         acc = getattr(self, "_axis_acc_store", None)
         if acc is None:
@@ -14880,6 +17195,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Six device adds per repeat, no host sync; the pull happens once
         per propose in :meth:`_report_obs_motion`.
+
+        Called by :meth:`_run_in_model_repeats` after each repeat whose draw
+        was the observable-basis kind (``GB_INMODEL_PROPOSAL=observable``,
+        the 9mo / 12mo setting); also feeds the per-axis tally through
+        :func:`_obs_axis_accum_for`. Returns early without the f0 / Mc /
+        fdot_astro_ratio columns.
+
+        Args:
+            cur (xp.ndarray): Current rows, shape ``(n, ndim)`` (f0 in mHz).
+            new (xp.ndarray): Proposed rows, same shape.
+            accept (xp.ndarray): Bool accept mask, length ``n``.
         """
         if cur is None or new is None or int(cur.shape[0]) == 0:
             return
@@ -14930,6 +17256,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the gate compacted rows, ``pick`` no longer aligns with
         ``accept`` and the whole tally is SKIPPED rather than silently
         attributed to the wrong axes.
+
+        Reached through :func:`_obs_axis_accum_for` from
+        :meth:`_obs_motion_accum`. Reads the per-row axis pick and ``|z|``
+        that :meth:`_observable_proposal` left in ``_last_obs_axis_pick`` /
+        ``_last_obs_axis_absz`` (set only in the ``axis`` eigen mode),
+        then clears the pick so a repeat cannot count twice. Accumulates a
+        ``(6, naxes)`` table: proposed, accepted, ``|z|`` sums and
+        ``|d f_mid|`` sums, each over all draws and over accepted draws.
+
+        Args:
+            a (xp.ndarray): Float accept weight per row (accept and finite).
+            d_fmid (xp.ndarray): ``|d f_mid|`` per row, in frequency bins.
+            d_lnfd (xp.ndarray): ``|d ln fdot|`` per row (not tallied here).
+            ok (xp.ndarray): Bool mask of rows with finite motion.
+            xp (module): numpy or cupy.
         """
         pick = getattr(self, "_last_obs_axis_pick", None)
         if pick is None:
@@ -14957,7 +17298,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._last_obs_axis_pick = None
 
     def _report_obs_motion(self):
-        """Log the observable-path motion census, then reset."""
+        """Log the observable-path motion census, then reset.
+
+        Called at the end of every :meth:`run_proposal`. Emits the
+        ``[GB_OBS_BASIS <move>] in-model motion`` line (draws, accepts, mean
+        ``|d ln fdot|`` and ``|d f_mid|`` proposed / accepted), then the
+        per-axis line of the observable-axis reporter defined right below.
+        No-op when no observable draw was tallied.
+        """
         m = getattr(self, "_obs_motion", None)
         if m is None:
             return
@@ -15033,6 +17381,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     _n_replicas = 1
 
     def _replica_active(self) -> bool:
+        """Whether this move's walker fan-out runs in one-walker replica mode.
+
+        True only with a multi-rank fan-out whose layout has
+        ``replica_mode`` (more than one rank per walker block, the opt-in
+        ``NGPUS=8 GF_GPU_ROUTING=1`` launcher line). At the launcher defaults
+        (``NGPUS=4``, ``GF_GPU_ROUTING`` unset) every walker block has one
+        rank, so it is False there. Read by ``_sched_block`` of the
+        orchestrated propose (band split per replica) and by
+        ``GBParaSearchRJMove.install_walker_fanout``.
+
+        Returns:
+            bool: True in replica mode.
+        """
         fanout = getattr(self, "fanout", None)
         return (
             fanout is not None
@@ -15041,7 +17402,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
 
     def _apply_replica_payload(self, payload):
-        """Install (or clear) the replica identity a command payload carries."""
+        """Install (or clear) the replica identity a command payload carries.
+
+        Called by :meth:`_enter_rank_block` on every rank command. Outside
+        replica mode both keys are ``None`` (or absent), so the move is reset
+        to no owned band range and replica ``(0, 1)``.
+
+        Args:
+            payload (dict): Rank command payload; reads ``band_range``
+                (``(lo, hi)`` global band indices, half-open, or ``None``)
+                and ``replica`` (``(index, count)`` or ``None``).
+        """
         rng = payload.get("band_range")
         self._owned_band_range = None if rng is None else (int(rng[0]), int(rng[1]))
         rep = payload.get("replica")
@@ -15062,6 +17433,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         cold chain. EVERY walker of the block is summed, not walker 0 alone --
         at a block width above one the split must balance the whole block's
         load, and at one walker the two are the same thing.
+
+        Args:
+            work (eryn.state.Branch): The work branch of the block's state
+                (:meth:`_work_branch`).
+
+        Returns:
+            np.ndarray: 1-D float array of f0 values in Hz (empty when no
+            cold leaf is alive).
         """
         col = self._f0_col if getattr(self, "_f0_col", None) is not None else 1
         coords = _to_numpy(work.coords[0])  # (nwalkers, nleaves_max, ndim)
@@ -15086,6 +17465,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Shared with VGB, which supplies its own
         :meth:`_cold_source_freqs_hz` because its f0 is a per-leaf fill.
+
+        Used by the orchestrated propose's replica band split only in
+        replica mode with GPU routing (``GF_GPU_ROUTING=1``, opt-in; the
+        launchers leave it unset by default).
+
+        Args:
+            work (eryn.state.Branch): The work branch of the block's state
+                (:meth:`_work_branch`).
+
+        Returns:
+            np.ndarray: Shape ``(num_bands,)``, float source counts per band
+            (each f0 filed in the band whose lower edge is the last edge at
+            or below it, clipped into range).
         """
         f0 = self._cold_source_freqs_hz(work)
         b = np.searchsorted(np.asarray(self.band_edges), f0, side="right") - 1
@@ -15096,7 +17488,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """Rows this replica may propose on: alive rows of its owned bands plus
         dead rows of its owned bands in its slot partition (``leaf % R == r``),
         so two replicas never birth into the same dead slot. ``None`` = no
-        restriction (not in replica mode)."""
+        restriction (not in replica mode).
+
+        Called once per :meth:`run_proposal`; ``None`` outside replica mode
+        (no owned band range is installed), i.e. at the launcher defaults.
+
+        Args:
+            band_sorter (BandSorter): The propose's sorter.
+
+        Returns:
+            xp.ndarray or None: Bool mask over sorter rows, or ``None``.
+        """
         rng = self._owned_band_range
         if rng is None:
             return None
@@ -15109,6 +17511,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return xp.asarray(owned)
 
     def _owned_band_row_mask(self, band_index_arr):
+        """Mask of the entries whose band lies in this replica's owned range.
+
+        Used by :meth:`run_tempering` and :meth:`_tempering_open_close_mask`.
+
+        Args:
+            band_index_arr (xp.ndarray): Global band index per row.
+
+        Returns:
+            xp.ndarray or None: Bool mask, same shape; ``None`` outside replica
+            mode (no restriction).
+        """
         rng = self._owned_band_range
         if rng is None:
             return None
@@ -15132,6 +17545,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Outside replica mode ``_owned_band_row_mask`` is ``None`` and this
         returns the plain residue expression, unchanged in dtype and device.
+        Reached only by the permuted ("fancy") swaps of :meth:`run_tempering`
+        (``vgb_pe`` in the 9mo / 12mo runs; the GB moves run
+        ``GB_RUN_FANCY_TEMPERING=0``).
+
+        Args:
+            band_sorter (BandSorter): The propose's sorter.
+            units (int): Number of parity units (band residue classes).
+            remainder (int): The unit's residue.
+
+        Returns:
+            xp.ndarray: Bool mask over sorter rows.
         """
         residue = band_sorter.band_inds % units == remainder
         owned = self._owned_band_row_mask(band_sorter.band_inds)
@@ -15149,6 +17573,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         (``eigen_axis_generic_ok``, e.g. VGB): plain eigenvectors of the
         conditioned matrix, no fiber, no ridge. ``None`` when neither
         branch applies (callers fall through to the joint draw).
+
+        Called by :meth:`_compute_proposal_cholesky`. In the 9mo / 12mo runs
+        the GB branch is off (``GB_INMODEL_EIGEN_AXIS`` unset), so only VGB
+        (``eigen_axis_generic_ok``) builds a table here. Per-axis widths are
+        capped by the prior box (:meth:`_eigen_axis_widths`); the capped
+        sigmas are kept in ``_last_axis_sigmas``.
+
+        Args:
+            info_y (xp.ndarray): Conditioned information matrices, shape
+                ``(n, ndim, ndim)``.
+            coords (xp.ndarray): The sources' sampling-basis rows,
+                ``(n, ndim)``.
+            ndim (int): Sampled dimension.
+
+        Returns:
+            xp.ndarray or None: Axis table ``(n, ndim, naxes)`` whose column
+            ``k`` is ``sigma_k * a_k``, or ``None``.
         """
         xp = self.xp
         if (self._eigen_axis_ready()
@@ -15175,6 +17616,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Guarded rather than asserted: the VGB move and the 8-column bases
         have no ``dist`` / ``Mc`` / ``fdot_astro_ratio``, and they must keep
         using the joint draw.
+
+        "Armed" is ``GB_INMODEL_EIGEN_AXIS=1`` (default off; unset in the
+        9mo / 12mo launchers, so this is False there). Read by the chol-cache
+        key (:meth:`_chol_cache`), :meth:`_eigen_axes_from_info`,
+        :meth:`_compute_proposal_cholesky` and :meth:`in_model_proposal`.
+
+        Returns:
+            bool: True when the GB per-eigen-axis path may run.
         """
         return (
             _eigen_axis_on()
@@ -15195,6 +17644,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         i.e. no prior bound beyond ``sigma_max`` -- when a prior does not
         expose finite limits, which keeps the path usable rather than
         crashing on an exotic prior.
+
+        Also the prior-box scale of the observable proposal's Mc step
+        (:meth:`_observable_step_scales`). Widths come from
+        :func:`eryn.moves.eigenaxis.prior_box_scales` of the integer-keyed priors of
+        the branch's GPU prior container.
+
+        Args:
+            ndim (int): Sampled dimension.
+
+        Returns:
+            xp.ndarray: Shape ``(ndim,)`` per-column widths (cached until
+            ``ndim`` changes).
         """
         cached = getattr(self, "_eigen_axis_widths_cache", None)
         if cached is not None and cached.shape[0] == ndim:
@@ -15254,11 +17715,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         move reads ``VGB_INMODEL_PROPOSAL`` (whose kinds differ), and the
         composite code path below must not have to know which branch it is
         serving.
+
+        GB reads ``GB_INMODEL_PROPOSAL`` through
+        :func:`_inmodel_proposal_kind` (``GB_INMODEL_OBSERVABLE_BASIS``, when
+        set, wins); the 9mo / 12mo launchers export ``observable``.
+
+        Returns:
+            str: ``"observable"`` or ``"legacy"`` (GB); the VGB override
+            returns its own kinds.
         """
         return _inmodel_proposal_kind()
 
     def _obs_eigen_mode(self) -> str:
-        """``off`` / ``axis`` / ``full`` for this branch's eigen knob."""
+        """``off`` / ``axis`` / ``full`` for this branch's eigen knob.
+
+        GB reads ``GB_INMODEL_OBSERVABLE_EIGEN`` (default ``off``; launchers
+        ``axis``); VGB overrides with ``VGB_INMODEL_OBSERVABLE_EIGEN``. Part
+        of the chol-cache key (:meth:`_chol_cache`).
+
+        Returns:
+            str: ``"off"``, ``"axis"`` or ``"full"``.
+        """
         return _observable_eigen_mode()
 
     def _observable_leaf_kw(self, band_sorter, source_ids):
@@ -15269,6 +17746,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         (``band_sorter.leaf_inds[ids]``; the 2026-09-15 job-501 fix). EMPTY
         for GB, whose fills are scalar -- so the GB calls below pass no new
         kwarg at all and stay byte-identical.
+
+        Args:
+            band_sorter (BandSorter or None): The propose's sorter.
+            source_ids (xp.ndarray): Sorter rows of the drawn sources.
+
+        Returns:
+            dict: ``{}`` or ``{"leaf_inds": ...}``.
         """
         if not getattr(self, "_per_leaf_fill", False) or band_sorter is None:
             return {}
@@ -15283,6 +17767,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         snapshotted into the map here so nothing downstream can re-read
         it -- and by the determinant result a stale ``Tobs`` would cost
         efficiency only, never correctness.
+
+        Built from :attr:`_observable_map_class` (GB:
+        :class:`~lisatools.sampling.gb_observable_basis.GBObservableFiberBasis`)
+        with ``GB_INMODEL_OBSERVABLE_SHEAR`` (default 0.5; launchers 0.5) and
+        fiber coordinate ``Mc``. A construction failure is logged once and
+        cached as ineligible (the legacy draw is used from then on).
+
+        Returns:
+            object or None: The map instance, or ``None`` when ineligible.
         """
         m = getattr(self, "_observable_map_cache", None)
         if m is not None:
@@ -15315,6 +17808,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         (:attr:`_observable_required_cols`) because the VGB restriction
         pins ``f0`` and ``Mc`` per leaf instead of sampling them -- the GB
         list would reject the very basis the reduced map exists to serve.
+
+        The gate of the observable path in :meth:`_run_in_model_repeats`,
+        :meth:`_compute_proposal_cholesky` and
+        :meth:`_maybe_observable_proposal`. True for GB and VGB in the
+        9mo / 12mo runs.
+
+        Returns:
+            bool: True when the observable-basis draw may run.
         """
         return (
             self._inmodel_kind() == "observable"
@@ -15337,6 +17838,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Scattered by SOURCE ID into a full-length array, because
         :meth:`in_model_proposal` sees ``source_ids`` and not the block's
         slice into them.
+
+        Called once per in-model block by :meth:`_run_in_model_repeats`.
+        Unset rows stay NaN (the step-scale reader substitutes a fallback
+        rho).
+
+        Args:
+            buffer_obj (SubBandBuffer): Bound buffer; ``h_h_out`` holds the
+                block anchors' ``<h|h>``.
+            ids (xp.ndarray): Sorter rows of the block's sources, aligned
+                with ``h_h_out``.
+            n_src (int): Sorter length (size of the stored array).
         """
         xp = self.xp
         hh = getattr(buffer_obj, "h_h_out", None)
@@ -15368,6 +17880,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``sqrt(diag(B B^T))`` times ``_proposal_param_scales`` -- exactly
         what the production path would have used. ``Mc`` is prior-set
         because the likelihood is flat along the fiber.
+
+        Knobs: the branch jump multiplier named by :meth:`_obs_jump_knob`
+        (code default 1.0; launchers GB 1.5, VGB 1.0) and
+        ``GB_INMODEL_OBSERVABLE_MC_STEP`` (fraction of the Mc prior box,
+        default 0.05). Per-axis multipliers come from
+        :func:`_obs_axis_mult_for`. Without a usable ``chol`` the extrinsic
+        widths fall back to a fixed fraction of the prior box.
+
+        Args:
+            chol (xp.ndarray or None): The block's proposal factors,
+                ``(n, ndim, ndim)``.
+            source_ids (xp.ndarray): Sorter rows of the drawn sources.
+            ndim (int): Sampled dimension.
+
+        Returns:
+            xp.ndarray: Shape ``(n, len(INTERNAL_BASIS))`` step scales in the
+            map's internal basis (``(n, 9)`` on the GB basis).
         """
         xp = self.xp
         m = self._observable_map()
@@ -15428,6 +17957,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Defaults are identical (1.0), so an unset VGB knob reproduces the
         old shared behaviour exactly; only an explicit GB-side change now
         stops at the GB branch.
+
+        Returns:
+            str: ``"GB_INMODEL_OBSERVABLE_JUMP"`` here; the VGB move returns
+            ``"VGB_INMODEL_OBSERVABLE_JUMP"``.
         """
         return "GB_INMODEL_OBSERVABLE_JUMP"
 
@@ -15447,6 +17980,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         VGB restriction: a row mapped with another leaf's f0/Mc is a
         different physical source); ``None`` leaves the GB calls
         byte-identical (empty-kwarg guard, no new kwarg at all).
+
+        Called by :meth:`_compute_proposal_cholesky` whenever the
+        observable eigen mode is not ``off`` (``axis`` in the 9mo / 12mo
+        runs) and :meth:`_observable_basis_ready` holds. Stored in
+        ``_obs_gamma_z``, shape ``(n_src, nz, nz)``,
+        NaN-filled for rows never written.
+
+        Args:
+            info_y (xp.ndarray): Conditioned information matrices,
+                ``(n, ndim, ndim)``.
+            coords (xp.ndarray): The sources' sampling-basis rows,
+                ``(n, ndim)``.
+            s (xp.ndarray): Per-column conditioning scales, ``(ndim,)``.
+            ids (xp.ndarray): Sorter rows of the sources.
+            n_src (int): Sorter length.
+            leaf_inds (xp.ndarray, optional): Per-row leaf indices (VGB).
+                Default ``None``.
         """
         xp = self.xp
         m = self._observable_map()
@@ -15497,6 +18047,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         column k is ``sigma_k * a_k`` in z units. Frozen for the block =>
         the draw stays symmetric and ``factors`` stay the plain
         observable log-Jacobian.
+
+        Called once per in-model block by :meth:`_run_in_model_repeats`
+        (eigen mode not ``off``). Whitened widths are capped at
+        ``GB_INMODEL_OBSERVABLE_EIGEN_SMAX`` (default 10.0; unset in the
+        launchers). Stored in ``_obs_eigen_table``, shape
+        ``(n_src, nz, nz)``; rows whose ``Gamma_z`` is not finite stay NaN
+        and take the diagonal draw. No-op before any ``Gamma_z`` was stashed.
+
+        Args:
+            chol (xp.ndarray or None): The block's proposal factors.
+            ids (xp.ndarray): Sorter rows of the block's sources.
+            n_src (int): Sorter length.
         """
         xp = self.xp
         gz_store = getattr(self, "_obs_gamma_z", None)
@@ -15547,6 +18109,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``_resolve_inmodel_repeats`` forbids (fixed budgets keep the
         rigid chunk shapes CUDA-graph capture needs) and which would
         leave ``h_h_out`` / ``d_h_out`` stale for the SNR clamp.
+
+        THE in-model draw of the 9mo / 12mo GB and VGB moves (reached
+        through :meth:`_maybe_observable_proposal` from
+        :meth:`in_model_proposal` and the VGB override). Eigen mode
+        ``axis`` (the launcher setting) draws one table axis per row,
+        excluding the pure-fiber axis while
+        ``GB_INMODEL_OBSERVABLE_FIBER_WEIGHT`` is 0 (default and
+        launchers), and records the pick for the per-axis census; ``full``
+        draws a correlated step over all axes; rows without a finite table
+        (or mode ``off``) take the diagonal draw scaled by
+        :meth:`_observable_step_scales`. The fiber (Mc) component is then
+        multiplied by the fiber weight.
+
+        Args:
+            coords (xp.ndarray): Current sampling-basis rows, ``(n, ndim)``.
+            chol (xp.ndarray or None): The block's proposal factors.
+            source_ids (xp.ndarray): Sorter rows of the drawn sources.
+            leaf_inds (xp.ndarray, optional): Per-row leaf indices (VGB).
+                Default ``None``.
+
+        Returns:
+            tuple[xp.ndarray, xp.ndarray]: ``(new_coords, factors)``: the
+            proposed rows, same shape as ``coords``, and the per-row log
+            proposal factor (the map's log-Jacobian), 1-D float64,
+            device-resident.
         """
         xp = self.xp
         m = self._observable_map()
@@ -15656,8 +18243,41 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         of the physical kernel itself.
 
         Not used by pure-stretch moves (``use_info_mat_proposal=False``,
-        e.g. the VGB move); the fdot conditioning column is resolved from
-        the transform container's input basis (``self._fdot_col``).
+        e.g. a VGB move under ``VGB_INMODEL_PROPOSAL=stretch``; the default
+        ``observable`` / ``eigen`` VGB kinds DO use it); the fdot
+        conditioning column is resolved from the transform container's input
+        basis (``self._fdot_col``).
+
+        Returns a per-axis eigen table instead of the joint factor when
+        :meth:`_eigen_axes_from_info` produces one (GB with
+        ``GB_INMODEL_EIGEN_AXIS=1``, or VGB's ``eigen_axis_generic_ok``):
+        same shape, column ``k`` holding ``sigma_k * a_k``. Otherwise the
+        factor is ``V diag(lambda^-1/2)`` of the eigendecomposition of the
+        sampling-basis information matrix, with the eigenvalues floored at
+        ``1e-10`` of the largest. Side effects: sets
+        ``_proposal_param_scales`` (fdot conditioning), stashes ``Gamma_z``
+        for the observable eigen table (:meth:`_observable_stash_gamma_z`)
+        when that mode is on, checks the info-matrix route cost
+        (:meth:`_infomat_route_check`), and frees the CuPy pool when
+        ``GB_INFOMAT_MEMPOOL_FREE=1`` (code default 0; the 9mo / 12mo
+        launchers export 1). Callers:
+        :meth:`_proposal_cholesky` (direct path),
+        :meth:`_refresh_infomat_table`, and the ``GB_CHOL_CACHE`` refresh /
+        miss paths in :mod:`.gb_chol_cache`.
+
+        Args:
+            model (eryn.model.Model): Carries the parent ACA
+                (``analysis_container_arr``).
+            band_sorter (BandSorter): The propose's sorter.
+            ids (xp.ndarray): Sorter rows of the sources.
+            slots (xp.ndarray, optional): Buffer slots aligned with ``ids``;
+                enables the sig-het info-matrix route. Default ``None``.
+            buffer_obj (SubBandBuffer, optional): Forwarded as the router's
+                slot holder. Default ``None``.
+
+        Returns:
+            xp.ndarray: Shape ``(n, ndim, ndim)`` proposal factors in the
+            conditioned sampling basis ``y = x / s``.
         """
         xp = self.xp
         coords = band_sorter.coords[ids]
@@ -15812,6 +18432,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``GB_DOPPLER_JUMP_EVERY`` (0 = off). Per-call 1/N draw (restart-safe --
         no persisted counter, unlike a deterministic cadence); confined to
         search moves so the factors=0 (search-waiver) proposal never enters PE.
+
+        Evaluated on every :meth:`in_model_proposal` call; the knob is unset
+        in the 9mo / 12mo launchers, so it returns False there.
+
+        Args:
+            coords (xp.ndarray or None): The rows about to be proposed.
+
+        Returns:
+            bool: True when this call should draw the Doppler jump.
         """
         try:
             n = int(os.environ.get("GB_DOPPLER_JUMP_EVERY", "0"))
@@ -15823,6 +18452,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return False
         return bool(np.random.rand() < (1.0 / float(n)))
 
+    # TODO check: keep/remove/document -- only _doppler_jump_proposal; GB_DOPPLER_JUMP_EVERY unset (default 0, launchers)
     def _doppler_orbit_window(self):
         """Cached ``(v_over_c, times)`` over the observation window from the
         run's orbit configured grid (ICRS, aligned to data_t0 by the engine).
@@ -15853,6 +18483,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._doppler_orbit_cache = (vc, tt)
         return self._doppler_orbit_cache
 
+    # TODO check: keep/remove/document -- search-only sky-Doppler alias jump; needs GB_DOPPLER_JUMP_EVERY>0 (default 0, unset in launchers)
     def _doppler_jump_proposal(self, coords):
         """Sky-Doppler jump proposal -> ``(new_coords, factors=0)``.
 
@@ -15903,6 +18534,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         label and the proposal itself exist once. ``None`` means "not
         armed for this branch" and the caller falls through to its own
         legacy component.
+
+        Args:
+            coords (xp.ndarray): Current sampling-basis rows, ``(n, ndim)``.
+            chol (xp.ndarray or None): The block's proposal factors.
+            band_sorter (BandSorter): The propose's sorter (leaf indices for
+                VGB).
+            source_ids (xp.ndarray): Sorter rows of the drawn sources.
+
+        Returns:
+            tuple[xp.ndarray, xp.ndarray] or None: ``(new_coords, factors)``
+            from :meth:`_observable_proposal`, or ``None`` when
+            :meth:`_observable_basis_ready` is False.
         """
         if not self._observable_basis_ready():
             return None
@@ -15933,6 +18576,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         that is not scale-invariant in this basis, and an ``f0`` derivative
         34% wrong). ``GB_INMODEL_PROPOSAL=legacy`` reverts, which is what
         makes a same-seed comparison against the v7 baseline possible.
+
+        Order of the branches: the sky-Doppler jump when
+        :meth:`_doppler_jump_should_fire` (``GB_DOPPLER_JUMP_EVERY``, off);
+        the observable step (:meth:`_maybe_observable_proposal`, the 9mo /
+        12mo path); group stretch; else the info-matrix jump
+        ``coords + jump_factor * dy * s`` with ``dy`` the factor contracted
+        with a normal draw (or one eigen-axis column when
+        :meth:`_eigen_axis_ready`). The branch taken is recorded in
+        ``_last_im_kind`` for the [GB_ACCEPT] per-kind census. Called once
+        per repeat by :meth:`_run_in_model_repeats`; VGB overrides it.
+
+        Args:
+            coords (xp.ndarray): Current sampling-basis rows, ``(n, ndim)``.
+            chol (xp.ndarray or None): The block's proposal factors
+                (required on the info-matrix branch).
+            band_sorter (BandSorter): The propose's sorter (friend table,
+                leaf indices).
+            source_ids (xp.ndarray): Sorter rows of the drawn sources.
+            model (eryn.model.Model): Supplies the random state of the
+                group-stretch draw.
+
+        Returns:
+            tuple[xp.ndarray, xp.ndarray]: ``(new_coords, factors)``, the
+            proposed rows (same shape as ``coords``) and the per-row
+            detailed-balance log-factors.
         """
         xp = self.xp
         # Sky-Doppler degeneracy jump (GB_DOPPLER_JUMP_EVERY, default off): a
@@ -16009,7 +18677,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         get exactly-zero contributions from the fixed parameters. Reading
         sampling columns directly (the old form) silently misread reduced
         bases -- VGB's column 1 is not f0, which made the drift audit
-        report ~1e13 rad of impossible "drift"."""
+        report ~1e13 rad of impossible "drift".
+
+        Used inside :meth:`_run_in_model_repeats` by the mid-block sig-het
+        reference refresh (``GB_SIGHET_REFRESH_EVERY``, launchers 25) and
+        the end-of-block drift audit (``GB_SIGHET_DRIFT_CHECK``, launchers
+        1). Physical columns 0 / 1 / 2 are amplitude, f0 (Hz) and fdot
+        (Hz/s); ``Tobs`` comes from the move's domain settings.
+
+        Args:
+            curr (xp.ndarray): Current sampling-basis rows, ``(n, ndim)``.
+            ref_track (xp.ndarray): The reference (expansion-point) rows,
+                same shape.
+            leaf_inds (xp.ndarray or None): Per-row leaf indices (used only
+                on a per-leaf-fill branch).
+
+        Returns:
+            tuple[cupy.ndarray, cupy.ndarray]: ``(drift, damp)``, each of
+            length ``n``: phase drift in rad and ``|ln(A / A_ref)|``.
+        """
         li = leaf_inds if self._per_leaf_fill else None
         pc = self.transform_fn.both_transforms(curr, xp=cp, leaf_inds=li)
         pr = self.transform_fn.both_transforms(ref_track, xp=cp, leaf_inds=li)
@@ -16027,6 +18713,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         stashed. ``C_phase = 0`` (the default) returns the uniform gate, so
         this is inert until armed. See the ctor comment for why a constant
         phase offset is the wrong gate shape and how to pick ``C_phase``.
+
+        ``C_phase`` is ``sighet_trust_phase_c`` (``GB_SIGHET_TRUST_PHASE_C``;
+        the 9mo / 12mo launchers export 49, so the per-source gate is live
+        there); the clip bounds are ``sighet_trust_dphase`` and
+        ``sighet_trust_dphase_max``. Called once per sig-het in-model block
+        by :meth:`_run_in_model_repeats`.
+
+        Args:
+            buffer_obj (SubBandBuffer): Bound buffer whose ``h_h_out`` holds
+                the reference ``<h|h>``.
+            n (int): Number of block sources.
+
+        Returns:
+            cupy.ndarray: Shape ``(n,)`` per-source phase gate in rad.
         """
         if self.sighet_trust_phase_c <= 0.0:
             return cp.full(n, self.sighet_trust_dphase)
@@ -16037,6 +18737,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self.sighet_trust_dphase, self.sighet_trust_dphase_max,
         )
 
+    # TODO check: keep/remove/document -- sig-het accuracy diagnostic; returns at once unless GB_SIGHET_TIER_SCAN is set (launchers export "")
     def _sighet_tier_scan(self, buffer_obj, curr, slots, N_vals, l_i,
                           ll_ref, beta, tm, t_i=None, w_i=None):
         """Displacement-resolved sig-het accuracy, in the SAMPLING-RELEVANT lens.
@@ -16215,6 +18916,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             logger.debug("%s: [GB_TIER] worst-source report skipped: %r",
                          self.name, exc)
 
+    # TODO check: keep/remove/document -- only via _sighet_tier_scan with GB_SIGHET_DISSECT set (launchers export "")
     def _sighet_dissect_dump(self, out_dir, buffer_obj, curr, slots, l_i,
                              tiers, ll_ref, ex0, het, exa, het0,
                              dh_het0, hh_het0, dh_ex0, hh_ex0,
@@ -16421,6 +19123,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         "maxr": "max_r", "max_r": "max_r",
     }
 
+    # TODO check: keep/remove/document -- only via _sighet_tier_scan with GB_SIGHET_SWEEP + GB_SIGHET_DISSECT set (launchers export "")
     def _sighet_sweep(self, out_dir, buffer_obj, curr, slots, N_vals, l_i,
                       tiers, cands, ex0, exa, het0_base, beta, t_i, w_i):
         """In-run engine sweep on ONE frozen block (``GB_SIGHET_SWEEP``).
@@ -16752,6 +19455,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         except Exception as exc:
             logger.warning("%s: [GB_SWEEP] dump failed: %r", self.name, exc)
 
+    # TODO check: keep/remove/document -- helper of the dissect / sweep diagnostics only (GB_SIGHET_DISSECT / GB_SIGHET_SWEEP unset)
     @staticmethod
     def _dissect_comps(buffer_obj):
         """Every reachable sig-het computation object behind a buffer.
@@ -16784,7 +19488,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Reads the reference template power ``h_h_out`` stashed on the
         buffer by the most recent ``get_ll``/``get_add_ll`` call (i.e. the
         block's ``ll_ref`` evaluation, or a refresh's re-basing call for
-        the refreshed subset). ``C = 0`` returns the uniform cap."""
+        the refreshed subset). ``C = 0`` returns the uniform cap.
+
+        ``C`` is ``sighet_trust_snr_c`` (``GB_SIGHET_TRUST_SNR_C``), the cap
+        ``sighet_trust_dlna`` (``GB_SIGHET_TRUST_DLNA``) and the floor
+        ``sighet_trust_dlna_min`` (``GB_SIGHET_TRUST_DLNA_MIN``), read by
+        :func:`~lisatools.globalfit.recipe.build_gb_moves` and
+        :func:`~lisatools.globalfit.recipe.build_vgb_moves` with defaults 30,
+        1.5 and 0.3; the 9mo / 12mo launchers leave all three unset. Called
+        by :meth:`_run_in_model_repeats` at each sig-het block start and for
+        the re-anchored rows after a mid-block reference refresh.
+
+        Args:
+            buffer_obj (SubBandBuffer): Bound buffer whose ``h_h_out`` holds
+                the reference ``<h|h>``.
+            n (int): Number of sources gated.
+
+        Returns:
+            cupy.ndarray: Shape ``(n,)`` per-source ``|d ln A|`` gate.
+        """
         if self.sighet_trust_snr_c <= 0.0:
             return cp.full(n, self.sighet_trust_dlna)
         hh = cp.asarray(buffer_obj.h_h_out).real
@@ -16799,7 +19521,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Returns ``(|A|, f0, fdot)`` of the heterodyne expansion points so
         the per-repeat gate only transforms the CANDIDATES (the anchor side
-        is fixed for the block, modulo mid-block refresh)."""
+        is fixed for the block, modulo mid-block refresh).
+
+        Called by :meth:`_run_in_model_repeats` when the sig-het trust gate
+        is armed (``sighet_trust_dlna > 0``; 1.5 in the 9mo / 12mo runs).
+
+        Args:
+            ref_track (xp.ndarray): Expansion-point rows, ``(n, ndim)``.
+            leaf_inds (xp.ndarray or None): Per-row leaf indices (used only
+                on a per-leaf-fill branch).
+
+        Returns:
+            tuple[cupy.ndarray, cupy.ndarray, cupy.ndarray]: ``|A|``, f0 (Hz)
+            and fdot (Hz/s) of the anchors, each of length ``n``.
+        """
         li = leaf_inds if self._per_leaf_fill else None
         pr = self.transform_fn.both_transforms(ref_track, xp=cp, leaf_inds=li)
         return cp.abs(pr[:, 0]), pr[:, 1].copy(), pr[:, 2].copy()
@@ -16829,6 +19564,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         given (t, w, b) appears at most once and each row joins at most one
         pair per parity class. Pairs are emitted for ONE parity of
         ``t_cold`` at a time by the caller so no row is in two pairs.
+
+        Used by :meth:`_vertical_swap_sweep`, the picked-row sweep that is
+        the stock default under ``GB_TEMPER_VERTICAL`` (code default off)
+        with ``GB_TEMPER_ALL_RUNGS`` unset. The 9mo / 12mo launchers set
+        ``GB_TEMPER_ALL_RUNGS=1``, so their sweeps go through
+        :meth:`_vertical_swap_sweep_all_rungs` instead.
+
+        Args:
+            t_i (xp.ndarray): Temperature index per picked row.
+            w_i (xp.ndarray): Walker index per picked row.
+            b_i (xp.ndarray): Band index per picked row.
+
+        Returns:
+            tuple[xp.ndarray, xp.ndarray]: ``(hot_rows, cold_rows)``, row
+            positions into the picked arrays, one entry per pair.
         """
         xp = self.xp
         key = (w_i.astype(xp.int64) * self.num_bands + b_i) * self.ntemps
@@ -16850,6 +19600,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``paired/rows`` is the availability the band ordering exists to
         raise (simulated 18.5% -> 94.0% at production scale). Measuring it
         on the real run is the only way to confirm that carries over.
+
+        Built once per in-model block by :meth:`_run_in_model_repeats` when
+        vertical swaps are on (``GB_TEMPER_VERTICAL=1`` in the 9mo / 12mo
+        runs); the sweeps fill it, :meth:`_vertical_census_flush` folds the
+        device counters in, and :meth:`_vertical_ladder_bank` banks the
+        per-(band, rung) counts. The all-rungs sweep adds further keys
+        (e.g. ``one_sided_bracket``) on the fly.
+
+        Args:
+            ntemps (int): Number of rungs.
+
+        Returns:
+            dict: Fresh census (host ints, ``(ntemps - 1,)`` int64 arrays,
+            ``None`` placeholders for the lazily created device arrays).
         """
         return {
             "sweeps": 0, "rows": 0, "paired": 0,
@@ -16885,6 +19649,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         :meth:`_vertical_ladder_reset`) because ``_adapt_band_temps`` runs
         once per propose and a single block's counts are far too sparse to
         steer a ladder with.
+
+        Called at each block end by :meth:`_run_in_model_repeats`; the banked
+        ``_vert_ladder_prop`` / ``_vert_ladder_acc`` arrays (shape
+        ``(num_bands, ntemps - 1)``) are read by
+        :meth:`_vertical_adapt_ladder` (on the head after the rank replies
+        are merged, or in-process on the legacy path).
+
+        Args:
+            census (dict): A block census from :meth:`_vertical_census_new`.
         """
         for key, attr in (("prop_by_bandrung_dev", "_vert_ladder_prop"),
                           ("acc_by_bandrung_dev", "_vert_ladder_acc")):
@@ -16895,7 +19668,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             setattr(self, attr, blk.copy() if cur is None else cur + blk)
 
     def _vertical_ladder_reset(self) -> None:
-        """Clear the per-propose vertical ladder counts."""
+        """Clear the per-propose vertical ladder counts.
+
+        Called at the start of every rank-side propose
+        (:meth:`_gb_serve_run_proposal`), by :meth:`_propose_legacy`, and on
+        the head after the ladder adaptation of the orchestrated propose.
+        Also resets the per-block adaptation cadence counter.
+        """
         self._vert_ladder_prop = None
         self._vert_ladder_acc = None
         # The local per-block adaptation cadence counter rides with them:
@@ -16930,6 +19709,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         of them per propose.
 
         Returns True when the ladder was adapted (so the caller can log it).
+
+        Callers: the head of the orchestrated propose, on the counts pooled
+        over every rank's walkers, whenever the permuted swaps did not
+        already adapt this propose (the only GB ladder adaptation in the
+        9mo / 12mo runs, which set ``GB_RUN_FANCY_TEMPERING=0``); and
+        :meth:`_propose_legacy` under ``{BRANCH}_VERTICAL_ADAPT_LADDER``
+        (``auto``: on when the permuted swaps are off and vertical swaps are
+        on). Skipped without counts, without a temperature control, or with a
+        single rung; warns below 100 pooled proposals.
+
+        Args:
+            band_temps (xp.ndarray): The per-band ladder, adapted in place by
+                :meth:`_adapt_band_temps`.
+
+        Returns:
+            bool: True when the ladder was adapted.
         """
         prop = getattr(self, "_vert_ladder_prop", None)
         acc = getattr(self, "_vert_ladder_acc", None)
@@ -16977,7 +19772,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     @staticmethod
     def _vertical_census_flush(census) -> None:
         """Merge the device-side rung accumulators into the host census
-        arrays (one D2H per block instead of two per sweep). Idempotent."""
+        arrays (one D2H per block instead of two per sweep). Idempotent.
+
+        Called at each block end by :meth:`_run_in_model_repeats`, before
+        the [GB_VERT] census line.
+
+        Args:
+            census (dict or None): A block census; ``None`` is a no-op.
+        """
         if census is None:
             return
         for key in ("prop_by_rung", "acc_by_rung"):
@@ -17013,6 +19815,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Without an explicit flag, ANY override disables the window and
         keeps the immediate relabel: a future override opts out until
         someone checks it, rather than silently reading stale labels.
+
+        Read by :meth:`_run_in_model_repeats` (vertical swaps on) to decide
+        whether to open the block-wide cell-label window; the sorter's
+        deferral itself follows ``GB_CELL_LABEL_DEFERRED`` (read in
+        :mod:`.gbbands`, default 1; the 9mo / 12mo launchers export 1). True
+        for the GB moves, False for VGB.
+
+        Returns:
+            bool: True when the block may defer its relabels.
         """
         flag = getattr(self, "inmodel_proposal_reads_labels", None)
         if flag is not None:
@@ -17024,6 +19835,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Returns ``None`` (disabled) unless ``GB_LADDER_DEBUG_BAND`` is set;
         the walker defaults to 0. Cached so the hot loop pays one dict read.
+        Evaluated on every :meth:`_vertical_swap_sweep` call; both knobs are
+        unset in the 9mo / 12mo launchers.
+
+        Returns:
+            tuple[int, int] or None: ``(band, walker)``, or ``None``.
         """
         c = getattr(self, "_ladder_dbg_target_cache", "unset")
         if c != "unset":
@@ -17036,6 +19852,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self._ladder_dbg_target_cache = (int(b), w)
         return self._ladder_dbg_target_cache
 
+    # TODO check: keep/remove/document -- debug log line; only with GB_LADDER_DEBUG_BAND set (unset by default and in launchers)
     def _ladder_debug_line(self, t_i, w_i, b_i, ll_ref, band, walker):
         """``walker``'s per-temperature cell ll at ``band``, cold(t0)->hot.
 
@@ -17132,6 +19949,51 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         The buffer's own slot -> special map is re-based ONCE per block
         by the caller (``update_special_indices`` on the block's slots)
         so any later pick on the same residency lands on the right slab.
+
+        The stock default vertical implementation (``GB_TEMPER_VERTICAL``
+        on, ``GB_TEMPER_ALL_RUNGS`` unset); the 9mo / 12mo launchers set
+        ``GB_TEMPER_ALL_RUNGS=1``, so their blocks run
+        :meth:`_vertical_swap_sweep_all_rungs` instead. Called by
+        :meth:`_run_in_model_repeats` once per repeat step (parities
+        alternate; under ``GB_TEMPER_VERTICAL_AT_REFIT`` with sig-het active,
+        only on reference-refresh repeats plus once at block open).
+        Uniforms come from the move's own ``_temper_rng`` stream; when a
+        ``swap_census`` is passed, accepted swaps also face the tempering
+        cap gate (:meth:`_swap_cap_ok`) and the census is carried forward
+        (:meth:`_cap_swap_apply`).
+
+        Args:
+            band_sorter (BandSorter): The propose's sorter; accepted cells
+                exchange their labels in it.
+            band_temps (xp.ndarray): Inverse temperatures, indexed
+                ``[band, temp]``.
+            t_i (xp.ndarray): Temperature label per block row (updated in
+                place on accept).
+            w_i (xp.ndarray): Walker index per block row.
+            b_i (xp.ndarray): Band index per block row.
+            slots (xp.ndarray): Buffer slot per block row.
+            beta (xp.ndarray): Per-row inverse temperature (updated in place).
+            ll_ref (xp.ndarray): Per-row add-delta of the current point.
+            ll_change_log (xp.ndarray): ``(ntemps, nwalkers, num_bands)``
+                ledger; swapped cells trade entries.
+            prop_counts (xp.ndarray): ``(2, ntemps, nwalkers, num_bands)``;
+                row 1 (in-model) trades entries.
+            acc_counts (xp.ndarray): Same shape; row 1 trades entries.
+            cell_ll_state (dict or None): Cell-ll bracket state
+                (``spec``, ``ll0``, ``led0``, ``rep0`` per slot).
+            parity (int): Parity of the cold rung paired in this sweep.
+            census (dict, optional): Block census from
+                :meth:`_vertical_census_new`. Default ``None``.
+            swap_census (optional): Tempering cap-gate census, built once
+                per block. Default ``None`` (no cap gate).
+            cell_ll_base (xp.ndarray): Per-row source-free slab likelihood.
+                Required despite the ``None`` default.
+
+        Returns:
+            int: Number of accepted swaps.
+
+        Raises:
+            ValueError: When ``cell_ll_base`` is ``None``.
         """
         xp = self.xp
         if cell_ll_base is None:
@@ -17333,11 +20195,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         total likelihood ... It still holds a total likelihood and should
         get swapped accordingly").
 
-        DELIBERATELY A SEPARATE METHOD. The picked-row sweep runs in every
-        production block and is the hottest code in the move; this path is
-        opt-in (``GB_TEMPER_ALL_RUNGS``) and must not be able to perturb it
-        even by a refactor. Nothing here is shared by mutation -- the two
-        read the same state and use the same sorter primitives.
+        DELIBERATELY A SEPARATE METHOD. The picked-row sweep is the stock
+        default and the hottest code in the move; this path is opt-in
+        (``GB_TEMPER_ALL_RUNGS``, code default off) and must not be able to
+        perturb it even by a refactor. Nothing here is shared by mutation --
+        the two read the same state and use the same sorter primitives.
+        (The 9mo / 12mo launchers export ``GB_TEMPER_ALL_RUNGS=1``: there
+        THIS is the vertical sweep every GB block runs, at the
+        ``GB_TEMPER_VERTICAL_AT_REFIT`` cadence, with
+        ``GB_VERT_EXACT_PRICE=0``.)
 
         WHAT THIS BUYS. A column's cell can now be swapped against a rung
         holding NO picked source, so a cold cell whose whole model is
@@ -17347,7 +20213,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``project_sole_occupant_swap_gap``.
 
         ``ar`` is the block's all-rung state:
-        ``(cols, carrier, occupied, cached, scorable)``. ``carrier`` is the
+        ``(cols, carrier, occupied, cached, scorable, frozen, ar_slot)``
+        (``frozen``: price this rung from the cache; ``ar_slot``: the buffer
+        slot of each rung, ``-1`` when not resident; all per-(column, rung)
+        arrays are permuted on accept). ``carrier`` is the
         single source of truth for which rung is scored live -- the spec's
         disjointness guard -- and a host-side uniqueness assert on the
         relabel source set backs it up, because
@@ -17364,7 +20233,46 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         * ``cell_ll_state`` is re-pointed ONE-SIDED when a partner has no
           slot: ``spec`` follows the model, ``ll0/led0/rep0`` do not. A
           two-sided swap is wrong with one side absent and a no-op credits
-          the wrong cell (verified against ``_cell_ll_finalize``).
+          the wrong cell (verified against ``_cell_ll_finalize``). When both
+          rungs are resident the brackets are traded two-sided
+          (:func:`_ar_trade_cell_ll`), and the one-sided remainder is
+          counted in the census (``one_sided_bracket``).
+
+        Unscorable pairs (either total not obtainable from the block's own
+        measurements) are dropped and counted (``unscorable``). Uniforms
+        come from ``_temper_rng``.
+
+        Args:
+            band_sorter (BandSorter): The propose's sorter; accepted cells
+                exchange their labels in it.
+            band_temps (xp.ndarray): Inverse temperatures, indexed
+                ``[band, temp]``.
+            t_i (xp.ndarray): Temperature label per block row (carrier rows
+                updated in place).
+            w_i (xp.ndarray): Walker index per block row.
+            b_i (xp.ndarray): Band index per block row.
+            slots (xp.ndarray): Buffer slot per block row.
+            beta (xp.ndarray): Per-row inverse temperature (updated in place).
+            ll_ref (xp.ndarray): Per-row add-delta of the current point.
+            ll_change_log (xp.ndarray): ``(ntemps, nwalkers, num_bands)``
+                ledger; swapped cells trade entries.
+            prop_counts (xp.ndarray): ``(2, ntemps, nwalkers, num_bands)``;
+                row 1 trades entries.
+            acc_counts (xp.ndarray): Same shape; row 1 trades entries.
+            cell_ll_state (dict or None): Cell-ll bracket state.
+            parity (int): Parity of the cold rung paired in this sweep.
+            ar (tuple): The all-rung state above.
+            census (dict, optional): Block census. Default ``None``.
+            cell_ll_base (xp.ndarray): Per-row source-free slab likelihood.
+                Required despite the ``None`` default.
+
+        Returns:
+            int: Number of accepted swaps.
+
+        Raises:
+            ValueError: When ``cell_ll_base`` is ``None``.
+            RuntimeError: When the accepted pairs name a duplicate cell
+                (refuses a half-applied relabel).
         """
         # Checked BEFORE touching any instance state: the ratio is
         # meaningless without whole-cell totals, and failing here rather
@@ -17621,6 +20529,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         pool, so every device in the ACA's ``gpus`` list is visited (same
         pattern as ``_purge_and_free`` around the sig-het arm sweep).
         ``GB_INMODEL_BATCH_MEMPOOL_FREE=0`` restores the previous behavior.
+
+        ``GB_INMODEL_BATCH_MEMPOOL_FREE`` defaults to 1 (the 9mo / 12mo
+        launchers export 1). Called by :meth:`_run_in_model_repeats` around
+        the ``GB_INMODEL_SETUP_BATCH`` staging sub-blocks, and by the F-stat
+        move's ``_setup_epoch`` before an epoch refit. No-op on a CPU
+        backend; failures are logged at DEBUG and swallowed.
+
+        Args:
+            model (eryn.model.Model): Its ``analysis_container_arr.gpus``
+                lists the devices to sweep (current device only when absent).
+            where: Label for the DEBUG log line.
         """
         if not self.backend.uses_cupy:
             return
@@ -17681,6 +20600,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # every call and RAISE, because silently copying them would desync the
     # phase-maximization write-back that mutates ``new`` in place.
 
+    # TODO check: keep/remove/document -- fused in-model accept kernel only; GB_INMODEL_ACCEPT_KERNEL=0 (default and launchers)
     def _imk_warn_once(self, msg):
         """One WARNING per distinct fallback reason, per move."""
         if getattr(self, "_imk_warned", None) == msg:
@@ -17688,6 +20608,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._imk_warned = msg
         logger.warning("%s: [GB_INMODEL_ACCEPT_KERNEL] %s", self.name, msg)
 
+    # TODO check: keep/remove/document -- fused in-model accept kernel only; GB_INMODEL_ACCEPT_KERNEL=0 (default and launchers)
     @staticmethod
     def _imk_layout_problem(pairs):
         """First ``(name, array, dtype)`` triple that is not kernel-ready, or None."""
@@ -17700,6 +20621,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 return f"{name} is not C-contiguous"
         return None
 
+    # TODO check: keep/remove/document -- fused in-model accept kernel only; GB_INMODEL_ACCEPT_KERNEL=0 (default and launchers)
     def _imk_require(self, pairs):
         """Per-repeat layout check that raises rather than silently copying."""
         bad = self._imk_layout_problem(pairs)
@@ -17712,6 +20634,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 "the python chain."
             )
 
+    # TODO check: keep/remove/document -- fused in-model accept kernel only; GB_INMODEL_ACCEPT_KERNEL=0 (default and launchers)
     @staticmethod
     def _imk_real_1d(xp, a):
         """``(contiguous float64 array, stride)`` for the real parts of ``a``.
@@ -17726,6 +20649,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         arr = xp.asarray(a).ravel()
         return xp.ascontiguousarray(arr.real, dtype=xp.float64), 1
 
+    # TODO check: keep/remove/document -- fused in-model accept kernel only; GB_INMODEL_ACCEPT_KERNEL=0 (default and launchers)
     def _imk_halves(self, xp, half_pre):
         """Int32/uint8 casts of the per-half gathers the kernels index with.
 
@@ -17752,10 +20676,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             })
         return out
 
+    # TODO check: keep/remove/document -- fused in-model accept kernel only (every call guarded on a live kernel state); kernel off
     def _imk_rebuild_halves(self, acc, half_pre):
         """Re-cast the per-half index arrays after a vertical swap."""
         acc["idx"] = self._imk_halves(acc["xp"], half_pre)
 
+    # TODO check: keep/remove/document -- called every in-model block but returns None at once unless GB_INMODEL_ACCEPT_KERNEL=1 (default 0, launchers 0)
     def _imk_block_setup(self, half_pre, curr, ll_ref, curr_prior,
                          ll_change_log, prop_counts, acc_counts, dg, trust_n):
         """Block-scope state for the fused kernels, or None to use python.
@@ -17940,6 +20866,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "kind_dev": {},
         }
 
+    # TODO check: keep/remove/document -- fused in-model accept kernel only; GB_INMODEL_ACCEPT_KERNEL=0 (default and launchers)
     def _imk_gate(self, acc, h_i, new, new_logp, curr, l_s,
                   anchor_phys, trust_dlna, trust_dphase, trust_Tobs):
         """Fused pre-score gate + compaction. Returns ``(keep, keep_idx, keep_any)``.
@@ -18005,6 +20932,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return (buf["keep_flag"].view(bool), buf["keep_idx"][:n_keep],
                 n_keep > 0)
 
+    # TODO check: keep/remove/document -- fused in-model accept kernel only; GB_INMODEL_ACCEPT_KERNEL=0 (default and launchers)
     def _imk_accept(self, acc, h_i, new, new_logp, factors, u, buffer_obj,
                     scored, keep_idx, keep_any, kind):
         """Fused post-score MH accept + every masked state write.
@@ -18078,6 +21006,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         be a statement about the RJ, not about the polish, and shutting the
         sub-band off would stop the search in it -- which is the
         stage-scoped valve's job, on a much coarser clock, not this one's.
+
+        Also ``None`` in PE stages (:func:`_converge_stage_allows`; warned
+        once). In the 9mo / 12mo runs (``GB_INMODEL_GROUP=1``, window
+        ``GB_INMODEL_GROUP_ITERS=3`` passes, ``gb_search_2`` 1 via
+        ``GB_SEARCH_2_INMODEL_GROUP_ITERS``; ``_DLL`` 4.0, ``_SCALE`` flat,
+        ``_MAX_PASSES`` 1000) the search-stage pure in-model moves get a
+        state. Called once per propose by :meth:`_gb_serve_run_proposal`
+        and :meth:`_propose_legacy`; the ``[GB_IMGROUP] armed`` line is
+        re-logged whenever the window or the repeats per pass change.
+
+        Returns:
+            _InModelGroupState or None: A fresh group state, or ``None``.
         """
         if not getattr(self, "inmodel_group", False):
             return None
@@ -18136,7 +21076,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
 
     def _group_cold_occupancy(self, band_sorter):
-        """``(nwalkers, num_bands)`` count of live COLD sources per pair."""
+        """``(nwalkers, num_bands)`` count of live COLD sources per pair.
+
+        The occupancy input of each group pass (:meth:`_run_group_passes`).
+
+        Args:
+            band_sorter (BandSorter): The propose's sorter.
+
+        Returns:
+            xp.ndarray: Integer counts, shape ``(nwalkers, num_bands)``.
+        """
         xp = self.xp
         cold = (band_sorter.temp_inds == 0) & band_sorter.inds
         idx = (band_sorter.walker_inds[cold].astype(xp.int64)
@@ -18171,6 +21120,34 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         that dropped it would have each rank draw its own and diverge from
         both the first pass and the other blocks. ``None`` is correct for
         the single-process caller, which never supplies one.
+
+        Each pass: update the group state from the pass's ledger and the
+        cold occupancy, log a ``[GB_IMGROUP] pass`` line, stop when every
+        pair is shut or at ``max_passes`` (loud warning), otherwise bank the
+        pass's cold delta into ``new_state.log_like``, publish the shut mask
+        as ``_group_shutoff_wb`` for the next pass's eligibility, clear
+        ``has_run_rj`` and run :meth:`run_proposal` again. Ends with
+        :meth:`_group_report`. Called by :meth:`_gb_serve_run_proposal` and
+        :meth:`_propose_legacy` after the first pass.
+
+        Args:
+            st (_InModelGroupState): The propose's group state.
+            model (eryn.model.Model): Forwarded to :meth:`run_proposal`.
+            new_state (GFState): The propose's state; cold deltas of the
+                non-final passes are added to its ``log_like``.
+            band_sorter (BandSorter): The propose's sorter.
+            band_temps (xp.ndarray): Inverse temperatures.
+            ll_change_log (xp.ndarray): First pass's ledger,
+                ``(ntemps, nwalkers, num_bands)``.
+            prop_counts (xp.ndarray): First pass's counts,
+                ``(2, ntemps, nwalkers, num_bands)``.
+            acc_counts (xp.ndarray): First pass's accept counts, same shape.
+            scan_schedule (optional): Head-drawn band-unit scan schedule,
+                forwarded unchanged to every pass. Default ``None``.
+
+        Returns:
+            tuple[xp.ndarray, xp.ndarray, xp.ndarray]: The LAST pass's
+            ``(ll_change_log, prop_counts, acc_counts)``.
         """
         xp = self.xp
         while True:
@@ -18249,7 +21226,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return ll_change_log, prop_counts, acc_counts
 
     def _group_report(self, st, xp):
-        """One closing ``[GB_IMGROUP]`` summary for the whole group."""
+        """One closing ``[GB_IMGROUP]`` summary for the whole group.
+
+        Percentiles of the pass at which each pair shut (all pairs and
+        occupied pairs), the never-shut count, and the pass count relative
+        to a fixed 5-pass block. No-op when the state never ran.
+
+        Args:
+            st (_InModelGroupState): The finished group state.
+            xp (module): numpy or cupy (unused; kept for symmetry).
+        """
         if st.shut is None:
             return
         at = _to_numpy(st.shut_at).ravel()
@@ -18261,6 +21247,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         else:
             occ_at = fired
         def _p(a, q):
+            """Percentile ``q`` of ``a``, NaN when empty."""
             return float(np.percentile(a, q)) if a.size else float("nan")
         logger.info(
             "[GB_IMGROUP %s] group done: %d pass(es) x %d repeats/source; "
@@ -18307,6 +21294,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         carried slot would have its sources injected twice. Not attempted.
         ``{BRANCH}_INMODEL_CONVERGE_REFILL=0`` turns the whole loop off and
         keeps every column in its block for that block's life.
+
+        Reached only from the DIRECT-batch schedule of :meth:`_run_band_unit`
+        (``GB_RJ_DIRECT_BATCH=1``, the code default) with convergence armed
+        and refill on. The 9mo / 12mo launchers run the grouped schedule
+        (``GB_RJ_DIRECT_BATCH=0``), which does not port the refill, so
+        their ``GB_INMODEL_CONVERGE_REFILL=1`` export has no effect there.
+
+        Args:
+            pool (dict): The pooled survivors (``ids``, ``specials``,
+                ``temp_inds``, ... per row), ordered by column.
+            state (_InModelConvergeState): The convergence state; its
+                ``generations`` count and ``capped`` set are updated.
+            polish (callable): Runs one in-model block on a pool chunk.
+            width (int): Number of columns a block may hold.
+            band_sorter (BandSorter): The propose's sorter (labels re-read
+                before every generation).
+            xp (module): numpy or cupy.
+
+        Returns:
+            int: Number of blocks run.
         """
         spans = _converge_column_spans(pool, self.num_bands)
         queue, active = list(spans), []
@@ -18395,6 +21402,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``..._GATE_RUNGS=1`` makes T0 the only rung with a vote. ``ceil``
         on the fraction path, so a fraction can never round to zero rungs
         and silently disarm the whole test.
+
+        Reads ``{BRANCH}_INMODEL_CONVERGE_GATE_RUNGS``, falling back to
+        ``GB_INMODEL_CONVERGE_GATE_RUNGS``, then to the
+        ``inmodel_converge_gate_frac`` fraction of ``ntemps``. The 9mo /
+        12mo launchers export ``GB_INMODEL_CONVERGE_GATE_RUNGS=4`` (gate
+        fraction 0.5 unused). Called by :meth:`_converge_state_for`.
+
+        Returns:
+            int: Rung count, clipped to ``[1, ntemps]``.
         """
         _raw = os.environ.get(
             f"{(self.branch_name or 'GB').upper()}"
@@ -18432,6 +21448,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
           sprint-wide rule in CLAUDE.md), and a per-row dict of device-fed
           floats is exactly the kind of runtime state that must not be
           live at that moment.
+
+        Also ``None`` for a class not in ``inmodel_converge_classes`` and in
+        PE stages (the module-level search-stage name gate, warned once). The state's
+        window is ``inmodel_converge_iters`` (newborn) or
+        ``inmodel_converge_iters_survivor`` (other classes), threshold
+        ``inmodel_converge_dll`` (scaled with the window only under
+        ``{BRANCH}_INMODEL_CONVERGE_DLL_SCALE_WITH_WINDOW=1``), ceiling
+        ``inmodel_converge_max`` (``0`` means 4x the class's repeat budget,
+        never below window + 1), gate rungs from
+        :meth:`_converge_gate_rungs`, and post-gate minimum repeats from
+        ``{BRANCH}_INMODEL_POST_GATE_NEWBORN`` (default 100) /
+        ``{BRANCH}_INMODEL_POST_GATE_SURVIVOR`` (default 0). 9mo / 12mo
+        values: ``GB_INMODEL_CONVERGE=on``, ``_ITERS`` 250 (``gb_search_2``
+        100 via ``GB_SEARCH_2_INMODEL_CONVERGE_ITERS``), ``_ITERS_SURVIVOR``
+        25, ``_DLL`` 4.0, ``_MAX`` 20000, ``_STOP_FRAC`` 0.5,
+        ``_CLASSES`` newborn,mature. Called per provenance class by the
+        grouped flush of :meth:`_run_band_unit` (and the direct-batch path);
+        logs the ``[GB_IMCONV] armed`` line when the window changes.
+
+        Args:
+            cls_name (str): Provenance class (``"newborn"`` or a survivor
+                class such as ``"mature"``).
+
+        Returns:
+            _InModelConvergeState or None: A fresh state, or ``None`` (keep
+            the fixed budget).
         """
         mode = getattr(self, "inmodel_converge", "off")
         if mode == "off":
@@ -18648,6 +21690,86 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         draw count/order/shape and the MH-ratio arithmetic are untouched;
         gated host branches became unconditional masked device ops with
         identical results.
+
+        THE in-model block of every GB / VGB move. One call is one block; a
+        pool larger than ``GB_INMODEL_SETUP_BATCH`` (code default 0 = off;
+        the 9mo / 12mo launchers export 2048) is split into sequential
+        sub-blocks (whole (walker, band) columns when vertical swaps or
+        convergence are on), each run by a recursive call, with
+        :meth:`_free_inmodel_batch_pools` before each one.
+
+        Block open: order the pool by column, take the picked sources out of
+        their cell slabs, build the per-source likelihood setup (the sig-het
+        reference), the proposal factors (:meth:`_proposal_cholesky`, after
+        :meth:`_ensure_proposal_tables` on the propose's first block), the
+        reference add-delta and prior, the observable rho snapshot and eigen
+        table, and the sig-het trust gate; with vertical swaps on, also the
+        source-free slab base, the all-rungs state and the deferred
+        cell-label window.
+
+        Each repeat, per parity half (two walker-parity halves for VGB's
+        sequential red-blue repeats, else one): :meth:`in_model_proposal`,
+        the pre-score gate chain (f0 window, trust gate, cap drift-gate
+        veto), ONE scoring call, the opt-SNR prior clamp, the MH test at the
+        row's ``beta`` and masked accept writes. Then the sig-het reference
+        refresh every ``sighet_refresh_every`` repeats, the vertical sweep
+        (:meth:`_vertical_swap_sweep_all_rungs` or
+        :meth:`_vertical_swap_sweep`; under ``GB_TEMPER_VERTICAL_AT_REFIT``
+        with sig-het active only on refresh repeats, plus one sweep at block
+        open), and, with ``converge``, the per-row freeze and early-exit
+        poll.
+
+        Block close: flush the label window, fold the per-kind accept
+        counts into ``_im_kind_counts``, re-base the buffer and scheduler
+        slot labels after accepted swaps, bank the vertical census for the
+        once-per-propose ladder adaptation (plus an optional local ladder
+        step every few blocks), log the [GB_VERT] and [GB_TRUST] lines and
+        the sig-het drift / accuracy audits (``sighet_drift_check``), clear
+        the in-model likelihood, write the final coordinates back to the
+        sorter and the residual, re-key the ``GB_CHOL_CACHE`` entries, and
+        fold the cold rows' band gain (:meth:`_observed_band_gain`) into the
+        block's cold-lnL peak.
+
+        Called by :meth:`_run_band_unit` (all schedules; the grouped flush
+        once per provenance class). Other knobs reach it through helpers:
+        ``GB_TEMPER_VERTICAL`` / ``GB_TEMPER_ALL_RUNGS`` (via
+        ``temper_vertical`` and :func:`_vert_all_rungs_on`),
+        ``GB_VERT_EXACT_PRICE``, ``GB_INMODEL_ACCEPT_KERNEL``
+        (:meth:`_imk_block_setup`), ``GB_CAP_DEST_BAND``. 9mo / 12mo:
+        all-rungs vertical swaps at the refit cadence, sig-het references
+        refreshed every 25 repeats, fused kernel off, leaf caps off.
+
+        Args:
+            model (eryn.model.Model): Carries the parent ACA.
+            band_sorter (BandSorter): The propose's sorter; final
+                coordinates and cell labels are written to it.
+            buffer_obj (SubBandBuffer): The bound buffer (cell residuals).
+            band_temps (xp.ndarray): Inverse temperatures ``[band, temp]``;
+                the local ladder step may adapt it in place.
+            picked (dict): The pooled rows (``ids``, ``slot_index``,
+                ``N_vals``, ``temp_inds``, ``walker_inds``, ``band_inds``,
+                ...); dead rows are skipped.
+            ll_change_log (xp.ndarray): ``(ntemps, nwalkers, num_bands)``,
+                updated in place.
+            prop_counts (xp.ndarray): ``(2, ntemps, nwalkers, num_bands)``;
+                row 1 (in-model) updated in place.
+            acc_counts (xp.ndarray): Same shape; row 1 updated in place.
+            num_repeats (int, optional): Repeat budget; ``None`` uses
+                ``num_repeat_proposals``.
+            cell_ll_state (dict, optional): The unit's cell-ll bracket state.
+            scheduler (BandScheduler, optional): Slot labels re-based after
+                accepted vertical swaps.
+            converge (_InModelConvergeState, optional): Convergence-driven
+                polish; ``None`` runs the fixed budget.
+            cold_lnl (np.ndarray, optional): Block-local ``(B, num_bands)``
+                cold-lnL peak to fold into; ``None`` uses the move's own
+                block-local peak array, allocated per propose (by the rank
+                when its session opens, by the head in its propose paths;
+                no caller passes it, and the sub-block recursion does not
+                forward it).
+
+        Returns:
+            None: Everything is written in place.
         """
         xp = self.xp
         # VERTICAL-LADDER STAGING (user requirement 2026-09-10): when the
@@ -18679,6 +21801,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # the full-width pool. Exact (per-slot slabs + serial-within-band);
         # see _picked_batches for the memory law and the RNG caveat.
         # 0 (default) = off: the unbatched path is byte-for-byte untouched.
+        # (The 9mo / 12mo launchers export GB_INMODEL_SETUP_BATCH=2048.)
         _batch_cap = int(os.environ.get("GB_INMODEL_SETUP_BATCH", "0") or 0)
         if _batch_cap > 0 and int(picked["ids"].shape[0]) > _batch_cap:
             _n_picked = int(picked["ids"].shape[0])
@@ -18733,9 +21856,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # flips band_sorter.inds on accepted births/deaths, so this mask
         # includes freshly-born sources (they get the repeat block) and drops
         # freshly-killed ones (their template is already out of the residual).
-        # Nested spans under the top-level ``inmodel_repeats`` span (see
-        # _ProposeTimer._TOP -- ``inmodel_*`` are reported but excluded from
-        # the tracked/untracked accounting, so they don't double-count).
+        # Nested spans under the top-level ``inmodel_repeats`` span (see the
+        # default ``top`` tuple of _ProposeTimer.report -- ``inmodel_*`` are
+        # reported but excluded from the tracked/untracked accounting, so
+        # they don't double-count).
         # This is the breakdown the sig-het GPU work needs: per-block setup
         # (cholesky / sighet_setup) vs the per-repeat scoring kernel
         # (inmodel_get_add_ll) vs host-side MH overhead (inmodel_accept).
@@ -18859,8 +21983,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             sighet_active = bool(
                 buffer_obj.setup_in_model_likelihood(curr, slots, N_vals, leaf_inds=l_i)
             )
-        # Pure-stretch moves (use_info_mat_proposal=False, e.g. the fixed-
-        # dimensional VGB move) never build the info-matrix Cholesky.
+        # Pure-stretch moves (use_info_mat_proposal=False, e.g. a VGB move
+        # under VGB_INMODEL_PROPOSAL=stretch; the default observable / eigen
+        # VGB kinds do build it) never build the info-matrix Cholesky.
         with _tspan(tm, "inmodel_cholesky"):
             chol = (
                 self._proposal_cholesky(model, band_sorter, ids, slots=slots,
@@ -19032,6 +22157,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         _cv_active = None
 
         def _build_half_pre():
+            """Per-half row gathers (ids, slots, labels, beta, bins, cold mask)."""
             out = []
             for _sub in halves:
                 if _cv_active is not None:
@@ -19057,8 +22183,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # Per-repeat VERTICAL band-temperature swaps (GB_TEMPER_VERTICAL).
         # Free: same walker => identical data slab => the swapped lls are
         # the current ones exchanged, so the ratio is closed form and no
-        # buffer is touched. OFF by default. The ladder is NOT adapted here
-        # -- ``_adapt_band_temps`` stays exclusive to ``run_tempering``.
+        # buffer is touched. OFF by default (the 9mo / 12mo launchers set
+        # GB_TEMPER_VERTICAL=1). The ladder is NOT adapted per repeat: the
+        # block banks its counts at block close (_vertical_ladder_bank) for
+        # the propose body's once-per-propose step (_vertical_adapt_ladder
+        # -> _adapt_band_temps; run_tempering is the other caller), and may
+        # take an optional LOCAL step at block close (see there).
         _vert_on = bool(getattr(self, "temper_vertical", False)) and self.ntemps > 1
         _vert_at_refit = _vert_at_refit_on()
         # Sweeps ACTUALLY run this block. Printed on [GB_VERT] because
@@ -19090,6 +22220,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         f"{int(slots.shape[0])} block slots."
                     )
         # ---- ALL-RUNGS VERTICAL SWAP state (GB_TEMPER_ALL_RUNGS, off) ---
+        # (code default off; the 9mo / 12mo launchers export 1.)
         # Built here, in the same BLOCK scope as _vert_base and for the same
         # reason: the parent plane is frozen between the removal above and
         # the write-back, so a non-resident cell's total is a block
@@ -19219,7 +22350,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
 
         # ---- DEFERRED CELL RELABELS (orchestration audit 2026-08-27,
-        # candidate 2; GB_CELL_LABEL_DEFERRED, default OFF) ----
+        # candidate 2; GB_CELL_LABEL_DEFERRED, default ON since the
+        # 2026-08-28 ruling -- see gbbands._cell_label_deferred) ----
         # The window spans the WHOLE repeat block, collapsing one
         # full-table relabel per repeat step (one vertical sweep each) into
         # one per block. Legal because nothing between the sweeps reads the
@@ -20523,6 +23655,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         device (parallel-resources plan P1). Row positions in a block only
         ever hold walkers from that block, so every adjacent-temperature
         pair within a row is device-local.
+
+        Called once per (band, temp) row by :meth:`_tempering_swap_grid`
+        unless ``GB_TEMPER_BATCH_PERMS=1`` (unset in the 9mo / 12mo
+        launchers, so this is the path ``vgb_pe`` takes).
+
+        Returns:
+            cupy.ndarray: Shape ``(nwalkers,)`` walker permutation.
         """
         groups = getattr(self, "_tempering_walker_groups", None)
         if not groups:
@@ -20533,6 +23672,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             out[g_dev] = g_dev[cp.random.permutation(len(g))]
         return out
 
+    # TODO check: keep/remove/document -- only with GB_TEMPER_BATCH_PERMS=1 (default 0, unset in launchers)
     def _batched_walker_permutations(self, n_rows):
         """``(n_rows, nwalkers)`` independent walker permutations, batched.
 
@@ -20585,6 +23725,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Returns ``(band_index, temp_index, walkers_permuted, special_index,
         num_bands_unit)``; the first four are shaped
         ``(bands_this_unit, nwalkers, ntemps)``.
+
+        Called once per unit by :meth:`run_tempering`. Permutations come from
+        :meth:`_permute_walkers_for_swaps` (one per row) or, with
+        ``GB_TEMPER_BATCH_PERMS=1``, :meth:`_batched_walker_permutations`.
+
+        Args:
+            band_sorter (BandSorter): The propose's sorter (packs the
+                special cell index).
+            start (int): The unit's offset into the interior bands.
+            units (int): Number of tempering units (band stride). Default 2.
+
+        Returns:
+            tuple: ``band_index``, ``temp_index``, ``walkers_permuted`` and
+            ``special_index`` (``cupy.ndarray``, shape
+            ``(num_bands_unit, nwalkers, ntemps)``), then the int
+            ``num_bands_unit``.
         """
         if self.num_bands == 1:
             num_bands_tempered = 1
@@ -20641,6 +23797,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         band-by-band. No-op on the first proposal (``self.time == 0``).
 
         TODO: change temperature adaptation.
+
+        The decay uses the move's ``temperature_control`` (``adaptation_lag``,
+        ``adaptation_time``). Callers: :meth:`run_tempering` (permuted swaps;
+        ``vgb_pe`` in the 9mo / 12mo runs), :meth:`_vertical_adapt_ladder`
+        (the pooled vertical counts, the GB route in those runs), the
+        orchestrated head's pooled permuted-swap step, and the optional
+        local per-block step of :meth:`_run_in_model_repeats`. Count arrays
+        may be numpy or cupy; they are coerced to ``band_temps``'s module.
+
+        Args:
+            band_temps (xp.ndarray): ``(num_bands, ntemps)`` inverse
+                temperatures, updated in place.
+            band_swaps_accepted (array-like): ``(num_bands, ntemps - 1)``
+                accepted swaps per band and adjacent rung pair.
+            band_swaps_proposed (array-like): Same shape, proposed swaps
+                (0 entries are treated as 1, so they adapt at ratio 0).
         """
         if self.time <= 0:
             return
@@ -20693,6 +23865,53 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     def run_tempering(self, model, state, band_sorter, band_temps, *,
                       tmp_start=None, adapt_band_temps=True):
+        """Permuted ("fancy") parallel-tempering swaps between band rungs.
+
+        For each of ``band_units`` tempering units (starting at
+        ``tmp_start``): take the unit's band class of the cold chain out of
+        the parent residual (:meth:`remove_cold_chain_sources_from_residual`
+        with :meth:`_tempering_open_close_mask`), build the permuted
+        (band, walker, temp) grid (:meth:`_tempering_swap_grid`), drop inert,
+        shut-off and (replica mode) unowned grid rows, then for each chunk of
+        ``GB_TEMPER_PRELOAD_CELLS`` cells (code default 1200; launchers 4800)
+        fill a swap buffer and run the descending rung-pair MH swaps
+        (empty-vs-empty pairs skipped under ``GB_TEMPER_SKIP_EMPTY``, default
+        1; the tempering cap gate when :meth:`_temper_cap_gate_on`); accepted
+        swaps exchange cell labels in the sorter. The class is then closed
+        back into the residual and the label consistency asserted. Counters
+        and the [GB_TEMPER_EMPTY] / [GB_TEMPER_CHECK] / [GB_TEMPER_SKIP]
+        lines are emitted, and the ladder is adapted from the swap counts
+        when ``adapt_band_temps``.
+
+        Other knobs read here (global ``GB_TEMPER_*`` names, also for VGB):
+        ``GB_TEMPER_CENSUS_HOIST``, ``GB_TEMPER_COMPACT_ROWS``,
+        ``GB_TEMPER_SKIP_SHUTOFF_BANDS`` (all default 0; launchers 1),
+        ``GB_TEMPER_BATCH_PERMS`` (default 0), ``GB_TEMPER_AUDIT`` (default
+        0: per-unit residual reconcile). In the 9mo / 12mo runs only
+        ``vgb_pe`` reaches this: the GB moves run
+        ``GB_RUN_FANCY_TEMPERING=0`` (vertical swaps instead). Called by the
+        rank-side ``_gb_serve_run_tempering`` (with ``tmp_start`` from the
+        head and ``adapt_band_temps=False``) and by :meth:`_propose_legacy`.
+
+        Args:
+            model (eryn.model.Model): Carries the parent ACA (its
+                ``gpu_splits`` set the device-local walker groups).
+            state (GFState): The propose's state (not read by the body).
+            band_sorter (BandSorter): The propose's sorter; cell labels are
+                exchanged in it.
+            band_temps (xp.ndarray): ``(num_bands, ntemps)`` inverse
+                temperatures; adapted in place when ``adapt_band_temps``.
+            tmp_start (int, optional): First unit; ``None`` draws one.
+                Default ``None``.
+            adapt_band_temps (bool, optional): Adapt the ladder at the end.
+                Default ``True``.
+
+        Returns:
+            tuple: ``ll_change_sum_temp`` (per-(temp, walker) credited
+            log-likelihood change, shape ``(ntemps, nwalkers)``), then
+            ``band_swaps_accepted`` and ``band_swaps_proposed`` (int,
+            ``(num_bands, ntemps - 1)``).
+        """
         # ``tmp_start`` (default None = draw here, today's behaviour) takes
         # the head's per-propose start class under the multi-rank fan-out so
         # every rank sweeps the same band classes in the same order; an int
@@ -20825,7 +24044,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                      band_sorter, start, units=units)
 
             # ---- DEFERRED CELL RELABELS (orchestration audit 2026-08-27,
-            # candidate 2; GB_CELL_LABEL_DEFERRED, default OFF) ----
+            # candidate 2; GB_CELL_LABEL_DEFERRED, default ON since the
+            # 2026-08-28 ruling -- see gbbands._cell_label_deferred) ----
             # Every cell this unit's rung-pair loop can name is in
             # ``special_index`` -- it IS the unit's swap grid -- so it is
             # exactly the universe the window needs. Inside the window an
@@ -21480,7 +24700,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def _write_back_state(self, new_state, band_sorter):
         """Repack the sorter's live sources; return ``(inds_new, alive)``.
 
-        The repack writes into ``new_state.branches['gb']``; the return is
+        The repack writes into the move's WORK branch of ``new_state``
+        (:meth:`_work_branch`: the branch sub-state's tempered ensemble,
+        sharing memory with the sub-state arrays; the main state's cold row
+        is mirrored afterwards by :meth:`_sync_cold_row`); the return is
         the written ``(temp, walker, leaf)`` index triple plus the sorter's
         alive mask (both branches return it). Note the multi-rank rank body
         does NOT consume that return: it ships its whole branch block back
@@ -21505,6 +24728,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         to their ORIGINAL leaf index at their CURRENT (temp, walker) labels
         (tempering only relabels temp/walker; leaves never move), so the
         per-leaf transform fills stay attached to the right source.
+
+        Requires every deferred cell relabel to be flushed (asserted), and
+        ends with :meth:`_sync_cold_row`. Called by the rank finish
+        (:meth:`_gb_serve_finish`) and by :meth:`_propose_legacy`.
+
+        Args:
+            new_state (GFState): The state being written.
+            band_sorter (BandSorter): The propose's sorter (final labels and
+                coordinates).
+
+        Returns:
+            tuple[tuple[np.ndarray, np.ndarray, np.ndarray], xp.ndarray]:
+            ``inds_new`` (host temp / walker / leaf index arrays of the
+            written leaves) and the sorter's alive mask.
         """
         # The FINAL repack: leaves are placed at the sources' CURRENT
         # (temp, walker), so a deferred relabel still in flight here would
@@ -21592,6 +24829,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         may have shifted, so it is "last known", which is what a gate
         heuristic needs. Without ``inds_old`` the old wipe semantics are
         kept.
+
+        Called by :meth:`_write_back_state` (both branches). No-op when the
+        move holds no capture or the sub-state carries no ``d_h`` array.
+
+        Args:
+            new_state (GFState): The state being written (its branch
+                sub-state's ``d_h`` / ``h_h``, shape ``(nwalkers, nleaves_max)``,
+                are overwritten).
+            alive (xp.ndarray): Sorter alive mask.
+            inds_new (tuple): Host ``(temp, walker, leaf)`` arrays of the
+                written leaves.
+            inds_old (tuple, optional): The same rows' pre-repack positions.
+                Default ``None``.
         """
         sub_states = getattr(new_state, "sub_states", None) or {}
         sub = sub_states.get(self.branch_name)
@@ -21624,6 +24874,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Thin wrapper over :meth:`_window_residual_lls` on the BAND grid;
         also stores ``self._band_dof`` (per-band real dof, used to scale the
         legacy nsigma convergence tolerance).
+
+        Called by :meth:`_cap_stats_local` on every rank-side propose (the
+        valve statistics ship even with leaf caps off).
+
+        Args:
+            acs (AnalysisContainerArray): The parent ACA (one AC per cold
+                walker).
+
+        Returns:
+            np.ndarray: Host ``(nwalkers, num_bands)`` residual lls.
         """
         lls, dof = self._window_residual_lls(acs, self.band_edges)
         self._band_dof = dof
@@ -21640,6 +24900,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the gain ``1/2 <d|d> - 1/2 <r|r>`` is formed pixel for pixel.
         Returns a host ``(nwalkers, len(edges) - 1)`` array, or None when the
         ACA does not carry the data.
+
+        Args:
+            acs (AnalysisContainerArray): The parent ACA.
+            edges (array-like): Window edges in Hz.
+
+        Returns:
+            np.ndarray or None: ``+1/2 <d|d>`` per (walker, window).
         """
         data = _valve_data_array(acs)
         if data is None:
@@ -21656,6 +24923,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         so the observation site and the judge-time statistic of one propose
         read the SAME data term. None (warned once) when it cannot be formed;
         the valve is then inert, never judged on the residual term.
+
+        Read by :meth:`_band_gain` and :meth:`_observed_band_gain`.
+
+        Args:
+            acs (AnalysisContainerArray): The parent ACA (cache key with its
+                ``psd_version``).
+
+        Returns:
+            np.ndarray or None: Host ``(nwalkers, num_bands)`` data term.
         """
         key = (id(acs), getattr(acs, "psd_version", None))
         hit = getattr(self, "_valve_dd", None)
@@ -21684,6 +24960,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         (:meth:`_band_residual_lls`). Positive when the templates explain
         power; exactly 0 for a band no template touches (``r = d`` there),
         under any noise. None when the data term is unavailable.
+
+        Called by :meth:`_cap_stats_local`; the result is what the
+        per-(walker, band) valve judge (:meth:`_update_search_band_shutoff`)
+        reads.
+
+        Args:
+            acs (AnalysisContainerArray): The parent ACA.
+            band_lls (np.ndarray): ``(nwalkers, num_bands)`` residual term.
+
+        Returns:
+            np.ndarray or None: ``(nwalkers, num_bands)`` gain, or ``None``
+            (no data term, or a shape mismatch).
         """
         dd = self._band_data_term(acs)
         if dd is None or np.shape(dd) != np.shape(band_lls):
@@ -21702,6 +24990,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         window does not lie whole inside the slot (a slab clamped at the
         active-band edge): the data term covers the whole window, so such a
         row is not observed.
+
+        Called by :meth:`_observed_band_gain`.
+
+        Args:
+            acs (AnalysisContainerArray): The parent ACA.
+            buffer_obj (SubBandBuffer): The bound buffer (slot origins and
+                the per-slot frequency length).
+            slots (xp.ndarray): Buffer slots.
+            band_inds (array-like): Band of each slot.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray, np.ndarray]: ``(lo, hi, ok)`` host
+            arrays aligned with ``slots`` (``lo`` / ``hi`` clipped into the
+            slot).
         """
         k0, k1, _, _ = self._window_bins(acs, self.band_edges)
         sl = np.asarray(_to_numpy(slots), dtype=np.int64).reshape(-1)
@@ -21743,6 +25045,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Returns a host float64 array aligned with ``slots``; NaN where the
         gain cannot be formed (no data term, a row outside its rows, a
         clipped window) -- the caller folds only finite entries.
+
+        Called at each in-model block close by :meth:`_run_in_model_repeats`
+        for the block's cold rows; the result is folded into the block's
+        cold-lnL peak.
+
+        Args:
+            model (eryn.model.Model): Its ``analysis_container_arr`` supplies
+                the data term.
+            buffer_obj (SubBandBuffer): The bound buffer (cold slots whole
+                again).
+            slots (xp.ndarray): Cold rows' buffer slots.
+            w_loc (array-like): Block-local walker index per row.
+            b_loc (array-like): Band index per row.
+
+        Returns:
+            np.ndarray: Float64 gain per row (NaN where not formed).
         """
         w = np.asarray(_to_numpy(w_loc), dtype=np.int64).reshape(-1)
         b = np.asarray(_to_numpy(b_loc), dtype=np.int64).reshape(-1)
@@ -21783,6 +25101,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         grid, whose resolution test (:meth:`_cap_cells_resolvable`) and
         partition windows depend on sub-layer cells coming back empty. FD
         windows are the stored bins either way.
+
+        Args:
+            acs (AnalysisContainerArray): The parent ACA (channels, FD start
+                bin and length).
+            edges (array-like): Window edges in Hz.
+            cover (bool, optional): WDM covering-layer rule. Default ``True``.
+
+        Returns:
+            tuple: ``(k0, k1, n_bins, window_dof)``: int window starts /
+            ends, the axis length, and the real dof per window
+            (``nchannels * Nt`` per WDM layer, ``2 * nchannels`` per FD bin).
         """
         bs = self._basis_settings
         be = _to_numpy(edges)
@@ -21837,6 +25166,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         That is the ``-1/2 <d|d>`` :meth:`_window_data_lls` negates. The
         plane is placed on each shard's device once and cached on the ACA
         (shared by every GB move; the ACA is never pickled).
+
+        The inner product is ``4 * differential_component`` times the
+        inverse-PSD weighted sum (full channel cross-covariance on XYZ, a
+        per-channel diagonal otherwise).
+
+        Args:
+            acs (AnalysisContainerArray): The parent ACA.
+            edges (array-like): Window edges in Hz.
+            data (array-like, optional): Shared data plane to reduce instead
+                of the residuals. Default ``None``.
+            cover (bool, optional): Forwarded to :meth:`_window_bins`.
+                Default ``True``.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: ``(lls, dof)``.
         """
         xp = self.xp
         bs = self._basis_settings
@@ -21855,6 +25199,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         w = "w" if data is None else ""
 
         def _rows(r):
+            """The shard's residual rows, or the data plane on this device."""
             # the shard's residual rows, or the data plane on this device
             if data is None:
                 return r
@@ -21862,6 +25207,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return xp.asarray(d).reshape(r.shape[1:])
 
         def _shard_band_lls(r, ic):
+            """Per-window ``-1/2 <r|r>`` of one shard, ``(nw, num_windows)``."""
             # r: (nw, nc, Nf[, Nt]), or ONE shared (nc, Nf[, Nt]) data plane;
             # ic: (nw, nc[, nc], Nf[, Nt]) -> (nw, Nf)
             if is_xyz:
@@ -21898,8 +25244,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # ------------------------------------------------------------------
     # Leaf-cap CELL grid helpers (user design 2026-08-15)
     # ------------------------------------------------------------------
-    # Every helper here short-circuits at ``cap_divisor == 1`` so the whole
-    # cap machinery collapses back onto the band grid bit-identically.
+    # The cell helpers here short-circuit when the cap grid IS the band grid
+    # (``_cap_is_band_grid``: divisor 1 WITHOUT stagger; ``_np_cap_cells``
+    # gets there by its arithmetic instead of an explicit branch), so the
+    # whole cap machinery collapses back onto the band grid bit-identically.
+    # Divisor 1 WITH stagger (the 9mo / 12mo GB_CAP_DIVISOR=1 +
+    # GB_CAP_STAGGER=1 setting) is a separate midpoint-to-midpoint grid and
+    # does not.
 
     def _cap_table(self, xp, name):
         """``getattr(self, name)`` resident on the CURRENT device.
@@ -21914,6 +25265,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         device reads a one-host-hop copy cached per device on
         ``_device_copy_cache`` (dropped by ``__getstate__``), re-copied when
         the master is rebuilt. A no-op on CPU and on the home device.
+
+        Used by :meth:`_cap_cell_index`, :meth:`_cap_cell_members`, the
+        fused-kernel cap arrays and the rank-block entry.
+
+        Args:
+            xp (module): numpy or cupy (the caller's array module).
+            name (str): Attribute name of the table.
+
+        Returns:
+            xp.ndarray: The table on the current device.
         """
         (arr,) = to_current_device_cached(xp, self, name, (getattr(self, name),))
         return arr
@@ -21949,6 +25310,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         into its 1.5-wide final cell, matching the stored edge array).
         Both branches agree exactly with ``searchsorted(cap_edges, f)-1``
         over the stored edges.
+
+        Called on every pick through :meth:`_cap_cell_members` (cap indices
+        of the picked rows; the staggered arithmetic in the 9mo / 12mo runs)
+        and by :meth:`_sorter_cap_cells`. On the plain band grid (divisor 1
+        without stagger, the band-grid property) it returns the band index
+        itself (re-derived first under ``resolve_band``); without
+        frequencies it returns ``band_inds`` unchanged.
+
+        Args:
+            band_inds (xp.ndarray): Filed band index per source.
+            freqs_hz (xp.ndarray or None): Source frequencies in Hz.
+            resolve_band (bool, optional): Re-derive the band from
+                ``freqs_hz`` first. Default ``False``.
+
+        Returns:
+            xp.ndarray: Cap-cell index per source, same shape and dtype as
+            ``band_inds``.
         """
         if resolve_band and freqs_hz is not None:
             xp = get_array_module(band_inds)
@@ -21977,6 +25355,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Same nested/staggered arithmetic, taking the band edges as a host
         array (callers already have them) and band indices from a prior
         searchsorted. MUST stay in lockstep with ``_cap_cell_index``.
+
+        Used via :meth:`_np_cap_members` by the source-attributed cap-cell
+        statistics (:meth:`_cap_cell_source_lls`), the cold cap-cell
+        occupancy and the cap-increment log. Note it has no plain-band-grid
+        short-circuit; at divisor 1 without stagger the arithmetic returns
+        the band index anyway (step = band width, clipped sub-cell 0).
+
+        Args:
+            f0_hz (np.ndarray): Source frequencies in Hz.
+            band (np.ndarray): Band index per source.
+            be (np.ndarray): Host band edges in Hz.
+
+        Returns:
+            np.ndarray: Integer cap-cell index per source.
         """
         step = (be[1:] - be[:-1]) / self.cap_divisor
         sub_i = np.floor(
@@ -22015,6 +25407,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         DEFENSIVE BY CONVENTION, like ``cap_drift_gate``: a move or a test
         harness that never built the cap machinery must get the gate OFF,
         not an AttributeError. Every missing attribute means off.
+
+        The gate also needs armed leaf caps (``_cap_leaf_cap`` set). The
+        9mo / 12mo launchers run the divisor-1 staggered grid with the caps
+        off (``GB_LEAF_CAP_START`` empty), so this returns False there.
+        Read once per in-model block (:meth:`_run_in_model_repeats`) and
+        once per :meth:`run_tempering` unit, to decide whether
+        :meth:`_cap_swap_census` is built.
+
+        Returns:
+            bool: True when the tempering swap gates must police the caps.
         """
         if int(getattr(self, "cap_divisor", 0) or 0) != 1:
             return False
@@ -22025,20 +25427,35 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return os.environ.get("GB_CAP_TEMPER_GATE", "1") == "1"
 
     def _cap_swap_census(self, band_sorter):
-        """``(counts, band_lo, band_hi, cap)`` for the tempering cap gate.
+        """Build the ``(counts, band_lo, band_hi, cap)`` census of the tempering cap gate.
 
-        * ``counts`` -- ``(ntemps*nwalkers*ncells,)`` alive occupancy, the
-          same census the birth gate reads;
-        * ``band_lo`` / ``band_hi`` -- ``(ntemps*nwalkers*nbands,)``, how
-          many of band ``b``'s alive sources at ``(t, w)`` sit in cell
-          ``b`` (its lower half) versus cell ``b+1`` (its upper half).
-          A band swap moves exactly these; everything else in the two
-          affected cells belongs to the NEIGHBOUR bands and stays put --
-          which is the whole reason a swap can overfill a straddling cell.
+        Built ONCE per in-model block / :meth:`run_tempering` unit, and only
+        when :meth:`_temper_cap_gate_on` is True; afterwards it is carried
+        forward in place by :meth:`_cap_swap_apply` and
+        :meth:`_cap_lohi_transition` (it walks every sorter row, so a
+        per-swap rebuild was an OOM).
+
+        Args:
+            band_sorter (BandSorter): The block's source table.
+
+        Returns:
+            tuple: ``(counts, band_lo, band_hi, cap)``, all on the sorter's
+            array module:
+
+            * ``counts`` -- ``(ntemps*nwalkers*ncells,)`` alive occupancy, the
+              same census the birth gate reads;
+            * ``band_lo`` / ``band_hi`` -- ``(ntemps*nwalkers*nbands,)``, how
+              many of band ``b``'s alive sources at ``(t, w)`` sit in cell
+              ``b`` (its lower half) versus cell ``b+1`` (its upper half).
+              A band swap moves exactly these; everything else in the two
+              affected cells belongs to the NEIGHBOUR bands and stays put --
+              which is the whole reason a swap can overfill a straddling cell;
+            * ``cap`` -- the live cap array (``_cap_leaf_cap``).
         """
         xp = get_array_module(band_sorter.band_inds)
 
         def _bc(sel, n):
+            """int32 length-``n`` bincount of ``sel``, zeros for an empty ``sel``."""
             # cupy.bincount computes max(x) first and RAISES on a zero-size
             # array (numpy returns zeros), and every selection below goes
             # empty in ordinary sparse states: no alive sources at all (the
@@ -22085,6 +25502,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         or ``b+1`` (the in-model window reaches at most N/4 past an edge,
         so the membership formula's ``sub`` is 0 or 1), which is what makes
         a two-bucket split complete.
+
+        Called from the in-model accept block of
+        :meth:`_run_in_model_repeats` when both the drift gate and the swap
+        census are live.
+
+        Args:
+            lo (xp.ndarray): ``band_lo`` of the census, updated IN PLACE.
+            hi (xp.ndarray): ``band_hi`` of the census, updated IN PLACE.
+            t (xp.ndarray): Temperature index per proposed row.
+            w (xp.ndarray): Walker index per proposed row.
+            b (xp.ndarray): Band index per proposed row.
+            cur_cell (xp.ndarray): Primary cap cell of the current f0.
+            new_cell (xp.ndarray): Primary cap cell of the proposed f0.
+            accept (xp.ndarray): Bool accept mask per row.
         """
         xp = get_array_module(b)
         m = accept & (new_cell != cur_cell)
@@ -22117,6 +25548,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the partner's; the neighbour bands' shares of those cells do not
         move. Scatter-add because several accepted pairs can touch one
         cell.
+
+        Args:
+            census (tuple): The :meth:`_cap_swap_census` tuple; its
+                ``counts``, ``band_lo`` and ``band_hi`` are updated IN PLACE.
+            t_a (xp.ndarray): Temperature index of side A per swap pair.
+            w_a (xp.ndarray): Walker index of side A per swap pair.
+            t_b (xp.ndarray): Temperature index of side B per swap pair.
+            w_b (xp.ndarray): Walker index of side B per swap pair.
+            bands (xp.ndarray): Band index per swap pair.
+            accepted (xp.ndarray): Bool accept mask per swap pair.
         """
         counts, lo, hi, _cap = census
         xp = get_array_module(bands)
@@ -22148,6 +25589,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``(t_a, w_a)`` and ``(t_b, w_b)`` are the two sides -- the vertical
         sweep shares a walker, the permuted path does not, so both are
         passed explicitly.
+
+        The cap test is :func:`tempering_swap_cap_ok`; the stage gate
+        (:meth:`_swap_stage_ok`) and the per-walker valve
+        (:meth:`_swap_shutoff_ok`) are AND-ed on, so either can only refuse
+        a swap the cap gate allowed. Callers: the picked-row vertical sweep
+        and :meth:`run_tempering`, both only when a census exists
+        (:meth:`_temper_cap_gate_on`).
+
+        Args:
+            census (tuple): The :meth:`_cap_swap_census` tuple.
+            t_a (xp.ndarray): Temperature index of side A per swap pair.
+            w_a (xp.ndarray): Walker index of side A per swap pair.
+            t_b (xp.ndarray): Temperature index of side B per swap pair.
+            w_b (xp.ndarray): Walker index of side B per swap pair.
+            bands (xp.ndarray): Band index per swap pair.
+
+        Returns:
+            xp.ndarray: Bool per pair, True when the swap is allowed.
         """
         counts, lo, hi, cap = census
         xp = get_array_module(bands)
@@ -22157,12 +25616,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         cells = xp.stack([c0, c1], axis=-1)
 
         def _occ(t, w):
+            """``(npair, 2)`` occupancy of cells ``b`` / ``b+1`` on side ``(t, w)``."""
             return xp.stack([
                 counts[self._cap_flat_index(t, w, c0)],
                 counts[self._cap_flat_index(t, w, c1)],
             ], axis=-1)
 
         def _fromband(t, w):
+            """``(npair, 2)`` band ``b``'s own share (lower, upper) on side ``(t, w)``."""
             f = self._band_flat_index(t, w, b)
             return xp.stack([lo[f], hi[f]], axis=-1)
 
@@ -22172,6 +25633,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # axis to gather against it. With a shared (1-D) cap both sides
         # gather the same values and ``cap_b`` is redundant but harmless.
         def _cap_side(w):
+            """``(npair, 2)`` cap of the two affected cells for the walker holding them."""
             return self._cap_for_rows(
                 cap, w[:, None] if np.ndim(cap) == 2 else None, cells)
 
@@ -22197,7 +25659,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         band INTO a frozen pair would hand it sources it has decided it is
         done with, and OUT of one would undo the freeze by the back door.
 
-        Vacuously True with the valve off.
+        Vacuously True with the valve off (``_rj_band_shutoff_w`` unbound).
+        Only reached through :meth:`_swap_cap_ok`.
+
+        Args:
+            w_a (xp.ndarray): Walker index of side A per swap pair.
+            w_b (xp.ndarray): Walker index of side B per swap pair.
+            bands (xp.ndarray): Band index per swap pair.
+
+        Returns:
+            xp.ndarray or bool: Bool per pair (True = neither side shut), or
+            the scalar True when no shut table is bound.
         """
         shut = getattr(self, "_rj_band_shutoff_w", None)
         if shut is None:
@@ -22221,6 +25693,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         harmlessly, elsewhere). End-edge extensions are 0 (ctor), so the
         neighbour index can never leave ``[0, num_cap_cells - 1]`` where
         ``has_neighbour`` is True.
+
+        The 9mo / 12mo launchers run ``GB_CAP_OVERLAP_FRAC=0``, so there the
+        result is always ``(primary, None, None)``.
+
+        Args:
+            band_inds (xp.ndarray): Band index per row.
+            freqs_hz (xp.ndarray or None): f0 per row in Hz; ``None`` when
+                f0 is not sampled.
+            resolve_band (bool, optional): Forwarded to
+                :meth:`_cap_cell_index`. Default False.
+
+        Returns:
+            tuple: ``(primary, neighbour, has_neighbour)``; the last two are
+            ``None`` without overlap.
         """
         primary = self._cap_cell_index(
             band_inds, freqs_hz, resolve_band=resolve_band)
@@ -22248,7 +25734,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """Numpy twin of :meth:`_cap_cell_members` for host-side censuses.
 
         MUST stay in lockstep with the device version (same edge/extension
-        arrays, same strict/non-strict comparisons).
+        arrays, same strict/non-strict comparisons). Used by the
+        source-attributed cell lnL path (:meth:`_cap_cell_source_lls`) and
+        the cap-gate occupancy / increment helpers (:meth:`_cold_occupancy`,
+        :meth:`_log_cap_increments`).
+
+        Args:
+            f0_hz (np.ndarray): Source frequencies in Hz.
+            band (np.ndarray): Band index per source.
+            be (np.ndarray): Host band edges in Hz.
+
+        Returns:
+            tuple: ``(primary, neighbour, has_neighbour)`` numpy arrays; the
+            last two are ``None`` without overlap.
         """
         primary = self._np_cap_cells(f0_hz, band, be)
         if self.cap_overlap_frac <= 0.0:
@@ -22277,6 +25775,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         side already was per walker -- ``_cap_flat_index`` is keyed on
         ``(temp, walker, cell)`` -- so this closes the asymmetry rather
         than adding one.
+
+        Args:
+            counts (xp.ndarray): Flat occupancy census
+                (:meth:`_cap_cell_counts`).
+            cap (xp.ndarray): Cap array, 1-D per cell or 2-D
+                ``(nwalkers, ncells)``.
+            temp_inds (xp.ndarray): Temperature index per row.
+            walker_inds (xp.ndarray): Walker index per row.
+            cells (xp.ndarray): Primary cap cell per row.
+            nb_cells (xp.ndarray, optional): Neighbour cell per row (overlap
+                mode). Default None.
+            has_nb (xp.ndarray, optional): Bool, row has a neighbour cell.
+                Default None.
+
+        Returns:
+            xp.ndarray: Bool per row, True when the row is at cap.
         """
         flat = self._cap_flat_index(temp_inds, walker_inds, cells)
         at = counts[flat] >= self._cap_for_rows(cap, walker_inds, cells)
@@ -22297,9 +25811,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         per band (cell identity cannot change with f0), or f0 not sampled.
 
         KNOWN APPROXIMATION: a mid-block VERTICAL temperature swap
-        (GB_TEMPER_VERTICAL, default off) exchanges two rungs' occupancy
-        without updating this census; the error is confined to the swapped
-        rung pair and self-corrects at the next block.
+        (GB_TEMPER_VERTICAL, code default off; the 9mo / 12mo launchers
+        export 1) exchanges two rungs' occupancy without updating this
+        census; the error is confined to the swapped rung pair and
+        self-corrects at the next block.
+
+        ``GB_CAP_DRIFT_GATE`` (code default 1) sets ``cap_drift_gate``; the
+        9mo / 12mo launchers export 0 and run without leaf caps, so this
+        returns None there. Called once per in-model block by
+        :meth:`_run_in_model_repeats`.
+
+        Args:
+            band_sorter (BandSorter): The block's source table.
+
+        Returns:
+            tuple or None: ``(counts, cap_dev)`` -- the flat int32 occupancy
+            census and the int32 device cap snapshot -- or None.
         """
         if not getattr(self, "cap_drift_gate", False):
             return None
@@ -22340,7 +25867,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     @staticmethod
     def _cap_gate_scatter_add(counts, flat, weights):
-        """Sync-free ``counts[flat] += weights`` with duplicate-safe adds."""
+        """Add ``weights`` into ``counts`` at ``flat``, duplicate-safe and sync-free.
+
+        ``numpy.add.at`` on the host, ``cupyx.scatter_add`` on device; the
+        weights are cast to the census dtype (int32) first.
+
+        Args:
+            counts (xp.ndarray): Flat census, updated IN PLACE.
+            flat (xp.ndarray): Flat indices (may repeat).
+            weights (xp.ndarray): Increment per index.
+        """
         # Newer cupy restricts add.at/scatter_add data dtypes to
         # {int32, float16/32/64, uint32/64} -- int64 raises TypeError. The
         # census family is int32 end-to-end; this coercion is the belt for
@@ -22374,6 +25910,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Factored out of the ``_run_in_model_repeats`` accept block (fix
         04c78c56) so the replacement move's accept path runs the SAME
         accounting rather than a duplicate.
+
+        Args:
+            counts (xp.ndarray): Flat occupancy census, updated IN PLACE.
+            temp_inds (xp.ndarray): Temperature index per row.
+            walker_inds (xp.ndarray): Walker index per row.
+            cur_memb (tuple): Covering set of the current f0.
+            new_memb (tuple): Covering set of the proposed f0.
+            weight (xp.ndarray): Bool per row; only True rows (accepted
+                moves) contribute.
         """
         xp = get_array_module(counts)
         c_p, c_nb, c_hn = cur_memb
@@ -22387,9 +25932,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ones = xp.ones(n_p.shape, dtype=bool)
 
         def _in_cur(_c):
+            """Bool per row: does cell ``_c`` cover the CURRENT f0?"""
             return (_c == c_p) | (c_hn & (_c == c_nb))
 
         def _in_new(_c):
+            """Bool per row: does cell ``_c`` cover the PROPOSED f0?"""
             return (_c == n_p) | (n_hn & (_c == n_nb))
 
         for _cell, _memb, _sign, _covered in (
@@ -22427,6 +25974,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         in the production divisor-1 configuration NOTHING called this and
         the effective in-model headroom was 0. Keep both callers pointed
         here: this is the single definition of the destination rule.
+
+        The headroom is ``GB_CAP_INMODEL_HEADROOM`` (code default 2; the
+        9mo / 12mo launchers export 0, and run without leaf caps, so this
+        veto is not reached there).
+
+        Args:
+            counts (xp.ndarray): Flat occupancy census.
+            cap (xp.ndarray): Cap array, 1-D per cell or 2-D
+                ``(nwalkers, ncells)``; a negative entry means disarmed.
+            temp_inds (xp.ndarray): Temperature index per row.
+            walker_inds (xp.ndarray): Walker index per row.
+            cur_memb (tuple): Covering set of the current f0.
+            new_memb (tuple): Covering set of the proposed f0.
+
+        Returns:
+            xp.ndarray: Bool per row, True when the move is vetoed.
         """
         xp = get_array_module(counts)
         c_p, c_nb, c_hn = cur_memb
@@ -22477,6 +26040,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         would NOT work: ``band_sorter.freqs`` is a construction-time
         snapshot, so accepted swaps would be invisible to it for the rest
         of the unit.
+
+        The cache lives on ``self._replace_cap_census`` (reset by
+        :meth:`_run_band_unit`); only :meth:`_run_replace_step` reads it.
+
+        Args:
+            band_sorter (BandSorter): The unit's source table.
+
+        Returns:
+            tuple: ``(counts, cap)``, both on the sorter's array module.
         """
         st = getattr(self, "_replace_cap_census", None)
         if st is None:
@@ -22494,8 +26066,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ALIVE rows are what this is meaningful for: a dead row's stored
         ``freqs`` are stale, and the cell an RJ birth lands in is set by the
         DRAWN frequency (see :meth:`_run_rj_step`'s prior gate), not by this.
-        Dead rows are handled through band SATURATION instead
-        (:meth:`_band_saturated_flat`).
+        Dead rows are gated on their birth's destination cell
+        (:meth:`_cap_at_cap_mask`; the older band-saturation rule,
+        :meth:`_band_saturated_flat`, is no longer called).
+
+        Only caller: :meth:`_cap_swap_census`.
+
+        Args:
+            band_sorter (BandSorter): The source table.
+
+        Returns:
+            xp.ndarray: Cap-cell index per sorter row (the band index on the
+            plain band grid).
         """
         if self._cap_is_band_grid:
             return band_sorter.band_inds
@@ -22505,7 +26087,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """``(primary, neighbour, has_neighbour)`` for every sorter row.
 
         The multi-membership twin of :meth:`_sorter_cap_cells` (same ALIVE
-        caveat). ``(cells, None, None)`` when overlap is off.
+        caveat). ``(cells, None, None)`` when overlap is off. Read by the
+        unit-open at-cap census of :meth:`run_proposal`, the live-cap pick
+        census and :meth:`_cap_cell_counts`.
+
+        Args:
+            band_sorter (BandSorter): The source table.
+
+        Returns:
+            tuple: ``(primary, neighbour, has_neighbour)`` per sorter row.
         """
         if self._cap_is_band_grid:
             return band_sorter.band_inds, None, None
@@ -22513,7 +26103,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                       band_sorter.freqs)
 
     def _cap_flat_index(self, temp_inds, walker_inds, cap_inds):
-        """Flat ``(temp, walker, cap cell)`` index (the occupancy bincount key)."""
+        """Flat ``(temp, walker, cap cell)`` index (the occupancy bincount key).
+
+        ``(temp * nwalkers + walker) * num_cap_cells + cell``, in int64.
+
+        Args:
+            temp_inds (xp.ndarray): Temperature index per row.
+            walker_inds (xp.ndarray): Walker index per row (block-local on
+                a compute rank).
+            cap_inds (xp.ndarray): Cap cell per row.
+
+        Returns:
+            xp.ndarray: int64 flat index per row.
+        """
         xp = get_array_module(cap_inds)
         return (
             (temp_inds.astype(xp.int64) * self.nwalkers + walker_inds)
@@ -22523,7 +26125,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     def _cap_cell_counts(self, band_sorter, cap_inds=None, nb_inds=None,
                          has_nb=None):
-        """``(ntemps*nwalkers*num_cap_cells,)`` alive-source occupancy census.
+        """``(flat, counts)``: the ``(ntemps*nwalkers*num_cap_cells,)`` alive occupancy census.
 
         OVERLAP MODE (cap_overlap_frac > 0): the census counts every alive
         leaf into EVERY covering cell -- primary always, plus the
@@ -22547,7 +26149,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the margin narrows. CHECK: log a per-propose count of sources
         whose cell changed between unit open and unit close, and decide
         whether the in-model accept path needs a cell-cap veto (or
-        whether post-hoc re-census suffices).
+        whether post-hoc re-census suffices). (Since 2026-08-29 the
+        in-model CAP DRIFT GATE, :meth:`_cap_drift_gate_setup` +
+        :meth:`_cap_new_entry_veto`, polices these crossings when
+        ``GB_CAP_DRIFT_GATE`` is on.)
+
+        Args:
+            band_sorter (BandSorter): The source table.
+            cap_inds (xp.ndarray, optional): Primary cell per sorter row;
+                computed from :meth:`_sorter_cap_members` when None.
+            nb_inds (xp.ndarray, optional): Neighbour cell per row (overlap
+                mode). Default None.
+            has_nb (xp.ndarray, optional): Bool, row has a neighbour cell.
+                Default None.
+
+        Returns:
+            tuple: ``(flat, counts)`` -- the per-row flat index
+            (:meth:`_cap_flat_index` of the primary cells) and the int32
+            alive occupancy census of shape
+            ``(ntemps*nwalkers*num_cap_cells,)``.
         """
         xp = get_array_module(band_sorter.band_inds)
         if cap_inds is None:
@@ -22600,6 +26220,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         used to test ``cap_divisor == 1`` means THIS predicate; testing the
         divisor alone silently mixes the two grids (a birth would be
         censused into one cell and gated on another).
+
+        False in the 9mo / 12mo runs (``GB_CAP_DIVISOR=1`` with
+        ``GB_CAP_STAGGER=1``).
         """
         return self.cap_divisor == 1 and not self.cap_stagger
 
@@ -22636,6 +26259,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         ``counts_post`` is passed in rather than derived so overlap mode
         can apply its multi-membership scatter first.
+
+        Args:
+            counts_pre (xp.ndarray): Flat occupancy census before the
+                accepted moves.
+            counts_post (xp.ndarray): Flat occupancy census after them.
+            flat_acc (xp.ndarray): Flat cell index of each accepted move.
+            cap_acc (xp.ndarray): Cap of that cell.
+            alive_acc (xp.ndarray): Bool, the row was alive before the move
+                (True = a death, False = a birth).
+
+        Returns:
+            tuple[xp.ndarray, xp.ndarray]: ``(freed, capped)`` bool masks per
+            accepted move.
         """
         sat_pre = counts_pre[flat_acc] >= cap_acc
         sat_post = counts_post[flat_acc] >= cap_acc
@@ -22643,6 +26279,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         capped = (~alive_acc) & ~sat_pre & sat_post
         return freed, capped
 
+    # TODO check: keep/remove/document -- no src callers since the 2026-08-29 per-cell dead-row gate; tests only (test_cap_stagger, test_gb_cap_per_walker, test_gb_cap_cell_grid)
     def _band_saturated_flat(self, counts, cap):
         """``(ntemps*nwalkers*num_bands,)`` bool: EVERY cap cell of the band full.
 
@@ -22695,7 +26332,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return sat.reshape(-1)
 
     def _band_flat_index(self, temp_inds, walker_inds, band_inds):
-        """Flat ``(temp, walker, band)`` index (matches ``_band_saturated_flat``)."""
+        """Flat ``(temp, walker, band)`` index (matches ``_band_saturated_flat``).
+
+        ``(temp * nwalkers + walker) * num_bands + band``, in int64; the key
+        of the swap census's ``band_lo`` / ``band_hi`` arrays.
+
+        Args:
+            temp_inds (xp.ndarray): Temperature index per row.
+            walker_inds (xp.ndarray): Walker index per row.
+            band_inds (xp.ndarray): Band index per row.
+
+        Returns:
+            xp.ndarray: int64 flat index per row.
+        """
         xp = get_array_module(band_inds)
         return (
             (temp_inds.astype(xp.int64) * self.nwalkers + walker_inds)
@@ -22753,6 +26402,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         At ``cap_divisor == 1`` this is the same expression the
         pre-2026-08-15 code used, so the per-band mask is unchanged there.
+
+        Args:
+            band_sorter (BandSorter): The source table (its walker / temp
+                indices are read).
+            counts (xp.ndarray): Flat occupancy census.
+            cap (xp.ndarray): Cap array, 1-D per cell or 2-D
+                ``(nwalkers, ncells)``.
+            flat (xp.ndarray): Flat index of each row's primary cell.
+            cap_inds (xp.ndarray): Primary cell per row.
+            nb_inds (xp.ndarray, optional): Neighbour cell per row (overlap
+                mode). Default None.
+            has_nb (xp.ndarray, optional): Bool, row has a neighbour cell.
+                Default None.
+
+        Returns:
+            xp.ndarray: Bool per sorter row, True when the row is at cap.
         """
         _w = band_sorter.walker_inds
         own = counts[flat] >= self._cap_for_rows(cap, _w, cap_inds)
@@ -22764,6 +26429,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 counts[flat_nb] >= self._cap_for_rows(cap, _w, nb_inds)))
         return own
 
+    # TODO check: keep/remove/document -- only the _cap_ll_check log line (GB_CAP_LL_CHECK diagnostic; skipped on the staggered grid)
     def _cap_cells_of_band(self, band_index: int):
         """``(lo, hi)`` cap-cell index range owned by sub-band ``band_index``."""
         k = self.cap_divisor
@@ -22789,6 +26455,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         divisor in this mode, including the band grid, where
         ``band_leaf_cap`` stops being the gate array and becomes a mirror
         like the rest.
+
+        Called when the caps are armed (the arm blocks of the propose
+        bodies), by :meth:`_cap_state_arrays` and by
+        :meth:`_update_band_leaf_caps`; not reached without leaf caps.
+
+        Args:
+            bi (dict): The GB ``band_info`` dict; its cap arrays are written
+                IN PLACE.
         """
         if self._cap_per_walker:
             cap_w = bi.get("cap_cell_leaf_cap_w")
@@ -22827,6 +26501,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         iterations of the per-band cold-walker residual ll -- with NO
         reset: band caps are a mirror on cell grids and never gate, so
         there is no increment to re-converge after.
+
+        Called by :meth:`_update_band_leaf_caps` (caps armed only).
+
+        Args:
+            bi (dict): The GB ``band_info`` dict; ``band_best_ll`` and
+                ``band_best_ll_w`` are updated IN PLACE.
+            band_lls (np.ndarray): Cold-chain residual lnL per
+                ``(walker, band)``.
         """
         lls = np.asarray(band_lls)
         # PER-WALKER mirror (2026-09-22). ``band_best_ll`` is a max over
@@ -22876,11 +26558,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         BIRTH floors, and a move with no RJ surface has nothing for it to
         gate (the in-model floor still follows the table when the move is
         an RJ move; a pure in-model move keeps the scalar).
+
+        ``search_stage_per_walker`` is the GB settings field of that name
+        (``GB_SEARCH_STAGE_PER_WALKER``, default off; the 9mo / 12mo
+        launchers export 0), passed by ``build_gb_moves``; so this is False
+        in production.
         """
         return bool(getattr(self, "search_stage_per_walker", False)) and bool(
             getattr(self, "is_rj_prop", False)
         )
 
+    # TODO check: keep/remove/document -- per-walker search stage only; GB_SEARCH_STAGE_PER_WALKER off (default, launchers 0)
     @staticmethod
     def _stage_arrays(bi):
         """The ``(stage, occ_last, streak)`` triple, or ``None`` if absent.
@@ -22911,17 +26599,33 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         table is host numpy (it lives in ``band_info``) while the rows are
         very often CuPy, and resolving on the table would return a host
         array into a device expression.
+
+        Called by the RJ prior gate (:meth:`_run_rj_step`), the replace step
+        and the in-model SNR clamp. In the 9mo / 12mo runs ``lim`` is the
+        scalar floor (the per-walker stage is off).
+
+        Args:
+            lim (float or np.ndarray): Scalar floor, or the
+                ``(nwalkers, num_bands)`` table.
+            walker_inds (xp.ndarray): Walker index per row.
+            bands (xp.ndarray): Band index per row.
+
+        Returns:
+            float or xp.ndarray: ``lim`` unchanged when scalar, else the
+            gathered floor per row.
         """
         if np.ndim(lim) == 0:
             return lim
         xp = get_array_module(bands)
         return xp.asarray(lim)[xp.asarray(walker_inds), xp.asarray(bands)]
 
+    # TODO check: keep/remove/document -- per-walker search stage only; GB_SEARCH_STAGE_PER_WALKER off (default, launchers 0)
     def _stage_snr_limits(self):
         """``(coarse, fine)`` opt-SNR floors, indexed by stage value."""
         return (float(self.opt_snr_limit_search_coarse),
                 float(self.opt_snr_limit_search_fine))
 
+    # TODO check: keep/remove/document -- per-walker search stage only; GB_SEARCH_STAGE_PER_WALKER off (default, launchers 0)
     def _build_snr_lim_table(self, new_state):
         """The live ``(nwalkers, num_bands)`` opt-SNR floor, or ``None``.
 
@@ -22960,11 +26664,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         with ``self.nwalkers = B`` and every floor lookup goes through
         ``lim[BLOCK-LOCAL walker, band]``, so an unsliced table would score
         block-local walker 0 against global walker 0's prior.
+
+        Used by the orchestrated head's per-rank payload for the
+        ``snr_lim_table``, ``stage_table`` and ``rj_band_shutoff_w``
+        tables; :meth:`_check_rank_stage_table` is the receiving-end check.
+
+        Args:
+            table (np.ndarray or None): Per-walker table with a leading
+                walker axis, a scalar, or None.
+            w0 (int): First global walker of the block.
+            w1 (int): One past the last global walker of the block.
+
+        Returns:
+            np.ndarray or None: ``table[w0:w1]`` for a 2-D-or-more table,
+            else ``table`` unchanged.
         """
         if table is None or np.ndim(table) < 2:
             return table
         return table[w0:w1]
 
+    # TODO check: keep/remove/document -- no callers in src, scripts or tests
     def _stage_for_rows(self, stage, walker_inds, bands):
         """Per-row stage index, for the swap gate and the diagnostics."""
         xp = get_array_module(stage)
@@ -22991,7 +26710,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         remove swaps from a sweep that does not need detailed balance.
 
         Vacuously True with the feature off, and for the vertical sweep
-        (which shares a walker, so both sides gather the same row).
+        (which shares a walker, so both sides gather the same row). Only
+        reached through :meth:`_swap_cap_ok`.
+
+        Args:
+            w_a (xp.ndarray): Walker index of side A per swap pair.
+            w_b (xp.ndarray): Walker index of side B per swap pair.
+            bands (xp.ndarray): Band index per swap pair.
+
+        Returns:
+            xp.ndarray or bool: Bool per pair, or the scalar True when the
+            per-walker stage is off or no stage table is bound.
         """
         if not self._stage_per_walker:
             return True
@@ -23040,6 +26769,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
           model, and the SNR gate enforces on in-model updates as well as
           births, so the sources below the restored floor would be frozen
           out rather than merely un-birthable.
+
+        Called every propose by the designated move from
+        :meth:`_propose_orchestrated`, :meth:`_propose_legacy` and
+        :meth:`_propose_zero_peak_skip`. Returns at once unless
+        :attr:`_stage_per_walker` (off in the 9mo / 12mo runs).
+
+        Args:
+            new_state (GFState): The propose's output state; its GB
+                ``band_info`` stage arrays are advanced IN PLACE.
+            band_counts (np.ndarray): ``(ntemps, nwalkers, num_bands)``
+                alive-source census; row 0 (cold) is read.
+
+        Raises:
+            RuntimeError: When the cold census and the stage table are not
+                the same shape.
         """
         if not self._stage_per_walker:
             return
@@ -23082,8 +26826,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             bi["band_stage"][:] = stage.min(axis=0)
         self._log_stage_spread(stage)
 
+    # TODO check: keep/remove/document -- per-walker search stage only; GB_SEARCH_STAGE_PER_WALKER off (default, launchers 0)
     def _log_stage_promotions(self, promote, occ, streak) -> None:
-        """Per-(walker, band) promotion breakdown, at decision time."""
+        """Per-(walker, band) promotion breakdown, at decision time.
+
+        ``GB_SEARCH_STAGE_DIAG=1`` (default 0) adds one line per promoted
+        pair, up to ``GB_SEARCH_STAGE_DIAG_MAX`` (default 20).
+        """
         ws, bs = np.where(promote)
         coarse, fine = self._stage_snr_limits()
         logger.info(
@@ -23116,6 +26865,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         knob that silently follows another is how a config change in one
         place rearms machinery in another with no line saying so -- the
         anti-pattern ``pe_phase_maximize_on`` was written to end.
+
+        ``search_shutoff_per_walker`` is the GB settings field
+        (``GB_SEARCH_BAND_SHUTOFF_PER_WALKER``; the 9mo / 12mo launchers
+        export 1), so this is True on the search-mode RJ moves there.
         """
         return (
             bool(getattr(self, "search_shutoff_per_walker", False))
@@ -23166,7 +26919,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Safe to call on a move with the feature off (it only records the
         serial), and safe to call repeatedly with the SAME serial -- only a
         CHANGE releases, so a recipe that re-runs ``setup_run`` for an
-        already-active step does not wipe a valve that step earned.
+        already-active step does not wipe a valve that step earned. The
+        first call of a process (no previous serial) never releases; the
+        bind in :meth:`_arm_search_stage` compares the stored stamp instead.
+
+        Args:
+            serial (int or None): The recipe step serial; stored as
+                ``_recipe_step_serial``.
         """
         prev = self._recipe_step_serial
         self._recipe_step_serial = None if serial is None else int(serial)
@@ -23210,6 +26969,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         holding the old step's best -- and the next bind would pick them
         straight back up. The release has to be visible to the saver, which
         means writing through it.
+
+        Called by :meth:`begin_recipe_step` on a step change and by
+        :meth:`_arm_search_stage` on a stored-stamp mismatch. Also clears
+        the pending-count stash and logs the number of pairs reopened.
+
+        Args:
+            why: Reason text for the ``[GB_STAGE]`` log line.
         """
         _v = cold_band_lnl_from_band_info(
             getattr(self, "_shutoff_band_info", None),
@@ -23272,6 +27038,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``None`` rather than raising if the shape cannot be read: the peak
         is telemetry for the shutoff gate and must never take a propose
         down; ``observe`` and the folds all skip a ``None`` peak.
+
+        Args:
+            state (GFState): The incoming state; ``log_like`` gives the
+                walker count.
+
+        Returns:
+            np.ndarray or None: float64 ``(nwalkers, num_bands)`` array of
+            ``-inf``, or None.
         """
         try:
             n_w = int(np.shape(state.log_like)[1])
@@ -23297,6 +27071,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         family exists to remove. It preserves ``band_cold_logl_max_w``
         when the shape already matches, because that one is the ALL-TIME
         max and must survive a window reseat.
+
+        Args:
+            bi (dict): The GB ``band_info`` dict.
+            shape (tuple): ``(nwalkers, num_bands)``.
         """
         self._shutoff_band_info = bi
         cold_band_lnl_from_band_info(bi, shape)
@@ -23305,10 +27083,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """Fold THIS process's block peak into the global one.
 
         A no-op under the fan-out: there every rank ships its block peak
-        in the ``gb_run_proposal`` reply and the head folds the blocks at
-        their w0 offsets, so folding again here would be harmless
-        (idempotent maximum) but would also mask a missing reply. Guarded
-        so the two paths cannot both claim to be the one that works.
+        in the ``gb_finish`` reply (:meth:`_gb_serve_finish`, key
+        ``cold_lnl_peak``) and the head folds the blocks at their w0
+        offsets, so folding again here would be harmless (idempotent
+        maximum) but would also mask a missing reply. Guarded so the two
+        paths cannot both claim to be the one that works. Called every
+        propose by :meth:`_propose_legacy`, :meth:`_propose_orchestrated`
+        and :meth:`_propose_zero_peak_skip`; it does work only on the
+        single-process path.
+
+        Args:
+            new_state (GFState): The propose's output state; its cold-lnL
+                peak (``band_info``) is raised IN PLACE.
         """
         if getattr(self, "fanout_active", False):
             return
@@ -23390,6 +27176,38 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         step stamp still releases the whole window whenever the recipe step
         changes, so nothing here can outlive the configuration it was
         measured under.
+
+        THE ALL-WALKER RULE (``GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS``, default
+        1): a band shuts on every walker only when every walker holding a
+        source in it is converged at the same judge, and a shut band
+        reopens on all walkers when one stops being converged
+        (:meth:`_ColdBandLnL.judge`). A record learned under an older valve
+        window rule is re-based once per store and that step is not judged
+        (:meth:`_relearn_valve_window_once`). While the galfor ratchet sets
+        ``rj_shutoff_min_freq`` the bands below it are exempt.
+
+        9mo / 12mo launcher values: ``GB_SEARCH_BAND_SHUTOFF_PER_WALKER=1``,
+        ``_CONV_ITER=3``, ``_LL_TOL=20``, ``_ALL_WALKERS=1``
+        (``_REQUIRE_OCC`` unset, so on). Called once per propose by the
+        designated move (``leaf_cap_update``) from the head-side propose
+        bodies, after the cap gate. Returns at once unless
+        :attr:`_search_shutoff_per_walker`. Writes the shut table and
+        window arrays IN PLACE in ``new_state``'s ``band_info``, publishes
+        :meth:`_publish_shutoff_w_pending` and logs the ``[GB_GATE]`` /
+        ``[GB_STAGE]`` lines (``GB_SEARCH_STAGE_DIAG=1`` adds one line per
+        newly shut pair).
+
+        Args:
+            model: The engine model (forwarded to :meth:`_shutoff_band_lls`
+                when the gain must be recomputed).
+            new_state (GFState): The propose's output state; the valve is
+                re-bound from its ``band_info`` first.
+            band_counts (np.ndarray): ``(ntemps, nwalkers, num_bands)``
+                alive-source census; row 0 (cold) is the occupancy.
+
+        Raises:
+            RuntimeError: When the cold census, the gain and the shut table
+                are not the same shape.
         """
         if not self._search_shutoff_per_walker:
             return
@@ -23642,11 +27460,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 )
 
     def _relearn_valve_window_once(self, band_info, current):
-        """:func:`relearn_valve_window` on the judge's ``band_info`` with
-        this step's gain ``current`` + its one log line. A no-op (None) once
-        the stamp reads the current rule, i.e. on every judge after the
-        first one under it, on this store; the caller skips the judge on
-        the one step this returns a record."""
+        """Re-base the valve record once when its window rule is outdated.
+
+        Runs :func:`relearn_valve_window` on the judge's ``band_info`` with
+        this step's gain ``current``, plus its one ``[GB_GATE]`` log line
+        (with a WDM window census when the basis is WDM). A no-op (None)
+        once the stamp reads the current rule, i.e. on every judge after the
+        first one under it, on this store; the caller
+        (:meth:`_update_search_band_shutoff`) skips the judge on the one step
+        this returns a record.
+
+        Args:
+            band_info (dict): The GB ``band_info`` holding the valve record.
+            current (np.ndarray): This step's ``(nwalkers, num_bands)`` gain,
+                NaN folded to ``-inf``.
+
+        Returns:
+            tuple or None: ``(stored_rule, n_pairs, n_shut, n_rebased)`` from
+            :func:`relearn_valve_window`, or None when nothing was re-based.
+        """
         out = relearn_valve_window(band_info, current)
         if out is None:
             return None
@@ -23683,6 +27515,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             n_shut, census, int(VALVE_WINDOW_RULE))
         return out
 
+    # TODO check: keep/remove/document -- galfor-ratchet shutoff floor only (rj_shutoff_min_freq > 0); GALFOR_RATCHET=0 (dropped 2026-10-03)
     def _shutoff_exempt_bands(self, fmin_hz, num_bands):
         """``(num_bands,)`` bool: bands whose CENTRE lies below ``fmin_hz``.
 
@@ -23710,7 +27543,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Defaults to the leaf cap's own D/2 hold threshold so the two
         features share one definition of "an improvement worth waiting
-        for". Env: ``GB_SEARCH_BAND_SHUTOFF_LL_TOL``.
+        for". Env: ``GB_SEARCH_BAND_SHUTOFF_LL_TOL`` (empty = the D/2
+        default, ``0.5 * leaf_cap_ndim`` = 4.0 for GBs; the 9mo / 12mo
+        launchers export 20).
+
+        Returns:
+            float: The tolerance in nats.
         """
         env = os.environ.get("GB_SEARCH_BAND_SHUTOFF_LL_TOL", "").strip()
         if env:
@@ -23719,7 +27557,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     @staticmethod
     def _shutoff_require_occ() -> bool:
-        """Must a band hold a source before its valve can close?"""
+        """Must a band hold a source before its valve can close?
+
+        ``GB_SEARCH_BAND_SHUTOFF_REQUIRE_OCC`` (default 1; unset in the
+        9mo / 12mo launchers). Under the all-walker rule an empty pair also
+        does not vote.
+        """
         return os.environ.get(
             "GB_SEARCH_BAND_SHUTOFF_REQUIRE_OCC", "1") == "1"
 
@@ -23729,7 +27572,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         walker holding a source in it is converged at the same judge, and
         reopens for all of them when one stops being converged. Env:
         ``GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS`` (default 1; 0 = the per-walker
-        valve of before)."""
+        valve of before; the 9mo / 12mo launchers export 1). Accepts
+        ``1`` / ``true`` / ``yes`` / ``on``."""
         return os.environ.get("GB_SEARCH_BAND_SHUTOFF_ALL_WALKERS", "1").strip() in (
             "1", "true", "True", "yes", "on")
 
@@ -23752,6 +27596,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         over it, and on an iteration where the gate did not run it is last
         iteration's values. Either would look exactly like a converged
         band.
+
+        In the 9mo / 12mo runs (caps off) the stash is written by the
+        orchestrated head from the shipped ``cap_stats`` replies.
+
+        Args:
+            model: The engine model (for the :meth:`_cap_stats_local`
+                recompute).
+            new_state (GFState): The propose's output state.
+
+        Returns:
+            np.ndarray or None: float ``(nwalkers, num_bands)`` gain, or
+            None when no gain is available (each failure mode warns once).
         """
         stamp = getattr(self, "_stage_band_lls_stamp", None)
         gain = getattr(self, "_stage_band_gain", None)
@@ -23793,23 +27649,37 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         which sums it over a nested move tree.
 
         OCCUPIED, not "all", is the load-bearing word. An EMPTY pair can
-        never shut -- ``_update_search_band_shutoff`` requires ``new_max >
-        0``, because a band that has found nothing has not plateaued, it
-        has not started -- so a plain "all pairs shut" criterion would be
+        never shut -- the judge's occupancy guard
+        (:meth:`_shutoff_require_occ`, on by default) excludes it, because
+        a band that has found nothing has not plateaued, it has not
+        started -- so a plain "all pairs shut" criterion would be
         unreachable in any run with an empty band, which is every run. The
         empty pairs stay the nleaves-plateau gate's business.
 
         Published on EVERY update, including the ones where nothing
         converged and the ones before the window has filled, so a stage
         reading it can never mistake "not computed yet" for 0. It starts at
-        the occupied-pair count and falls to 0.
+        the occupied-pair count and falls to 0. Also sets
+        ``_shutoff_w_shut`` (shut pairs) and ``_shutoff_w_total``.
+
+        Args:
+            shut (np.ndarray): Bool ``(nwalkers, num_bands)`` shut table.
+            occ (np.ndarray): Cold-chain source count per
+                ``(walker, band)``.
         """
         self._shutoff_w_pending = int(((occ > 0) & ~shut).sum())
         self._shutoff_w_shut = int(shut.sum())
         self._shutoff_w_total = int(shut.size)
 
     def _log_shutoff_w_spread(self, shut) -> None:
-        """Every-iteration summary; says so while the valve is still inert."""
+        """Every-iteration ``[GB_STAGE]`` summary; says so while the valve is still inert.
+
+        Logged by :meth:`_update_search_band_shutoff` on judges where no
+        pair newly converged.
+
+        Args:
+            shut (np.ndarray): Bool ``(nwalkers, num_bands)`` shut table.
+        """
         n = int(shut.sum())
         if n == 0:
             logger.info(
@@ -23834,6 +27704,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Everything here is ``None`` with both features off, which is what
         keeps the scalar-floor path bit-identical.
+
+        Three binds, by move role:
+
+        * per-walker stage on (off in the 9mo / 12mo runs): the stage table
+          and the derived opt-SNR floor table;
+        * a search-mode move that may READ the shut table but does not own
+          the valve (the pure in-model moves): the shut table only, so shut
+          pairs are excluded from its pick pool and subset;
+        * the valve OWNERS (:attr:`_search_shutoff_per_walker`, the
+          search-mode RJ moves): the shut table, the window arrays
+          (:meth:`_bind_shutoff_window`) and the recipe-step stamp check,
+          which releases a valve stored under a different step.
+
+        Called once per propose by the head-side propose bodies (before
+        ``new_state`` is copied; :meth:`_update_search_band_shutoff`
+        re-binds from ``new_state``). Ends with :meth:`_log_stage_arm`.
+
+        Args:
+            state (GFState): The incoming state.
+
+        Raises:
+            RuntimeError: When this move owns the valve but the state carries
+                no ``band_rj_shutoff_w`` array.
         """
         self._stage_table = None
         self._snr_lim_table = None
@@ -23922,8 +27815,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._log_stage_arm()
 
     def _log_stage_arm(self) -> None:
-        """Arming line. Fires in BOTH modes, so a flag that did not take is
-        impossible to miss -- the same rule the cap's arming log follows."""
+        """Log the once-per-move ``[GB_STAGE]`` arming lines.
+
+        Fires in BOTH modes, so a flag that did not take is impossible to
+        miss -- the same rule the cap's arming log follows: the floor line
+        (shared scalar or per-(walker, band) table) and, when requested,
+        whether the per-walker RJ valve is live.
+        """
         if self._stage_armed_logged:
             return
         self._stage_armed_logged = True
@@ -23955,6 +27853,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 bool(getattr(self, "search_mode", False)),
                 bool(getattr(self, "is_rj_prop", False)))
 
+    # TODO check: keep/remove/document -- only the dist-birth / replace centre blocks; GB_RJ_FSTAT_DIST_BIRTH off (default + launchers)
     @staticmethod
     def _snr_trunc_floor(lim) -> float:
         """The SCALAR boundary the SNR-truncated distance draw is built on.
@@ -23993,12 +27892,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         The ``(nwalkers, nbands)`` table when the stage schedule is live,
         otherwise the scalar the move has always passed. ONE accessor, so
         the two construction sites cannot drift apart.
+
+        Returns:
+            float or np.ndarray: ``opt_snr_rej_samp_limit`` (the 9mo / 12mo
+            case: the per-walker stage is off), or the bound
+            ``_snr_lim_table``.
         """
         table = getattr(self, "_snr_lim_table", None)
         if table is None:
             return self.opt_snr_rej_samp_limit
         return table
 
+    # TODO check: keep/remove/document -- per-walker search stage only; GB_SEARCH_STAGE_PER_WALKER off (default, launchers 0)
     def _log_stage_spread(self, stage) -> None:
         """Every-iteration summary; says so when the latch is still inert."""
         n_fine = int((stage == SEARCH_STAGE_FINE).sum())
@@ -24032,7 +27937,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Read-only, like every other shipped table: the head arms, advances
         and persists the caps, and a rank must never see them move under
-        it mid-propose.
+        it mid-propose. Called by the orchestrated head's per-rank payload;
+        returns None in the 9mo / 12mo runs (no leaf caps).
+
+        Args:
+            cap (np.ndarray or None): The live cap table (``_cap_leaf_cap``).
+            w0 (int): First global walker of the block.
+            w1 (int): One past the last global walker of the block.
+
+        Returns:
+            np.ndarray or None: A host copy (:meth:`_ro_table`; rows
+            ``[w0, w1)`` of a per-walker cap), or None.
         """
         if cap is None:
             return None
@@ -24050,6 +27965,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         GLOBAL walker 0's floor -- every index in range, nothing raised,
         nothing logged. This is the one failure mode the multi-rank layout
         can produce invisibly, so it gets a check rather than a comment.
+
+        Called by :meth:`_enter_rank_block` for ``snr_lim_table``,
+        ``stage_table`` and ``rj_band_shutoff_w`` (the last is live in the
+        9mo / 12mo runs). Logs the received shape once per process.
+
+        Args:
+            name (str): Table name, for the messages.
+            table (np.ndarray or None): The shipped table.
+            block_width (int): This rank's walker block width.
+
+        Raises:
+            RuntimeError: When a 2-D table's walker rows differ from
+                ``block_width``.
         """
         if table is None or np.ndim(table) < 2:
             return
@@ -24087,7 +28015,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         from the rank logs instead of inferred.
 
         A SHARED (1-D) cap is correct at any block width -- a cap indexed
-        by cell alone means the same thing for every walker.
+        by cell alone means the same thing for every walker. Called by
+        :meth:`_enter_rank_block`; returns at once in the 9mo / 12mo runs
+        (no leaf caps).
+
+        Args:
+            cap (np.ndarray or None): The shipped cap table.
+            block_width (int): This rank's walker block width.
+
+        Raises:
+            RuntimeError: When a 2-D cap's walker rows differ from
+                ``block_width``.
         """
         if cap is None or np.ndim(cap) == 1:
             return
@@ -24120,7 +28058,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         written before the flag, or a fresh arm) or already spread (a
         genuine resume of per-walker state). A run whose per-walker caps
         silently failed to allocate is the failure this makes impossible
-        to miss: the line simply says ``SHARED``.
+        to miss: the line simply says ``SHARED``. Called from the cap-arming
+        blocks of the propose bodies (leaf caps armed only).
+
+        Args:
+            cap_arr (np.ndarray): The cap table just bound.
         """
         if getattr(self, "_cap_pw_armed_logged", False):
             return
@@ -24148,6 +28090,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             int(cap_arr.min()), int(cap_arr.max()), _origin,
         )
 
+    # TODO check: keep/remove/document -- per-walker leaf caps only; GB_LEAF_CAP_PER_WALKER unset (default off) and caps off in launchers
     def _log_per_walker_increments(self, converged, cap, cap_pre, iters_pre,
                                    best_pre, cur, occ) -> None:
         """``[GB_CAP_PW]``: who incremented, and on what evidence.
@@ -24207,6 +28150,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 self.name, int(w_idx.size) - _max, _max,
             )
 
+    # TODO check: keep/remove/document -- per-walker leaf caps only; GB_LEAF_CAP_PER_WALKER unset (default off) and caps off in launchers
     def _log_per_walker_cap_spread(self, cap) -> None:
         """``[GB_CAP_PW]`` divergence summary -- is this mode doing anything?
 
@@ -24249,6 +28193,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         max-over-walkers mirrors (:meth:`_mirror_band_leaf_cap`), so the
         monitor and the diagnostic scripts keep reading what they always
         have.
+
+        Allocates the cap-cell fields on first use
+        (:func:`ensure_cap_cell_fields`). Used by the cap arming and
+        :meth:`_update_band_leaf_caps` (leaf caps armed only).
+
+        Args:
+            bi (dict): The GB ``band_info`` dict.
+
+        Returns:
+            tuple: ``(cap, iters, best)`` arrays, live references into
+            ``bi``.
         """
         if self._cap_per_walker:
             ensure_cap_cell_fields(bi, self.num_cap_cells,
@@ -24283,6 +28238,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         stays in range and nothing raises.
 
         1-D is the historical expression, bit-identically.
+
+        Args:
+            cap (xp.ndarray): Cap table, 1-D ``(ncells,)`` or 2-D
+                ``(nwalkers, ncells)``.
+            walker_inds (xp.ndarray or None): Walker index per row (ignored
+                for a 1-D cap).
+            cells (xp.ndarray): Cap cell per row.
+
+        Returns:
+            xp.ndarray: Cap value per row.
         """
         if np.ndim(cap) == 1:
             return cap[cells]
@@ -24296,12 +28261,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         statistic when it cannot. The floor is the domain's frequency
         resolution: FD bins are ``1/Tobs`` wide (a band/8 cell at the
         production 3-month config is ~135 bins, comfortably resolved),
-        but WDM's is one ``layer_df``, and the production band grid is
-        ONE LAYER PER BAND -- so every K > 1 cap cell there is SUB-LAYER
-        and its residual window comes back empty. This detects that from
+        but WDM's is one ``layer_df``, and the production band grid was
+        ONE LAYER PER BAND when this was written -- so every K > 1 cap cell
+        there is SUB-LAYER and its residual window comes back empty (the
+        current WDM sub-band grids are finer still: under the centres rule
+        most 9mo sub-bands own no layer centre). This detects that from
         the window bin ranges themselves rather than assuming a domain.
 
-        ``GB_CAP_LL_SOURCE=residual|source`` forces either branch.
+        ``GB_CAP_LL_SOURCE=residual|source`` forces either branch (default
+        ``auto``; unset in the 9mo / 12mo launchers). The answer is cached
+        on the move and logged once (``cap-cell ll source = ...``).
+
+        Args:
+            acs: The analysis container array whose residual windows are
+                tested.
+
+        Returns:
+            bool: True for the residual-window statistic, False for the
+            source-attributed one.
         """
         forced = os.environ.get("GB_CAP_LL_SOURCE", "auto").lower()
         if forced == "residual":
@@ -24361,6 +28338,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         importing a better hot-rung configuration registers that change only
         through the resulting cold-chain sources, which is the same thing
         the band gate would see one iteration later.
+
+        Called by :meth:`_cap_stats_local` whenever the cap grid is not the
+        band grid (the 9mo / 12mo staggered grid included, where the result
+        is not used for gating: caps are off). The residual branch also
+        runs the ``GB_CAP_LL_CHECK`` diagnostic (:meth:`_cap_ll_check`).
+
+        Args:
+            model: The engine model (``analysis_container_arr`` is read).
+            new_state (GFState): The propose's output state.
+            band_lls (np.ndarray): Per-band cold residual lnL, for the
+                tiling check.
+
+        Returns:
+            tuple: ``(lls, dof)`` -- ``(nwalkers, num_cap_cells)`` statistic
+            and the per-cell window size (zeros on the source branch).
         """
         if self._cap_cells_resolvable(model.analysis_container_arr):
             # the PARTITION windows (centres rule): see _cap_cell_source_lls
@@ -24374,7 +28366,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
 
     def _cap_cell_source_lls(self, new_state):
-        """``(nwalkers, num_cap_cells)`` sum of ``d_h - h_h/2`` per cap cell."""
+        """``(nwalkers, num_cap_cells)`` sum of ``d_h - h_h/2`` per cap cell.
+
+        The source-attributed branch of :meth:`_cap_cell_lls`: each alive
+        cold-chain source's own likelihood contribution (the sub-state's
+        ``d_h`` / ``h_h``, non-finite values folded to 0), filed by f0 into
+        its covering cap cells (both cells in overlap mode). Zeros when the
+        sub-state carries no ``d_h`` / ``h_h``.
+
+        Args:
+            new_state (GFState): The propose's output state.
+
+        Returns:
+            np.ndarray: float ``(nwalkers, num_cap_cells)``.
+        """
         sub = new_state.sub_states[self.branch_name]
         branch = self._work_branch(new_state)
         # cold row of the module ladder = the joint solution
@@ -24411,7 +28416,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return out
 
     def _cold_occupancy(self, band_counts, new_state):
-        """Cold-chain per-unit occupancy for the ``require_occupancy`` test."""
+        """Cold-chain per-unit occupancy for the ``require_occupancy`` test.
+
+        On the band grid this is ``band_counts[0]``; on a cell grid the cold
+        sources are re-filed by f0 into their (multi-membership) cap cells.
+        Used by :meth:`_update_band_leaf_caps` (leaf caps armed only).
+
+        Args:
+            band_counts (np.ndarray): ``(ntemps, nwalkers, num_bands)``
+                alive-source census.
+            new_state (GFState): The propose's output state.
+
+        Returns:
+            np.ndarray: int ``(nwalkers, num_bands)`` or
+            ``(nwalkers, num_cap_cells)``.
+        """
         if self._cap_is_band_grid:
             return _to_numpy(band_counts[0])  # (nwalkers, num_bands)
         branch = self._work_branch(new_state)
@@ -24453,6 +28472,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Diagnostic only -- reads the state, mutates nothing. Volume is
         bounded (``max_cells`` cells per call, ``max_src`` sources per
         walker); increments run 2-6 cells per iteration in production.
+        Called by :meth:`_update_band_leaf_caps` under ``GB_CAP_INC_DIAG``
+        (default 1) when cells increment (leaf caps armed only).
+
+        Args:
+            new_state (GFState): The propose's output state.
+            band_counts (np.ndarray): Alive-source census (unused here).
+            inc (np.ndarray): Indices of the incrementing cells.
+            cap (np.ndarray): Cap per cell before the increment.
+            iters (np.ndarray): Patience counter per cell.
+            best (np.ndarray): Running best cell lnL.
+            cur_max (np.ndarray): Current max-over-walkers cell lnL.
+            occ_w (np.ndarray or None): Per-walker occupancy the gate used.
+            max_cells (int, optional): Cells detailed per call. Default 24.
+            max_src (int, optional): Sources listed per walker. Default 8.
         """
         branch = self._work_branch(new_state)
         coords = _to_numpy(branch.coords[0])
@@ -24503,6 +28536,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"[GB_CAP_INC {self.name}] ... {len(inc) - max_cells} more "
                 "cell(s) not detailed (max_cells)")
 
+    # TODO check: keep/remove/document -- dist-birth chain; every call site needs GB_RJ_FSTAT_DIST_BIRTH (off by default + launchers)
     def _rj_birth_perrow(self) -> bool:
         """Per-row F-stat centers for this move's fstat births/deaths?
 
@@ -24530,6 +28564,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return False
         return "search" in str(getattr(self, "name", "")).lower()
 
+    # TODO check: keep/remove/document -- dist-birth chain; read only under GB_RJ_FSTAT_DIST_BIRTH (off; launchers export the knob 1, inert)
     def _perrow_unit_cache(self) -> bool:
         """Route per-row F-stat centers through the UNIT-OPEN cache?
 
@@ -24554,6 +28589,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """
         return os.environ.get("GB_FSTAT_PERROW_UNIT_CACHE", "1") != "0"
 
+    # TODO check: keep/remove/document -- called per unit but returns False at once without GB_RJ_FSTAT_DIST_BIRTH (off by default + launchers)
     def _fstat_ctr_hoist_wanted(self) -> bool:
         """Should this unit run the unit-open center precompute?
 
@@ -24563,6 +28599,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the 726 s/row per-round path) -- gated by
         :meth:`_perrow_unit_cache`. Replace keeps its direct per-row
         evaluations (small row counts; its candidates are fresh draws).
+
+        False unless ``rj_fstat_dist_birth`` (``GB_RJ_FSTAT_DIST_BIRTH``,
+        off by default and in the 9mo / 12mo launchers), so the
+        ``GB_RJ_FSTAT_CTR_HOIST`` knob (default 1) is never consulted there.
+        Called once per unit by :meth:`_run_band_unit`.
+
+        Returns:
+            bool: True to run :meth:`_precompute_fstat_centers` at unit open.
         """
         if not getattr(self, "rj_fstat_dist_birth", False):
             return False
@@ -24574,6 +28618,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return True
         return self._rj_birth_perrow() and self._perrow_unit_cache()
 
+    # TODO check: keep/remove/document -- only inside the dist-birth block of _run_rj_step; GB_RJ_FSTAT_DIST_BIRTH off
     def _resolve_rj_ctr(self, tbl, ctr):
         """Resolve which (epoch table, unit cache) an RJ step consumes.
 
@@ -24608,6 +28653,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         were never picked this iteration. The in-model capture runs
         AFTER the RJ rounds in a unit, so pooled leaves still end with
         their post-polish values (later write wins).
+
+        Called by :meth:`_run_rj_step` for the death rows of every RJ move.
+        Allocates ``_sorter_dh`` / ``_sorter_hh`` (NaN-filled, length
+        ``n_src``) on first use.
+
+        Args:
+            ids_death (cupy.ndarray): Sorter row index of each death row.
+            d_h_raw (cupy.ndarray): ``<r|h>`` per death row, with the leaf
+                still subtracted from ``r``.
+            h_h_raw (cupy.ndarray): ``<h|h>`` per death row.
+            n_src (int): Number of sorter rows.
         """
         if getattr(self, "_sorter_dh", None) is None:
             self._sorter_dh = cp.full(int(n_src), np.nan)
@@ -24629,7 +28685,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         ``GB_INMODEL_POOL_AT_CAP=0`` restores the 2026-08-13 exclusion
         (only below-cap cells' survivors pool), with the live-state /
-        unit-open-snapshot precedence unchanged.
+        unit-open-snapshot precedence unchanged. At the default (1; unset
+        in the 9mo / 12mo launchers) this returns ``alive_now`` unchanged.
+        Called by :meth:`_run_band_unit` when it pools each RJ pick round's
+        survivors (both pooling paths).
+
+        Args:
+            alive_now (xp.ndarray): Bool per picked row, alive after the RJ
+                step.
+            picked (dict): The pick-round row dict (``ids``, ``temp_inds``,
+                ``walker_inds``, ``cap_inds`` and the optional neighbour
+                keys).
+
+        Returns:
+            xp.ndarray: Bool per picked row, True when it joins the pool.
         """
         if os.environ.get("GB_INMODEL_POOL_AT_CAP", "1") == "1":
             return alive_now
@@ -24649,6 +28718,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return alive_now & ~_at_cap_m[picked["ids"]]
         return alive_now
 
+    # TODO check: keep/remove/document -- diagnostic; only the residual branch of _cap_cell_lls, and it returns at once on a staggered grid
     def _cap_ll_check(self, cell_lls, band_lls) -> None:
         """[GB_CAP_LL_CHECK] does the cap grid partition the band ll? (default OFF)
 
@@ -24659,7 +28729,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         same, only the difference points move); a discrepancy means the cap
         windows do not tile their band -- e.g. the WDM boundary layer that
         adjacent windows SHARE by construction, which this reports rather
-        than hides. ``GB_CAP_LL_CHECK_TOL`` sets the warning threshold.
+        than hides. ``GB_CAP_LL_CHECK_TOL`` (default 1e-6) sets the warning
+        threshold. The 9mo / 12mo launchers export ``GB_CAP_LL_CHECK=1``,
+        but their grid is staggered, so the check only logs that it was
+        skipped (and only when the residual branch is taken).
         """
         if os.environ.get("GB_CAP_LL_CHECK", "0") != "1":
             return
@@ -24721,6 +28794,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         NO ``band_info`` writes happen here -- the head owns those, in the
         order :meth:`_update_band_leaf_caps` has always written them.
+
+        Callers: :meth:`_gb_serve_finish` on every compute rank when the
+        head requests ``cap_stats`` (in the 9mo / 12mo runs the per-walker
+        valve requests it on every propose of the designated move, with the
+        caps off), :meth:`_update_band_leaf_caps` without a precomputed
+        dict, and :meth:`_shutoff_band_lls` as a fallback. With the 9mo /
+        12mo staggered grid ``is_cells`` is True, so the cell statistic is
+        computed even though no cap gate reads it.
+
+        Args:
+            model: The engine model (``analysis_container_arr`` is read).
+            new_state (GFState): This process's state (a rank's block).
+
+        Returns:
+            dict: ``band_lls``, ``band_gain``, ``lls``, ``dof``,
+            ``band_dof``, ``is_cells`` as described above.
         """
         # The CELL statistic drives the gate whenever the cap-cell
         # machinery is live: divisor > 1, OR divisor 1 with overlap
@@ -24751,6 +28840,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "is_cells": is_cells,
         }
 
+    # TODO check: keep/remove/document -- only with GB_LEAF_CAP_ALL_WALKERS=1 (default 0, unset in launchers) and leaf caps on
     def _cap_all_walkers_converged(self, lls, occ_w, thresh, tol):
         """Per-cell mask: has EVERY engaged cold walker plateaued here?
 
@@ -24869,6 +28959,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         :meth:`_cap_stats_local` dict the head assembled from the rank
         blocks; ``None`` -- single process -- computes it here, which is
         exactly what this method has always done inline.
+
+        Every call site is gated on armed caps (``_band_leaf_cap`` set) and
+        the designated ``leaf_cap_update`` move, so the 9mo / 12mo runs
+        (``GB_LEAF_CAP_START`` empty) never reach it; there the orchestrated
+        head stashes the valve statistic from the shipped ``cap_stats``
+        instead. Besides the cap arrays it writes ``band_cold_ll`` /
+        ``cap_cell_cold_ll`` and the valve stash (``_stage_band_lls``,
+        ``_stage_band_gain``, stamped with ``num_proposals``). Env knobs
+        read here (code defaults): ``GB_LEAF_CAP_REQUIRE_IMPROVEMENT`` (0),
+        ``GB_LEAF_CAP_ENGAGE_TOL`` (0.1), ``GB_LEAF_CAP_ALL_WALKERS`` (0),
+        ``GB_CAP_CELL_MAX`` (0), ``GB_SEARCH_CAP_HEADROOM`` (0) and
+        ``GB_CAP_INC_DIAG`` (1).
+
+        Args:
+            model: The engine model.
+            new_state (GFState): The propose's output state; its GB
+                ``band_info`` is updated IN PLACE.
+            band_counts (np.ndarray): ``(ntemps, nwalkers, num_bands)``
+                alive-source census.
+            precomputed (dict, optional): The assembled
+                :meth:`_cap_stats_local` dict (fan-out). Default None.
         """
         bi = new_state.sub_states[self.branch_name].band_info
         cap, iters, best = self._cap_state_arrays(bi)
@@ -25423,7 +29534,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     @property
     def fanout_active(self) -> bool:
-        """Is this propose shared by several compute ranks?"""
+        """Is this propose shared by several compute ranks?
+
+        True when a fan-out is bound (:meth:`install_walker_fanout`) and it
+        has more than one compute rank, as on the multi-rank 9mo / 12mo
+        launches; it routes :meth:`propose` to
+        :meth:`_propose_orchestrated`.
+        """
         return self.fanout is not None and not self.fanout.single
 
     def install_walker_fanout(self, curr):
@@ -25451,6 +29568,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         even and at least 2. Today the ``assert`` guarding it lives inside
         the proposal and fires at the first propose, after the whole build;
         refuse here instead, where the launch can still be fixed.
+
+        Called by ``recipe.build_gb_moves`` / ``build_vgb_moves`` on every GB
+        and VGB move they build (overridden by
+        :meth:`GBParaSearchRJMove.install_walker_fanout`).
+
+        Args:
+            curr: The built global-fit setup; its ``fanout`` and ``rank``
+                attributes are read (missing = single-process).
+
+        Raises:
+            ValueError: When VGB stretch needs an even walker block and this
+                rank's block is odd or narrower than 2.
         """
         self.fanout = getattr(curr, "fanout", None)
         self.gf_rank = getattr(curr, "rank", None)
@@ -25480,7 +29609,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         take a red-blue complement, and the VGB ``observable`` / ``eigen``
         kinds take the composite / one-axis draw instead. ``_inmodel_kind``
         is the single resolver for ``VGB_INMODEL_PROPOSAL`` (see
-        ``_vgb_inmodel_defaults``).
+        ``_vgb_inmodel_defaults``). False in the 9mo / 12mo runs
+        (``VGB_INMODEL_PROPOSAL=observable``).
+
+        Returns:
+            bool: True only for a VGB move whose in-model kind is
+            ``stretch``.
         """
         if not isinstance(self, VGBSpecialStretchMove):
             return False
@@ -25494,6 +29628,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``(clock["seq"], clock["call_index"])``: ``seq`` does not advance in
         single mode (``WalkerFanout.run``), so the pair is what actually
         separates one propose from the next.
+
+        Args:
+            clock (dict or None): The fan-out clock of the command.
+
+        Returns:
+            tuple: ``(seq, call_index)`` (entries None when absent).
         """
         clock = clock or {}
         return (clock.get("seq"), clock.get("call_index"))
@@ -25503,7 +29643,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return "" if self.gf_rank is None else f"[r{self.gf_rank}] "
 
     def _gb_require_session(self, payload, op):
-        """The open session for ``payload["session"]``, or raise."""
+        """The open session for ``payload["session"]``, or raise.
+
+        Used by the second and third commands of a propose
+        (``gb_run_tempering``, ``gb_finish``), which must carry the token
+        ``gb_run_proposal`` opened.
+
+        Args:
+            payload (dict or None): The command payload.
+            op (str): The command name, for the message.
+
+        Returns:
+            GBRankSession: The open session.
+
+        Raises:
+            RuntimeError: When no session is open or its token differs.
+        """
         sess = getattr(self, "_gb_session", None)
         token = (payload or {}).get("session")
         if sess is None or sess.token != token:
@@ -25517,7 +29672,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return sess
 
     def _rank_block_width(self, payload) -> int:
-        """This command's walker-block width ``B``."""
+        """This command's walker-block width ``B``.
+
+        Taken from ``payload["nwalkers"]``, else from the shipped state
+        slice, else from the open session.
+
+        Args:
+            payload (dict or None): The command payload.
+
+        Returns:
+            int: The block width.
+
+        Raises:
+            ValueError: When none of the three sources is available.
+        """
         if payload is not None and payload.get("nwalkers") is not None:
             return int(payload["nwalkers"])
         part = (payload or {}).get("state")
@@ -25558,6 +29726,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         per-propose session commands (:meth:`_enter_rank_block`) and the
         F-stat epoch-fit commands, which carry no session and so cannot go
         through the block prologue.
+
+        Args:
+            model: The rank's engine model (``analysis_container_arr`` is
+                read).
+
+        Returns:
+            AnalysisContainerArray: The bound analysis container array
+            (``model.analysis_container_arr``).
         """
         acs = model.analysis_container_arr
         pin_main_device(self.xp, acs.gpus)
@@ -25594,6 +29770,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         The returned dict goes straight back to :meth:`_exit_rank_block` in
         a ``finally``; on the head that restores N, and on a pure compute
         rank the restore is harmless (nothing runs between commands).
+
+        Also applied here: the head's ``gf_iteration`` stamp (the F-stat
+        refit clock's tick source on ranks), the head's live per-propose
+        knobs (:meth:`_install_rank_live_attrs`), the shape checks of the
+        shipped tables (:meth:`_check_rank_cap_table`,
+        :meth:`_check_rank_stage_table`) and the replica payload
+        (:meth:`_apply_replica_payload`).
+
+        Args:
+            payload (dict): The command payload (``ntemps``, ``nwalkers``,
+                ``clock_vals``, ``tables``, ``rank_seed``, ...).
+            clock (dict): The fan-out clock (not read here).
+            model: The rank's engine model.
+
+        Returns:
+            dict: The overwritten attribute values (keys of
+            :data:`_RANK_BLOCK_SAVED` plus the propose-count census and the
+            replaced live attributes).
         """
         self._bind_rank_acs(model)
 
@@ -25685,7 +29879,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return saved
 
     def _exit_rank_block(self, saved):
-        """Put every attribute :meth:`_enter_rank_block` overwrote back."""
+        """Put every attribute :meth:`_enter_rank_block` overwrote back.
+
+        Restores :data:`_RANK_BLOCK_SAVED`, the class-level propose-count
+        census entry and the head's live attributes
+        (:meth:`_restore_rank_live_attrs`).
+
+        Args:
+            saved (dict or None): What :meth:`_enter_rank_block` returned; a
+                falsy value is a no-op.
+        """
         if not saved:
             return
         for name in self._RANK_BLOCK_SAVED:
@@ -25704,6 +29907,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         carries are written (a stale or foreign key never invents an
         attribute). On the head the shipped values are its own, so this is
         a no-op there.
+
+        Args:
+            live (dict or None): The ``clock_vals["live_attrs"]`` the head
+                shipped (built by ``gb_rank_live_attrs``).
+
+        Returns:
+            dict: The previous values of the attributes written.
         """
         saved = {}
         for k, v in dict(live or {}).items():
@@ -25713,6 +29923,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return saved
 
     def _restore_rank_live_attrs(self, saved) -> None:
+        """Put back what :meth:`_install_rank_live_attrs` replaced.
+
+        Args:
+            saved (dict or None): Its return value.
+        """
         for k, v in dict(saved or {}).items():
             setattr(self, k, v)
 
@@ -25723,7 +29938,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         orchestrated propose is computed against the BLOCK width while the
         fills run against the ACA's rows, so an ensemble-width ACA on a rank
         silently scores the wrong walkers (spec, ACA-width rule). An ACA with
-        no ``acs_total_entries`` (test stubs) is not checked.
+        no ``acs_total_entries`` (test stubs) is not checked. Called by
+        :meth:`_propose_orchestrated` on the head.
+
+        Args:
+            acs: The head's analysis container array.
+
+        Raises:
+            RuntimeError: When its walker rows differ from the head's block
+                width.
         """
         entries = getattr(acs, "acs_total_entries", None)
         if entries is None:
@@ -25741,8 +29964,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """The rank-side stand-in for ``setup()``: install epoch tables only.
 
         ``setup()`` on an F-stat grid move can RUN THE FIT -- an expensive
-        residual-dependent sweep against the GLOBAL argmax over every compute
-        rank's block (``_fstat_global_reference``, one ``gather_likelihood``
+        residual-dependent sweep against the GLOBAL reference walker picked
+        over every compute rank's block (``_fstat_global_reference``, one
+        ``gather_likelihood``
         collective; it was a head-LOCAL argmax before the walker-block port,
         which under a fan-out would have named a row the head does not even
         own), which then writes ``fstat_grid_peaks_stacked.npz`` and
@@ -25777,7 +30001,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         exists to reject.
 
         No-op on the base class (only ``GBSpecialRJFStatGridMove`` has an
-        ``_install``) and no-op when the head ships no epoch.
+        ``_install``) and no-op when the head ships no epoch. Called by
+        :meth:`_gb_serve_run_proposal` on every compute rank with the
+        payload's ``directive`` entry.
+
+        Args:
+            directive (dict or None): ``{"epoch": k, "ctr_table": bool}``
+                from the head, or None.
+
+        Raises:
+            RuntimeError: When the epoch directory (or the requested centre
+                table) is not complete on this rank's filesystem view.
         """
         if not directive or not hasattr(self, "_install"):
             return
@@ -25858,6 +30092,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         installed no epoch. Never fatal on its own: a missing artifact is the
         RANK's loud failure, and an unreadable one is reported as a warning
         here rather than taking down a run whose ``setup()`` succeeded.
+
+        Args:
+            k (int or None): The epoch the head installed.
         """
         if k is None or not hasattr(self, "_epoch_dir"):
             return
@@ -25938,6 +30175,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``key`` names the payload entry holding the slice: ``"state"`` for the
         opening command, ``"merged_state"`` for ``gb_sync`` (the head's MERGED
         one-walker branch). Same object shape, same validation.
+
+        Args:
+            payload (dict or None): The command payload.
+            key (str, optional): Payload entry holding the slice. Default
+                ``"state"``.
+
+        Returns:
+            GFState: The shipped walker-block state.
+
+        Raises:
+            ValueError: When the slice is missing or has no tempered
+                sub-state for this branch.
         """
         part = (payload or {}).get(key)
         if part is None:
@@ -25955,7 +30204,34 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     # ---- the three commands -------------------------------------------
     def gf_serve(self, op, payload, clock, model):
-        """Serve one GB fan-out command on a compute rank (see :data:`GB_OPS`)."""
+        """Serve one GB fan-out command on a compute rank (see :data:`GB_OPS`).
+
+        The dispatcher the run's walker fan-out calls on every compute rank
+        (the head included, for its own block). One propose is three
+        session commands: ``gb_run_proposal`` (:meth:`_gb_serve_run_proposal`,
+        opens the session), ``gb_run_tempering``
+        (:meth:`_gb_serve_run_tempering`) and ``gb_finish``
+        (:meth:`_gb_serve_finish`, closes it), plus ``gb_sync``
+        (:meth:`_gb_serve_sync`) in replica mode only. The F-stat epoch fit
+        adds ``gb_fstat_ref_row``, ``gb_fstat_comb`` and
+        ``gb_fstat_stage_b`` (refused by :meth:`_require_fstat_grid_move` on a
+        move that cannot run them, and run under a detached timer) and
+        ``gb_fstat_release``. :data:`GB_PARA_SEARCH_OP` is served only by
+        :class:`GBParaSearchRJMove` (not built in the 9mo / 12mo runs).
+
+        Args:
+            op (str): The command name.
+            payload (dict): The head's per-rank payload.
+            clock (dict): The fan-out clock.
+            model: This rank's engine model.
+
+        Returns:
+            dict: The command's reply (host data for the head to merge).
+
+        Raises:
+            ValueError: For an unknown op, or the para-search op on a move
+                that cannot serve it.
+        """
         if op == "gb_run_proposal":
             return self._gb_serve_run_proposal(payload, clock, model)
         if op == "gb_run_tempering":
@@ -26025,6 +30301,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Checked HERE rather than inside the bodies precisely because it is
         SYMMETRIC: every rank serves the same move class, so either all of
         them raise (before any collective) or none does.
+
+        Args:
+            op (str): One of the keys of ``_FSTAT_OP_REQUIRES``.
+
+        Raises:
+            ValueError: When the move lacks the attribute that op needs.
         """
         needed = _FSTAT_OP_REQUIRES[op]
         if getattr(self, needed, None) is None:
@@ -26035,7 +30317,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
 
     def _gb_new_timer(self, model):
-        """``propose``'s per-propose stage timer, per rank."""
+        """``propose``'s per-propose stage timer, per rank.
+
+        On a CuPy backend the timer syncs the ACA's devices per span
+        according to ``GB_PROP_TIMING_SYNC`` (default 0; unset in the 9mo /
+        12mo launchers).
+
+        Args:
+            model: The rank's engine model.
+
+        Returns:
+            _ProposeTimer: A fresh timer.
+        """
         _tm_sync = None
         if self.backend.uses_cupy:
             _tm_sync = _prop_timer_sync_fn(
@@ -26046,7 +30339,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return _ProposeTimer(sync_fn=_tm_sync)
 
     def _gb_neutral_shapes(self, sess):
-        """``(B, ntemps, num_bands)`` for a neutral block's zero replies."""
+        """``(B, ntemps, num_bands)`` for a neutral block's zero replies.
+
+        Args:
+            sess (GBRankSession): The open session.
+
+        Returns:
+            tuple[int, int, int]: Block width, rung count, band count.
+        """
         return int(sess.nwalkers), int(sess.ntemps), len(self.band_edges) - 1
 
     def _gb_serve_run_proposal(self, payload, clock, model):
@@ -26059,6 +30359,45 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         so the head must SKIP the merge for a block it marked neutral --
         merging ``log_like_cold``/``log_like_final`` from a neutral reply
         would zero those walkers' likelihood.
+
+        The first of the three session commands (see :meth:`gf_serve`). In
+        order: enter the rank block (:meth:`_enter_rank_block`); install the
+        head's epoch directive (:meth:`_setup_from_directive`) and re-apply
+        the shipped per-band shut table after it; reset the per-propose
+        stashes (timer, RJ split census, buffer cache unless
+        ``GB_BUFFER_PERSIST`` is 1, its default); open the
+        :class:`GBRankSession` on the shipped walker-block slice and
+        allocate the block-local cold-lnL peak. A non-neutral block then
+        applies the head's replace-pass source, warm-self directive
+        (:meth:`_warm_self_apply`) and para-search directive (the
+        para-search epoch hook, live only on :class:`GBParaSearchRJMove`),
+        builds the :class:`BandSorter` (with the walker block's source
+        uids), snapshots the non-GB residual, checks the start likelihood
+        (re-injecting on a mismatch above 1e-4), runs :meth:`run_proposal`,
+        followed by the in-model group passes when the group state exists
+        or by the cold-reseed passes, and credits the cold-chain lnL
+        change, rebuilding it from the residual when the drift is at least
+        1e-4 (deferred to ``gb_sync`` in replica mode). The session stays
+        open for ``gb_run_tempering`` / ``gb_finish``.
+
+        Args:
+            payload (dict): The head's per-rank payload: the
+                :meth:`_enter_rank_block` keys plus ``neutral``,
+                ``directive``, ``state`` (the walker-block slice),
+                ``engine_ntemps``, ``keep_all_inds``, ``band_temps``,
+                ``scan_schedule``, ``replace_pass_source``, ``warm_self``
+                and ``para_search``.
+            clock (dict): The fan-out clock (its token keys the session).
+            model: This rank's engine model.
+
+        Returns:
+            dict: Host-side reply: ``log_like_cold`` (B,), walker-summed
+            ``prop_counts`` / ``acc_counts`` ``(2, ntemps, num_bands)`` (row
+            0 = RJ), ``cold_counts`` ``(2, 2, B, num_bands)``,
+            ``alive_per_temp``, ``n_alive``, ``start_diffs``, ``drift``,
+            ``rj_at_cap``, ``timing`` and the vertical-swap ladder census
+            (the ``vert_ladder_*`` proposed / accepted pair). A neutral
+            block answers a zero-valued subset (no vertical census).
         """
         saved = self._enter_rank_block(payload, clock, model)
         try:
@@ -26419,7 +30758,34 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self._exit_rank_block(saved)
 
     def _gb_serve_run_tempering(self, payload, clock, model):
-        """Run this block's band-temperature swaps on the session sorter."""
+        """Run this block's band-temperature swaps on the session sorter.
+
+        The second session command. Calls :meth:`run_tempering` with
+        ``adapt_band_temps=False`` (the band ladder has no walker axis and
+        the head owns it), credits the cold-chain lnL change and rebuilds it
+        from the residual when the drift is at least 1e-4 (deferred to
+        ``gb_sync`` in replica mode). The head issues this command only when
+        its tempering gate fires (``run_swaps`` and the cadence, or a reseed
+        round); under the 9mo / 12mo launchers ``GB_RUN_FANCY_TEMPERING=0``
+        turns ``run_swaps`` off on the GB moves, so only ``vgb_pe`` reaches
+        it there.
+
+        Args:
+            payload (dict): The head's payload (``session``, ``band_temps``,
+                ``tmp_start`` and the :meth:`_enter_rank_block` keys).
+            clock (dict): The fan-out clock.
+            model: This rank's engine model.
+
+        Returns:
+            dict: Host-side reply: ``log_like_cold``, ``band_swaps_accepted``
+            / ``band_swaps_proposed`` ``(num_bands, ntemps - 1)``,
+            ``ll_change_sum_temp_cold``, ``drift``, ``census`` (currently
+            always None) and ``timing``; zeros for a neutral block.
+
+        Raises:
+            RuntimeError: When the payload's session token is not the open
+                session's.
+        """
         sess = self._gb_require_session(payload, "gb_run_tempering")
         saved = self._enter_rank_block(payload, clock, model)
         try:
@@ -26534,7 +30900,37 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self._exit_rank_block(saved)
 
     def _gb_serve_finish(self, payload, clock, model):
-        """Write back, rebuild the residual, export the block and close the session."""
+        """Write back, rebuild the residual, export the block and close the session.
+
+        The third session command. Writes the sorter back into the block's
+        branch (:meth:`_write_back_state`), copies the WHOLE block branch
+        (coords and inds, dead-slot fill included), ``d_h`` / ``h_h`` and the
+        source uids, rebuilds a fresh :class:`BandSorter` for the band counts
+        and the final residual likelihood (:meth:`check_ll_inject`; skipped
+        in replica mode, where ``gb_sync`` does it over the merged branch),
+        computes :meth:`_cap_stats_local` when the head asked for it
+        (``want_cap_stats``) and ships the block's cold-lnL peak. The session
+        is torn down (buffer cache, F-stat NM lanes) whatever happens.
+
+        Args:
+            payload (dict): The head's payload (``session``,
+                ``want_cap_stats`` and the :meth:`_enter_rank_block` keys).
+            clock (dict): The fan-out clock.
+            model: This rank's engine model.
+
+        Returns:
+            dict: Host-side reply: ``block_coords`` / ``block_inds``
+            ``(ntemps, B, nleaves_max[, ndim])``, ``block_band_inds`` (replica
+            mode, else None), ``block_source_uid``, ``d_h``, ``h_h``,
+            ``band_counts``, ``log_like_final``, ``cap_stats``,
+            ``fstat_ctr_fallback_rows``, ``band_dof``, ``cold_lnl_peak``,
+            ``rj_split``, ``replace_census`` and ``timing``. A neutral block
+            answers through :meth:`_gb_neutral_finish_reply`.
+
+        Raises:
+            RuntimeError: When the payload's session token is not the open
+                session's.
+        """
         sess = self._gb_require_session(payload, "gb_finish")
         saved = self._enter_rank_block(payload, clock, model)
         new_band_sorter = None
@@ -26762,6 +31158,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         branch's move still rebuilds the same walkers' likelihood, so no
         value goes stale in a real recipe; documented so a future reader does
         not mistake the zeros for state.
+
+        Args:
+            sess (GBRankSession): The open session.
+            B (int): Block width.
+            ntemps (int): Rung count.
+            nb (int): Band count.
+            cap_stats (dict, optional): The block's :meth:`_cap_stats_local`
+                dict when the head asked for it. Default None.
+
+        Returns:
+            dict: The ``gb_finish`` reply keys with ``None`` block arrays,
+            zero ``band_counts`` / ``log_like_final`` and the sub-state's
+            ``d_h`` / ``h_h`` (NaN when none are recorded).
         """
         branch = self._work_branch(sess.new_part)
         nleaves = int(branch.coords.shape[-2])
@@ -26832,6 +31241,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         is subtracted, because ``add_cold_chain_sources_to_residual`` forces
         ``apply_inds=True`` (alive leaves only) and ``get_band_info`` counts
         ``inds`` rows only.
+
+        Only issued in replica mode (several compute ranks per walker block:
+        the launcher-wired ``NGPUS=8 GF_GPU_ROUTING=1`` option; not at the
+        launcher defaults).
+
+        Args:
+            payload (dict): The head's payload (``merged_state``,
+                ``neutral`` and the :meth:`_enter_rank_block` keys).
+            clock (dict): The fan-out clock.
+            model: This rank's engine model.
+
+        Returns:
+            dict: ``log_like_final``, ``band_counts`` and ``residual_hash``
+            (the head compares the hashes across replicas); a neutral block
+            answers ``{"neutral": True, ...}`` with None values.
+
+        Raises:
+            RuntimeError: When the propose-start non-GB residual snapshot is
+                missing.
         """
         if (payload or {}).get("neutral"):
             # A NEUTRAL block (several walker blocks, one of them with
@@ -26885,9 +31313,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 del sorter
             self.mempool.free_all_blocks()
             self._exit_rank_block(saved)
-    # ---- the F-stat epoch fit's two fan-out commands -----------------------
+    # ---- the F-stat epoch fit's fan-out commands ---------------------------
     #
-    # These two are NOT part of the per-propose session above: the head issues
+    # ``gb_fstat_ref_row``, ``gb_fstat_comb``, ``gb_fstat_stage_b`` and
+    # ``gb_fstat_release``.
+    # These are NOT part of the per-propose session above: the head issues
     # them from ``setup()``, where no session (and no state slice) exists on
     # any rank. They are served here, on the base, next to the other
     # ``_gb_serve_*`` bodies ``gf_serve`` dispatches to; the head-side work
@@ -26915,6 +31345,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the other side of the wire, off its own local flag -- so the fact is
         recorded on both the rank that failed to open the window and the
         rank an operator reads first).
+
+        Args:
+            w_global (int): Global index of the reference walker.
+            owner_rank (int): Fan-out rank whose block holds it.
+            local_index (int): Its row inside the owner's block.
+            gb_free_requested (bool): Whether the head asked for the GB-free
+                window.
+
+        Returns:
+            dict: ``walker_ref``, ``owner_rank``, ``local_index``,
+            ``gb_free``.
         """
         return {
             "walker_ref": int(w_global),
@@ -26952,6 +31393,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         walker axis MUST be the rank's block.
 
         At 6 months with ``B = 5`` this is ~3.6 MB of coords + inds.
+
+        Args:
+            branches (dict or None): The head's ``{branch_name: Branch}``.
+            w0 (int): First global walker of the owner's block.
+            w1 (int): One past its last walker.
+
+        Returns:
+            dict or None: ``{"coords", "inds"}`` host arrays of shape
+            ``(1, w1 - w0, nleaves_max[, ndim])``, or None without a branch.
         """
         branch = (branches or {}).get(self.branch_name)
         if branch is None:
@@ -26964,7 +31414,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         }
 
     def _fstat_ref_branch_from_payload(self, blob):
-        """Rebuild the ``{branch_name: Branch}`` dict from a shipped slice."""
+        """Rebuild the ``{branch_name: Branch}`` dict from a shipped slice.
+
+        Args:
+            blob (dict or None): What :meth:`_fstat_ref_branch_slice`
+                shipped.
+
+        Returns:
+            dict or None: ``{branch_name: eryn.state.Branch}``, or None for an
+            empty blob.
+        """
         if not blob:
             return None
         return {
@@ -26980,7 +31439,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Under the one-rank-per-GPU layout a rank's ACA is single-shard and
         this is the identity ``(acs, row)``. It is NOT single-shard at
-        ``n_compute == 1`` on a multi-GPU box -- today's production config --
+        ``n_compute == 1`` on a multi-GPU box -- the production config when
+        this was written --
         where ``linear_data_arr`` holds one buffer PER DEVICE: there
         ``linear_data_arr[0]`` is only the first device's rows and
         ``acs_total_entries`` is the total, so a global row index would
@@ -26988,6 +31448,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         that does not live there. Same resolution
         :meth:`_RoutedBandEngine.route_fstat_ll` makes for every routed
         F-stat call, through the same cached lookup tables.
+
+        Args:
+            acs: The rank's analysis container array.
+            row (int): ACA row index.
+
+        Returns:
+            tuple: ``(view, intra_row)`` -- the owning shard view (``acs``
+            itself when single-shard) and the row inside it.
         """
         if len(acs.linear_data_arr) <= 1:
             return acs, int(row)
@@ -27059,8 +31527,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         then RESTORES its residual -- so unlike the serial fit, no rank's
         live residual stays mutated for the duration of the sweep. Every
         rank then wraps the pair in an :class:`FStatRefRowHolder` scored
-        with ``data_index = noise_index = 0``.
+        with ``data_index = noise_index = 0``, stored on
+        ``_fstat_ref_holder`` (with ``_fstat_ref_walker``; the scorer
+        closure ``_fstat_ref_call`` is reset to be rebuilt lazily).
 
+        Args:
+            payload (dict): :meth:`_fstat_ref_row_payload`'s dict, plus
+                ``gb_branch`` on the owner under a real fan-out.
+            clock (dict): The fan-out clock (not read).
+            model: This rank's engine model.
+
+        Returns:
+            dict: ``rank``, ``is_owner``, ``gb_free_opened``, ``n_live``,
+            ``data_bytes``, ``psd_bytes``.
+
+        Raises:
+            RuntimeError: On every rank together when the owner could not
+                snapshot the row or broadcast an empty one; or when no row
+                reached this rank.
         """
         from .gbbands import FStatRefRowHolder, snapshot_ref_rows
 
@@ -27248,9 +31732,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         * **No fan-out, or ONE compute rank** -- ``_fstat_ref_branches``
           carries the head's own dict straight into the body. Nothing is
           pickled and nothing is sliced, so this path (every production run
-          today, and the one the stage-B goldens gate) is byte-for-byte what
-          it was. Cleared in a ``finally`` so a later command can never reuse
-          a stale one.
+          when this was written, and the one the stage-B goldens gate; the
+          multi-rank 9mo / 12mo launches take the route below) is
+          byte-for-byte what it was. Cleared in a ``finally`` so a later
+          command can never reuse a stale one.
 
           BYTE-IDENTICAL IS NOT COST-IDENTICAL, and the difference is the
           number an operator diffs against epoch 0: there is no disk round
@@ -27298,7 +31783,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         raising ``WalkerFanout.run is head-only`` is the right answer -- a
         local snapshot there would silently be of the wrong walker.
 
-        Returns ``{rank: reply}``, the shape :meth:`_fanout_cmd` produces.
+        Called by :meth:`GBSpecialRJFStatGridMove._run_fstat_fit` and
+        :meth:`GBSpecialRJFStatGridMove._install_ctr_table` on the head.
+        Logs one INFO line and :meth:`_warn_if_gb_free_missed`.
+
+        Args:
+            model: The head's engine model.
+            branches (dict or None): The head's ``{branch_name: Branch}``
+                (needed for the GB-free window).
+            w_global (int): Global index of the reference walker.
+            owner_rank (int): Fan-out rank owning it.
+            local_index (int): Its row in the owner's block.
+
+        Returns:
+            dict: ``{rank: reply}``, the shape :meth:`_fanout_cmd` produces
+            (``{0: reply}`` without a fan-out).
         """
         fanout = getattr(self, "fanout", None)
         # The payload's ``gb_free`` is what the head ASKED FOR, so it has to
@@ -27346,6 +31845,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     branches, ow0, ow1)
 
         def per_rank(rank, w0, w1):
+            """The owner's payload (with ``gb_branch``) or the shared base payload."""
             # Only the OWNER's payload differs, and only in ``gb_branch``,
             # which no other rank reads. Every field the COLLECTIVE depends
             # on -- ``owner_rank``, hence the ``root`` each rank derives --
@@ -27387,6 +31887,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         no branch looks like. Meanwhile ``_run_fstat_fit`` stamps
         ``gbfree=<env flag>`` into the epoch's cache fingerprint either way, so
         a silent miss here is resumed as a GB-free grid forever.
+
+        Args:
+            requested (bool): The head asked for the window.
+            opened (bool): The owner reported it open.
+            owner_rank (int): The owner rank, for the message.
+            w_global (int): The reference walker, for the message.
         """
         if not requested or opened:
             return
@@ -27403,10 +31909,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Two callers, on the two sides of the wire:
 
-        * the HEAD, from ``setup()``'s ``finally``, once the grid fit AND the
-          centre table are done -- they must score against the same reference
-          row (the 2026-08-24 same-residual rule), so the release cannot
-          happen between them;
+        * the HEAD, from ``setup()``'s ``finally``
+          (:meth:`GBSpecialRJFStatGridMove._setup_at_floor`), once the grid
+          fit AND the centre table are done -- they must score against the
+          same reference row (the 2026-08-24 same-residual rule), so the
+          release cannot happen between them (and from
+          :meth:`GBSpecialRJFStatGridMove._install_ctr_table` when that took
+          its own row);
         * every COMPUTE rank, serving ``gb_fstat_release``, which the head
           issues from :meth:`_run_fstat_fit` as soon as the last stage-B group
           is assembled and the epoch's artifacts are written. A rank cannot
@@ -27434,8 +31943,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Nothing else invalidates any of it: ``_gb_serve_fstat_ref_row``
         resets the holder and the closure only when a NEW row arrives, and
         the comp's blocks only when the next ``setup_fstat_references`` runs
-        -- at ``GB_FSTAT_REFIT_EVERY=50``, ~50 iterations of GB proposals
-        later.
+        -- at the next refit, ``fstat_refit_every`` iterations later (the
+        9mo / 12mo launchers: 2 in ``gb_search_1``, 4 in ``gb_search_2`` via
+        ``GB_SEARCH_2_FSTAT_REFIT_EVERY``, 150 for the PE residual fit).
         """
         self._fstat_ref_holder = None
         self._fstat_ref_call = None
@@ -27519,7 +32029,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def _gb_serve_fstat_release(self, payload, clock, model):
         """Drop this rank's row, scorer and blocks; free the pool.
 
-        NON-SESSION (the head issues it from ``setup()``, like the other two
+        NON-SESSION (the head issues it from ``setup()``, like the other
         F-stat ops) and, unlike ``gb_fstat_ref_row``, NO COLLECTIVE and NO
         PAYLOAD: nothing here can block on another rank, so a failure on one
         surfaces as an ordinary remote failure instead of parking the rest.
@@ -27534,6 +32044,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Returns ``{"rank", "released"}``; ``released`` says whether this rank
         was actually holding anything, so the head's line reports a measured
         count rather than the number of ranks it asked.
+
+        Args:
+            payload: Unused (the head ships None).
+            clock (dict): The fan-out clock (not read).
+            model: This rank's engine model (not read).
+
+        Returns:
+            dict: ``{"rank": int or None, "released": bool}``.
         """
         # ``_fstat_ref_walker`` too: it is part of what
         # ``_fstat_release_ref_row`` clears, so a rank holding only the index
@@ -27561,7 +32079,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Stage A and the centre table are head-only, so no worker's holder is
         needed past that point, and waiting for the next fit would leave the
         row plus its built sig-het scorer idle on every worker's device for
-        ``GB_FSTAT_REFIT_EVERY`` (50) iterations of GB proposals.
+        ``fstat_refit_every`` iterations of GB proposals (or for good on a
+        fit-once move).
 
         WRITTEN, NOT YET FSYNCED. The barrier is the head's NEXT propose
         (:meth:`_flush_epoch_artifacts`, from ``_propose_orchestrated``),
@@ -27594,6 +32113,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         No-op with no fan-out, and at ONE compute rank (there is no other rank
         to release, and the byte-identity-gated single-rank path must not grow
         a command it never had). Returns ``{rank: reply}``.
+
+        Called by :meth:`GBSpecialRJFStatGridMove._run_fstat_fit` and
+        :meth:`GBSpecialRJFStatGridMove._install_ctr_table`.
+
+        Args:
+            model: The head's engine model.
+
+        Returns:
+            dict: ``{rank: reply}`` (empty when skipped).
         """
         fanout = getattr(self, "fanout", None)
         if fanout is None or fanout.single:
@@ -27634,13 +32162,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         away between groups -- exactly the rebuild pathology the f0-sorted
         box order exists to avoid.
 
-        Used by the head (stage A, and the centre table under the spec's
-        same-residual rule) and by every rank's ``gb_fstat_stage_b`` body,
-        so the whole epoch is scored against ONE residual snapshot. THE
+        Used by the head (the fit and its runners, and the centre table
+        under the spec's same-residual rule) and by every rank's
+        ``gb_fstat_comb`` / ``gb_fstat_stage_b`` body, so the whole epoch is
+        scored against ONE residual snapshot. THE
         SINGLE CHOKEPOINT, and therefore the single place the "is there a
         reference row?" guard lives -- every caller passes through here, so
         duplicating it in the served body would only give one condition two
         different messages.
+
+        Args:
+            model: This rank's engine model.
+
+        Returns:
+            callable: The cached ``call_fstat`` closure
+            (``_fstat_ref_call``), built by
+            :meth:`GBSpecialRJFStatGridMove._fstat_call` against
+            ``_fstat_ref_holder``.
+
+        Raises:
+            RuntimeError: When no reference row is held on this rank, or the
+                move has no ``_fstat_call``.
         """
         if self._fstat_ref_holder is None:
             # Without this, ``holder=None`` falls straight through to the
@@ -27674,6 +32216,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         per rank so two ranks never share a progress file -- their
         fingerprints already differ, because the fingerprint hashes the
         SLICED rows plus the label.
+
+        Args:
+            spec (CombLevelSpec): The level's full spec.
+            rank_index (int): Index of the receiving rank in the split.
+            a (int): First node of its range.
+            b (int): One past its last node.
+
+        Returns:
+            dict: Host-array payload (rebuilt by :meth:`_fstat_comb_spec`).
         """
         sub = spec.sub_range(
             a, b, ckpt_name=f"{spec.ckpt_name}_r{int(rank_index)}")
@@ -27698,7 +32249,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     @staticmethod
     def _fstat_comb_spec(payload):
-        """Rebuild the :class:`CombLevelSpec` a payload describes."""
+        """Rebuild the :class:`CombLevelSpec` a payload describes.
+
+        Args:
+            payload (dict): A :meth:`_fstat_comb_payload` dict.
+
+        Returns:
+            CombLevelSpec: The rank's sub-range spec.
+        """
         from lisatools.sampling.fstat_gridfit import CombLevelSpec
 
         return CombLevelSpec(
@@ -27735,6 +32293,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         The missing-reference-row guard is :meth:`_fstat_holder_call`'s: the
         scorer below is built through it, so the condition is checked once,
         before any sweep, with one message.
+
+        Args:
+            payload (dict): A :meth:`_fstat_comb_payload` dict.
+            clock (dict): The fan-out clock (not read).
+            model: This rank's engine model.
+
+        Returns:
+            dict: Part metadata: ``li``, ``a``, ``b``, ``rank_index``,
+            ``n_nodes``, ``sha1``, ``wall_s``, ``rank``.
         """
         from lisatools.sampling.fstat_gridfit import (
             run_comb_level,
@@ -27796,6 +32363,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``comb_nsky{lv}`` to ``comb_nsky{lv}_r0`` (invalidating an in-flight
         comb's resume, which at 6mo is up to 47 minutes of scan) and the
         gated serial path would round-trip through disk for nothing.
+
+        Built by :meth:`GBSpecialRJFStatGridMove._run_fstat_fit` when
+        :attr:`fanout_active`; the returned runner issues ``gb_fstat_comb``
+        per level, checks every reply's range and width, assembles the
+        level from the shared ``parts_dir`` and clears the partials.
+
+        Args:
+            model: The head's engine model.
+
+        Returns:
+            callable: ``runner(spec, call_fstat, *, xp)`` returning the
+            assembled level (what :func:`assemble_comb_level` returns).
+
+        Raises:
+            RuntimeError: Without a multi-rank fan-out; the runner itself
+                raises on a foreign scorer, a missing ``parts_dir``, an
+                out-of-order or short partial, or an unreadable partial.
         """
         from lisatools.sampling.fstat_gridfit import (
             assemble_comb_level,
@@ -27820,6 +32404,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         n_parts = int(layout.n_compute)
 
         def runner(spec, call_fstat, *, xp):
+            """Fan one comb sky level out over the compute ranks and assemble it."""
             # Stage A, stage B and the centre table must score against the
             # SAME residual snapshot (spec decision 6). The ranks build their
             # own scorer from the replicated row, so this argument is unused
@@ -27948,6 +32533,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``node_shape`` are sliced. ``ckpt_name`` is per rank so two ranks
         never share a progress file -- their fingerprints already differ,
         because the fingerprint hashes the SLICED inputs plus ``node_shape``.
+
+        Args:
+            spec (StageBGroupSpec): The group's full spec.
+            rank_index (int): Index of the receiving rank in the split.
+            a (int): First box of its range.
+            b (int): One past its last box.
+
+        Returns:
+            dict: Host-array payload (rebuilt by :meth:`_fstat_stage_b_spec`).
         """
         sub = spec.sub_range(a, b, ckpt_name=f"{spec.ckpt_name}_r{int(rank_index)}")
         return {
@@ -27971,7 +32565,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     @staticmethod
     def _fstat_stage_b_spec(payload):
-        """Rebuild the :class:`StageBGroupSpec` a payload describes."""
+        """Rebuild the :class:`StageBGroupSpec` a payload describes.
+
+        Args:
+            payload (dict): A :meth:`_fstat_stage_b_payload` dict.
+
+        Returns:
+            StageBGroupSpec: The rank's sub-range spec.
+        """
         from lisatools.sampling.fstat_gridfit import StageBGroupSpec
 
         return StageBGroupSpec(
@@ -28007,6 +32608,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         The missing-reference-row guard is :meth:`_fstat_holder_call`'s, not
         a second copy here: the scorer below is built through it, so the
         condition is checked once, before any sweep, with one message.
+
+        Args:
+            payload (dict): A :meth:`_fstat_stage_b_payload` dict.
+            clock (dict): The fan-out clock (not read).
+            model: This rank's engine model.
+
+        Returns:
+            dict: Part metadata: ``gi``, ``a``, ``b``, ``rank_index``,
+            ``n_rows``, ``sha1``, ``wall_s``, ``rank``.
         """
         from lisatools.sampling.fstat_gridfit import (
             run_stage_b_group,
@@ -28059,6 +32669,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         serial path would round-trip through disk for nothing. So the caller
         must pass NO ``sweep_runner`` there, and this refuses instead of
         trusting a docstring Task 8 may not read.
+
+        Built by :meth:`GBSpecialRJFStatGridMove._run_fstat_fit` when
+        :attr:`fanout_active`; the returned runner issues
+        ``gb_fstat_stage_b`` per group, checks every reply's range and row
+        count, assembles the grid from the shared ``parts_dir`` and clears
+        the partials.
+
+        Args:
+            model: The head's engine model.
+
+        Returns:
+            callable: ``runner(spec, call_fstat, *, xp)`` returning the
+            assembled group grid (what :func:`assemble_stage_b_group`
+            returns).
+
+        Raises:
+            RuntimeError: Without a multi-rank fan-out; the runner itself
+                raises on a foreign scorer, a missing ``parts_dir``, an
+                out-of-order or short partial, or an unreadable partial.
         """
         from lisatools.sampling.fstat_gridfit import (
             assemble_stage_b_group,
@@ -28083,6 +32712,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         n_parts = int(layout.n_compute)
 
         def runner(spec, call_fstat, *, xp):
+            """Fan one stage-B group out over the compute ranks and assemble it."""
             # Stage A, stage B and the centre table must score against the
             # SAME residual snapshot (spec decision 6). The ranks build their
             # own scorer from the replicated row, so this argument is unused
@@ -28233,15 +32863,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         unchanged. ``GB_PROPOSE_ORCHESTRATE=1`` forces the orchestrator even
         at one compute rank -- where ``WalkerFanout.run`` is a direct call
         with no communicator and the single block IS the whole ensemble --
-        which is the parity lever: the two paths must agree there.
+        which is the parity lever: the two paths must agree there. The 9mo /
+        12mo runs are multi-rank, so every GB / VGB propose there takes
+        :meth:`_propose_orchestrated`.
+
+        Before dispatching: clears ``gf_skip_partner_once``, runs the
+        warm-start self-refit hook (:meth:`_warm_self_begin`) and, for a
+        replace move with more than one candidate source
+        (:meth:`_replace_passes`), runs one complete sweep per source
+        (:meth:`_propose_replace_passes`) instead of one dispatch.
 
         Args:
-            model (:class:`eryn.model.Model`): Carrier of sampler information.
-            state (:class:`GFState`): Current state of the sampler.
+            model (eryn.model.Model): Carrier of sampler information.
+            state (GFState): Current state of the sampler.
 
         Returns:
-            :class:`GFState`: GFState of sampler after proposal is complete.
-
+            tuple[GFState, np.ndarray]: The state after the proposal and the
+            bool ``(ntemps, nwalkers)`` accepted mask.
         """
         # only THIS propose's zero-peak skip may ask the leg runner to skip
         # the in-model partner; an earlier one's request is stale
@@ -28255,7 +32893,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return self._propose_dispatch(model, state)
 
     def _propose_dispatch(self, model, state):
-        """The single-pass propose: orchestrated when fanned out, else local."""
+        """The single-pass propose: orchestrated when fanned out, else local.
+
+        :meth:`_propose_orchestrated` when :attr:`fanout_active`, or when a
+        fan-out is bound and ``GB_PROPOSE_ORCHESTRATE=1`` (default 0; unset
+        in the 9mo / 12mo launchers); otherwise :meth:`_propose_legacy`.
+
+        Args:
+            model (eryn.model.Model): Carrier of sampler information.
+            state (GFState): Current state of the sampler.
+
+        Returns:
+            tuple[GFState, np.ndarray]: As :meth:`propose`.
+        """
         if self.fanout_active or (
             self.fanout is not None
             and os.environ.get("GB_PROPOSE_ORCHESTRATE", "0") == "1"
@@ -28273,6 +32923,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         their own f0 (coords column 1, mHz) with the sorter's
         ``searchsorted(..., side="right") - 1`` convention -- for a propose
         that builds no sorter. Leaves outside the band grid are not counted.
+        Used only by :meth:`_propose_zero_peak_skip`.
+
+        Args:
+            state (GFState): The state to census.
+
+        Returns:
+            np.ndarray: int ``(ntemps, nwalkers, num_bands)``.
         """
         work_b = self._work_branch(state)
         inds = np.asarray(_to_numpy(work_b.inds), dtype=bool)
@@ -28331,6 +32988,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         accumulated, its own rule for an unobserved cell. The leaf caps need
         the real statistic, so under the fan-out they are NOT advanced on a
         skipped propose (warned once; caps are off in the v9 launchers).
+
+        The skip itself is armed by
+        :meth:`GBSpecialRJFStatGridMove._adopt_epoch_container`
+        (``_fstat_zero_peak_epoch``) and gated by
+        :meth:`GBSpecialRJFStatGridMove._fstat_zero_peak_skips`.
+
+        Args:
+            model: The engine model.
+            state (GFState): The incoming state (also the returned one).
+            engine_ntemps (int): Rung count of the engine's state.
+            nwalkers (int): Walker count.
+
+        Returns:
+            tuple[GFState, np.ndarray]: ``state`` and an all-False
+            ``(engine_ntemps, nwalkers)`` accepted mask.
         """
         k = getattr(self, "_fstat_zero_peak_epoch", None)
         if getattr(self, "gf_stage_kind", None) == "pe":
@@ -28404,6 +33076,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         has actually been installed on this move; ``GB_REPLACE_PASSES``
         (comma list of ``warm`` / ``fstat``) overrides, and
         ``GB_REPLACE_PASSES=fstat`` restores the pre-2026-09-24 behaviour.
+
+        Called every :meth:`propose`. Returns ``()`` on every move without
+        ``rj_replace``; the 9mo / 12mo launchers build no replace move
+        (``GB_SEARCH_RJ_REPLACE=0``, ``GB_PE_RJ_REPLACE=0``; stock default
+        on).
+
+        Returns:
+            tuple[str, ...]: Pass names in order (``"warm"``, ``"fstat"``).
+
+        Raises:
+            ValueError: When ``GB_REPLACE_PASSES`` holds anything but
+                ``warm`` / ``fstat``.
         """
         if not getattr(self, "rj_replace", False):
             return ()
@@ -28447,6 +33131,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         writes (``_fstat_fit_decision`` / ``_install``), so borrowing it for a
         pass could make a refit land on the borrowed value, or make the pass
         loop's restore discard a grid that was just fitted.
+
+        Args:
+            rj_prop: The move's own birth container for this branch (or None).
+
+        Returns:
+            The container the sorter is built with: ``replace_warm_distribution``
+            on a ``warm`` pass, else ``rj_prop``.
         """
         src = getattr(self, "_replace_pass_source", None)
         if src is None or src == "fstat":
@@ -28466,14 +33157,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # ``gb_run_proposal`` payload (``_warm_self_apply``), the F-stat epoch
     # directive pattern. No mixer -> every hook below is a no-op.
     def _warm_self_mixer(self):
+        """This move's warm-start self-refit mixer, or None.
+
+        The branch's birth container when it is a
+        ``warmstart.self_refit.WarmSelfMixer`` (``is_warm_self_mixer``); the
+        ``rj_warm_search`` / ``rj_warm_pe`` moves carry one under
+        ``GB_WARM_SELF=1`` (as in the 9mo / 12mo runs).
+
+        Returns:
+            WarmSelfMixer or None: The mixer.
+        """
         d = getattr(self, "rj_proposal_distribution", None)
         cont = d.get(self.branch_name) if isinstance(d, dict) else None
         return cont if getattr(cont, "is_warm_self_mixer", False) else None
 
     def _warm_self_rank(self):
+        """This process's rank for the mixer (0 single-process)."""
         return 0 if self.gf_rank is None else int(self.gf_rank)
 
     def _warm_self_begin(self):
+        """Pick this propose's warm container on the head (no-op without a mixer).
+
+        Called once per :meth:`propose`. Stores the mixer's
+        ``begin_propose`` result (it may build or adopt a newer self-refit
+        epoch first) on ``_warm_self_directive``, which the orchestrated
+        payload ships as ``warm_self``; None without a mixer.
+        """
         # The live stage (re-stamped on this move before every propose by
         # the stage combine): on the head, the registered head builder
         # builds a due self epoch here, at the warm move's entry (user
@@ -28485,11 +33194,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                      stage=getattr(self, "gf_stage_name", None)))
 
     def _warm_self_apply(self, directive):
+        """Apply the head's warm-self directive on a compute rank.
+
+        Called by :meth:`_gb_serve_run_proposal` before the sorter is built,
+        so the rank draws births from the container (and epoch) the head
+        chose. No-op without a mixer.
+
+        Args:
+            directive (dict or None): The payload's ``warm_self`` entry.
+        """
         mixer = self._warm_self_mixer()
         if mixer is not None:
             mixer.apply_directive(directive, rank=self._warm_self_rank())
 
     def _warm_self_note(self, sp):
+        """Credit this propose's RJ split census to the mixer (no-op without one).
+
+        Called from :meth:`run_proposal` with the per-propose RJ split dict.
+
+        Args:
+            sp (dict): The RJ split census.
+        """
         mixer = self._warm_self_mixer()
         if mixer is not None:
             mixer.note_census(sp, move_name=self.name,
@@ -28501,9 +33226,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # ("para_search") and every rank loads exactly that epoch before its
     # BandSorter is built. No-ops on every other GB move.
     def _para_search_apply(self, directive):
+        """No-op hook; :class:`GBParaSearchRJMove` loads the head's epoch here.
+
+        Args:
+            directive: The payload's ``para_search`` entry (ignored).
+        """
         return None
 
     def _para_search_note(self, sp):
+        """No-op hook; :class:`GBParaSearchRJMove` credits its census here.
+
+        Args:
+            sp (dict): The RJ split census (ignored).
+        """
         return None
 
     def _propose_replace_passes(self, model, state, passes):
@@ -28516,6 +33251,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         old GPU/scoring setup was the cause. So each pass prints its own
         acceptance census and its own measured lnL drift, and the two are
         attributable to a single container rather than pooled.
+
+        Each pass sets ``_replace_pass_source`` (shipped to the ranks as
+        ``replace_pass_source``), runs :meth:`_propose_dispatch` and writes a
+        mid-iteration checkpoint boundary (``midit_checkpoint.maybe_write``).
+        Only reached by a replace move with two or more passes (not built in
+        the 9mo / 12mo runs).
+
+        Args:
+            model (eryn.model.Model): Carrier of sampler information.
+            state (GFState): Current state.
+            passes (tuple[str, ...]): From :meth:`_replace_passes`.
+
+        Returns:
+            tuple[GFState, np.ndarray]: The final state and the OR of the
+            passes' accepted masks.
         """
         accepted = None
         for i, src in enumerate(passes):
@@ -28569,6 +33319,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Diagnostic only -- it must never be able to break a propose, so every
         shape/attribute assumption is guarded rather than asserted.
+
+        Args:
+            state (GFState): The state.
+
+        Returns:
+            np.ndarray or None: ``log_like[0]`` copy, or None.
         """
         try:
             ll = getattr(state, "log_like", None)
@@ -28614,6 +33370,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         per ``(move, op)``, so only the token captured right after the
         OPENING ``gb_run_proposal`` identifies the session -- it cannot be
         re-derived from a later command's clock.
+
+        Args:
+            op (str): The command name (one of :data:`GB_OPS`, or
+                :data:`GB_PARA_SEARCH_OP`).
+            per_rank_payload (callable): ``fn(rank, w0, w1) -> payload`` for
+                each compute rank's walker block.
+            model: ``propose``'s model, used by the head's local body.
+
+        Returns:
+            tuple[dict, tuple]: ``({rank: reply}, (seq, call_index))``.
         """
         n_walkers = getattr(self, "nwalkers", None)
         n_temps = getattr(self, "ntemps", None)
@@ -28637,7 +33403,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     @staticmethod
     def _ro_table(arr):
-        """A host COPY of a head-owned table, for shipping read-only."""
+        """A host COPY of a head-owned table, for shipping read-only.
+
+        Args:
+            arr (xp.ndarray or None): The table.
+
+        Returns:
+            np.ndarray or None: A numpy copy, or None.
+        """
         return None if arr is None else np.array(_to_numpy(arr), copy=True)
 
     # ---- replica mode (R > 1): the head's finish bookkeeping -------------
@@ -28658,6 +33431,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``(w0, w1) = (None, None)`` -- "the whole branch" -- on a layout
         stand-in without the block axis (the one-walker unit-test stubs),
         which is exactly the old single-group behaviour.
+
+        Replica mode only (the opt-in ``NGPUS=8 GF_GPU_ROUTING=1`` launcher
+        line; not at the launcher defaults).
+
+        Args:
+            layout: The fan-out's rank layout.
+
+        Returns:
+            list[tuple]: ``(ranks, w0, w1)`` per walker block, lead rank
+            first in ``ranks``.
         """
         n_blocks = getattr(layout, "n_blocks", None)
         if n_blocks is None or not hasattr(layout, "ranks_in_block"):
@@ -28671,7 +33454,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     @staticmethod
     def _replica_is_lead(layout, rank):
-        """Replica 0 of its block (the head, on a stub without the block axis)."""
+        """Replica 0 of its block (the head, on a stub without the block axis).
+
+        Args:
+            layout: The fan-out's rank layout.
+            rank (int): A compute rank.
+
+        Returns:
+            bool: True when ``rank`` leads its block.
+        """
         if hasattr(layout, "is_block_lead"):
             return bool(layout.is_block_lead(rank))
         return int(rank) == int(layout.head_rank)
@@ -28691,6 +33482,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         R replicas are merged into that block's ``[w0, w1)`` columns of the
         head's branch -- views, so the merge writes in place -- and no rank
         ever contributes to another block's walkers.
+
+        Args:
+            work (eryn.state.Branch): The head's working branch (written IN
+                PLACE).
+            sub (GBState): The GB sub-state (``d_h`` / ``h_h`` /
+                ``source_uid`` ride along).
+            replies_f (dict): ``{rank: gb_finish reply}``.
+            layout: The fan-out's rank layout.
+            band_ranges (list): Per-replica owned band ranges.
         """
         f0_col = getattr(self, "_f0_col", None)
         # the sampling-basis frequency column ``_write_back_state`` sorts on;
@@ -28734,6 +33534,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         divergence detector; the hash is an exact-match BONUS, logged at INFO
         when it differs.
         Returns the hash map (for tests and the digest lines).
+
+        Args:
+            replies_s (dict): ``{rank: gb_sync reply}``.
+            layout: The fan-out's rank layout.
+            log_like_final (np.ndarray): ``(nwalkers,)`` array written IN
+                PLACE from each block lead.
+            band_counts (np.ndarray): ``(ntemps, nwalkers, num_bands)``
+                written IN PLACE.
+            neutral (dict, optional): ``{rank: bool}`` neutral flags.
+                Default None (none neutral).
+
+        Returns:
+            dict: ``{rank: residual_hash}``.
         """
         neutral = neutral or {}
         hashes = {}
@@ -28846,6 +33659,38 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         branch back to every rank for the authoritative residual rebuild that
         ``gb_finish`` skipped. See the merge loop and the ``gb_sync`` block
         below.
+
+        THE PRODUCTION PROPOSE: every GB / VGB move of the multi-rank 9mo /
+        12mo runs comes here through :meth:`_propose_dispatch`. After
+        ``setup()`` the head also returns early on a zero-peak F-stat epoch
+        (:meth:`_propose_zero_peak_skip`) and on an RJ move with no birth
+        distribution; it checks the head's ACA width
+        (:meth:`_check_block_aca_width`) and flushes the epoch artifacts
+        (:meth:`_flush_epoch_artifacts`) before the first command. The
+        per-rank payloads carry the epoch directive, the read-only tables
+        (per-band and per-walker shut tables, caps, stage tables, sliced per
+        block), the scan schedule, the clock values with the live
+        per-propose knobs (:func:`gb_rank_live_attrs`), the warm-self /
+        para-search / replace-pass choices and ``want_cap_stats``. After the
+        merges the head adapts the band ladder once (permuted-swap counts,
+        or the pooled vertical-swap census through the vertical-ladder
+        adaptation), runs the empty-band valve tick
+        (:meth:`_update_band_shutoff`), and on the designated
+        ``leaf_cap_update`` move the cap gate (caps armed) or the valve-stash
+        hand-over (caps off, the 9mo / 12mo case), the stage latch and the
+        per-walker valve judge (:meth:`_update_search_band_shutoff`). Env
+        knobs read here: ``GB_PROP_TIMING_SYNC`` (default 0),
+        ``GB_BUFFER_PERSIST`` (default 1) and ``GB_COLD_RESEED_EVERY``
+        (unset = off).
+
+        Args:
+            model (eryn.model.Model): Carrier of sampler information (its
+                ACA is the head's own walker block).
+            state (GFState): Current state of the sampler (all N walkers).
+
+        Returns:
+            tuple[GFState, np.ndarray]: The new state and the bool
+            ``(ntemps, nwalkers)`` accepted mask.
         """
         # ---- prologue: ``_propose_legacy``'s, VERBATIM --------------------
         st_all = time.perf_counter()
@@ -29229,6 +34074,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
 
         def _sched_block(w0, w1):
+            """This block's slice of the ensemble scan schedule ``(starts, dirs)``."""
             starts = (_unit_starts if np.ndim(_unit_starts) == 0
                       else _unit_starts[w0:w1])
             dirs = (_unit_dirs if np.ndim(_unit_dirs) == 0
@@ -29410,6 +34256,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # ---- command 1: gb_run_proposal (opens the session) ---------------
         def _payload_proposal(rank, w0, w1):
+            """The ``gb_run_proposal`` payload of one rank's walker block."""
             payload = _common(rank, w0, w1)
             payload.update({
                 "neutral": neutral[rank],
@@ -29573,6 +34420,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             tmp_start = int(np.random.randint(_units_t))
 
             def _payload_temper(rank, w0, w1):
+                """The ``gb_run_tempering`` payload of one rank's walker block."""
                 payload = _common(rank, w0, w1)
                 payload.update({
                     "session": session,
@@ -29686,6 +34534,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                  or self._search_shutoff_per_walker))
 
         def _payload_finish(rank, w0, w1):
+            """The ``gb_finish`` payload of one rank's walker block."""
             payload = _common(rank, w0, w1)
             payload.update({
                 "session": session,
@@ -29814,6 +34663,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # band counts unset.
         if _replica and not all(neutral[r] for r in layout.compute_ranks):
             def _payload_sync(rank, w0, w1):
+                """The ``gb_sync`` payload of one rank (the merged block slice)."""
                 payload = _common(rank, w0, w1)
                 payload.update({
                     "neutral": bool(neutral[rank]),
@@ -29967,6 +34817,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _pc, _ac = prop_counts_sum, acc_counts_sum
 
             def _rate(row, cold_only):
+                """``(acceptance rate, proposals)`` of count row 0 (RJ) or 1 (in-model)."""
                 pr = _pc[row][0] if cold_only else _pc[row]
                 ac = _ac[row][0] if cold_only else _ac[row]
                 tot = float(pr.sum())
@@ -30046,15 +34897,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return new_state, accepted
 
     def _propose_legacy(self, model, state):
-        """Use the move to generate a proposal and compute the acceptance
+        """The single-process propose: the whole ensemble in this process.
+
+        This move's pre-port ``propose``, kept byte-identical as the parity
+        reference for :meth:`_propose_orchestrated` (whose prologue is this
+        one's). Taken with no fan-out installed or at one compute rank
+        (``fit.sample()``, tests, tutorials); the multi-rank 9mo / 12mo runs
+        never take it. In order: the per-propose timer and stashes, the
+        tempering-cadence tick, the early returns (no sources to act on),
+        the cap arming, the per-walker valve bind (:meth:`_arm_search_stage`),
+        the early valve adopt, ``setup()`` (the F-stat fit or epoch load), the
+        zero-peak skip and the no-distribution return; then the
+        :class:`BandSorter` build, :meth:`run_proposal` (plus the in-model
+        group passes or the cold-reseed passes), the permuted tempering
+        swaps (:meth:`run_tempering`) when the gate fires, the write-back,
+        the empty-band valve tick, the residual rebuild, and the propose-end
+        bookkeeping (vertical-swap ladder adaptation, cap gate / stage latch
+        / per-walker valve judge on the designated move, census lines).
 
         Args:
-            model (:class:`eryn.model.Model`): Carrier of sampler information.
-            state (:class:`GFState`): Current state of the sampler.
+            model (eryn.model.Model): Carrier of sampler information.
+            state (GFState): Current state of the sampler.
 
         Returns:
-            :class:`GFState`: GFState of sampler after proposal is complete.
-
+            tuple[GFState, np.ndarray]: The new state and the bool
+            ``(ntemps, nwalkers)`` accepted mask.
         """
 
         st_all = time.perf_counter()
@@ -30857,6 +35724,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _pc, _ac = _to_numpy(prop_counts), _to_numpy(acc_counts)
 
             def _rate(row, cold_only):
+                """``(acceptance rate, proposals)`` of count row 0 (RJ) or 1 (in-model)."""
                 pr = _pc[row][0] if cold_only else _pc[row]
                 ac = _ac[row][0] if cold_only else _ac[row]
                 tot = float(pr.sum())
@@ -30921,6 +35789,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return new_state, accepted
 
     def check_ll_inject(self, model, band_sorter, verbose=False):
+        """Rebuild the residual from the non-GB snapshot plus the sorter's cold sources.
+
+        Zeroes the ACA data, restores this propose's non-GB residual snapshot
+        (``reset_non_gb_linear_data_arr``, taken at sorter build), subtracts
+        every alive cold-chain source of ``band_sorter`` and returns the
+        resulting likelihood. Used at propose start on a mismatch, after a
+        drift of at least 1e-4, and for the final ``log_like`` of every
+        propose (legacy and rank bodies, ``gb_sync``).
+
+        Args:
+            model: The engine model whose ACA is rebuilt IN PLACE.
+            band_sorter (BandSorter): The source table to subtract.
+            verbose (bool, optional): Unused. Default False.
+
+        Returns:
+            np.ndarray: The ACA's per-walker likelihood after the rebuild
+            (:meth:`~lisatools.analysiscontainer.AnalysisContainerArray.likelihood`).
+        """
         # breakpoint()
         init_like = model.analysis_container_arr.likelihood()
         model.analysis_container_arr.zero_out_data_arr()
@@ -30945,12 +35831,36 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
 
 class GBSpecialStretchMove(GBSpecialBase):
-    """In-model GB move with the band-aware group-stretch / info-matrix mix.
+    """The pure in-model GB move (fixed dimension; no births or deaths).
 
-    All machinery lives in :class:`GBSpecialBase`; the cold-chain friend
-    table for the group stretch is rebuilt at the top of every ``propose``
-    call (see ``build_friend_index``), so no per-iteration setup is needed
-    here.
+    All machinery lives in :class:`GBSpecialBase`; this subclass adds no
+    constructor arguments, attributes or overrides, so it takes exactly
+    :class:`GBSpecialBase`'s arguments (``*args`` / ``**kwargs``). What makes
+    it a pure in-model move is how it is built: ``is_rj_prop=False`` and
+    ``rj_proposal_distribution=None``, so each band unit runs only the
+    in-model repeats (:meth:`GBSpecialBase._run_in_model_repeats`). The
+    in-model draw is the base class's: the observable composite step under
+    ``GB_INMODEL_PROPOSAL=observable`` (the default and the 9mo / 12mo
+    setting, with ``GB_INMODEL_OBSERVABLE_EIGEN=axis``), else the legacy
+    information-matrix / group-stretch mix (the group-stretch friend table
+    is built per block only when ``stretch_probability > 0``; it is 0 for
+    GB in production).
+
+    BUILT AS (``recipe.build_gb_moves``, search mode with
+    ``gb.search_in_model`` / ``GB_SEARCH_IN_MODEL=1``): four instances,
+    the stock slots ``in_model``, ``in_model_fstat``, ``in_model_replace``
+    and ``in_model_removal``, each with ``is_rj_prop=False``,
+    ``phase_maximize=False``, ``run_swaps=False``, ``gpus=[]`` and
+    ``leaf_cap_update=False`` on top of the shared GB move arguments. In
+    the 9mo / 12mo search stages each runs right after its RJ partner
+    (``rj_warm_search``, ``rj_fstat_search``, ``rj_prior_removal``) as the
+    end of a search leg; ``in_model_replace`` is built but not staged
+    (``GB_SEARCH_IN_MODEL_REPLACE=0``, no replace move). The in-model
+    budget per stage comes from the stage profile
+    (``recipe.apply_inmodel_budget``; ``gb_search_2`` in the launchers: 30
+    repeats per pass, a 1-pass group window) and the group convergence
+    (``GB_INMODEL_GROUP=1``) adapts the number of passes. It is built by
+    the recipe, not by hand.
     """
 
 
@@ -30973,7 +35883,16 @@ def _vgb_inmodel_defaults(kwargs):
     ``VGB_SIGHET_INMODEL=0`` the per-block exact information matrices
     route through the CHUNKED engine (~29-46 ms/instance; 55 leaves x
     ntemps x nwalkers instances per propose). Explicitly passed kwargs
-    always win (``setdefault``).
+    always win (``setdefault``). Called by
+    :class:`VGBSpecialStretchMove`'s constructor; the 9mo / 12mo launchers
+    export ``VGB_INMODEL_PROPOSAL=observable`` (and
+    ``VGB_SIGHET_INMODEL=1``).
+
+    Args:
+        kwargs (dict): The move's constructor kwargs, updated IN PLACE.
+
+    Returns:
+        dict: ``kwargs``.
     """
     kind = _vgb_inmodel_proposal_kind()
     if kind == "stretch":
@@ -31041,6 +35960,40 @@ class VGBSpecialStretchMove(GBSpecialBase):
     The fixed per-leaf parameters (f0, sky) live in the transform
     container's per-leaf ``fill_dict`` (Eryn per-leaf fills, selected by
     ``leaf_inds``).
+
+    BUILT AS the stock move ``vgb_pe`` by ``recipe.build_vgb_moves``
+    (``branch_name="vgb"``, ``run_swaps=True``, ``opt_snr_rej_samp_limit``
+    from ``VGB_OPT_SNR_LIMIT``, default 0.0 = off, ``num_repeat_proposals``
+    from the VGB settings, ``VGB_NUM_REPEAT_PROPOSALS``, and the same
+    ``GB_SIGHET_*`` reference / trust-region knobs as the GB moves). The
+    9mo / 12mo driver (``run_combined_staged.py``) samples it from the
+    first stage onward, in the search and the PE stages. The ``{BRANCH}_*``
+    knobs of :class:`GBSpecialBase` resolve with the ``VGB_`` prefix (e.g.
+    ``VGB_RUN_FANCY_TEMPERING``, unset in the launchers, so the permuted
+    band-temperature swaps run here), except
+    the stretch-probability and jump-factor overrides, which read
+    ``GB_STRETCH_PROBABILITY`` / ``GB_JUMP_FACTOR`` (see the note in
+    :class:`GBSpecialBase`). VGB-specific env knobs:
+    ``VGB_INMODEL_PROPOSAL`` (default ``observable``; launchers
+    ``observable``), ``VGB_INMODEL_OBSERVABLE_EIGEN`` (default ``off``;
+    launchers ``axis``) and ``VGB_INMODEL_OBSERVABLE_JUMP`` (default 1.0;
+    launchers 1.0).
+
+    Args:
+        *args: Forwarded to :class:`GBSpecialBase` (the same positional
+            arguments as the GB moves).
+        **kwargs: Forwarded to :class:`GBSpecialBase`. Defaults set here
+            when absent: ``branch_name="vgb"``, ``swap_on_in_model=True``
+            (no RJ move carries this branch's band-temperature swaps) and,
+            through :func:`_vgb_inmodel_defaults`, ``use_info_mat_proposal``
+            / ``stretch_probability`` (True / 0.0 for ``observable`` and
+            ``eigen``, False / 1.0 for ``stretch``). The group-stretch
+            friend table is never built (``_build_friend_table = False``).
+
+    Raises:
+        ValueError: When ``rj_proposal_distribution`` is given, ``is_rj_prop``
+            is truthy (the move is in-model only), or ``phase_maximize`` is
+            truthy.
     """
 
     # This move IS eryn's plain stretch. GBSpecialBase's MRO inherits
@@ -31107,7 +36060,10 @@ class VGBSpecialStretchMove(GBSpecialBase):
         return _vgb_inmodel_proposal_kind()
 
     def _obs_eigen_mode(self) -> str:
-        """``VGB_INMODEL_OBSERVABLE_EIGEN``: off (default) | axis | full."""
+        """``VGB_INMODEL_OBSERVABLE_EIGEN``: off (default) | axis | full.
+
+        The 9mo / 12mo launchers export ``axis``.
+        """
         return _vgb_observable_eigen_mode()
 
     def _obs_jump_knob(self) -> str:
@@ -31140,7 +36096,15 @@ class VGBSpecialStretchMove(GBSpecialBase):
         ever stops holding.
 
         :meth:`GBSpecialBase._replica_band_weights` does the binning; only
-        the frequency SOURCE differs between GB and VGB.
+        the frequency SOURCE differs between GB and VGB. Replica mode only
+        (the opt-in ``NGPUS=8 GF_GPU_ROUTING=1`` launcher line).
+
+        Args:
+            work (eryn.state.Branch): The block's working VGB branch.
+
+        Returns:
+            np.ndarray: f0 in Hz of every leaf alive on the cold row of any
+            walker.
         """
         tf = self.transform_fn
         alive = np.asarray(_to_numpy(work.inds[0]), dtype=bool)
@@ -31156,6 +36120,18 @@ class VGBSpecialStretchMove(GBSpecialBase):
         The vgb flow shares the GB engine machinery, but its reduced basis
         and comp wiring are exercised far less; a failure here must cost
         the eigen draw for the block — never the run. Warns once.
+
+        Args:
+            model: The engine model.
+            band_sorter (BandSorter): The block's source table.
+            ids (xp.ndarray): Sorter rows of the block's sources.
+            slots (optional): Forwarded to
+                :meth:`GBSpecialBase._proposal_cholesky`. Default None.
+            buffer_obj (optional): Forwarded likewise. Default None.
+
+        Returns:
+            xp.ndarray or None: The base's per-source factor table, or None
+            on any failure (the draw then degrades).
         """
         try:
             return GBSpecialBase._proposal_cholesky(
@@ -31170,6 +36146,7 @@ class VGBSpecialStretchMove(GBSpecialBase):
                 self._vgb_chol_warned = True
             return None
 
+    # TODO check: keep/remove/document -- VGB_INMODEL_PROPOSAL=eigen escape, or fallback when the observable map is not ready; observable (default + launchers) takes the draw
     def _vgb_use_eigen_draw(self, chol):
         """Eigen one-axis draw iff armed, a table exists, and the
         per-repeat stretch mix does not claim this round."""
@@ -31181,6 +36158,7 @@ class VGBSpecialStretchMove(GBSpecialBase):
             return True
         return bool(np.random.rand() >= self.stretch_probability)
 
+    # TODO check: keep/remove/document -- VGB_INMODEL_PROPOSAL=eigen escape, or fallback when the observable map is not ready; observable (default + launchers) takes the draw
     def _vgb_eigen_axis_draw(self, coords, chol):
         """One-axis symmetric step: column ``k`` of ``chol`` is
         ``sigma_k * a_k`` (built once per block, frozen across the
@@ -31207,8 +36185,8 @@ class VGBSpecialStretchMove(GBSpecialBase):
         if kwargs.get("phase_maximize"):
             raise ValueError("Phase maximization is not used for VGBs.")
         kwargs.setdefault("branch_name", "vgb")
-        # VGB_INMODEL_PROPOSAL: eigen (default) arms use_info_mat_proposal
-        # + one-axis draw; stretch restores the legacy pure-stretch config.
+        # VGB_INMODEL_PROPOSAL: observable (default) and eigen arm
+        # use_info_mat_proposal; stretch restores the legacy pure-stretch config.
         _vgb_inmodel_defaults(kwargs)
         # No RJ move carries the band-temperature swaps for this branch.
         kwargs.setdefault("swap_on_in_model", True)
@@ -31217,9 +36195,14 @@ class VGBSpecialStretchMove(GBSpecialBase):
         self._build_friend_table = False
 
     def in_model_proposal(self, coords, chol, band_sorter, source_ids, model):
-        """One parity HALF of a Goodman-Weare red-blue sweep, via eryn's stretch.
-        (The stretch component; the observable / eigen components above it
-        take the draw first when armed.)
+        """The VGB in-model draw: observable step, else eigen axis, else a stretch half.
+
+        Tried in order: the observable composite
+        (:meth:`GBSpecialBase._maybe_observable_proposal`, the 9mo / 12mo
+        path), the sampling-basis eigen-axis draw
+        (:meth:`_vgb_eigen_axis_draw`, when :meth:`_vgb_use_eigen_draw`),
+        and one parity HALF of a Goodman-Weare red-blue sweep via eryn's
+        stretch, described next.
 
         The base repeat block (``sequential_parity_repeats = True``) calls
         this once per parity half per repeat -- even-parity movers first,
@@ -31250,6 +36233,19 @@ class VGBSpecialStretchMove(GBSpecialBase):
         runs whenever the per-block table was built (see
         :meth:`_vgb_eigen_axis_draw`); the stretch below remains the
         mix-in / fallback component.
+
+        Args:
+            coords (xp.ndarray): ``(n, ndim)`` current coordinates of the
+                movers.
+            chol (xp.ndarray or None): Per-source factor table from
+                :meth:`_proposal_cholesky`.
+            band_sorter (BandSorter): The block's source table (its
+                ``coords`` hold the current ensemble).
+            source_ids (xp.ndarray): Sorter rows of the movers.
+            model: The engine model (its RNG feeds the stretch on CPU).
+
+        Returns:
+            tuple: ``(new_coords, factors)``, ``(n, ndim)`` and ``(n,)``.
         """
         obs = self._maybe_observable_proposal(coords, chol, band_sorter,
                                               source_ids)
@@ -31300,7 +36296,34 @@ class VGBSpecialStretchMove(GBSpecialBase):
 
 
 class GBSpecialRJPriorMove(GBSpecialBase):
-    """Reversible-jump GB move that draws proposals from the prior distribution."""
+    """Reversible-jump GB move whose births are drawn from its ``rj_proposal_distribution``.
+
+    Adds no constructor arguments, attributes or overrides: it takes exactly
+    :class:`GBSpecialBase`'s arguments. Passing an
+    ``rj_proposal_distribution`` (``{branch_name: container}``) makes it an
+    RJ move (``is_rj_prop`` becomes True), and that container is the birth
+    law, so the name is historical: the same class carries prior births,
+    warm-start births and the self-refit mixer. It is also the base class
+    of :class:`GBSpecialRJFStatGridMove` and :class:`GBParaSearchRJMove`.
+
+    BUILT AS (``recipe.build_gb_moves``):
+
+    * ``rj_prior_removal`` -- the search-cycle removal move over the prior
+      (``gb.search_prior_removal``); ``GB_SEARCH_PRIOR_REMOVAL_ONLY=1`` (the
+      9mo / 12mo launchers) builds it death-only (``rj_removal_only``),
+      and a search stage profile's ``prior_births`` re-enables births per
+      stage;
+    * ``rj_warm_search`` / ``rj_warm_pe`` -- births from the warm-start
+      mixture (``GB_WARM_START_COMPONENTS``; under ``GB_WARM_SELF=1``, as
+      in the 9mo / 12mo runs, a ``WarmSelfMixer`` that alternates the
+      parent warm start with the run's own self refit, see
+      :meth:`GBSpecialBase._warm_self_begin`);
+    * ``rj_prior_pe`` -- PE births from the prior;
+    * the F-stat slots (``rj_fstat_search``, ``rj_fstat_pe``,
+      ``rj_fstat_pe_residual``, ``rj_replace*``) only when
+      ``GB_FSTAT_FIT_IN_MOVE=0``; otherwise (the default and the 9mo / 12mo
+      setting) those are :class:`GBSpecialRJFStatGridMove`.
+    """
     pass
 
 
@@ -31326,7 +36349,19 @@ _FSTAT_ENV_FORCED_ROOTS: set = set()
 
 def _claim_env_forced_refit(root) -> bool:
     """True exactly once per process and fit dir while
-    ``GB_FSTAT_FORCE_REFIT=1``."""
+    ``GB_FSTAT_FORCE_REFIT=1``.
+
+    ``GB_FSTAT_FORCE_REFIT`` defaults to 0 and is unset in the 9mo / 12mo
+    launchers (a manual one-relaunch override), so this returns False
+    there. Called by :meth:`GBSpecialRJFStatGridMove._setup_at_floor`; the
+    claimed roots are kept in ``_FSTAT_ENV_FORCED_ROOTS``.
+
+    Args:
+        root (str): The move's fit root (:attr:`GBSpecialRJFStatGridMove._fstat_root`).
+
+    Returns:
+        bool: True when this call claims the forced refit for ``root``.
+    """
     if os.environ.get("GB_FSTAT_FORCE_REFIT", "0").strip() != "1":
         return False
     key = os.path.abspath(str(root))
@@ -31346,7 +36381,12 @@ def _evict_fstat_epochs(root, keep):
     2026-10-06): without it every earlier epoch's grid and centre table
     stayed resident on the device for the life of the process. A move still
     holding an older epoch keeps its own reference until it installs the
-    new one.
+    new one. Called by :meth:`GBSpecialRJFStatGridMove._setup_epoch` on
+    every refit.
+
+    Args:
+        root (str): The fit root whose other epochs are dropped.
+        keep (str): The epoch directory to keep.
     """
     prefix = os.path.join(root, "")
     for reg in (_FSTAT_GRID_REGISTRY, _FSTAT_CTR_TABLE_REGISTRY):
@@ -31387,19 +36427,20 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
 
     * ``fstat_refit_every <= 0`` (default): fit exactly once, ever.
     * otherwise: refit when the REFIT CLOCK has advanced that many ticks
-      since the last fit. The clock (:meth:`_fstat_clock`, 2026-08-24
-      redesign) is the shared per-branch propose census
-      (:attr:`GBSpecialBase._branch_propose_counts` — ticked by EVERY
-      GBSpecial move of the branch, so the search and pe instances pool
-      their hits), journaled to ``<fstat_root>/clock.json`` so it
-      SURVIVES RESTARTS; the last-fit tick rides in the epoch's
-      ``DONE.json``. The per-instance ``num_proposals`` counter it
-      replaced starved structurally: full_pe's random_choice hands each
-      move ~1/6 of iterations, gb_search hands its move ~11 per launch,
-      and nothing persisted across launches — production never refit.
-      At the production ``GB_FSTAT_REFIT_EVERY=50`` the shared clock
-      refits roughly every ~20 gb_search iterations (2-3 branch
-      proposes/iteration) and every ~150 randomized full_pe iterations.
+      since the last fit. The clock (:meth:`_fstat_clock`) counts ELAPSED
+      global-fit ITERATIONS (the ``gf_iteration`` stamp of the stage
+      combine; since 2026-09-18/24 -- it was the shared per-branch propose
+      census before that, and a per-instance ``num_proposals`` counter
+      before that, which starved structurally and never refit), journaled
+      to ``<fstat_root>/clock.json`` so it SURVIVES RESTARTS; the last-fit
+      tick rides in the epoch's ``DONE.json``. The decision itself is
+      :meth:`_fstat_fit_decision`. 9mo / 12mo values:
+      ``GB_FSTAT_REFIT_EVERY=2`` for the search move in ``gb_search_1``,
+      ``GB_SEARCH_2_FSTAT_REFIT_EVERY=4`` in ``gb_search_2`` (a stage
+      profile override, ``recipe.apply_fstat_refit_every``); with
+      ``GB_SEARCH_LEGS=1`` a search cycle is three iterations, so these
+      refit every cycle and every second cycle. Stock default
+      (``gb_no_fg``) 40.
 
     Each fit gets its own ``epoch_<k>`` cache directory, and the sweep
     checkpoints are salted with the epoch, so a mid-fit death resumes
@@ -31428,9 +36469,52 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
     (:func:`~lisatools.sampling.fstat_gridfit.stacked_cache_at_floor`, no
     refit). The load path consults no floor otherwise, so without the second
     half a resumed store keeps whatever floor its epoch was fitted at.
+
+    BUILT AS (``recipe.build_gb_moves``, when ``gb.fstat_fit_in_move`` /
+    ``GB_FSTAT_FIT_IN_MOVE`` is on -- the default and the 9mo / 12mo
+    setting; otherwise these slots are :class:`GBSpecialRJPriorMove`):
+    ``rj_fstat_search`` (the search birth move: live residual,
+    :attr:`fstat_search_residual`, root ``shared_search``, the designated
+    ``leaf_cap_update`` move, so it also runs the per-walker valve judge),
+    ``rj_fstat_pe`` and ``rj_fstat_pe_residual`` (the two PE instances
+    above; ``recipe.pe_fstat_move_config``), and the replace moves
+    ``rj_replace`` / ``rj_replace_pe`` when built (not in the 9mo / 12mo
+    runs). All share ``fstat_fit_dir`` (``gb.fstat_fit_dir``, default
+    ``<main file dir>/gb_fstat_fit``) and their epochs live under
+    :attr:`_fstat_root`.
+
+    Other env knobs read by this class (code defaults): ``GB_FSTAT_FORCE_REFIT``
+    (0; one forced new epoch per fit dir and process),
+    ``GB_FSTAT_FIT_PER_MOVE`` (0; per-move roots), ``GB_FSTAT_FIT_WALKERS``
+    (unset = 1), ``GB_FSTAT_CTR_MAX_NODES`` (1000000; centre-table node
+    cap), ``GB_FSTAT_BIRTH_RATIO_TIGHT`` (1), ``GB_FSTAT_BIRTH_RATIO_EPS``
+    (0.1), ``GB_FSTAT_BIRTH_RATIO_PHASE`` (2 pi) and
+    ``GB_FSTAT_BIRTH_RATIO_WMIN`` (0.05) (the birth container's
+    ``fdot_astro_ratio`` tightening, :meth:`_install`), ``FSTAT_USE_SIGHET`` (1; the
+    sig-het F-stat scorer); through the base class and helpers also
+    ``GB_FSTAT_SEARCH_REF`` / ``GB_FSTAT_PE_REF`` (reference walker),
+    ``GB_FSTAT_GB_FREE``, ``GB_FSTAT_CTR_MODE`` and ``FSTAT_PEAK_MIN_SNR``.
+
+    Args:
+        *args: Forwarded to :class:`GBSpecialRJPriorMove` /
+            :class:`GBSpecialBase`.
+        fstat_fit_dir: Root of the ``epoch_<k>`` grid caches. Required:
+            the default ``""`` raises.
+        fstat_refit_every: Refit cadence in refit-clock ticks
+            (iterations); ``<= 0`` fits once. Default 0.
+        fstat_fit_kwargs: Fit settings read by the fit:
+            ``A_lims``, ``mc_lims`` (default ``[0.001, 1.0]`` when empty),
+            ``dist_lims``, ``fdot_astro_ratio_max`` and ``build_seed`` (the
+            per-rank seed of :meth:`_birth_seed`). Default None (empty).
+        fstat_peak_min_snr: This move's own peak floor (SNR); None uses
+            the floor in force. Default None.
+        **kwargs: Forwarded to :class:`GBSpecialBase`.
+
+    Raises:
+        ValueError: When ``fstat_fit_dir`` is empty.
     """
 
-    #: When True the CADENCE refit is suspended: an installed grid is kept
+    #: Class-level default ``False``. When True the CADENCE refit is suspended: an installed grid is kept
     #: until a FORCED refit (:meth:`arm_fstat_refit`) asks for a new epoch.
     #: Set per iteration by the galfor ratchet's recipe step (user ruling
     #: 2026-10-02: "let's run it only on the nudge step" -- job 675 refit
@@ -31499,6 +36583,16 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         selected the wrong peaks whatever its floor or tick age says. The
         soft decline in :meth:`_consume_forced_refit` ("already fitted at the
         floor in force and not stale") is skipped for a hard arm.
+
+        Called through ``recipe.force_fstat_refit`` by the search stage
+        profile step on a peak-floor change, and by the galfor ratchet's
+        step (hard). Also probed with ``hasattr`` by the launcher preflight.
+
+        Args:
+            serial (int or tuple): The recipe-step serial (or the ratchet's
+                tuple) the refit is requested for; None is a no-op.
+            reason: Text for the log lines. Default ``""``.
+            ignore_age: The hard form. Default False.
         """
         if serial is None:
             return
@@ -31507,10 +36601,20 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         self._force_refit_hard = bool(ignore_age)
 
     def _consume_forced_refit(self):
-        """``(epoch, reason)`` when a forced refit is due now, else ``None``.
+        """The epoch number a forced refit should open now, else ``None``.
 
         Consumes the request, so the second ``setup()`` of the same stage
-        takes the ordinary cadence path.
+        takes the ordinary cadence path. A SOFT request is declined (None)
+        when the latest complete epoch was fitted at the peak floor now in
+        force AND is younger than ``fstat_refit_every`` refit-clock ticks
+        (the restart case); a HARD request (``ignore_age``) never is. Moves
+        sharing a fit root agree on ONE new epoch per recipe step through
+        ``_FORCED_FSTAT_EPOCH``. Called by :meth:`_setup_at_floor`, after
+        :meth:`_fstat_fit_decision`.
+
+        Returns:
+            int or None: The epoch to open (``latest + 1``, or the one
+            already opened for this step by a sibling move), or None.
         """
         serial = getattr(self, "_force_refit_serial", None)
         if serial is None or serial == getattr(self, "_force_refit_done", None):
@@ -31617,8 +36721,10 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         """Where this move's epochs live.
 
         SHARED by default (``<fit_dir>/shared``): several moves in one run
-        want the SAME birth grid -- the search cycle's ``rj_prior_search``
-        and the PE ``rj_prior`` both score births against the same residual,
+        want the SAME birth grid -- originally the search cycle's
+        ``rj_prior_search`` and the PE ``rj_prior`` (today's
+        ``rj_fstat_search`` / ``rj_fstat_pe``, which now have separate roots,
+        below) both scored births against the same residual,
         so making each fit its own copy would pay the (potentially
         hours-scale) sweep once per move for an identical answer. Whichever
         move's ``setup()`` fires first does the fit; the rest pick it up
@@ -31631,7 +36737,9 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         SEARCH AND PE DO NOT SHARE A ROOT (2026-09-21). Under
         :attr:`fstat_search_residual` the epochs are fitted to a DIFFERENT
         residual (live, not GB-free) against a DIFFERENT reference walker
-        (min lnL, not max), so a PE move landing on a search epoch -- which
+        (min lnL, not max, when this was written; today the search rule
+        rotates and the PE rule is random, see ``_fstat_fit_ref_rule``),
+        so a PE move landing on a search epoch -- which
         the shared root guarantees, since ``full_pe`` follows ``gb_search``
         in the same store and ``_latest_epoch`` simply takes the highest
         number it finds -- would silently inherit grids built under
@@ -31647,10 +36755,11 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         dangerous: ``full_pe`` opens holding whatever the search last
         fitted, and with one root that grid is live for PE until PE's own
         cadence fires. Once PE has taken its FIRST refit under
-        ``GB_FSTAT_REFIT_EVERY`` (30 iterations, so shortly after the
-        handoff) it is back on a grid it fitted itself, GB-free and max-lnL,
-        and from then on the two modes never read each other's epochs
-        anyway. So the split is only really buying that opening window. If
+        ``GB_FSTAT_REFIT_EVERY`` (30 iterations when this was written, so
+        shortly after the handoff; the PE moves now have their own cadences,
+        see the class docstring) it is back on a grid it fitted itself,
+        GB-free and max-lnL, and from then on the two modes never read each
+        other's epochs anyway. So the split is only really buying that opening window. If
         the PE TODO in ``recipe.py`` resolves to "PE also fits the live
         residual", this collapses back to one root outright; if PE keeps the
         GB-free grid, decide whether a forced refit at the stage handoff is
@@ -31664,8 +36773,14 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         the residual move would load the galaxy epoch as its own and, at its
         first cadence refit, open ``epoch k+1`` in the galaxy's directory and
         evict the galaxy's registry entry. ``shared_search`` holds the search
-        stages' min-lnL grids. Its own root also gives it its own epoch
+        stages' live-residual grids. Its own root also gives it its own epoch
         numbering, clock journal and registry keys.
+
+        Returns:
+            str: ``<fstat_fit_dir>/shared_pe_residual`` (live-residual PE
+            move), ``<fstat_fit_dir>/shared_search`` (search moves) or
+            ``<fstat_fit_dir>/shared``; ``<fstat_fit_dir>/<move name>`` under
+            ``GB_FSTAT_FIT_PER_MOVE=1`` (default 0).
         """
         if os.environ.get("GB_FSTAT_FIT_PER_MOVE", "0") == "1":
             return os.path.join(self.fstat_fit_dir, self.name)
@@ -31676,21 +36791,25 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         return os.path.join(self.fstat_fit_dir, "shared")
 
     def _epoch_dir(self, k: int) -> str:
+        """``<fstat_root>/epoch_<k:04d>``, the cache directory of epoch ``k``."""
         return os.path.join(self._fstat_root, f"epoch_{k:04d}")
 
+    # TODO check: keep/remove/document -- no src callers (tests/test_fstat_multiwalker_plan.py, test_pe_two_fstat_moves.py only)
     @property
     def fstat_fit_walkers(self) -> int:
         """How many walkers' residuals one F-stat epoch is fitted to.
 
         ``GB_FSTAT_FIT_WALKERS``, **default 1 in BOTH modes** (user ruling
         2026-09-23): the epoch keeps being fitted to the single reference
-        walker of :meth:`_fstat_fit_ref_from` -- the MIN-lnL cold chain in
-        search, a random cold walker per epoch in PE (2026-10-06). The multi-walker union is entirely opt-in, and at
+        walker of :meth:`_fstat_fit_ref_from` -- rotating with the epoch in
+        search (the MIN-lnL cold chain before 2026-10-16), a random cold
+        walker per epoch in PE (2026-10-06). The multi-walker union is entirely opt-in, and at
         the default this whole path is dormant and bit-identical.
 
         ``1`` -- the reference walker only, today's behaviour.
         ``n > 1`` -- the ``n`` best references by :meth:`_fstat_fit_refs_from`,
-        swept independently and unioned.
+        swept independently and unioned (planned: no code in the fit reads
+        this property yet, so ``n > 1`` currently changes nothing).
         Unset / ``0`` / unparseable -- the default.
 
         WHY IT IS NOT ON BY DEFAULT. There is NO work shared between
@@ -31713,6 +36832,7 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
                     "the single reference walker.", self.name, raw)
         return 1
 
+    # TODO check: keep/remove/document -- no src callers (tests/test_fstat_multiwalker_plan.py only)
     def _fstat_slot_dir(self, k: int, walker: int, n_slots: int) -> str:
         """Cache directory for ONE walker's sweep within epoch ``k``.
 
@@ -31794,6 +36914,15 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         A move that never receives a stamp (an exotic harness, a direct unit
         -test call) falls back to counting its own visits, which is the old
         behaviour for that move alone and keeps the clock monotone.
+
+        On a compute rank the stamp arrives in the payload's
+        ``clock_vals["gf_iteration"]`` (:meth:`GBSpecialBase._enter_rank_block`).
+        The seed never lands below the move's last-fit tick (warned and
+        clamped), so a lagging journal cannot stall the cadence.
+
+        Returns:
+            int: The clock value (a per-branch counter shared by every move
+            of the branch, see :attr:`GBSpecialBase._branch_iteration_counts`).
         """
         branch = getattr(self, "branch_name", "gb")
         counts = GBSpecialBase._branch_iteration_counts
@@ -31871,6 +37000,12 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         an epoch of unknown age has no budget left, so the first
         ``fstat_refit_every`` ticks of sampling on top of it trigger the
         refit — exactly right for stores fitted before this clock existed.
+
+        Args:
+            k: The epoch number.
+
+        Returns:
+            int: The stamped clock, or 0.
         """
         try:
             with open(os.path.join(self._epoch_dir(k), "DONE.json")) as f:
@@ -31881,7 +37016,17 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
     def _epoch_manifest_walker(self, k: int):
         """The GLOBAL walker epoch ``k``'s grid was fitted to (its DONE.json
         ``walker_ref``), or ``None`` when the manifest is missing, unreadable
-        or records none (the ``_already_fitted`` short circuit writes None)."""
+        or records none (the ``_already_fitted`` short circuit writes None).
+
+        Read by :meth:`_install_ctr_table` to score a loaded epoch's centre
+        table through the walker its grid was fitted to.
+
+        Args:
+            k: The epoch number.
+
+        Returns:
+            int or None: The global walker index.
+        """
         try:
             with open(os.path.join(self._epoch_dir(k), "DONE.json")) as f:
                 w = json.load(f).get("walker_ref")
@@ -31892,7 +37037,14 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
     def _epoch_n_peaks(self, k: int):
         """How many peaks epoch ``k``'s fit selected (its DONE.json
         ``n_peaks``), or ``None`` when the manifest is missing, unreadable or
-        records none. ``None`` is "cannot tell", never "zero"."""
+        records none. ``None`` is "cannot tell", never "zero".
+
+        Args:
+            k: The epoch number.
+
+        Returns:
+            int or None: The peak count.
+        """
         try:
             with open(os.path.join(self._epoch_dir(k), "DONE.json")) as f:
                 n = json.load(f).get("n_peaks")
@@ -31916,6 +37068,10 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         ``rj_fstat_pe``, which share this code path). ``rj_replace`` /
         ``rj_replace_pe`` share the fit dir but are not the F-stat RJ proposal
         the ruling names: they keep the historical prior fallback, unchanged.
+
+        Returns:
+            bool: True for an RJ move that is neither a replace nor a
+            removal-only move.
         """
         return (bool(getattr(self, "is_rj_prop", False))
                 and not bool(getattr(self, "rj_replace", False))
@@ -31945,6 +37101,12 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
           (recipe.py builds them as ``{"gb": ...}`` and hands them to the
           removal move unwrapped), so they are assigned straight through --
           re-wrapping them would nest a dict where a distribution is expected.
+
+        Args:
+            dist (dict or None): ``{branch: container}`` or None.
+            k (int): The epoch number.
+            n_peaks (int, optional): The epoch's peak count; read from its
+                ``DONE.json`` when None. Default None.
         """
         if dist is not None:
             self.rj_proposal_distribution = dist
@@ -31993,6 +37155,12 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         ``run_fstat_grid_fit`` short-circuits on and ``stage_b_complete``
         tests, so this predicate and that one can differ only in the trailing
         ``or DONE.json``, which is the zero-peak case above.
+
+        Args:
+            d: An epoch directory.
+
+        Returns:
+            bool: True when the stacked npz or ``DONE.json`` exists.
         """
         from lisatools.sampling.fstat_gridfit import stacked_grid_path
 
@@ -32022,6 +37190,13 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         The npz is named through ``fstat_gridfit``'s :func:`stacked_grid_path`
         for the same reason :meth:`_epoch_complete` does: one spelling, so a
         rank can never wait on a file the head does not write.
+
+        Args:
+            d: An epoch directory.
+
+        Returns:
+            str or None: ``"DONE.json"``, the stacked npz basename, or None
+            when nothing is missing.
         """
         from lisatools.sampling.fstat_gridfit import stacked_grid_path
 
@@ -32041,6 +37216,13 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         return stacked
 
     def _latest_epoch(self):
+        """The highest ``epoch_<k>`` number under :attr:`_fstat_root`, or None.
+
+        Any ``epoch_<digits>`` directory counts, complete or not.
+
+        Returns:
+            int or None: The epoch number, or None when there is none.
+        """
         root = self._fstat_root
         if not os.path.isdir(root):
             return None
@@ -32055,6 +37237,12 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         ``None`` means "cannot tell" -- no stage-B cache yet (a mid-fit or
         zero-peak epoch), or a cache written before the stamp existed. Every
         caller must treat that as "assume it differs", never as a match.
+
+        Args:
+            d: An epoch directory.
+
+        Returns:
+            float or None: The stacked npz's ``peak_min_F`` (F units).
         """
         from lisatools.sampling.fstat_gridfit import stacked_grid_path
 
@@ -32077,7 +37265,15 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         The count a LOAD under this move's own floor installs (see
         :meth:`_install`); ``0`` is what arms the zero-peak skip there, the
         same as a fit that selected nothing. ``None`` is "cannot tell", never
-        "zero" (the manifest's count is then used, as before)."""
+        "zero" (the manifest's count is then used, as before).
+
+        Args:
+            k: The epoch number.
+            min_F: The floor in F units (``SNR**2 / 2``).
+
+        Returns:
+            int or None: The count, or None.
+        """
         from lisatools.sampling.fstat_gridfit import stacked_grid_path
 
         try:
@@ -32103,6 +37299,14 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         band metadata at all also counts as stale (unverifiable). Missing
         caches (e.g. a DONE.json-only zero-peak epoch) are NOT stale -- they
         carry no band-indexed state.
+
+        Args:
+            d: An epoch directory.
+
+        Returns:
+            bool: True (with a warning) when
+            :func:`~lisatools.sampling.fstat_gridfit.check_cached_band_grid`
+            refuses it.
         """
         from lisatools.sampling.fstat_gridfit import check_cached_band_grid
 
@@ -32130,6 +37334,19 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         such an epoch would read as "nothing installed" and be re-LOADED on
         every propose, the clock would never be consulted and the move could
         never refit out of it.
+
+        With something installed: ``skip`` for a fit-once move, under
+        ``fstat_refit_only_forced``, or while the refit clock is within
+        ``fstat_refit_every`` of the last fit; else ``fit`` of the next
+        epoch. With nothing installed: ``fit`` epoch 0 on an empty root, a
+        fresh epoch over a band-grid-stale latest one, ``load`` a complete
+        latest epoch (a fit-once move loads the newest complete one rather
+        than resume an incomplete one), else resume (``fit``) the latest.
+        The forced refit (:meth:`_consume_forced_refit`) is applied by the
+        caller, :meth:`_setup_at_floor`.
+
+        Returns:
+            tuple[str, int or None]: ``(action, epoch)``.
         """
         if (self.rj_proposal_distribution is not None
                 or getattr(self, "_fstat_zero_peak_epoch", None) is not None):
@@ -32189,8 +37406,9 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         unwrap and the multi-shard route are both load-bearing, so this
         reuses that method rather than re-deriving the comp.
 
-        ``FSTAT_USE_SIGHET=1`` (opt-in; default stays the chunked path)
-        swaps in the signal-het shared-reference F-stat: the comb/stage-B
+        ``FSTAT_USE_SIGHET=1`` (the DEFAULT since the 2026-08-12 ruling;
+        ``=0`` restores the chunked path) swaps in the signal-het
+        shared-reference F-stat: the comb/stage-B
         sweeps score through
         :func:`lisatools.sampling.fstat_gridfit.build_sighet_call_fstat`,
         which builds bucketed heterodyne references against the reference
@@ -32202,9 +37420,10 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         :meth:`_RoutedBandEngine.route_sighet_fstat`, which pins the whole
         scorer to the reference walker's shard on a device-local comp
         replica; ``FSTAT_SIGHET_MULTIDEV=1`` (OPT-IN, default off pending
-        the on-GPU parity gate; ``=check`` adds a pinned shadow compare)
-        fans candidate batches out over ALL run devices instead.
-        Single-shard holders pass through unchanged.
+        the on-GPU parity gate; ``=check`` adds a pinned shadow compare;
+        the 9mo / 12mo launchers export 1) fans candidate batches out over
+        ALL run devices instead. Single-shard holders pass through
+        unchanged.
 
         ``holder`` overrides the ACA the scorer reads. The multi-rank fit
         passes the replicated single-row :class:`FStatRefRowHolder`
@@ -32279,10 +37498,12 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         full-galaxy count forever, so each refit gets cheaper and the
         stage-B stacked tables (the 2026-09-21 OOM site,
         ``StackedFStatProposal4D``) shrink with it. The walker-independence
-        argument below is what is being traded away; it is bought back by
+        argument below is what is being traded away; it was bought back by
         taking the MIN-lnL walker as the reference
         (:meth:`_fstat_fit_ref_from`), i.e. the residual that still holds
-        the most unfound signal in the ensemble.
+        the most unfound signal in the ensemble (since 2026-10-16 the search
+        default ROTATES the reference walker by epoch, and PE picks a random
+        one; see :meth:`_fstat_fit_ref_rule`).
 
         **Why.** The fit is scored against ONE reference walker (the
         max-likelihood one, :meth:`_fstat_reference_walker`), and its GBs are
@@ -32308,6 +37529,23 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         i.e. restores their signal TO the residual (``factor=+1``,
         "restoring them to the residual" in
         :meth:`adjust_sources_in_residual_buffer`).
+
+        In the 9mo / 12mo runs the window opens only for ``rj_fstat_pe``
+        (the GB-free galaxy grid, fitted once); the search move and the PE
+        live-residual move skip it (:meth:`_fstat_gb_free_on`). Under the
+        fan-out it runs on the reference walker's OWNER rank, inside
+        :meth:`_gb_serve_fstat_ref_row`. Publishes ``_gb_free_opened`` and
+        ``_gb_free_n_live``.
+
+        Args:
+            model: The engine model whose main residual is edited.
+            branches (dict or None): ``{branch_name: Branch}``; without the
+                branch the window is not opened.
+            walker_ref: The walker (ACA row) whose cold sources are
+                restored.
+
+        Yields:
+            None: The residual is GB-free for the body of the ``with``.
         """
         if (not self._fstat_gb_free_on()
                 or branches is None or self.branch_name not in branches):
@@ -32373,6 +37611,17 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         this visible. Split out of :meth:`_run_fstat_fit` when the global
         gather moved into the fit-only branch: it is the only consumer of
         ``lls``, and inlining it there hid the branch that actually matters.
+
+        Args:
+            model: The head's engine model.
+            k (int): The epoch.
+            w_global (int): Global index of the reference walker.
+            owner_rank (int): The rank owning it.
+            local_index (int): Its row in that rank's block.
+            lls (np.ndarray): The gathered per-walker lnL (or a length-1
+                NaN placeholder without a fan-out).
+            n_compute (int): Number of compute ranks.
+            cache_dir (str): The epoch cache directory.
         """
         try:
             # BRANCH ON THE SOURCE OF ``lls``, NOT ON ITS SIZE.
@@ -32421,8 +37670,10 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         Three things differ from the single-process fit, all of them forced
         by the walker-block layout (design spec 2026-09-16):
 
-        1. The reference walker is the GLOBAL argmax
-           (:meth:`_fstat_global_reference`), not this rank's local one.
+        1. The reference walker is picked over ALL N walkers
+           (:meth:`_fstat_global_reference`: rotating with the epoch in
+           search, random per epoch in PE, at the defaults), not from this
+           rank's local block.
         2. The whole sweep scores through the REPLICATED reference row
            (``gb_fstat_ref_row``), not the live residual -- so the GB-free
            window is opened once, on the OWNING rank, around the snapshot,
@@ -32463,6 +37714,28 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         cache short circuit, which is what this path was always going to
         reach. The centre table then replicates (and releases) its own row if
         it still needs one, deriving its own global reference for it.
+
+        The sweep itself is
+        :func:`~lisatools.sampling.fstat_gridfit.run_fstat_grid_fit` over
+        the interior band span, with the epoch-salted cache fingerprint
+        (epoch, GB-free flag, reference walker and the per-band stage
+        terms), the per-band peak floors (``fstat_band_min_F_for``) and the
+        search-only skip set (``fstat_band_skip_for``: bands shut on every
+        walker, or with births off under the empty-band valve); it writes the
+        epoch's ``DONE.json`` manifest (the epoch number, the reference
+        walker, whether this process swept it, the compute-rank count, the
+        peak count, the wall time, the propose count and the refit clock).
+        Called by :meth:`_setup_epoch` on a ``fit`` decision.
+
+        Args:
+            model: The head's engine model.
+            k: The epoch to fit.
+            branches (dict, optional): The head's ``{branch_name: Branch}``
+                (needed for the GB-free window). Default None.
+
+        Returns:
+            tuple: ``(stacked, n_peaks)`` -- the stacked grid and the peak
+            count, as :func:`run_fstat_grid_fit` returns them.
         """
         from lisatools.sampling.fstat_gridfit import (
             run_fstat_grid_fit,
@@ -32527,6 +37800,7 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             # file that vanished between the two tests says WHY instead of
             # dying as a ``NoneType is not callable`` somewhere inside stage A.
             def call_fstat(*_args, **_kw):
+                """Refusing stand-in scorer: the epoch was already fitted."""
                 raise RuntimeError(
                     f"{self.name}: epoch {k}'s stage-B grid was complete when "
                     "the fit started, so no reference row was replicated and "
@@ -32744,15 +38018,32 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         WITHOUT building an F-stat scorer); an epoch that predates the table
         (or an offline grid dropped into ``epoch_0000``) rebuilds it here,
         replicating the reference row itself first -- AGAINST THE RESIDUAL AS
-        IT STANDS AT THAT MOMENT, which on a pure load path (no fit in this
-        process) is generally not the walker the loaded grids were fitted
-        against, i.e. not ``DONE.json``'s ``walker_ref``. When this process
-        DID run the fit, ``_fstat_epoch_reference`` makes the two literally
-        the same walker.
+        IT STANDS AT THAT MOMENT. The reference walker is the fit's own
+        (``_fstat_epoch_reference``) when this process ran the fit, else the
+        walker the epoch's ``DONE.json`` records (``walker_ref``,
+        :meth:`_epoch_manifest_walker`), else a fresh global reference
+        gathered here; the residual itself is the current one, so on a pure
+        load path it is generally not the residual the grids were fitted
+        against. A row taken here is released here, and the workers' copies
+        through :meth:`_fstat_release_fanout`.
 
-        No-ops under ``GB_FSTAT_CTR_MODE=unit``. Leaves ``_fstat_ctr_table``
-        ``None`` when the epoch has no drawable support at all — the move
-        then falls back to the per-unit hoist.
+        No-ops under ``GB_FSTAT_CTR_MODE=unit`` (the 9mo / 12mo launchers
+        export ``epoch``). Leaves ``_fstat_ctr_table`` ``None`` when the
+        epoch has no drawable support at all — the move then falls back to
+        the per-unit hoist. Node count capped by ``GB_FSTAT_CTR_MAX_NODES``
+        (default 1000000). Results are shared through
+        ``_FSTAT_CTR_TABLE_REGISTRY``.
+
+        Args:
+            k: The epoch.
+            model (optional): The head's engine model; ``None`` (the rank
+                directive path) loads the npz only and never sweeps.
+                Default None.
+            branches (dict, optional): The head's ``{branch_name: Branch}``
+                for the GB-free window of a sweep. Default None.
+
+        Raises:
+            RuntimeError: When a non-head rank would have to sweep.
         """
         if self._fstat_ctr_mode() != "epoch":
             self._fstat_ctr_table = None
@@ -32942,6 +38233,13 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         ``None`` (no ``general.random_seed``) keeps every birth generator on
         OS entropy, exactly as before this existed. NOT a user knob: the base
         is machine-stamped per rank.
+
+        Args:
+            k (int): The epoch.
+
+        Returns:
+            int or None: A uint32 seed from ``SeedSequence([base, k,
+            0x6B62])``, or None.
         """
         base = self.fstat_fit_kwargs.get("build_seed")
         if base is None:
@@ -32962,6 +38260,26 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         the ranks, so a rank that re-synced here would silently revive
         bands the head has shut off (``run_tempering`` reads
         ``_rj_band_shutoff`` to drop grid rows). Default True = today.
+
+        Builds the container with
+        :func:`~lisatools.sampling.fstat_gridfit.build_gb_birth_distribution`
+        from the epoch cache (or the just-fitted ``stacked``), cut on a load
+        to this move's own peak floor, with the tightened
+        ``fdot_astro_ratio`` birth draw (``GB_FSTAT_BIRTH_RATIO_*``) and the
+        per-rank per-epoch seed (:meth:`_birth_seed`); adopts it
+        (:meth:`_adopt_epoch_container`), records ``_fstat_epoch`` and the
+        last-fit clock, and publishes it in :data:`_FSTAT_GRID_REGISTRY`.
+        Called by :meth:`_setup_epoch` (head) and
+        :meth:`GBSpecialBase._setup_from_directive` (ranks,
+        ``sync_shutoff=False``).
+
+        Args:
+            k: The epoch.
+            stacked (optional): The stacked grid a fit in this process just
+                produced; None loads it from the epoch cache. Default None.
+            n_peaks (int, optional): The epoch's peak count. Default None.
+            sync_shutoff (bool, optional): Run the band-shutoff epoch sync.
+                Default True.
         """
         from lisatools.sampling.fstat_gridfit import build_gb_birth_distribution
 
@@ -33068,6 +38386,15 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         (the forced-refit decline, peak selection, the stage-B stamp) sees
         THIS move's, and the stage's override is back the moment it returns.
         ``None`` -- every move but the PE galaxy one -- is a no-op scope.
+
+        Overrides :meth:`GBSpecialBase.setup`. Called once per propose on
+        the head (or single process) just before the birth distribution is
+        read; compute ranks never call it (they install the head's epoch
+        through :meth:`GBSpecialBase._setup_from_directive`).
+
+        Args:
+            model: The head's engine model.
+            branches (dict): The state's branches (``state.branches``).
         """
         from lisatools.sampling.fstat_proposal import peak_min_snr_scope
 
@@ -33075,7 +38402,22 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             self._setup_at_floor(model, branches)
 
     def _setup_at_floor(self, model, branches):
-        """``setup()``'s body, inside the move's peak-floor scope."""
+        """``setup()``'s body, inside the move's peak-floor scope.
+
+        Takes :meth:`_fstat_fit_decision`, lets a forced refit
+        (:meth:`_consume_forced_refit`) override it, and under
+        ``GB_FSTAT_FORCE_REFIT=1`` (default 0) turns the first non-fit
+        decision of the process into a fit of a NEW epoch (once per fit
+        dir, :func:`_claim_env_forced_refit`). Unless the final action is
+        ``skip``, runs :meth:`_setup_epoch` and, whatever happens there,
+        releases this process's replicated reference row
+        (:meth:`_fstat_release_ref_row`) and clears
+        ``_fstat_epoch_reference``.
+
+        Args:
+            model: The head's engine model.
+            branches (dict): The state's branches.
+        """
         action, k = self._fstat_fit_decision()
         # A forced refit OVERRIDES every branch of the decision above,
         # including "skip": the whole point is that the cadence has not
@@ -33128,6 +38470,20 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
 
         Split out only so the reference-row release can wrap every exit path
         -- including the two early ``return``s -- in one ``finally``.
+
+        In order: reuse an epoch another move sharing the fit dir already
+        installed in this process (:data:`_FSTAT_GRID_REGISTRY`); else on
+        ``load`` install the epoch from disk; else (``fit``) drop the
+        installed grid and the fit dir's older registry entries
+        (:func:`_evict_fstat_epochs`), free the in-model batch pools, run
+        :meth:`_run_fstat_fit` and install its result. Every path ends with
+        the epoch's centre table (:meth:`_install_ctr_table`).
+
+        Args:
+            model: The head's engine model.
+            branches (dict): The state's branches.
+            action (str): ``"load"`` or ``"fit"``.
+            k (int): The epoch.
         """
         # Cross-move reuse: another move sharing this fit dir may already
         # have built (or loaded) this exact epoch in THIS process. Take its
@@ -33199,25 +38555,39 @@ def para_log_like(
     fstat=True,
     return_snr=False,
 ):
-    """Vectorized GB log-likelihood used by serial-search and refit moves.
+    """Vectorized legacy FD GB log-likelihood of the serial F-stat search.
+
+    The scorer of :meth:`GBSpecialRJSerialSearchMCMC.setup` (the stock
+    ``rj_fstat_mcmc_search`` / ``rj_fstat_mcmc`` moves): the legacy GBGPU
+    FD kernels ``gb.get_fstat_ll`` / ``gb.get_ll`` against one walker's
+    residual. FD only: the 9mo / 12mo runs are WDM and never call it (those
+    moves are built but never staged).
 
     Args:
-        x: GB parameter rows (untransformed).
+        x (np.ndarray): ``(n, ndim)`` GB rows in the sampling basis; with
+            ``fstat`` the amplitude (or distance), ``phi0``, ``cos_iota``
+            and ``psi`` columns are overwritten IN PLACE with the F-stat
+            maximizers, and with ``phase_maximize`` (``fstat`` False) the
+            ``phi0`` column is rotated to the maximizing phase.
         gb: :class:`gbgpu.GBGPU` instance.
-        acs: :class:`AnalysisContainerArray`.
-        walker_max: Index of the walker whose data the proposals are scored
-            against.
-        transform_fn: :class:`TransformContainer` for GB parameters.
-        phase_maximize: If ``True``, marginalize over phase.
-        waveform_kwargs: Forwarded to ``gb.get_fstat_ll`` / ``gb.get_ll``.
-        fstat: If ``True``, use the F-statistic likelihood (``get_fstat_ll``)
-            and overwrite the amplitude / phase / iota / polarization
-            entries of ``x`` with their maximized values.
-        return_snr: If ``True`` and ``fstat`` is ``False``, also return the
-            optimal SNR per row.
+        acs: The :class:`AnalysisContainerArray` (FD).
+        walker_max (int): Index of the walker whose data the proposals are
+            scored against.
+        transform_fn: Transform container for GB parameters.
+        phase_maximize (bool): If ``True``, maximize over phase.
+        waveform_kwargs (dict): Forwarded to ``gb.get_fstat_ll`` /
+            ``gb.get_ll``.
+        fstat (bool, optional): If ``True``, use the F-statistic
+            likelihood (``get_fstat_ll``). Default True.
+        return_snr (bool, optional): If ``True`` and ``fstat`` is
+            ``False``, also return the optimal SNR per row. Default False.
 
     Returns:
-        Per-row log-likelihood (or ``(ll, snr)`` tuple).
+        xp.ndarray or tuple[xp.ndarray, xp.ndarray]: Per-row log-likelihood
+        (on the GB backend's array module), or the ``(ll, snr)`` tuple.
+
+    Raises:
+        ValueError: When the ACA's domain settings are not FD.
     """
     xp = gb.backend.xp
 
@@ -33343,14 +38713,22 @@ def para_log_like(
 class PriorTransformFn:
     """Transform between unit-cube prior coordinates and GB :math:`(f, \\dot f)`.
 
-    Used by the serial-search move to draw uniform-in-band proposals while
-    keeping the rest of the GB prior unchanged.
+    Used by :meth:`GBSpecialRJSerialSearchMCMC.setup` to draw
+    uniform-in-band proposals while keeping the rest of the GB prior
+    unchanged: sampling columns 1 (f0) and 2 (the third column: ``fdot``,
+    or ``Mc`` on chirp-mass bases) are mapped per band group between the
+    unit cube and ``[min, max]``. eryn's ``ParaEnsembleSampler`` (its
+    ``prior_transform_fn``) calls :meth:`transform_to_prior_basis` and
+    :meth:`adjust_logp` when it evaluates the prior; the move itself calls
+    :meth:`transform_from_prior_basis` on the unit-cube start draws.
 
     Args:
-        f_min: Minimum frequency (Hz).
-        f_max: Maximum frequency (Hz).
-        fdot_min: Minimum frequency derivative.
-        fdot_max: Maximum frequency derivative.
+        f_min: Per-band minimum f0, in the units of the sampled f0 column
+            (mHz in the stock GB basis; the move passes band edges x 1e3).
+            Array, one entry per band group.
+        f_max: Per-band maximum f0, same units.
+        fdot_min: Per-band minimum of the third column.
+        fdot_max: Per-band maximum of the third column.
     """
 
     def __init__(self, f_min: float, f_max: float, fdot_min: float, fdot_max: float):
@@ -33362,7 +38740,17 @@ class PriorTransformFn:
         )
 
     def adjust_logp(self, logp, groups_running):
-        """Add the (uniform) ``f`` and ``fdot`` log-density to ``logp``."""
+        """Add the (uniform) ``f`` and ``fdot`` log-density to ``logp``.
+
+        Args:
+            logp (xp.ndarray): Log-prior with a leading band-group axis,
+                updated IN PLACE.
+            groups_running (xp.ndarray or None): Band groups being sampled;
+                None means all.
+
+        Returns:
+            xp.ndarray: ``logp``.
+        """
         xp = get_array_module(self.f_min)
 
         if groups_running is None:
@@ -33382,7 +38770,14 @@ class PriorTransformFn:
         return logp
 
     def transform_to_prior_basis(self, coords, groups_running):
-        """Map ``f`` / ``fdot`` columns of ``coords`` to the unit-cube basis."""
+        """Map ``f`` / ``fdot`` columns of ``coords`` to the unit-cube basis.
+
+        Args:
+            coords (xp.ndarray): ``(ngroups, ntemps, nwalkers, ndim)``;
+                columns 1 and 2 are rewritten IN PLACE.
+            groups_running (xp.ndarray or None): Band groups; None means
+                all.
+        """
         xp = get_array_module(self.f_min)
 
         if groups_running is None:
@@ -33406,7 +38801,15 @@ class PriorTransformFn:
         return
 
     def transform_from_prior_basis(self, coords, groups_running):
-        """Map ``f`` / ``fdot`` columns of ``coords`` from unit cube back to physical."""
+        """Map ``f`` / ``fdot`` columns of ``coords`` from unit cube back to physical.
+
+        Args:
+            coords (xp.ndarray): ``(ngroups, ntemps, nwalkers, ndim)``;
+                columns 1 and 2 are rewritten IN PLACE.
+            groups_running (xp.ndarray): Band groups, one per leading row of
+                ``coords`` (asserted). None is not usable here: that branch
+                references an undefined ``xp``.
+        """
         if groups_running is None:
             groups_running = xp.arange(len(self.f_min))
 
@@ -33432,7 +38835,14 @@ def _gb_sampling_third_name(move) -> str:
     ``"fdot"`` for the legacy basis, ``"Mc"`` for chirp-mass runs
     (``GBSettings.use_chirp_mass``), read off the move's transform-container
     ``input_basis`` -- so GMM RJ containers assemble in the SAME basis the
-    sampler walks in.
+    sampler walks in. Used by :class:`GBSpecialRJSerialSearchMCMC` and
+    :class:`GBSpecialRJRefitMove`.
+
+    Args:
+        move: A GB move (its ``transform_fn`` is read).
+
+    Returns:
+        str: ``"Mc"`` or ``"fdot"``.
     """
     ib = list(getattr(getattr(move, "transform_fn", None), "input_basis", None) or [])
     return "Mc" if "Mc" in ib else "fdot"
@@ -33444,6 +38854,15 @@ def _gb_fdot_astro_ratio_max(move):
     Read off the move's own run prior so RJ-birth / GMM-refit containers
     append the 9th column with the SAME bounds the sampler walks in
     (``None`` for the 8-column bases). Independent of the move subclass.
+    Used by :meth:`GBSpecialRJFStatGridMove._run_fstat_fit` (the 9mo / 12mo
+    fit's ``ratio_max``) and the serial-search, para-search and refit moves.
+
+    Args:
+        move: A GB move (``_fdot_astro_col``, ``priors`` and
+            ``branch_name`` are read).
+
+    Returns:
+        float or None: The prior's maximum, or None.
     """
     if getattr(move, "_fdot_astro_col", None) is None:
         return None
@@ -33458,7 +38877,15 @@ def _gb_use_distance(move) -> bool:
 
     Read off the move's transform-container ``input_basis`` so GMM/refit
     containers assemble slot 0 in the SAME basis the sampler walks in
-    (``dist`` vs ``A``).
+    (``dist`` vs ``A``). Also read by the base class's F-stat distance-birth
+    / replace / slot-0 helpers and RJ step, the serial search and the refit
+    move.
+
+    Args:
+        move: A GB move (its ``transform_fn`` is read).
+
+    Returns:
+        bool: True for a distance basis.
     """
     ib = list(getattr(getattr(move, "transform_fn", None), "input_basis", None) or [])
     return len(ib) > 0 and ib[0] == "dist"
@@ -33472,7 +38899,29 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
 
     Each band proposes one new GB at a time using a parallel ensemble
     sampler driven by :func:`para_log_like`, with proposals drawn from a
-    band-restricted prior via :class:`PriorTransformFn`.
+    band-restricted prior via :class:`PriorTransformFn`. :meth:`setup` runs
+    the search and installs a GMM birth container fitted to the found
+    samples as ``rj_proposal_distribution``; ``propose`` is the base
+    class's.
+
+    LEGACY FD-ONLY. :func:`para_log_like` refuses non-FD settings, the
+    search raises :class:`NotImplementedError` under a multi-rank fan-out,
+    and the GMM fit needs CuPy. ``recipe.build_gb_moves`` always builds it
+    as the stock moves ``rj_fstat_mcmc_search`` (search list) and
+    ``rj_fstat_mcmc`` (PE list), but no 9mo / 12mo stage requests either
+    (they are built and never staged).
+
+    Adds no constructor arguments: it takes exactly :class:`GBSpecialBase`'s
+    (``*args`` / ``**kwargs``), with ``search_kwargs`` required to be a dict
+    holding ``nwalkers``, ``ntemps``, ``shutoff_band_iteration``,
+    ``shutoff_frequency_threshold``, ``burn_1``, ``nsteps_1``,
+    ``snr_threshold``, ``burn_2`` and ``nsteps_2``.
+
+    Attributes:
+        comm_info: Class-level placeholder, None.
+        found_source_in_band (np.ndarray): Per-call history of which band
+            groups found a source (set by :meth:`setup`), used to shut
+            bands that found nothing for ``shutoff_band_iteration`` calls.
     """
     comm_info = None
 
@@ -33485,6 +38934,12 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         prior (GMM ``mc_lims`` or the uniform's bounds). Fixing the third
         column to the RIGHT quantity is the pre-existing chirp-mass search
         bug (fdot bounds were being written into the Mc slot).
+
+        Args:
+            f0_max (np.ndarray): Upper band edges (Hz), one per band group.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: ``(min, max)`` per band group.
         """
         if _gb_sampling_third_name(self) != "Mc":
             return get_fdot_mojito(f0_max, sign="-"), get_fdot_mojito(f0_max, sign="+")
@@ -33507,6 +38962,12 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         band-restricted unit-cube singles, so ``PriorTransformFn`` maps
         columns 1 and 2 back to physical. Every other prior -- crucially the
         9th ``fdot_astro_ratio`` U[-M, M] -- is carried through unchanged.
+
+        Args:
+            priors_global (dict): ``{branch_name: ProbDistContainer}``.
+
+        Returns:
+            dict: The new ``priors_in`` mapping.
         """
         third = _gb_sampling_third_name(self)
         uc = self.backend.uses_cupy
@@ -33524,6 +38985,30 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         return out
 
     def setup(self, model, branches):
+        """Run the two-stage band search and install its GMM birth container.
+
+        Against the residual of the local max-lnL walker: stage 1 is an
+        F-stat ParaEnsemble MCMC per active band group (amplitude, phi0,
+        cos_iota, psi and ``fdot_astro_ratio`` held off, the extrinsics
+        analytically maximized); groups whose minimum optimal SNR exceeds
+        ``snr_threshold`` go to stage 2, a full-likelihood refinement; the
+        stage-2 samples are fitted by
+        :func:`~lisatools.sampling.gmm.fit_gb_gmm_rj_container` and installed
+        as ``rj_proposal_distribution``. After ``shutoff_band_iteration``
+        calls, bands that found nothing in that many calls (above
+        ``shutoff_frequency_threshold``, when set) are dropped, and when
+        every band is dropped the prior becomes the birth distribution.
+        Returns early, keeping the previous distribution, when nothing is
+        found or the GMM fit is skipped. Sets ``self.gb.d_d`` as a side
+        effect.
+
+        Args:
+            model: The engine model (its ACA must be FD).
+            branches (dict): The state's branches.
+
+        Raises:
+            NotImplementedError: Under a multi-rank fan-out.
+        """
         if getattr(self, "fanout_active", False):
             raise NotImplementedError(
                 f"{type(self).__name__} (FD dev-search path, scalar-walker "
@@ -33812,7 +39297,14 @@ def _para_mc_lims(move):
 
     The old move's ``_third_col_search_bounds`` (chirp-mass basis): the joint
     ``("f0", "Mc")`` prior's ``mc_lims``, else the ``Mc`` uniform's bounds,
-    else ``(0.001, 1.0)``.
+    else ``(0.001, 1.0)``. Used by :meth:`GBParaSearchRJMove._para_builder`
+    (``GB_PARA_SEARCH=1`` only).
+
+    Args:
+        move: A GB move (``priors`` and ``branch_name`` are read).
+
+    Returns:
+        tuple[float, float]: ``(Mc_min, Mc_max)``.
     """
     pr = move.priors[move.branch_name].priors_in
     gmm = pr.get(("f0", "Mc"))
@@ -33833,12 +39325,25 @@ def _make_move_para_scorer(move, model, row, mode):
     ``route_sighet_fstat`` (the shared-reference scorer) and the parent
     engine's ``get_ll`` inside ``exact_scoring`` (the chunked full likelihood
     even if a sig-het in-model reference were still built). ``row`` is the
-    walker's row of THIS process's ACA.
+    walker's row of THIS process's ACA. Used by
+    :meth:`GBParaSearchRJMove._para_builder` (``GB_PARA_SEARCH=1`` only).
+
+    Args:
+        move: The GB move (its comp, likelihood engine and waveform kwargs).
+        model: This rank's engine model (its ACA is the scorer's holder).
+        row (int): The walker's ACA row.
+        mode (str): The scorer mode (``ParaSearchConfig.scorer``).
+
+    Returns:
+        ResidualScorer: The routed scorer.
     """
     from lisatools.globalfit.warmstart.para_search import ResidualScorer
 
     class _Scorer(ResidualScorer):
+        """``ResidualScorer`` whose entry points route through the band engine."""
+
         def fstat_exact(self, P):
+            """Exact chunked F-stat of rows ``P`` (routed per shard)."""
             n = int(P.shape[0])
             self.n_fstat += n
             di = self._di(n, self.row)
@@ -33847,12 +39352,14 @@ def _make_move_para_scorer(move, model, row, mode):
                 data_index=di, noise_index=di, convert_to_ra_dec=False)
 
         def _sighet_call(self, f0_lims_hz):
+            """The shared-reference sig-het F-stat scorer over ``f0_lims_hz``."""
             return _RoutedBandEngine.route_sighet_fstat(
                 self.sighet, self.holder, xp=self.xp, Tobs=self.tobs,
                 f0_lims_hz=(float(f0_lims_hz[0]), float(f0_lims_hz[-1])),
                 data_index=self.row, noise_index=self.noise_row)
 
         def full(self, P):
+            """``(d_h, h_h)`` of rows ``P`` from the chunked full likelihood."""
             xp = self.xp
             n = int(P.shape[0])
             self.n_full += n
@@ -33912,6 +39419,37 @@ class GBParaSearchRJMove(GBSpecialRJPriorMove):
     Refuses the ``GF_GPU_ROUTING=1`` replica layout (several ranks per walker
     block) at ``install_walker_fanout``: v1 searches each walker on the rank
     that owns its whole residual.
+
+    A documented, DEFAULT-OFF option (``gb.para_search`` /
+    ``GB_PARA_SEARCH=1``; unset in the 9mo / 12mo launchers, so this move
+    is not built there). ``recipe.build_gb_moves`` requires the 9-column GB
+    basis, passes ``rj_proposal_distribution=None``, ``is_rj_prop=True``,
+    ``name="rj_para_search_pe"`` and the arguments below; the PE draw share
+    is ``GB_PE_RJ_PARA_FRACTION``. The search knobs are the
+    ``GB_PARA_SEARCH_*`` fields of
+    :class:`~lisatools.globalfit.warmstart.para_search.ParaSearchConfig`
+    (``GB_PARA_SEARCH_EVERY_PE`` the build cadence in PE iterations, the
+    chain counts, SNR floor, convergence window, scorer, ...); see
+    ``docs/gb-para-search.md``.
+
+    Args:
+        *args: Forwarded to :class:`GBSpecialRJPriorMove` /
+            :class:`GBSpecialBase`.
+        para_search_cfg (ParaSearchConfig, optional): The search settings;
+            None reads ``ParaSearchConfig.from_env()``. Default None.
+        para_search_root (str, optional): The epoch root
+            (``<run_dir>/warmstart/parasearch`` from the recipe); None makes
+            :meth:`setup` propose nothing. Default None.
+        para_search_load_kwargs (dict, optional): Forwarded to the
+            :class:`~lisatools.globalfit.warmstart.para_search.ParaSearchHolder`
+            epoch loads (floor box, ``floor_eps``, ``circ_images``, ...).
+            Default None.
+        para_search_seed (int, optional): Per-rank build seed (the per-walker
+            search seeds and the container seeds derive from it). Default
+            None.
+        para_search_tag (int, optional): Seed-domain tag of the container
+            seeds. Default 0.
+        **kwargs: Forwarded to :class:`GBSpecialBase`.
     """
 
     def __init__(self, *args, para_search_cfg=None, para_search_root=None,
@@ -33941,6 +39479,15 @@ class GBParaSearchRJMove(GBSpecialRJPriorMove):
 
     # ---- wiring ----------------------------------------------------------
     def install_walker_fanout(self, curr):
+        """Bind the fan-out as the base class does, refusing the replica layout.
+
+        Args:
+            curr: The built global-fit setup.
+
+        Raises:
+            NotImplementedError: Under the ``GF_GPU_ROUTING=1`` replica
+                layout (several compute ranks per walker block).
+        """
         super().install_walker_fanout(curr)
         if self.fanout_active and self._replica_active():
             raise NotImplementedError(
@@ -33951,30 +39498,56 @@ class GBParaSearchRJMove(GBSpecialRJPriorMove):
                 "or GF_GPU_ROUTING (docs/gb-para-search.md).")
 
     def _para_tobs(self) -> float:
+        """Observation time (s): the basis settings' ``Tobs``, else ``1 / df``."""
         bs = getattr(self, "_basis_settings", None)
         if bs is not None and getattr(bs, "Tobs", None):
             return float(bs.Tobs)
         return 1.0 / float(self.df)
 
     def _para_rank(self):
+        """This process's rank (0 single-process)."""
         return 0 if self.gf_rank is None else int(self.gf_rank)
 
     def _para_log_tag(self, w):
+        """``"rank R walker W"`` log prefix for walker ``w``."""
         return f"rank {self._para_rank()} walker {int(w)}"
 
     def _para_search_apply(self, directive):
-        """COMPUTE RANK: hold exactly the head's epoch for this propose."""
+        """COMPUTE RANK: hold exactly the head's epoch for this propose.
+
+        Overrides the base no-op; called by
+        :meth:`GBSpecialBase._gb_serve_run_proposal` before the sorter is
+        built. Sets ``rj_proposal_distribution`` to the holder, or None when
+        no epoch is held.
+
+        Args:
+            directive (dict or None): The payload's ``para_search`` entry
+                (``{"epoch": k}``).
+        """
         self._para_holder.apply_directive(directive, rank=self._para_rank())
         self.rj_proposal_distribution = (
             None if self._para_holder.epoch is None
             else {self.branch_name: self._para_holder})
 
     def _para_search_note(self, sp):
+        """Credit the propose's RJ split census to the holder.
+
+        Args:
+            sp (dict): The RJ split census (from :meth:`run_proposal`).
+        """
         self._para_holder.note_census(sp, move_name=self.name,
                                       rank=self._para_rank())
 
     # ---- the clock -------------------------------------------------------
     def _para_tick(self) -> int:
+        """Advance and return the build clock (journaled under the epoch root).
+
+        A :class:`~lisatools.globalfit.warmstart.para_search.ParaSearchClock`
+        ticked with this move's ``gf_iteration`` stamp.
+
+        Returns:
+            int: The clock value.
+        """
         from lisatools.globalfit.warmstart.para_search import ParaSearchClock
 
         if self._para_clock is None:
@@ -34001,6 +39574,19 @@ class GBParaSearchRJMove(GBSpecialRJPriorMove):
         return None
 
     def _para_build_due(self, clock) -> bool:
+        """Is a new epoch build due at ``clock``?
+
+        True on the run's first entry (nothing ever built or attempted);
+        otherwise when ``GB_PARA_SEARCH_EVERY_PE`` (``every_pe``, > 0) clock
+        ticks have passed since the later of the newest manifest's
+        ``built_at_clock`` and this process's last attempt.
+
+        Args:
+            clock (int): The current build clock.
+
+        Returns:
+            bool: Whether to build.
+        """
         every = int(self._para_search_cfg.every_pe)
         last = self._para_last_build_clock()
         if self._para_last_attempt is not None:
@@ -34014,6 +39600,20 @@ class GBParaSearchRJMove(GBSpecialRJPriorMove):
 
     # ---- setup: poll, maybe build, choose ---------------------------------
     def setup(self, model, branches):
+        """Poll, maybe build, and choose this propose's container (HEAD).
+
+        See the class docstring: outside a PE stage (or without an epoch
+        root) the move proposes nothing (warned once); otherwise the newest
+        complete epoch is adopted first, a due build
+        (:meth:`_para_build_due`) runs :meth:`_para_build`, and the held
+        epoch (if any) becomes ``rj_proposal_distribution`` with its
+        directive stored on ``_para_search_directive`` for the rank
+        payload.
+
+        Args:
+            model: The head's engine model.
+            branches (dict): The state's branches (not read).
+        """
         from lisatools.globalfit.warmstart.para_search import para_search_stage_ok
 
         holder = self._para_holder
@@ -34042,11 +39642,32 @@ class GBParaSearchRJMove(GBSpecialRJPriorMove):
 
     # ---- the build ---------------------------------------------------------
     def _para_walker_seeds(self, k, w0, w1):
+        """Per-walker search seeds of epoch ``k`` for walkers ``[w0, w1)``.
+
+        Returns:
+            list[int]: ``SeedSequence([base, k, w])`` uint32 seeds (base 0
+            without a build seed).
+        """
         base = 0 if self._para_build_seed is None else int(self._para_build_seed)
         return [int(np.random.SeedSequence([base, int(k), int(w)])
                     .generate_state(1, dtype=np.uint32)[0]) for w in range(w0, w1)]
 
     def _para_build(self, model, clock, stage):
+        """Build the next epoch: search every walker, merge, write ``epoch_NNNN``.
+
+        Under the fan-out one ``gb_para_search`` command
+        (:data:`GB_PARA_SEARCH_OP`) has every compute rank search its own
+        walker rows (:meth:`_gb_serve_para_search`); single process the head
+        searches all walkers. The head merges the finds (``merge_finds``),
+        writes the epoch npz and ``DONE.json`` (``write_epoch``), fsyncs the
+        npz and prunes old epochs. Never raises: a failed build is logged
+        and the held epoch is kept (the next attempt waits ``every_pe``).
+
+        Args:
+            model: The head's engine model.
+            clock (int): The build clock (stamped as ``built_at_clock``).
+            stage (str): The stage name, for the manifest.
+        """
         from lisatools.globalfit.warmstart.para_search import (
             merge_finds,
             write_epoch,
@@ -34069,6 +39690,7 @@ class GBParaSearchRJMove(GBSpecialRJPriorMove):
         try:
             if self.fanout_active:
                 def _payload(rank, w0, w1):
+                    """The ``gb_para_search`` payload of one rank's walker block."""
                     return {"epoch": int(k), "w0": int(w0), "w1": int(w1),
                             "cfg": cfg.as_dict(),
                             "seeds": self._para_walker_seeds(k, w0, w1)}
@@ -34136,6 +39758,21 @@ class GBParaSearchRJMove(GBSpecialRJPriorMove):
 
     # ---- the rank body -----------------------------------------------------
     def _para_builder(self, model, row, cfg):
+        """The search builder (``warmstart.para_search.ParaSearchBuilder``) for one ACA row.
+
+        Built with the band-restricted search prior, the move's routed
+        scorer (:func:`_make_move_para_scorer`), the band edges, the run's
+        chirp-mass box (:func:`_para_mc_lims`) and ``fdot_astro_ratio``
+        bound, over the interior band span.
+
+        Args:
+            model: This rank's engine model.
+            row (int): The walker's row in this process's ACA.
+            cfg (ParaSearchConfig): The search settings.
+
+        Returns:
+            ParaSearchBuilder: Ready to ``run``.
+        """
         from lisatools.globalfit.warmstart.para_search import (
             ParaSearchBuilder,
             band_restricted_priors_in,
@@ -34166,6 +39803,15 @@ class GBParaSearchRJMove(GBSpecialRJPriorMove):
 
         Never raises: a failed walker is reported in ``errors`` and the head
         builds the epoch from the others. Replies host numpy only.
+
+        Args:
+            payload (dict): ``epoch``, ``w0``, ``w1``, ``cfg``
+                (``ParaSearchConfig`` fields) and ``seeds``.
+            clock (dict or None): The fan-out clock (not read).
+            model: This rank's engine model.
+
+        Returns:
+            dict: ``{"finds": [...], "errors": [...], "rank": int or None}``.
         """
         from lisatools.globalfit.warmstart.para_search import ParaSearchConfig
 
@@ -34207,11 +39853,33 @@ from lisatools.globalfit.state import GBState
 
 
 class GBSpecialRJRefitMove(GBSpecialBase):
-    """Reversible-jump GB move that uses GMM-refitted proposals.
+    """Reversible-jump GB move whose births come from a GMM refit of the run's own chains.
 
-    Loads per-leaf GMM proposals (refit by :func:`gb_refit_func`) and uses
-    them as the RJ proposal distribution. This is typically alternated
-    with :class:`GBSpecialRJPriorMove` to sharpen accepted GB candidates.
+    :meth:`setup` reads the run's HDF store (``fp``), gathers the GB samples
+    per band group (:func:`~lisatools.globalfit.gathergalaxy.gather_gb_samples`),
+    fits GPU Gaussian mixtures to six columns (amplitude or distance, f0,
+    fdot or Mc, cos_iota, alpha, sin_delta; ``vec_fit_gmm_min_bic``) and
+    installs the result -- with ``phi0`` /
+    ``psi`` (and ``fdot_astro_ratio``) uniform -- as the RJ proposal
+    distribution. (The old CPU ``gb_refit_func`` worker it once used is
+    gone.) Meant to alternate with :class:`GBSpecialRJPriorMove` to sharpen
+    accepted GB candidates.
+
+    LEGACY FD-ONLY and single-rank: :meth:`setup` raises under a multi-rank
+    fan-out and on a non-FD basis. Built by ``recipe.build_gb_moves`` as
+    ``rj_refit`` / ``rj_refit_search`` only when a requested move name
+    starts with ``rj_refit`` and ``general.main_file_path`` exists; the 9mo
+    / 12mo runs request neither, so it is not built there.
+
+    Args:
+        *args: Forwarded to :class:`GBSpecialBase`.
+        fp (str): Path of the run's HDF store to refit from; must exist.
+        **kwargs: Forwarded to :class:`GBSpecialBase`; its ``search_kwargs``
+            must hold ``refit_start_iteration`` (samples kept per leaf) and
+            ``nwalkers``.
+
+    Raises:
+        AssertionError: When ``fp`` is not an existing path string.
     """
     def __init__(self, *args, fp=None, **kwargs):
         assert fp is not None and isinstance(fp, str)
@@ -34220,6 +39888,22 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         GBSpecialBase.__init__(self, *args, **kwargs)
 
     def setup(self, model, branches):
+        """Refit the birth GMM from the run's stored GB chains.
+
+        Falls back to the prior (and returns) while the store holds fewer
+        than ``2 * refit_start_iteration`` iterations, when no band group
+        has enough samples, or when the group sizes give no step range;
+        returns WITHOUT replacing the distribution when NaN padding leaks
+        into a fit batch.
+
+        Args:
+            model: The engine model (its ACA must be FD).
+            branches (dict): The state's branches (not read).
+
+        Raises:
+            NotImplementedError: Under a multi-rank fan-out, or on a non-FD
+                basis.
+        """
         if getattr(self, "fanout_active", False):
             raise NotImplementedError(
                 f"{type(self).__name__} (FD dev-search path, scalar-walker "
@@ -34407,8 +40091,9 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         self.rj_proposal_distribution = {self.branch_name: rj_dist}
 
 
+# TODO check: keep/remove/document -- debugging helper; no callers in src, scripts, tests or LATW
 def get_param_limits(array): # can be used for debugging of coordinate values
-    """Return per-column min/max of ``array`` (debug helper for GB coordinates)."""
+    """Log the per-column min / max of ``array`` (debug helper for GB coordinates); returns None."""
     num_params = array.shape[-1]
 
     if num_params == 8:

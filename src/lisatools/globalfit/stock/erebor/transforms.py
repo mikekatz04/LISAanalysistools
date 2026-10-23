@@ -3,6 +3,31 @@
 Named, picklable transform functions and the per-source
 :class:`~eryn.utils.TransformContainer` builders (sampling basis <->
 waveform basis) shared by every Erebor-family variant.
+
+Builders (each container also carries the inverse transforms, so
+``both_inverse_transforms`` maps a waveform-basis row back to the sampling
+basis — catalogue rows are converted that way):
+
+* :func:`make_gb_transform_container` — THE (V)GB container. Production GB
+  basis (9 columns): ``dist`` (kpc), ``f0`` (mHz), ``Mc`` (Msol), ``phi0``,
+  ``cos_iota``, ``psi``, ``alpha`` (RA), ``sin_delta``, ``fdot_astro_ratio``;
+  production VGB basis (``VGB_CHIRP_MASS_BASIS=1``, 6 columns): ``dist``,
+  ``phi0``, ``cos_iota``, ``psi``, ``Mc``, ``fdot_astro_ratio`` with per-leaf
+  ``f0`` / ``alpha`` / ``sin_delta`` fills.
+* :func:`make_mbh_transform_container` — direct ICRS, ``Q = m1/m2 >= 1``
+  (``logM, Q, s1z, s2z, dist [Gpc], phi_ref, cos_iota, psi, alpha,
+  sin_delta, t_plunge``).
+* :func:`make_emri_transform_container` — the FEW basis (sky ``qS`` /
+  ``phiS`` kept in FEW's ecliptic-polar convention, the "special EMRI
+  frame" of ``prepare_emri_branch``).
+* :func:`make_sobbh_transform_container` — the SOBBH basis; in the ICRS run
+  frame the ``phiS`` / ``cosqS`` sampling columns carry RA and ``sin(Dec)``
+  (the ``lam`` / ``beta`` output slots hold RA / Dec, see
+  :func:`~lisatools.globalfit.stock.erebor.injections.sobbh_catalogue_to_waveform_basis`).
+
+Called by the branch Setups (``GBSetup`` / ``VGBSetup`` / ``MBHSetup`` /
+``EMRISetup`` / ``SOBBHSetup``) and the branch preps; every transform is a
+module-level name so the configured fit pickles.
 """
 
 from __future__ import annotations
@@ -22,17 +47,38 @@ from ..base import ten_to_the_x  # noqa: F401
 
 def negate(x):
     """Return ``-x`` (named 1-arg transform for pickling support; it is its
-    own functional inverse -- e.g. the GB phi0 sign flip)."""
+    own functional inverse -- e.g. the GB phi0 sign flip).
+
+    Args:
+        x (float | np.ndarray): Input values.
+
+    Returns:
+        float | np.ndarray: ``-x``.
+    """
     return -x
 
 
 def f_ms_to_s(x):
-    """Convert frequencies from mHz to Hz (named for pickling support)."""
+    """Convert frequencies from mHz to Hz (named for pickling support).
+
+    Args:
+        x (float | np.ndarray): Frequencies in mHz.
+
+    Returns:
+        float | np.ndarray: ``x * 1e-3`` (Hz).
+    """
     return x * 1e-3
 
 
 def f_s_to_ms(x):
-    """Convert frequencies from Hz to mHz (inverse of :func:`f_ms_to_s`)."""
+    """Convert frequencies from Hz to mHz (inverse of :func:`f_ms_to_s`).
+
+    Args:
+        x (float | np.ndarray): Frequencies in Hz.
+
+    Returns:
+        float | np.ndarray: ``x * 1e3`` (mHz).
+    """
     return x * 1e3
 
 
@@ -44,6 +90,18 @@ def mchirp_to_fdot_pair(f0_Hz, Mc):
     transform so the sampling basis carries ``f0`` in mHz linearly and Mc in
     solar masses, while the physical basis receives ``f0`` in Hz and fdot in
     Hz/s (with fddot = 0 filled elsewhere).
+
+    Used by the chirp-mass-only GB basis (``use_chirp_mass=True``,
+    ``use_fdot_astro=False``; ``GB_USE_ASTROPHYSICAL_F0_MC_PRIOR=0``) and by
+    :mod:`lisatools.globalfit.priors.gbpriors`.
+
+    Args:
+        f0_Hz (float | np.ndarray): GW frequency (Hz).
+        Mc (float | np.ndarray): Chirp mass (Msol).
+
+    Returns:
+        tuple: ``(f0_Hz, fdot)`` with ``fdot`` from
+        :func:`gbgpu.utils.utility.get_fdot` (Hz/s).
     """
     from gbgpu.utils.utility import get_fdot
 
@@ -52,7 +110,18 @@ def mchirp_to_fdot_pair(f0_Hz, Mc):
 
 
 def fdot_to_mchirp_pair(f0_Hz, fdot):
-    """Inverse of :func:`mchirp_to_fdot_pair`: ``(f0[Hz], fdot) -> (f0[Hz], Mc[Msol])``."""
+    """Inverse of :func:`mchirp_to_fdot_pair`: ``(f0[Hz], fdot) -> (f0[Hz], Mc[Msol])``.
+
+    Args:
+        f0_Hz (float | np.ndarray): GW frequency (Hz).
+        fdot (float | np.ndarray): Frequency derivative (Hz/s). A negative
+            fdot has no GW chirp mass; the mirror-convention inverses
+            (:class:`McFdotAstroRatioTripleInverse`,
+            :class:`McDistFdotAstroQuadInverse`) handle that case.
+
+    Returns:
+        tuple: ``(f0_Hz, Mc)``.
+    """
     from gbgpu.utils.utility import get_chirp_mass_from_f_fdot
 
     Mc = get_chirp_mass_from_f_fdot(f0_Hz, fdot)
@@ -80,7 +149,12 @@ class McFdotAstroRatioTriple:
     sampling basis directly, so no such factor appears today.
 
     Module-level class so the containing :class:`TransformContainer`
-    pickles.
+    pickles. Selected by :func:`make_gb_transform_container` with
+    ``use_fdot_astro=True`` and ``use_distance=False``; the stock GB / VGB
+    Setups never request that combination (they pair ``use_fdot_astro``
+    with ``use_distance`` and get :class:`McDistFdotAstroQuad`). Calling an
+    instance maps arrays of equal shape ``(f0_Hz, Mc, ratio)`` (Hz, Msol,
+    dimensionless) to ``(f0_Hz, fdot, fddot)`` (Hz, Hz/s, zeros).
     """
 
     def __call__(self, f0_Hz, Mc, ratio):
@@ -99,6 +173,14 @@ class McFdotAstroRatioTripleInverse:
     lands every source at exactly ``r = 0`` (fdot > 0) or ``r = -2``
     (fdot < 0) -- both well inside any sensible ``U[-M, M]`` prior box --
     and reproduces the physical fdot exactly for either sign (no NaNs).
+
+    Also used directly by
+    :func:`lisatools.globalfit.recipe.gb_fdot_rows_to_run_basis` (GB truth
+    rows -> the run's chirp-mass basis).
+
+    Args:
+        mc_lims (tuple, optional): ``(Mc_min, Mc_max)`` (Msol) the GW-inverted
+            chirp mass is clipped into. Default ``(0.001, 1.0)``.
     """
 
     _TINY_FDOT = 1e-30  # inverts to an Mc far below any box floor -> clip
@@ -131,6 +213,14 @@ def gb_amp_from_dist(f0_Hz, Mc, dist_kpc):
     :func:`get_fdot`. ``A = 2 (G Mc)^{5/3} / (c^4 d) (pi f)^{2/3}`` -- A is
     strictly ``propto 1/d``, which the inverse exploits. Named module-level
     function for pickling support.
+
+    Args:
+        f0_Hz (float | np.ndarray): GW frequency (Hz).
+        Mc (float | np.ndarray): Chirp mass (Msol).
+        dist_kpc (float | np.ndarray): Luminosity distance (kpc).
+
+    Returns:
+        float | np.ndarray: Dimensionless strain amplitude ``A``.
     """
     from gbgpu.utils.utility import get_amplitude
 
@@ -151,6 +241,9 @@ class McDistFdotAstroQuad:
     (via ``key_map``); the single ``f0`` mHz->Hz runs first so this multi
     sees f0 in Hz. One class computes all derived physical values, avoiding
     any two-transform ordering subtlety. Module-level for pickling.
+
+    This is the transform of the production GB 9-column basis and of the VGB
+    distance / chirp-mass bases.
     """
 
     def __call__(self, dist_kpc, f0_Hz, Mc, ratio):
@@ -170,6 +263,10 @@ class McDistFdotAstroQuadInverse:
     ``dist = gb_amp_from_dist(f0, Mc, 1) / A``. Reproduces the physical A and
     fdot EXACTLY for either fdot sign (no NaNs); distance is NOT clipped to
     any box (exactness over box membership).
+
+    Args:
+        mc_lims (tuple, optional): ``(Mc_min, Mc_max)`` (Msol) clip box.
+            Default ``(0.001, 1.0)``.
     """
 
     _TINY_FDOT = 1e-30
@@ -256,6 +353,36 @@ def make_gb_transform_container(
         mc_lims: ``[Mc_min, Mc_max]`` box used by the fdot_astro inverse
             (mirror convention clips ``Mc_GW(f0, |fdot|)`` into it).
             Ignored unless ``use_fdot_astro``.
+
+    Returns:
+        TransformContainer: Forward (sampling -> the 9-name physical basis
+        ``A, f0, fdot, fddot, phi0, cos_iota, psi, alpha, sin_delta``) and
+        inverse transforms.
+
+    Raises:
+        ValueError: ``use_fdot_astro`` without ``use_chirp_mass``,
+            ``use_distance`` without ``use_fdot_astro``, or ``input_basis``
+            names outside the sampling basis.
+
+    Note:
+        The production GB branch calls it from
+        :meth:`~lisatools.globalfit.stock.erebor.gb.GBSetup.init_sampling_info`
+        with all three switches on (``GBSettings.use_fdot_astro`` /
+        ``use_distance``); the VGB branch passes its reduced ``input_basis``
+        and a per-leaf ``fill_dict``.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.stock.erebor.transforms import (
+                make_gb_transform_container,
+            )
+
+            tc = make_gb_transform_container(
+                use_chirp_mass=True, use_fdot_astro=True, use_distance=True
+            )
+            physical = tc.both_transforms(samples)      # (n, 9) -> (n, 9)
+            sampling = tc.both_inverse_transforms(physical)
     """
     if use_fdot_astro and not use_chirp_mass:
         raise ValueError(
@@ -362,20 +489,46 @@ def make_gb_transform_container(
     )
 
 
+# TODO check: keep/remove/document -- no caller anywhere; erebor re-export only
 def mbh_dist_trans(x):
-    """Transform an MBH ``ln total mass`` parameter (named for pickling support)."""
+    """Convert a distance in Gpc to metres: ``x * PC_SI * 1e9`` (named for pickling).
+
+    Not used by the stock MBH container (which maps Gpc -> Mpc with
+    :func:`gpc_to_mpc`).
+    """
     return x * PC_SI * 1e9  # Gpc
 
 
 def gpc_to_mpc(x):
-    """
-    Transform from Gpc to Mpc, for distance prior.
+    """Transform from Gpc to Mpc (the MBH ``dist`` sampling -> waveform unit).
+
+    Args:
+        x (float | np.ndarray): Distance in Gpc.
+
+    Returns:
+        float | np.ndarray: ``x * 1e3`` (Mpc).
     """
     return x * 1e3
 
 def mT_Q(M, Q):
-    """
-    Transform from total mass and mass ratio m1/m2 to m1 and m2.
+    """Transform total mass and mass ratio ``Q = m1/m2 >= 1`` to ``(m1, m2)``.
+
+    ``m2 = M / (1 + Q)``, ``m1 = Q * m2``.
+
+    Args:
+        M (float | np.ndarray): Total mass ``m1 + m2`` (Msol).
+        Q (float | np.ndarray): Mass ratio ``m1 / m2``, ``>= 1``.
+
+    Returns:
+        tuple: ``(m1, m2)`` (Msol), ``m1 >= m2``.
+
+    Raises:
+        AssertionError: When any ``Q < 1`` (so ``m1 < m2``).
+
+    Example:
+        >>> from lisatools.globalfit.stock.erebor.transforms import mT_Q
+        >>> mT_Q(3.0, 2.0)
+        (2.0, 1.0)
     """
     m2 = M / (1 + Q)
     m1 = Q * m2
@@ -383,19 +536,37 @@ def mT_Q(M, Q):
     return m1, m2
 
 def mpc_to_gpc(x):
-    """
-    Transform from Mpc to Gpc (inverse of :func:`gpc_to_mpc`).
+    """Transform from Mpc to Gpc (inverse of :func:`gpc_to_mpc`).
+
+    Args:
+        x (float | np.ndarray): Distance in Mpc.
+
+    Returns:
+        float | np.ndarray: ``x * 1e-3`` (Gpc).
     """
     return x * 1e-3
 
 
+# TODO check: keep/remove/document -- no caller anywhere; erebor re-export only
 def m1_m2_to_mT_q(m1, m2):
-    """Convert m1, m2 to total mass and mass ratio (inverse of ``mT_q``)."""
+    """Convert m1, m2 to total mass and ``q = m2/m1 <= 1`` (inverse of bbhx ``mT_q``).
+
+    The bbhx convention (mass ratio below 1); the stock MBH basis samples
+    ``Q = m1/m2 >= 1`` instead (:func:`m1_m2_to_mT_Q`).
+    """
     return (m1 + m2, m2 / m1)
 
 
 def m1_m2_to_mT_Q(m1, m2):
-    """Convert m1, m2 to total mass and ``Q = m1/m2 >= 1`` (inverse of :func:`mT_Q`)."""
+    """Convert m1, m2 to total mass and ``Q = m1/m2 >= 1`` (inverse of :func:`mT_Q`).
+
+    Args:
+        m1 (float | np.ndarray): Primary (larger) mass (Msol).
+        m2 (float | np.ndarray): Secondary mass (Msol).
+
+    Returns:
+        tuple: ``(m1 + m2, m1 / m2)``.
+    """
     return (m1 + m2, m1 / m2)
 
 
@@ -412,6 +583,25 @@ def make_mbh_transform_container():
     response consumes ``(alpha, delta)`` directly. The inverse
     transforms enable ``both_inverse_transforms`` (full basis ->
     sampling basis).
+
+    Forward: ``logM -> M`` (``np.exp``), then ``(M, Q) -> (m1, m2)`` via
+    :func:`mT_Q`; ``dist`` Gpc -> Mpc; ``cos_iota -> iota``;
+    ``sin_delta -> delta``; ``s1z``, ``s2z``, ``phi_ref``, ``psi``, ``alpha``
+    and ``t_plunge`` pass through. The output columns keep the input names
+    (``logM`` holds ``m1``, ``Q`` holds ``m2``, ...).
+
+    Returns:
+        TransformContainer: The 11-column MBH container (no fills).
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.stock.erebor.transforms import (
+                make_mbh_transform_container,
+            )
+
+            tc = make_mbh_transform_container()
+            wave = tc.both_transforms(samples)   # (n, 11): m1, m2, ..., t_plunge
     """
     input_basis = [
         "logM",
@@ -475,6 +665,11 @@ def make_emri_transform_container(fill_values):
             ``fill_dict``: ``xI0`` is the intrinsic prograde/retrograde flag
             fixed per EMRI source, so it can differ per leaf; transform
             calls then require ``leaf_inds``).
+
+    Returns:
+        TransformContainer: 12 sampled -> 14 FEW parameters (``logm1 -> m1``
+        via ``np.exp``, ``cosqS -> qS`` and ``cosqK -> qK`` via
+        ``np.arccos``; ``dist`` in Gpc and the angles pass through).
     """
     input_basis = [
         "logm1",
@@ -550,12 +745,32 @@ def make_emri_transform_container(fill_values):
 
 
 def cosqS_to_beta(x):
-    """Transform ``cosqS`` to ecliptic latitude ``beta = pi/2 - arccos(cosqS)``."""
+    """Transform ``cosqS`` to the latitude ``beta = pi/2 - arccos(cosqS)``.
+
+    The SOBBH sky-latitude column: in the ICRS run frame (catalogue rows from
+    :func:`~lisatools.globalfit.stock.erebor.injections.sobbh_catalogue_to_waveform_basis`)
+    the latitude is the declination, so ``cosqS = sin(Dec)``; the
+    ``beta`` / ecliptic naming is the legacy ResponseWrapper convention.
+
+    Args:
+        x (float | np.ndarray): ``cos`` of the polar angle, in ``[-1, 1]``.
+
+    Returns:
+        float | np.ndarray: Latitude (rad), in ``[-pi/2, pi/2]``.
+    """
     return np.pi / 2.0 - np.arccos(x)
 
 
 def beta_to_cosqS(x):
-    """Transform ecliptic latitude ``beta`` to ``cosqS = sin(beta)`` (inverse of :func:`cosqS_to_beta`)."""
+    """Transform the latitude ``beta`` to ``cosqS = sin(beta)`` (inverse of :func:`cosqS_to_beta`).
+
+    Args:
+        x (float | np.ndarray): Latitude (rad); the declination in the ICRS
+            run frame.
+
+    Returns:
+        float | np.ndarray: ``sin(x)``.
+    """
     return np.sin(x)
 
 
@@ -566,6 +781,16 @@ def make_sobbh_transform_container():
     f_low, phiS, cosqS, psi, phi0``; output basis: ``m1, m2, s1, s2,
     dist, inc, f_low, lam, beta, psi, phi0``. The inverse transforms
     enable ``both_inverse_transforms`` (full basis -> sampling basis).
+
+    Units: masses Msol (sampled as ``ln``), ``dist`` Gpc, ``f_low`` Hz (the GW
+    frequency at the reference epoch). In the ICRS run frame ``phiS`` /
+    ``lam`` is the right ascension and ``cosqS = sin(Dec)`` / ``beta`` the
+    declination (the waveform wrap
+    :class:`~lisatools.globalfit.stock.erebor.wrappers.SOBBHTDIonFlyWaveWrap`
+    reads those slots as ``ra`` / ``dec``).
+
+    Returns:
+        TransformContainer: The 11-column SOBBH container (no fills).
     """
     input_basis = [
         "logm1",

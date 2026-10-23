@@ -41,6 +41,35 @@ proposal; base = stock-name lookup, subclass+``setup(ctx)`` = custom,
 unified :class:`~lisatools.globalfit.recipe.Recipe` — declarative before the
 run, materializing itself into the runtime steps at run start. All of it is
 cheap-construct / heavy-setup, so a configured fit pickles.
+
+Main entry points: :class:`StockGlobalFit` (the deferred-build base every
+variant subclasses), :class:`StockRegistry` (a family's name -> class table,
+behind ``erebor.get_stock`` / ``erebor.get_stock_options``), and the
+env-default helpers :func:`env_default`, :func:`env_resolve`,
+:func:`env_is_set` and :func:`bool_or_str` with the :data:`ENV_ALIASES`
+rename table. Every ``*Settings`` field default of the stock families
+resolves through :func:`env_default`: *explicit kwarg > env var > lite
+preset > hard default*, the env knob being the capitalized field name with
+the branch prefix (``gb.min_freq`` -> ``GB_MIN_FREQ``).
+
+In production (the 9mo / 12mo launchers
+``scripts/fstat_proposal/submit_gf_9mo_v9.sh`` and
+``scripts/flagship/submit_gf_12mo.sh``, driver
+``scripts/fstat_proposal/run_combined_staged.py``) the driver clones
+``erebor.all_sources(nwalkers=4)`` (:meth:`StockGlobalFit.__call__`), edits
+``fit.general``, replaces ``fit.recipe`` wholesale, pins the rank layout,
+then calls :meth:`StockGlobalFit.build` and :meth:`StockGlobalFit.run`.
+
+Example:
+    .. code-block:: python
+
+        from lisatools.globalfit.stock import erebor
+
+        fit = erebor.gb_no_fg(nwalkers=4)   # cheap: no data load yet
+        fit.gb.min_freq = 9.8e-3            # plain attribute access on a block
+        print(fit.describe())
+        fit.build()                          # heavy: data, domain, branch Setups
+        fit.run()                            # MPI run (GlobalFit.run_global_fit)
 """
 
 from __future__ import annotations
@@ -136,7 +165,32 @@ def env_resolve(var: str, default, cast=str):
     :data:`ENV_ALIASES`); deprecated aliases are still honored with a warning.
     ``cast`` converts the raw string; ``bool`` accepts 1/0, true/false,
     yes/no, on/off (case-insensitive). Explicit user kwargs always beat this
-    (they never consult it).
+    (they never consult it). A present-but-empty variable counts as unset.
+
+    Args:
+        var: Canonical environment-variable name (e.g. ``"GB_NTEMPS"``).
+        default: Value returned when neither ``var`` nor a deprecated alias
+            is set. Returned as-is (not passed through ``cast``).
+        cast (callable, optional): Converter applied to the raw string.
+            Default ``str``. ``bool`` is special-cased (see above); any other
+            callable is called as ``cast(raw)``.
+
+    Returns:
+        object: The cast environment value, or ``default`` when unset.
+
+    Raises:
+        ValueError: When ``cast is bool`` and the value is not one of the
+            accepted spellings, or when ``cast`` itself raises on the raw
+            string.
+
+    Example:
+        >>> import os
+        >>> from lisatools.globalfit.stock.base import env_resolve
+        >>> os.environ["DEMO_STOCK_FLAG"] = "on"
+        >>> env_resolve("DEMO_STOCK_FLAG", False, bool)
+        True
+        >>> env_resolve("DEMO_STOCK_UNSET_KNOB", 3, int)
+        3
     """
     raw = _env_lookup(var)
     if raw is None:
@@ -158,6 +212,13 @@ def env_is_set(var: str) -> bool:
     counts as unset), so it reports exactly when ``env_resolve`` would return
     the environment's value rather than the hard default. Used by
     :meth:`StockGlobalFit.apply_lite` to let env vars overrule the lite preset.
+
+    Args:
+        var: Canonical environment-variable name.
+
+    Returns:
+        bool: ``True`` when ``var`` or one of its :data:`ENV_ALIASES` legacy
+        names holds a non-empty value.
     """
     return _env_lookup(var) is not None
 
@@ -173,6 +234,13 @@ def bool_or_str(raw: str):
 
     Module level and named (never a lambda) so the settings tree stays
     pickle/deepcopy-safe.
+
+    Args:
+        raw: The raw environment string.
+
+    Returns:
+        bool | str: ``True`` / ``False`` for a boolean spelling, else
+        ``raw.strip()``.
     """
     low = raw.strip().lower()
     if low in _BOOL_TRUE:
@@ -187,7 +255,34 @@ def env_default(var: str, default, cast=str):
 
     Resolution order is *explicit kwarg > environment variable > hard
     default* — the factory only runs when the field is not passed
-    explicitly, and it reads the environment at construction time.
+    explicitly, and it reads the environment at construction time (so an env
+    var set after a fit was constructed does not reach that fit; clone or
+    re-construct it). A ``lite=True`` preset sits between the env var and
+    the hard default (see :meth:`StockGlobalFit.apply_lite`).
+
+    Args:
+        var: Canonical environment-variable name — the capitalized
+            field name, prefixed with the branch for per-branch blocks.
+        default: Hard default used when the variable is unset.
+        cast (callable, optional): Converter for the raw string (see
+            :func:`env_resolve`). Default ``str``.
+
+    Returns:
+        callable: A zero-argument factory for ``dataclasses.field(default_factory=...)``.
+
+    Example:
+        .. code-block:: python
+
+            import dataclasses
+            from lisatools.globalfit.engine import Settings
+            from lisatools.globalfit.stock.base import env_default
+
+            @dataclasses.dataclass
+            class MyBranchSettings(Settings):
+                # env knob MY_NTEMPS (= the capitalized, prefixed field name)
+                ntemps: int = dataclasses.field(
+                    default_factory=env_default("MY_NTEMPS", 8, int)
+                )
     """
 
     def _factory():
@@ -205,7 +300,14 @@ def ten_to_the_x(x):
 
     Lives here rather than in ``erebor/transforms.py`` (which re-exports it)
     because the noise branch needs it and that module pulls in ``bbhx`` at
-    import — see :func:`~lisatools.globalfit.stock.erebor.noise.make_galfor_log_transform_container`.
+    import — see
+    :func:`~lisatools.globalfit.stock.erebor.noise.make_galfor_log_transform_container`.
+
+    Args:
+        x (float | np.ndarray): Exponent(s).
+
+    Returns:
+        float | np.ndarray: ``10.0 ** x``, same shape as ``x``.
     """
     return 10.0**x
 
@@ -217,7 +319,18 @@ def engine_ntemps_default():
     internally on its own per-branch ladder), so ``general.ntemps`` is
     pinned to 1. A set legacy ``NTEMPS`` environment variable raises here
     rather than being silently ignored — it would otherwise quietly
-    downgrade a runbook that expects it to control tempering.
+    downgrade a runbook that expects it to control tempering. The
+    per-branch ladder sizes are the branch fields ``ntemps`` (env
+    ``GB_NTEMPS``, ``VGB_NTEMPS``, ``MBH_NTEMPS``, ``EMRI_NTEMPS``,
+    ``SOBBH_NTEMPS``, ``PSD_NTEMPS``, ``GALFOR_NTEMPS``, ``SGWB_NTEMPS``).
+
+    Returns:
+        callable: A zero-argument factory returning ``1``.
+
+    Raises:
+        ValueError: From the factory (i.e. at settings construction) when the
+            ``NTEMPS`` environment variable is present (any value, even
+            empty).
     """
 
     def _factory():
@@ -258,6 +371,10 @@ class _InfoBranchSettings(Settings):
     hood from the ``ndim``/``nleaves_max``/``priors``/... kwargs. Adds the
     ``injection`` field the run's generic branch seeding reads (start walkers
     scattered around it; ``<BRANCH>_START_FACTOR=0`` starts exactly there).
+
+    Attributes:
+        injection: Optional sampling-basis start/truth rows for the branch
+            (``None`` -> walkers start from the prior).
     """
 
     injection: typing.Optional[typing.Any] = None
@@ -286,6 +403,81 @@ class StockGlobalFit(GlobalFitSetup):
     - ``default_setup_function`` (a named module-level function);
     - :meth:`make_general_settings` (optional) to resolve derived fields
       (domain factories, processor kwargs) right before the heavy build.
+
+    Users rarely construct a variant class directly: the family module holds
+    one cheap default instance per registered variant, and calling it clones
+    the configuration (``erebor.all_sources(nwalkers=4)``, see
+    :meth:`__call__`); ``erebor.get_stock(name, **knobs)`` constructs a fresh
+    instance from the class instead.
+
+    Args:
+        general: The run-wide block. Default ``None`` ->
+            :meth:`default_general`.
+        branches: Ordered ``{name: Settings}`` branch blocks, each added with
+            :meth:`add_branch`. Default ``None`` -> :meth:`default_branches`.
+        recipe: The declarative recipe. Default ``None`` ->
+            :meth:`default_recipe`.
+        setup_function: Named module-level function that materializes the
+            recipe at run start (the variant's ``setup_recipe``). Default
+            ``None`` -> the class attribute ``default_setup_function``.
+        head_rank: Legacy alias of the retired multi-stage pipeline's head
+            rank. Default ``0``; ``GlobalFit`` assigns the saver rank itself
+            at ``np >= 3``.
+        main_rank: Main (head) MPI rank. Default ``0``.
+        **knobs: Applied after the blocks by :meth:`_apply_knobs`, in this
+            order of lookup: a headline knob (``_HEADLINE_KNOBS``, delegated to
+            ``self.general``), a class or instance attribute of the variant,
+            then any field of ``self.general``. ``lite=True`` applies the
+            variant's laptop-smoke preset first (:meth:`apply_lite`).
+
+    Raises:
+        TypeError: When a ``**knobs`` key matches none of the above.
+        ValueError: When a branch name clashes with a fit attribute, or
+            ``lite=True`` on a variant without a preset.
+
+    Attributes:
+        general: The run-wide :class:`~lisatools.globalfit.engine.GeneralSettings`
+            block (Erebor: :class:`~lisatools.globalfit.stock.erebor.fit.EreborGeneralSettings`
+            or a variant subclass). Its env-backed fields resolve at construction.
+        recipe: The :class:`~lisatools.globalfit.recipe.Recipe` (stages of moves).
+            The production driver replaces it wholesale before ``build()``.
+        setup_function: Recipe-materialization function run at run start.
+        head_rank: See Args.
+        main_rank: See Args.
+        option_name: Class attribute; registry name (``"all_sources"``, ...).
+        description: Class attribute; one-line registry description.
+        setup_classes: Class attribute; ``{branch name: Setup class}`` used by
+            :meth:`make_source_setup`.
+        default_setup_function: Class attribute; default recipe setup function.
+
+    Note:
+        Each branch block is also an attribute named after the branch
+        (``fit.gb``, ``fit.mbh``, ...; see :attr:`branches`), and every
+        headline knob reads and writes through to ``fit.general``
+        (``fit.nwalkers`` is ``fit.general.nwalkers``). After :meth:`build`
+        the instance carries the :class:`~lisatools.globalfit.run.GlobalFitSetup`
+        products (``settings_dict``, ``current_info``, ``backend``, ...);
+        reading them before the build raises an ``AttributeError`` that says
+        to build first.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.stock import erebor
+
+            def nudge(model, state):              # a move IS a proposal
+                aca = model.analysis_container_arr  # read / adjust the residual
+                return state, None                # (new_state, accepted)
+
+            erebor.get_stock_options()            # [(name, description), ...]
+            fit = erebor.gb_no_fg(nwalkers=4)     # clone of the module default
+            fit.gb.center_freq = 8e-3             # per-branch field
+            fit.general.num_iterations = 100      # general field
+            print(fit.list_moves())               # [pe] gb_pe: rj_fstat_pe ...
+            fit.add_move(nudge, branch="gb")      # one stage -> lands in gb_pe
+            fit.recipe.pop_move("nudge")          # and out again
+            fit.build()                           # heavy stage, on command
+            fit.run()                             # MPI: GlobalFit.run_global_fit
     """
 
     option_name: typing.ClassVar[str] = ""
@@ -349,12 +541,15 @@ class StockGlobalFit(GlobalFitSetup):
     # -- defaults hooks ------------------------------------------------------
 
     def default_general(self) -> GeneralSettings:
+        """Return the variant's default general block (subclasses override; base raises)."""
         raise NotImplementedError
 
     def default_branches(self) -> typing.Dict[str, Settings]:
+        """Return the variant's ordered ``{name: Settings}`` blocks (subclasses override)."""
         raise NotImplementedError
 
     def default_recipe(self) -> Recipe:
+        """Return the variant's default :class:`~lisatools.globalfit.recipe.Recipe` (override)."""
         raise NotImplementedError
 
     # -- knob application ------------------------------------------------------
@@ -367,6 +562,13 @@ class StockGlobalFit(GlobalFitSetup):
         vars overrule the preset), and every explicit kwarg is applied AFTER
         the preset (kwargs win over both). Precedence: explicit kwarg > env
         var > lite preset > class default.
+
+        Args:
+            knobs: Constructor / clone kwargs; ``"lite"`` is popped.
+
+        Raises:
+            TypeError: When a key is neither a headline knob, a variant
+                attribute, nor a field of ``self.general``.
         """
         if knobs.pop("lite", False):
             self.apply_lite()
@@ -395,6 +597,12 @@ class StockGlobalFit(GlobalFitSetup):
         ``stock/erebor/variants/lite.py``). Precedence when applied:
         explicit kwarg > env var > lite preset > class default (a set env var
         overrules the preset for its path — see :meth:`lite_env_vars`).
+
+        Returns:
+            dict: Map of dotted attribute paths to values (empty in the
+            base); ``gb_no_fg``'s preset includes, e.g.,
+            ``"general.tobs_target": 14 * 86400.0`` and
+            ``"gb.num_repeat_proposals": 2``.
         """
         return {}
 
@@ -407,6 +615,9 @@ class StockGlobalFit(GlobalFitSetup):
         overrule the preset. Paths absent from this map are always overridden
         by lite (they are not env-backed). Empty in the base; variants provide
         it alongside :meth:`lite_overrides`.
+
+        Returns:
+            dict: Dotted path -> canonical env-var name (empty in the base).
         """
         return {}
 
@@ -417,7 +628,17 @@ class StockGlobalFit(GlobalFitSetup):
         ``"gb.num_repeat_proposals"``, ...); paths whose parent object is
         missing (e.g. a removed branch) are skipped silently. A path whose
         :meth:`lite_env_vars` env var is set is also skipped, leaving the
-        env-resolved value in place (env vars overrule the preset).
+        env-resolved value in place (env vars overrule the preset). Values are
+        deep-copied onto the fit.
+
+        Raises:
+            ValueError: When the variant has no preset (empty
+                :meth:`lite_overrides`).
+
+        Example:
+            .. code-block:: python
+
+                fit = erebor.gb_no_fg(lite=True)   # same as erebor.gb_no_fg_lite()
         """
         overrides = self.lite_overrides()
         if not overrides:
@@ -521,6 +742,59 @@ class StockGlobalFit(GlobalFitSetup):
         — a post-build append incrementally builds just this branch against
         the cached general setup, so the heavy data load is not redone.
         Mid-run appends are not supported.
+
+        Args:
+            name: Branch name; becomes the attribute ``fit.<name>`` and the
+                key in every state/backend. Must not clash with a fit
+                attribute or headline knob.
+            settings: Stock path: a :class:`~lisatools.globalfit.engine.Settings`
+                dataclass instance. ``None`` selects the simple path.
+            ndim: Simple path: sampled dimension (required).
+            nleaves_max: Simple path: maximum leaves. Default ``None`` -> 1.
+            nleaves_min: Simple path: minimum leaves. Default ``None`` ->
+                ``nleaves_max`` (fixed-dimensional, always-on).
+            priors (ProbDistContainer | dict): Simple path (required): a
+                :class:`~eryn.prior.ProbDistContainer`, a ``{param_index:
+                distribution}`` dict, or an already-keyed ``{name: container}``
+                dict (see :meth:`_coerce_priors`).
+            moves: Moves to add for this branch (each anything
+                :meth:`add_move` accepts), placed with ``branch=name``.
+            stage: Stage for ``moves`` (required when several stages exist).
+            injection (np.ndarray, optional): Simple path: sampling-basis
+                start rows (walkers start scattered around them;
+                ``<BRANCH>_START_FACTOR=0`` exactly).
+            signal_gen: Simple path: per-leaf template generator
+                ``fn(*sampling_params) -> DomainBase`` registered into every
+                analysis container, so the engine builds/subtracts this
+                branch's templates itself.
+            sub_state (type, optional): Per-branch sub-state class (sets
+                ``settings.branch_state``).
+            sub_backend (type, optional): Per-branch HDF sub-backend class
+                (sets ``settings.branch_backend``).
+            setup_class: Optional Setup class overriding the variant's
+                ``setup_classes`` entry for this branch at build.
+            **branch_kwargs: Simple path only: extra ``Settings`` fields
+                (``transform``, ``periodic``, ``betas``, ...).
+
+        Raises:
+            RuntimeError: When called while :meth:`sample` is running.
+            TypeError: When neither a Settings instance nor ``ndim`` +
+                ``priors`` is given, ``settings`` is not a ``Settings``, or
+                ``branch_kwargs`` are passed alongside a Settings instance.
+            ValueError: When ``name`` clashes with an existing fit attribute.
+
+        Example:
+            .. code-block:: python
+
+                from eryn.prior import uniform_dist
+
+                fit = erebor.blank(nwalkers=4, ntemps=2)
+                fit.add_branch(
+                    "line", ndim=2,
+                    priors={0: uniform_dist(0.0, 1.0), 1: uniform_dist(-1.0, 1.0)},
+                    signal_gen=my_line_template,   # fn(*params) -> DomainBase
+                    moves=[my_line_move],          # fn(model, state)
+                )
         """
         if getattr(self, "_runner", None) is not None:
             raise RuntimeError(
@@ -601,7 +875,10 @@ class StockGlobalFit(GlobalFitSetup):
 
         Accepts a :class:`~eryn.prior.ProbDistContainer`, a ``{param_index:
         distribution}`` dict (wrapped in one), or the already-keyed
-        ``{branch_name: container}`` dict.
+        ``{branch_name: container}`` dict (returned unchanged).
+
+        Raises:
+            TypeError: For any other type.
         """
         if isinstance(priors, ProbDistContainer):
             return {name: priors}
@@ -623,6 +900,26 @@ class StockGlobalFit(GlobalFitSetup):
         stage emptied by the removal is dropped too. Re-adding the branch with
         :meth:`add_branch` does NOT restore its moves — pass them via
         ``add_branch(..., moves=[...])``.
+
+        Only the configured fit is edited (the build products are not); call
+        it before :meth:`build`. The production driver calls it only for an
+        unarmed source branch (empty ``MBHB_IDS`` / ``EMRI_IDS`` /
+        ``SOBHB_IDS``) or a ``REMOVE_BRANCHES`` entry.
+
+        Args:
+            name: Branch to remove.
+
+        Returns:
+            Settings: The removed branch block.
+
+        Raises:
+            KeyError: When ``name`` is not a present branch.
+
+        Example:
+            .. code-block:: python
+
+                fit = erebor.all_sources(nwalkers=4)
+                fit.remove_branch("emri")   # also drops emri_pe from every stage
         """
         if name not in self._branch_names:
             raise KeyError(
@@ -666,12 +963,48 @@ class StockGlobalFit(GlobalFitSetup):
         iteration). See :meth:`Recipe.add_move
         <lisatools.globalfit.recipe.Recipe.add_move>` for placement kwargs
         (``stage=`` required when several stages exist).
+
+        Args:
+            move (Move | str | callable | eryn.moves.Move): The move (see above).
+            **kwargs: Forwarded to :meth:`Recipe.add_move
+                <lisatools.globalfit.recipe.Recipe.add_move>`: ``stage``,
+                ``before`` / ``after`` (move names) or ``index``, ``name``,
+                ``branch``, ``sync_log_like``.
+
+        Returns:
+            Move: The recipe entry that was added.
+
+        Example:
+            .. code-block:: python
+
+                def my_move(model, state):
+                    aca = model.analysis_container_arr
+                    return state, None
+
+                fit = erebor.all_sources(nwalkers=4)   # stages full_pe, vgb_pe
+                fit.add_move(my_move, stage="full_pe", branch="gb")
         """
         mv = self.recipe.add_move(move, **kwargs)
         self._materialize_live(mv)
         return mv
 
     def pop_move(self, *args, **kwargs):
+        """Remove and return a recipe move by name (alias of ``fit.recipe.pop_move``).
+
+        Args:
+            *args: Forwarded to :meth:`Recipe.pop_move
+                <lisatools.globalfit.recipe.Recipe.pop_move>` (``name``, then
+                optionally ``stage``).
+            **kwargs: Forwarded likewise (``stage=`` disambiguates a name
+                present in several stages).
+
+        Returns:
+            Move: The removed entry.
+
+        Raises:
+            KeyError: When the name is absent, or present in several stages
+                and no ``stage`` is given.
+        """
         return self.recipe.pop_move(*args, **kwargs)
 
     def _materialize_live(self, move: Move) -> None:
@@ -719,18 +1052,48 @@ class StockGlobalFit(GlobalFitSetup):
         combined.moves.append(runtime)
 
     def set_move_debug(self, *args, **kwargs):
+        """Toggle one move's debug instrumentation (alias of ``fit.recipe.set_move_debug``).
+
+        Args:
+            *args: Forwarded to :meth:`Recipe.set_move_debug
+                <lisatools.globalfit.recipe.Recipe.set_move_debug>` (``name``,
+                ``enabled=True``).
+            **kwargs: Forwarded likewise (``stage=``, plus ``plot_dir`` /
+                ``plot_walker`` / ``plot_leaf`` / ``plot_band`` / ``every``).
+
+        Returns:
+            Move: The edited recipe entry.
+        """
         return self.recipe.set_move_debug(*args, **kwargs)
 
     def set_stage_debug(self, *args, **kwargs):
+        """Toggle debug for every move of a stage (alias of ``fit.recipe.set_stage_debug``).
+
+        Args:
+            *args: Forwarded to :meth:`Recipe.set_stage_debug
+                <lisatools.globalfit.recipe.Recipe.set_stage_debug>`
+                (``stage_name``, ``enabled=True``).
+            **kwargs: Forwarded likewise (the debug options).
+
+        Returns:
+            Stage: The edited stage.
+        """
         return self.recipe.set_stage_debug(*args, **kwargs)
 
     def list_moves(self) -> str:
+        """Stage-grouped, human-readable recipe summary (``fit.recipe.list_moves()``).
+
+        Returns:
+            str: One ``[kind] stage:`` header per stage, then one line per move
+            (``name  <- stock|ClassName branch=...``).
+        """
         return self.recipe.list_moves()
 
     # -- lifecycle ---------------------------------------------------------------
 
     @property
     def built(self) -> bool:
+        """``True`` once :meth:`build` has run (and until :meth:`reset_build`)."""
         return "settings_dict" in self.__dict__
 
     def make_general_settings(self) -> GeneralSettings:
@@ -739,11 +1102,25 @@ class StockGlobalFit(GlobalFitSetup):
         The default returns a deepcopy of ``self.general``; variants override
         to fill derived fields (domain factories, processor kwargs) from the
         fit-level knobs at the last moment.
+
+        Returns:
+            GeneralSettings: A build-time copy (``self.general`` stays the
+            editable, re-buildable configuration).
         """
         return deepcopy(self.general)
 
     def build_general(self, force: bool = False) -> GeneralSetup:
-        """Build the (heavy) :class:`GeneralSetup`: data load, domain pour, sensitivity."""
+        """Build the (heavy) :class:`GeneralSetup`: data load, domain pour, sensitivity.
+
+        Cached on the fit: a second call returns the same object unless
+        ``force``.
+
+        Args:
+            force: Rebuild even when a cached general setup exists.
+
+        Returns:
+            GeneralSetup: Built from :meth:`make_general_settings`.
+        """
         if force or getattr(self, "_general_setup", None) is None:
             self._general_setup = GeneralSetup(self.make_general_settings())
         return self._general_setup
@@ -756,6 +1133,21 @@ class StockGlobalFit(GlobalFitSetup):
         back to the plain generic :class:`~lisatools.globalfit.engine.Setup`
         when its info is complete (``ndim``/``priors`` set) — the simple
         branch-append path.
+
+        Args:
+            name: Branch name.
+            settings: The build-time branch block (from
+                :meth:`prepare_branch_settings`).
+            general_setup: The built general setup (unused by the base; kept
+                for variant overrides).
+
+        Returns:
+            Setup: The constructed branch Setup (e.g.
+            :class:`~lisatools.globalfit.stock.erebor.gb.GBSetup`).
+
+        Raises:
+            KeyError: When no Setup class is registered and the branch info is
+                incomplete.
         """
         override = getattr(self, "_setup_class_overrides", {}).get(name)
         if override is not None:
@@ -786,6 +1178,13 @@ class StockGlobalFit(GlobalFitSetup):
         :func:`~lisatools.globalfit.communication.ranks.rank_build_seed`.
         ``None`` there means ``general.random_seed`` is unset, which keeps
         those objects on OS entropy exactly as before.
+
+        Args:
+            name: Branch name (``fit.<name>`` is copied).
+            general_setup: The built general setup.
+
+        Returns:
+            Settings: A deepcopy of the branch block with the defaults filled.
         """
         settings = deepcopy(getattr(self, name))
         if settings.Tobs is None:
@@ -799,6 +1198,15 @@ class StockGlobalFit(GlobalFitSetup):
         return settings
 
     def build_sources(self, force: bool = False) -> typing.Dict[str, Setup]:
+        """Build every branch Setup against the (cached) general setup.
+
+        Args:
+            force: Rebuild the branch Setups even when cached (the general
+                setup is reused either way).
+
+        Returns:
+            dict[str, Setup]: ``{branch name: Setup}`` in branch order.
+        """
         if force or getattr(self, "_source_info", None) is None:
             general_setup = self.build_general(force=False)
             self._source_info = {
@@ -816,6 +1224,30 @@ class StockGlobalFit(GlobalFitSetup):
         rank layout / device pin a prior ``prepare_rank`` left on the fit --
         call ``prepare_rank`` again afterwards under several ranks, or the run
         falls back to the late (post-build) layout path.
+
+        Steps: :meth:`build_general` (data load, grid, domain, sensitivity),
+        :meth:`build_sources` (one Setup per branch), then
+        ``GlobalFitSetup.__init__`` on a
+        :class:`~lisatools.globalfit.engine.GlobalFitSettings` carrying the
+        live recipe (``source_metadata["recipe"]``), and finally
+        :meth:`attach_runtime_objects`. A built fit returns immediately.
+
+        Args:
+            force: Drop the previous build products and build again.
+
+        Returns:
+            StockGlobalFit: ``self``, now usable as a
+            :class:`~lisatools.globalfit.run.GlobalFitSetup`.
+
+        Raises:
+            ValueError: When ``setup_function`` is ``None``.
+
+        Example:
+            .. code-block:: python
+
+                fit = erebor.all_sources(nwalkers=4)
+                curr = fit.build()        # curr is fit
+                print(fit.describe())     # now lists each branch's built Setup
         """
         if self.built and not force:
             return self
@@ -875,8 +1307,33 @@ class StockGlobalFit(GlobalFitSetup):
         walker-block layout and this rank's device are resolved BEFORE the
         build (``communication.ranks.prepare_rank``: ``CUDA_VISIBLE_DEVICES``
         must be set before the first CUDA call); a fit that was already
-        prepared or built is left alone. ``run_kwargs`` pass through to
-        ``GlobalFit.run_global_fit``.
+        prepared or built is left alone. ``run_kwargs`` are forwarded to
+        ``GlobalFit.run_global_fit``, which takes none (see Args).
+
+        Every rank calls this; :class:`~lisatools.globalfit.run.GlobalFit`
+        assigns the role (head / compute / saver). The production driver
+        calls ``prepare_rank`` itself, then ``fit.build()`` and
+        ``fit.run(comm=run_comm)`` on the communicator left after the monitor
+        rank split.
+
+        Args:
+            comm (mpi4py.MPI.Comm, optional): Communicator. Default ``None`` ->
+                ``MPI.COMM_WORLD``.
+            **run_kwargs: Forwarded to
+                :meth:`GlobalFit.run_global_fit
+                <lisatools.globalfit.run.GlobalFit.run_global_fit>`, which
+                currently takes no arguments, so this must stay empty.
+
+        Returns:
+            None: ``run_global_fit`` returns nothing; the results are in the
+            run's HDF store (``general_info.main_file_path``, under
+            ``general.file_store_dir``).
+
+        Example:
+            .. code-block:: bash
+
+                # my_driver.py: fit = erebor.gb_no_fg(nwalkers=4); fit.run()
+                mpiexec -n 3 python my_driver.py
         """
         if comm is None:
             from mpi4py import MPI
@@ -911,6 +1368,26 @@ class StockGlobalFit(GlobalFitSetup):
         :meth:`add_move` start firing on the next iteration. See
         :meth:`GlobalFit.sample <lisatools.globalfit.run.GlobalFit.sample>`
         for the keyword arguments and the backend-saving cadence.
+
+        Args:
+            iterations (int, optional): Iterations to run. Default ``None`` ->
+                ``general.num_iterations``.
+            **sample_kwargs: Forwarded to :meth:`GlobalFit.sample
+                <lisatools.globalfit.run.GlobalFit.sample>`: ``thin_by``,
+                ``progress``, ``store``, ``sync_log_like``.
+
+        Yields:
+            tuple: ``(model, state)`` once per (thinned) iteration — the
+            engine model (``model.analysis_container_arr`` holds the residual)
+            and the :class:`~lisatools.globalfit.state.GFState` fed to the next
+            iteration.
+
+        Example:
+            .. code-block:: python
+
+                fit = erebor.blank(nwalkers=4, ntemps=2, make_diagnostic_plots=False)
+                for model, state in fit.sample(iterations=3, store=False, progress=False):
+                    print(state.log_like)
         """
         self.build()
         from ..run import GlobalFit
@@ -931,6 +1408,13 @@ class StockGlobalFit(GlobalFitSetup):
         Arrays collapse to shape/dtype, classes/callables to their name, and
         long reprs are truncated — so ``describe(full=True)`` stays readable
         even with domain factories, priors, and injection tables present.
+
+        Args:
+            value (object): Any settings value.
+            maxlen: Truncation length of the fallback ``repr``.
+
+        Returns:
+            str: The one-line illustration.
         """
         shape = getattr(value, "shape", None)
         if shape is not None and hasattr(value, "dtype"):
@@ -957,6 +1441,9 @@ class StockGlobalFit(GlobalFitSetup):
         for a printable illustration). Reflects the current config only —
         build-time derived fields (``Tobs``, ``domain_settings``, ...) are
         resolved later, in :meth:`build`.
+
+        Returns:
+            dict: The nested mapping shown above.
         """
         general = {f.name: getattr(self.general, f.name) for f in dataclasses.fields(self.general)}
         branches = {
@@ -989,6 +1476,20 @@ class StockGlobalFit(GlobalFitSetup):
         branch has one), so this doubles as the post-build inspection view.
         For what the *sampler* produced, see
         :meth:`~lisatools.globalfit.run.GlobalFitSetup.summarize_run`.
+
+        Args:
+            full: List every field of every block instead of the headline
+                knobs only. Default ``False``.
+
+        Returns:
+            str: The multi-line summary (print it).
+
+        Example:
+            .. code-block:: python
+
+                fit = erebor.gb_no_fg_lite()
+                print(fit.describe())            # headline knobs + recipe
+                print(fit.describe(full=True))   # every field of every block
         """
         lines = [
             f"{type(self).__name__} ({self.option_name or 'unregistered'}) — "
@@ -1035,11 +1536,33 @@ class StockGlobalFit(GlobalFitSetup):
         Variants intercept special constructor knobs here (e.g. gb_no_fg's
         ``debug`` preset) so that cloning via ``__call__`` honors them the
         same way construction does.
+
+        Args:
+            overrides: Same keys as the constructor ``**knobs``.
         """
         self._apply_knobs(overrides)
 
     def __call__(self, **overrides) -> "StockGlobalFit":
-        """Clone this configuration (config only, never built products) with overrides."""
+        """Clone this configuration (config only, never built products) with overrides.
+
+        The clone is a ``deepcopy`` followed by :meth:`reset_build` and
+        :meth:`apply_overrides`. Field values (including env-resolved ones)
+        are copied from ``self``: env vars are NOT re-read, so a knob exported
+        after the module default was constructed must be passed as an
+        override (or the class re-constructed, e.g. via ``get_stock``).
+
+        Args:
+            **overrides: Constructor-style knobs (headline knobs, variant
+                attributes, general fields, ``lite=True``).
+
+        Returns:
+            StockGlobalFit: A fresh, unbuilt fit.
+
+        Example:
+            .. code-block:: python
+
+                fit = erebor.all_sources(nwalkers=4)   # what the production driver does
+        """
         new = deepcopy(self)
         new.reset_build()
         new.apply_overrides(overrides)
@@ -1073,6 +1596,12 @@ class StockGlobalFit(GlobalFitSetup):
         Plain construction already resolves env-backed field defaults; this
         alias exists so call sites can say explicitly that they want the
         env-driven configuration (legacy settings-file stubs use it).
+
+        Args:
+            **overrides: Constructor knobs.
+
+        Returns:
+            StockGlobalFit: ``cls(**overrides)``.
         """
         return cls(**overrides)
 
@@ -1083,14 +1612,44 @@ class StockGlobalFit(GlobalFitSetup):
 
 
 class StockRegistry:
-    """Name -> StockGlobalFit-class registry for one stock family (e.g. erebor)."""
+    """Name -> StockGlobalFit-class registry for one stock family (e.g. erebor).
+
+    The erebor package builds one at import (``erebor._registry``), registers
+    every variant class, and exposes :meth:`get` / :meth:`options` as
+    ``erebor.get_stock`` / ``erebor.get_stock_options``.
+
+    Args:
+        family: Family name used in error messages (``"erebor"``).
+
+    Attributes:
+        family: See Args.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.stock import erebor
+
+            erebor.get_stock_options()                  # [(name, description), ...]
+            fit = erebor.get_stock("gb_no_fg", nwalkers=16)
+    """
 
     def __init__(self, family: str):
         self.family = family
         self._classes: typing.Dict[str, type] = {}
 
     def register(self, cls: type) -> type:
-        """Class decorator: register ``cls`` under its ``option_name``."""
+        """Class decorator: register ``cls`` under its ``option_name``.
+
+        Args:
+            cls: A :class:`StockGlobalFit` subclass with a non-empty
+                ``option_name``.
+
+        Returns:
+            type: ``cls`` unchanged (decorator form).
+
+        Raises:
+            ValueError: When ``option_name`` is empty or already registered.
+        """
         name = getattr(cls, "option_name", "")
         if not name:
             raise ValueError(f"{cls.__name__} needs a non-empty option_name to register.")
@@ -1108,7 +1667,25 @@ class StockRegistry:
         return sorted(self._classes)
 
     def get(self, option: str, *args, **kwargs) -> StockGlobalFit:
-        """Instantiate the stock fit registered under ``option``."""
+        """Instantiate the stock fit registered under ``option``.
+
+        Constructs a NEW instance from the class (env-backed field defaults
+        are read now), unlike calling a module-level default instance
+        (``erebor.gb_no_fg(...)``), which clones that instance.
+
+        Args:
+            option: Registered option name.
+            *args: Forwarded to the class constructor.
+            **kwargs: Forwarded to the class constructor (the knobs of
+                :class:`StockGlobalFit`).
+
+        Returns:
+            StockGlobalFit: The unbuilt fit.
+
+        Raises:
+            ValueError: For an unknown option name (the message lists the
+                available ones).
+        """
         try:
             cls = self._classes[option]
         except KeyError:

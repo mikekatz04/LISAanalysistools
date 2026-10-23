@@ -17,12 +17,18 @@ proposal (an eryn move) that runs inside a stage.
 ```
 Recipe
  └─ Stage   "gb_search"  kind="search"   ──▶ SearchRecipeStep
- │    ├─ Move "rj_prior_search"
+ │    ├─ Move "rj_fstat_search"
  │    └─ Move ...
  └─ Stage   "gb_pe"      kind="pe"        ──▶ PERecipeStep
-      ├─ Move "rj_prior"
-      └─ Move "rj_fstat_mcmc"
+      ├─ Move "rj_fstat_pe"
+      └─ Move "rj_prior_pe"
 ```
+
+(The production recipe, built by `scripts/fstat_proposal/run_combined_staged.py`
+on `erebor.all_sources`, is `gb_search_seed` x3 -> `source_search` ->
+`gb_search_1` -> `gb_search_2` -> `full_pe`, using the `gb_search` stage kind
+and the standalone `in_model*` moves; `docs/global-fit-navigation.md` section 2.2
+has it. This page covers the mechanics.)
 
 One concept per level, each with a required **`setup(ctx)`** hook run at
 materialization — there are no separate "spec" classes. Everything is
@@ -92,17 +98,20 @@ info-appended branch **must be targeted by at least one move**
 
 ## The three classes
 
-**`Move(name, branch=None, debug=None)`** — a move IS a proposal.
+**`Move(name, *, branch=None, debug=None, every=1)`** — a move IS a proposal.
+`every=N` runs it on every Nth iteration of its stage.
 
 | how you use it | what happens at `setup(ctx)` |
 |---|---|
-| `Move("rj_prior", branch="gb")` (or just the string `"rj_prior"` to `add_move`) | **stock lookup**: the variant's setup function built a move under this name; the base `setup` resolves it. |
+| `Move("rj_fstat_pe", branch="gb")` (or just the string `"rj_fstat_pe"` to `add_move`) | **stock lookup**: the variant's setup function built a move under this name; the base `setup` resolves it. |
 | subclass `Move`, override `setup(ctx)` | **custom construction**: build and return your eryn move from the live context (`ctx.acs`, `ctx.priors`, `ctx.curr`, …) — or return `None` to mean "`self` IS the runtime move" (then also implement `propose`). |
 | plain `fn(model, state)` to `add_move` | wrapped in a `FunctionMove` (which uses exactly the return-`None` convention). |
 | a constructed eryn move to `add_move` | wrapped privately; note a constructed move often holds arrays/device state, so the fit may stop being picklable — prefer the name/subclass paths. |
 
 `ctx` is a `MoveBuildContext(recipe, engine_info, curr, acs, priors, state,
-stock_moves, ntemps, nwalkers)`. `debug` (`bool` or options dict) is applied
+stock_moves, ntemps, nwalkers, layout, fanout, rank, state_local)`; the last
+four are the multi-rank context (filled from `curr`, all `None` in a
+single-process run). `debug` (`bool` or options dict) is applied
 via `move.set_debug(...)` at materialization and wins over the stage's.
 
 **`Stage(name, kind, moves, step_kwargs, combine_kwargs, debug)`**
@@ -110,7 +119,7 @@ via `move.set_debug(...)` at materialization and wins over the stage's.
 | field | meaning |
 |---|---|
 | `name` | unique stage name (e.g. `"gb_pe"`, `"main"`). |
-| `kind` | `"search"` \| `"pe"` \| `"rj"` — which runtime step class `setup` produces (`SearchRecipeStep` / `PERecipeStep` / `RJRecipeStep`), i.e. when the recipe advances past it. |
+| `kind` | `"search"` \| `"pe"` \| `"rj"` \| `"gb_search"` \| `"replica_pe"` — which runtime step class `setup` produces (`SearchRecipeStep` / `PERecipeStep` / `RJRecipeStep` / `SearchStageProfileStep` / `ReplicaPERecipeStep`), i.e. when the recipe advances past it. `gb_search` (the numbered GB search stages) is an `RJRecipeStep` subclass that also applies a per-stage GB search profile on entry and folds the per-(walker, band) RJ valve into its stopping rule; `replica_pe` is a `PERecipeStep` that ends when the large-scale metrics stop trending. |
 | `moves` | ordered moves — each entry is anything `add_move` accepts. |
 | `step_kwargs` | passed to the `RecipeStep` constructor (e.g. RJ plateau knobs). |
 | `combine_kwargs` | passed to the `GFCombineMove` that bundles the stage's moves (they propose together, sharing the analysis-container array). |
@@ -145,14 +154,15 @@ engine calls the variant's module-level `setup_recipe(...)` — the run's
    doing the true-point / prior seeding.
 2. **Builds the stock moves for exactly the names the recipe asks for**
    (`recipe.stock_names()`). GB names are forwarded to `build_gb_moves(...)` —
-   the GB *reference recipe* — steered by which names survived your edits; PSD
-   names go to `build_psd_moves`; single-source branches (`mbh_pe`, `emri_pe`,
-   `sobbh_pe`) use the per-branch move builders.
+   the GB *reference recipe* — steered by which names survived your edits; noise
+   names (psd / galfor / sgwb) go to `build_noise_moves` (`build_psd_moves` is a
+   deprecated wrapper of it); single-source branches (`mbh_pe`, `emri_pe`,
+   `sobbh_pe`) use the per-branch move builders
+   (`stock/erebor/source_runtime.build_source_moves`).
 3. **Calls `recipe.setup(ctx)`**: every move's `setup(ctx)` runs (stock lookup
    / custom construction / function-move binding); each stage's moves are
-   wrapped in one `GFCombineMove`; and each stage registers its
-   `SearchRecipeStep` / `PERecipeStep` / `RJRecipeStep` on the recipe under the
-   stage's name.
+   wrapped in one `GFCombineMove`; and each stage registers its runtime step
+   (the class its `kind` selects) on the recipe under the stage's name.
 
 **At run time** the `Recipe` is the sampler's stopping/advance controller: after
 each iteration it asks the *current* step whether to move on, so a
@@ -165,15 +175,18 @@ inside the generator.)
 
 | name | what it is |
 |---|---|
-| `rj_prior`, `rj_fstat_mcmc`, `rj_refit` | GB reversible-jump proposals (prior-draw births, F-stat MCMC births, GMM-refit births). The **in-model** parameter updates happen *inside* these moves — `fit.gb.num_repeat_proposals` repeats per picked source per iteration. |
-| `rj_prior_search`, `rj_fstat_mcmc_search`, `rj_refit_search` | the same proposals configured for a `kind="search"` stage. |
-| `psd_pe`, `psd_search` | instrumental-noise sampling (`all_sources` / `noise_only`). |
-| `mbh_pe`, `emri_pe`, `sobbh_pe` | single-source stretch/RJ moves (`all_sources` / `full_year_combined`). |
+| `rj_fstat_pe`, `rj_fstat_pe_residual`, `rj_prior_pe`, `rj_warm_pe`, `rj_fstat_mcmc`, `rj_refit` | GB reversible-jump proposals for PE stages: F-stat grid births (GB-free galaxy grid / live-residual grid), prior-draw births, warm-start mixture births (needs `GB_WARM_START_COMPONENTS`), F-stat MCMC births, GMM-refit births (only with a refit file). The **in-model** parameter updates happen *inside* these moves — `fit.gb.num_repeat_proposals` repeats per picked source per iteration. |
+| `rj_fstat_search`, `rj_prior_removal`, `rj_warm_search`, `rj_fstat_mcmc_search`, `rj_refit_search` | the search-stage GB proposals. `rj_prior_search` / `rj_prior` are legacy aliases of `rj_fstat_search` / `rj_fstat_pe`, resolved at build time only (a recipe edit by the old name finds nothing). |
+| `in_model`, `in_model_fstat`, `in_model_removal` (+ `in_model_replace`, retired: composed only with `GB_SEARCH_IN_MODEL_REPLACE=1`) | standalone GB in-model passes (search stages; the per-band group rule). Built only under `GB_MODE=search` with `GB_SEARCH_IN_MODEL=1`. |
+| `gb_ridge_gibbs`, `vgb_pe`, `vgb_ridge_gibbs` | GB ridge Gibbs move; the VGB in-model move and its ridge Gibbs move. |
+| `psd_pe`, `psd_search`, `galfor_pe`, `galfor_search` (+ `sgwb_*`) | noise sampling (`all_sources` / `noise_only`), one move per noise branch. |
+| `mbh_pe`, `emri_pe`, `sobbh_pe` | single-source per-leaf PE moves on `ResidualAddOneRemoveOneMove` (`all_sources` / `full_year_combined`). |
 
-The key implication: **in-model parameter updates are not a separate move.** For
+The key implication: **in-model parameter updates ride inside the RJ moves.** For
 GB they live *inside* the RJ moves and repeat `num_repeat_proposals` times per
-picked source per iteration — so a GB PE stage with just `rj_prior` already does
-both births/deaths and in-model refinement.
+picked source per iteration — so a GB PE stage with just `rj_fstat_pe` (the
+`gb_no_fg` default) already does both births/deaths and in-model refinement.
+The standalone `in_model*` moves are extra polish passes the search stages add.
 
 ## Worked examples
 
@@ -191,8 +204,9 @@ print(fit.recipe.move_names())         # flat list of every move name
 ### Add / remove a move by name (with placement)
 
 ```python
-# add the F-stat RJ proposal right after the prior one …
-fit.add_move("rj_fstat_mcmc", branch="gb", stage="gb_pe", after="rj_prior")
+# add the F-stat MCMC RJ proposal right after the default F-stat grid one …
+# (gb_no_fg's default recipe: one stage gb_pe holding rj_fstat_pe)
+fit.add_move("rj_fstat_mcmc", branch="gb", stage="gb_pe", after="rj_fstat_pe")
 print("after add:", fit.recipe.move_names())
 
 # … then take it back out
@@ -221,7 +235,7 @@ demo.recipe.add_stage(
     Stage(
         name="gb_search",
         kind="search",
-        moves=[Move("rj_prior_search", branch="gb")],
+        moves=[Move("rj_fstat_search", branch="gb")],
         combine_kwargs=dict(verbose=True, share_temperature_control=False),
     ),
     before="gb_pe",     # run search first, then the existing PE stage
@@ -263,19 +277,20 @@ plain-function path, see "The simplest entrances first" above.
 - **Stage = phase of the run; move = one proposal within it.** Two stages in
   order = a pipeline (search then PE); two moves in one stage = both proposals
   applied each iteration of that phase.
-- **Stock names are indirection, not instances.** `Move("rj_prior")` carries no
+- **Stock names are indirection, not instances.** `Move("rj_fstat_pe")` carries no
   move object — the variant's `setup_recipe` builds it at run start. That is
   what keeps the pre-build fit cheap and picklable.
 - **`kind` picks the runtime step** (`search`/`pe`/`rj`) and therefore the
   stopping behavior; `step_kwargs` tune that step, `combine_kwargs` tune how the
   stage's moves are bundled.
 - **In-model updates ride inside the GB RJ moves** (`num_repeat_proposals`), so
-  you rarely add a separate "in-model" move for GB.
+  a PE stage rarely needs a separate "in-model" move for GB (the search stages
+  add the standalone `in_model*` passes).
 - **The in-model proposals of `mbh_pe` / `emri_pe` / `sobbh_pe` / `psd_pe` /
   `galfor_pe` (and GB's in-model blocks) are shaped by an information matrix**
   whose route is a knob, not a move: `{BRANCH}_EIGEN_INFO` for the eigen
   tables, `SIGHET_INFOMAT_ENGINE` / `GB_CHOL_CACHE` for GB. See
-  [`docs/eigen-info-routes.md`](eigen-info-routes.md).
+  [`docs/eigen-info-routes.md`](https://github.com/lisa-analysis-tools/lisa-analysis-tools/blob/dev/docs/eigen-info-routes.md).
 - **Edit freely, validate early.** Duplicate names, empty stages, bad `kind`,
   and conflicting placement all raise at edit/materialize time with actionable
   messages.

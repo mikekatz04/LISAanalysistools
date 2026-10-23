@@ -49,7 +49,15 @@ Exactness (the argument the add/remove move's scheduling relies on):
 
 ``mode_frac`` and the stack weight are the branch knobs ``{BRANCH}_DE_JUMP_MODE_FRAC``
 (default 0.5) and ``{BRANCH}_DE_JUMP_MIX`` (default 0 = not in the stack);
-see ``lisatools.globalfit.stock.erebor.common.make_default_inner_moves``.
+see :func:`~lisatools.globalfit.stock.erebor.common.make_default_inner_moves`,
+which builds this move with the stack's eigen move as its ``fallback`` and
+gives the eigen move the remaining ``1 - mix`` weight. The 9mo / 12mo
+launchers set ``EMRI_DE_JUMP_MIX=0.2``, ``MBH_DE_JUMP_MIX=0.1``,
+``SOBBH_DE_JUMP_MIX=0.2`` and ``EMRI_DE_JUMP_MODE_FRAC=0.5`` (the MBH and
+SOBBH mode fractions stay at the 0.5 code default; ``gamma_sigma`` is never
+set and stays 0.1). The walker-group split, the partner pool and the
+per-split installation (:meth:`WalkerDifferenceJumpMove.set_partners`) live
+in :class:`~lisatools.globalfit.moves.addremovemove.ResidualAddOneRemoveOneMove`.
 """
 
 from __future__ import annotations
@@ -67,6 +75,7 @@ KIND_FALLBACK, KIND_MODE, KIND_SCALED = 0, 1, 2
 
 
 def _xp_of(arr):
+    """Return ``cupy`` when ``arr`` is a ``cupy.ndarray`` (and cupy imports), else ``numpy``."""
     try:
         import cupy as cp  # noqa: F401
     except (ImportError, ModuleNotFoundError):
@@ -77,22 +86,55 @@ def _xp_of(arr):
 class WalkerDifferenceJumpMove(MHMove):
     """Symmetric cross-walker difference jump; inactive rows take ``fallback``.
 
-    Args:
-        fallback: The move whose proposal the rows of INACTIVE walkers take
-            (the stack's eigen move; its tables are installed by the
-            add/remove move as for any eigen inner move). Required.
-        mode_frac (float): Probability, per active row, of ``gamma = 1``
-            (the mode jump); in ``[0, 1]``.
-        gamma_sigma (float): Relative spread of the scaled ``gamma``,
-            ``2.38 / sqrt(2 d) x N(1, gamma_sigma)``; ``>= 0``.
-        **kwargs: Forwarded to :class:`eryn.moves.MHMove` (``periodic``, ...).
-
     The add/remove move installs, per leaf visit, the active rows and the
-    partner pool with :meth:`set_partners` (``clear_partners`` = every row
+    partner pool with :meth:`set_partners` (:meth:`clear_partners` = every row
     takes the fallback). After each :meth:`get_proposal` the per-row
     bookkeeping is in ``last_kind[name]`` (0 fallback, 1 mode jump, 2 scaled
     jump) and ``last_pick[name]`` (the fallback's picked eigen axis, -1 for a
-    jump row, -2 when the fallback does not report one).
+    jump row, -2 when the fallback does not report one). Setting
+    :attr:`periodic` also hands the periodic container to the fallback when
+    the fallback has none.
+
+    Args:
+        fallback (eryn.moves.Move): The move whose proposal the rows of
+            INACTIVE walkers take (the stack's eigen move,
+            :class:`~eryn.moves.EigenAxisMove` or
+            :class:`~lisatools.sampling.moves.eigenjumpmix.EigenAxisJumpMixMove`;
+            its tables are installed by the add/remove move as for any eigen
+            inner move). Required; it must have a ``get_proposal`` method.
+        mode_frac (float, optional): Probability, per active row, of
+            ``gamma = 1`` (the mode jump); in ``[0, 1]``. Default ``0.5``.
+        gamma_sigma (float, optional): Relative spread of the scaled
+            ``gamma``, ``2.38 / sqrt(2 d) x N(1, gamma_sigma)``; finite and
+            ``>= 0``. Default ``0.1``.
+        **kwargs: Forwarded to :class:`eryn.moves.MHMove` (``periodic``, ...).
+
+    Raises:
+        ValueError: ``fallback`` is ``None`` or has no callable
+            ``get_proposal``, ``mode_frac`` is outside ``[0, 1]``, or
+            ``gamma_sigma`` is negative or not finite.
+
+    Attributes:
+        fallback (eryn.moves.Move): The fallback move.
+        mode_frac (float): The mode-jump probability.
+        gamma_sigma (float): The relative spread of the scaled ``gamma``.
+        last_kind (dict): ``{branch: np.ndarray}`` of per-row kind codes
+            (``KIND_FALLBACK`` 0, ``KIND_MODE`` 1, ``KIND_SCALED`` 2), in the row
+            order of the alive leaves.
+        last_pick (dict): ``{branch: np.ndarray}`` of per-row eigen axes (see
+            above).
+
+    Example:
+        >>> import numpy as np
+        >>> from eryn.moves import EigenAxisMove
+        >>> from lisatools.sampling.moves.walkerdiffjump import WalkerDifferenceJumpMove
+        >>> move = WalkerDifferenceJumpMove(EigenAxisMove(mode="axis"), mode_frac=0.5)
+        >>> move.describe()
+        'mode frac 0.50, fallback EigenAxisMove'
+        >>> active = np.array([[True, False]])
+        >>> move.set_partners("emri", active, np.random.rand(4, 3))
+        >>> move.partner_spec("emri")[1].shape
+        (4, 3)
     """
 
     def __init__(self, fallback, mode_frac=0.5, gamma_sigma=0.1, **kwargs):
@@ -115,6 +157,7 @@ class WalkerDifferenceJumpMove(MHMove):
     # ---- periodicity reaches the fallback too ---------------------------------
     @property
     def periodic(self):
+        """eryn.utils.PeriodicContainer or None: Periodic container (passed on to the fallback)."""
         return getattr(self, "_periodic", None)
 
     @periodic.setter
@@ -125,6 +168,13 @@ class WalkerDifferenceJumpMove(MHMove):
             fb.periodic = periodic
 
     def _periodic_cols(self, name):
+        """Return the periodic column indices and periods of branch ``name``.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: ``(cols, periods)``, int and float
+            arrays of equal length; both empty when the branch has no periodic
+            columns or no periodic container is set.
+        """
         per = self.periodic
         inds = getattr(per, "inds_periodic", None)
         periods = getattr(per, "periods", None)
@@ -137,10 +187,20 @@ class WalkerDifferenceJumpMove(MHMove):
     def set_partners(self, name, active, partners):
         """Install branch ``name``'s jump spec for the coming proposals.
 
-        ``active``: boolean ``(ntemps, nwalkers)`` over the (temperature,
-        walker) rows of the coordinates the next :meth:`get_proposal` sees
-        (``True`` = that row jumps). ``partners``: ``(P, ndim)`` partner
-        states, ``P >= 2``; frozen until the next call.
+        Both arrays are copied to the host; the spec stays frozen until the
+        next :meth:`set_partners` or :meth:`clear_partners` for ``name``.
+
+        Args:
+            name (str): Branch name.
+            active (array-like): Boolean ``(ntemps, nwalkers)`` over the
+                (temperature, walker) rows of the coordinates the next
+                :meth:`get_proposal` sees (``True`` = every alive leaf of that
+                row jumps).
+            partners (array-like): ``(P, ndim)`` partner states, ``P >= 2``, in
+                the same coordinates as the proposed rows.
+
+        Raises:
+            ValueError: ``partners`` is not 2-D or has fewer than two rows.
         """
         partners = np.array(partners, dtype=float, copy=True)
         if partners.ndim != 2 or partners.shape[0] < 2:
@@ -148,20 +208,46 @@ class WalkerDifferenceJumpMove(MHMove):
         self._partners[name] = (np.asarray(active, dtype=bool).copy(), partners)
 
     def clear_partners(self, name=None):
-        """No jump spec (every row takes the fallback) for ``name`` (``None``: all)."""
+        """Remove the jump spec, so every row takes the fallback.
+
+        Args:
+            name (str, optional): Branch name; ``None`` (default) clears every
+                branch.
+        """
         if name is None:
             self._partners = {}
         else:
             self._partners.pop(name, None)
 
     def partner_spec(self, name):
-        """``(active, partners)`` installed for ``name``, or ``None``."""
+        """Return the installed spec of branch ``name``.
+
+        Args:
+            name (str): Branch name.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray] or None: ``(active, partners)`` as
+            stored by :meth:`set_partners`, or ``None`` when none is installed.
+        """
         return self._partners.get(name)
 
     # ---- the proposal ---------------------------------------------------------
     def _draws(self, random, n, npart, ndim):
-        """``(i, j, gamma, mode)`` for ``n`` rows: an ordered pair of distinct
-        partner indices drawn uniformly, and the jump scale."""
+        """Draw the partner pair and the jump scale of ``n`` rows.
+
+        Args:
+            random (numpy.random.Generator or numpy.random.RandomState): Host
+                random stream.
+            n (int): Number of jumping rows (may be 0; the calls are made anyway).
+            npart (int): Size ``P`` of the partner pool.
+            ndim (int): Parameters per row (sets ``2.38 / sqrt(2 ndim)``).
+
+        Returns:
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+            ``(i, j, gamma, mode)``, each of shape ``(n,)``: an ordered pair of
+            distinct partner indices drawn uniformly, the jump scale, and the
+            boolean mode-jump flag (``gamma == 1``).
+        """
         if hasattr(random, "integers"):          # numpy Generator
             i = np.asarray(random.integers(npart, size=n))
             j = np.asarray(random.integers(npart - 1, size=n))
@@ -180,11 +266,36 @@ class WalkerDifferenceJumpMove(MHMove):
 
     def get_proposal(self, branches_coords, random, branches_inds=None,
                      supps=None, branch_supps=None, **kwargs):
-        """The fallback's proposal, with the active rows replaced by jumps.
+        """Return the fallback's proposal, with the active rows replaced by jumps.
 
         See the module docstring for the proposal and the exactness argument.
-        Returns ``(q, factors)``; ``factors`` is the fallback's on its rows
-        and 0 on the jump rows (the jump is symmetric).
+        The fallback always runs first on every row; then, per branch with an
+        installed spec, every alive leaf of an active ``(temperature, walker)``
+        row is moved from its CURRENT point (``branches_coords``, not the
+        fallback's proposal) by ``gamma (x_a - x_b)``. Fills
+        :attr:`last_kind` and :attr:`last_pick`.
+
+        Args:
+            branches_coords (dict): ``{branch: xp.ndarray}`` of shape
+                ``(ntemps, nwalkers, nleaves_max, ndim)``.
+            random (numpy.random.Generator or numpy.random.RandomState): Host
+                random stream.
+            branches_inds (dict, optional): ``{branch: bool array}`` of shape
+                ``(ntemps, nwalkers, nleaves_max)``; ``None`` means every leaf.
+            supps (optional): Forwarded to the fallback.
+            branch_supps (dict, optional): Forwarded to the fallback.
+            **kwargs: Forwarded to the fallback's ``get_proposal``.
+
+        Returns:
+            tuple[dict, np.ndarray]: ``(q, factors)``: the proposed coordinates
+            (the fallback's array module) and the ``(ntemps, nwalkers)`` factors,
+            the fallback's on its rows and 0 on the jump rows (the jump is
+            symmetric).
+
+        Raises:
+            ValueError: An installed ``active`` mask does not match
+                ``(ntemps, nwalkers)``, or the partners' ``ndim`` differs from
+                the branch's.
         """
         q, factors = self.fallback.get_proposal(
             branches_coords, random, branches_inds=branches_inds, supps=supps,
@@ -243,5 +354,9 @@ class WalkerDifferenceJumpMove(MHMove):
         return q, factors
 
     def describe(self) -> str:
-        """``"mode frac 0.50, fallback EigenAxisJumpMixMove"`` (the stack log suffix)."""
+        """Return the inner-move stack log suffix.
+
+        Returns:
+            str: e.g. ``"mode frac 0.50, fallback EigenAxisJumpMixMove"``.
+        """
         return f"mode frac {self.mode_frac:.2f}, fallback {type(self.fallback).__name__}"

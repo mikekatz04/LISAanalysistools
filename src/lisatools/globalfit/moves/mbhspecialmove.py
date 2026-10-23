@@ -1,4 +1,19 @@
-"""MBH-specific MCMC move including an optional time-windowed search step."""
+"""Legacy MBH-specific moves, including an optional time-windowed search step.
+
+Holds :class:`MBHSpecialMove` (add/remove move scored through a BBHx heterodyned
+likelihood, with a one-time sangria-era AET windowed MBH search in ``setup``),
+:class:`TDMBHSpecialMove` (the DCGA time-domain variant) and the search helpers
+:func:`search_likelihood_wrap` / :func:`update_fn`.
+
+Not on the production path: no recipe builder constructs either class at any
+``MBH_LIKELIHOOD`` value. The stock MBH branch runs
+:class:`~lisatools.globalfit.moves.mbhbatchedmove.MBHBatchedLikeMove`
+(``MBH_LIKELIHOOD=batched``, the 9mo / 12mo runs) or the base
+:class:`~lisatools.globalfit.moves.addremovemove.ResidualAddOneRemoveOneMove`
+(``full``). The classes stay exported from :mod:`lisatools.globalfit.moves` and
+documented in ``docs/source/user/globalfitmoves.rst``; the maintained copy of the
+windowed search lives in :mod:`lisatools.globalfit.mbhsearch`.
+"""
 
 from __future__ import annotations
 
@@ -48,6 +63,7 @@ if TYPE_CHECKING:
     from ...sources.bbh import PhenomTHMTDIWaveform, PhenomTHMTDIOnFlyWaveform
 
 
+# TODO check: keep/remove/document -- only caller is MBHSpecialMove.setup (a class no builder constructs)
 def update_fn(i, last_sample, sampler):
     """Search-mode update hook that copies the cold chain into the hottest chain."""
     logger.info("max logl: %s", last_sample.log_like.max())
@@ -56,6 +72,7 @@ def update_fn(i, last_sample, sampler):
     last_sample.log_prior[-1] = last_sample.log_prior[0]
 
 
+# TODO check: keep/remove/document -- only caller is MBHSpecialMove.setup (a class no builder constructs); the dev search script uses the copy in globalfit/mbhsearch.py
 def search_likelihood_wrap(
     x,
     wave_gen,
@@ -117,10 +134,9 @@ def search_likelihood_wrap(
 
     return ll
 
+# TODO check: keep/remove/document -- no builder or caller in src/scripts/tests/LATW (export + rst only); built on the deprecated MultiGPUResidualAddRemoveMove alias
 class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
-    """
-    
-    """
+    """DCGA time-domain MBH add/remove move (legacy; built by no recipe builder)."""
     def __init__(
         self, 
         dcga: DomainComputationGroupArray,
@@ -195,6 +211,7 @@ class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
 
 
 
+# TODO check: keep/remove/document -- no recipe builder constructs it at any MBH_LIKELIHOOD (production is MBHBatchedLikeMove); only tests/test_walkerfanout_mixin.py imports it
 class MBHSpecialMove(
     LISAToolsParallelModule, ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove
 ):

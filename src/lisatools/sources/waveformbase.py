@@ -4,10 +4,30 @@
 # pylint: disable=too-many-instance-attributes
 # pylint: disable=too-many-instance-attributes, too-few-public-methods, too-many-locals
 # pylint: disable=too-many-positional-arguments, too-many-statements, line-too-long
-"""
-WaveformBase module
+"""Base classes for source waveform generators, including the LISA response step.
 
-This module defines the base wrappers for waveform generation, including the application of the LISA response.
+Classes:
+
+- :class:`AETTDIWaveform`, :class:`SNRWaveform`: minimal interfaces (``dt``, ``f_arr``,
+  ``df``) for the simple generators the calculation controllers
+  (:mod:`lisatools.sources.utils`) consume.
+- :class:`TDWaveformBase`: a time-domain generator that returns TDI channels
+  (:meth:`~TDWaveformBase.compute_tdi_channels`) and projects them onto the analysis domain
+  (FD, STFT, or WDM through a :class:`~lisatools.domains.WDMSettings` target).
+- :class:`TDPyResponseWaveformBase`: applies the LISA response with
+  :class:`~lisatools.response.directresponse.pyResponseTDI` to ``(h+, hx)`` from
+  ``wave_gen`` / ``wave_gen_batch``. Base of the MBH
+  :class:`~lisatools.sources.bbh.waveform.PhenomTHMTDIWaveform` family, which the 9mo / 12mo
+  runs use (``MBH_LIKELIHOOD=batched``: residual rebuilds through
+  :meth:`~TDWaveformBase.get_signals_for_residuals`, scoring through the grid-aligned
+  subclasses and :class:`~lisatools.sources.batching.MBHWindowedWDMSignalGen`).
+- :class:`TDTDIOnFlyWaveformBase`: the TDI-on-the-fly variant
+  (:class:`~lisatools.response.tdionfly.TDTDIonTheFly` on per-mode amplitude / phase). Base of
+  :class:`~lisatools.sources.bbh.waveform.PhenomTHMTDIOnFlyWaveform`; the MBH
+  ``use_tdionfly`` path is off in production.
+
+``DEBUG_MODE`` (module constant, default ``False``) turns on the pre-response NaN / orbit-span
+checks in :meth:`TDPyResponseWaveformBase._apply_response`.
 """
 from __future__ import annotations
 
@@ -54,7 +74,14 @@ logger = logging.getLogger(__name__)
 DEBUG_MODE = False
 
 class AETTDIWaveform(ABC):
-    """Base class for an AET TDI Waveform."""
+    """Base class for an AET TDI Waveform.
+
+    Interface for the generators the calculation controllers
+    (:class:`~lisatools.sources.utils.CalculationController`) call: a subclass is callable on
+    its parameters, returns the TDI channels, and exposes :attr:`dt`, :attr:`f_arr` and
+    :attr:`df` (all ``None`` here). Subclasses: :class:`~lisatools.sources.gb.GBAETWaveform`,
+    :class:`~lisatools.sources.emri.EMRITDIWaveform`.
+    """
     #: Whether this generator can evaluate a BATCH of independent parameter
     #: sets in one call, returning one result per set.
     #:
@@ -66,7 +93,7 @@ class AETTDIWaveform(ABC):
     #:
     #: A subclass sets this True only if every row of a batch is guaranteed
     #: to share the sub-sample alignment ``pyResponseTDI`` requires; see
-    #: :class:`~lisatools.sources.bbh.waveform.GridAlignedPhenomTHMTDIWaveform`.
+    #: :class:`~lisatools.sources.bbh.gridaligned.GridAlignedPhenomTHMTDIWaveform`.
     supports_batch: bool = False
 
     @property
@@ -86,7 +113,11 @@ class AETTDIWaveform(ABC):
 
 
 class SNRWaveform(ABC):
-    """Base class for a waveform built in a simpler fashion for SNR calculations."""
+    """Base class for a waveform built in a simpler fashion for SNR calculations.
+
+    Same interface as :class:`AETTDIWaveform` (:attr:`dt`, :attr:`f_arr`, :attr:`df`, all
+    ``None`` here). Subclass: :class:`~lisatools.sources.bbh.BBHSNRWaveform`.
+    """
 
     @property
     def dt(self) -> float:
@@ -105,29 +136,59 @@ class SNRWaveform(ABC):
 
 
 class TDWaveformBase(ABC, LISAToolsParallelModule):
-    """
-    Base class for a waveform built in the time domain.
+    """Base class for a waveform built in the time domain.
+
+    A subclass implements :meth:`compute_tdi_channels` (absolute times and TDI channels). This
+    base adds the projection onto the analysis domain:
+
+    - :meth:`get_signals_for_residuals` (and :meth:`_td_to_output_domain`) return one
+      :class:`~lisatools.domains.DomainBase` per source. With a
+      :class:`~lisatools.domains.WDMSettings` ``output_domain_settings`` (the production
+      case) the channels are placed on the full data grid, Tukey-windowed like the data and
+      transformed with ``TDSignal.transform``.
+    - :meth:`__call__` returns the raw ``(signal, start_freqs[, start_times])`` arrays of
+      :meth:`fft` / :meth:`stft` on a common padded grid (FD and STFT targets only).
+
+    The analysis domain is WDM when ``output_domain_settings`` is given, STFT when ``stft_dt``
+    is given, else FD (see :attr:`analysis_domain`).
 
     Args:
-    waveform_t0: Initial time in seconds.
-    dt: Time step in seconds.
-    data_t0: Optional initial time for the data. If None, defaults to waveform_t0.
-            If provided, the output time arrays will be shifted so that the first sample corresponds to a integer multiple of dt after data_t0.
-            This allows for proper alignment of the waveform with an external time grid (e.g. from a loader) when data_t0 is set to the same reference time as the loader.
-    response_kwargs: Keyword arguments for the TDI response.
-    buffer_time: Time in seconds to add as buffer to the TDI response to ensure proper calculation at the beginning and end of the signal.
-    tukey_alpha: Alpha parameter for the Tukey window applied to the output signal. Only applied if settings_class is not None.
-    force_uniform_stft: If True, batched calls in STFT mode will force all signals onto a common STFT grid
-        spanning the union of all source time ranges. If False (default), each source retains its natural
-        STFT grid derived from its own time range. Only relevant for batched calls with output_domain='STFT'.
-    output_domain_settings: Optional :class:`DomainSettingsBase` instance giving
-        the analysis-domain target directly (sprint rule: domains are
-        communicated by settings objects, not strings). Currently supports
-        :class:`WDMSettings` — the per-source output of
-        :meth:`get_signals_for_residuals` is placed on the full data grid and
-        transformed through the canonical ``TDSignal.transform`` chain. FD and
-        STFT targets continue to be configured via ``stft_dt`` / the frequency
-        bounds until the domain plumbing is unified.
+        waveform_t0: Epoch [s] the sampled merger / reference times are measured from; the
+            subclasses add it to the waveform's own time axis to get absolute times.
+        data_td_settings: :class:`~lisatools.domains.TDSettings` of the data grid (``N``,
+            ``dt``, ``t0`` = the absolute data start). Defines :attr:`dt`, :attr:`Tobs` and
+            :attr:`data_t0`.
+        tdi_generation: TDI generation string for :class:`~lisatools.response.tdiconfig.TDIConfig`
+            (``"1st generation"`` or ``"2nd generation"``). Default ``"2nd generation"``.
+        tdi_channels: TDI channel set. Default ``"XYZ"``.
+        sampling_frequency: Sampling frequency [Hz] handed to the response. Default ``0.4``.
+        orbits: :class:`~lisatools.detector.Orbits` for the response. ``None`` builds an
+            :class:`~lisatools.detector.EqualArmlengthOrbits` on ``force_backend`` and logs a
+            warning; production passes the run's unequal-arm orbits.
+        tukey_alpha: Alpha of the Tukey window applied before every domain transform
+            (``0`` skips the window on the WDM path). Default ``0.01``.
+        stft_dt: STFT segment duration [s]; must be an integer multiple of ``dt`` and
+            ``>= dt``. ``None`` (default) means no STFT target.
+        freq_min: Lower frequency bound [Hz] of the FD / STFT output. Default ``1e-5``.
+        freq_max: Upper frequency bound [Hz] of the FD / STFT output. Default ``1.0``.
+        fft_batch_size: Sources per ``rfft`` call in :meth:`fft` (bounds memory). Default ``1``.
+        output_domain_settings: Analysis-domain target as a settings object (domains are never
+            communicated by string). Only :class:`~lisatools.domains.WDMSettings` is supported;
+            FD and STFT targets are set by ``stft_dt`` and the frequency bounds.
+        force_backend: Backend name (``"cpu"``, ``"cuda12x"``, ``"cuda13x"``, ...). Default
+            ``"cpu"``.
+
+    Attributes:
+        tdi_config (TDIConfig): Built from ``tdi_generation`` on ``force_backend``.
+        domain_settings (TDSettings): ``data_td_settings``.
+        nperseg (int | None): Samples per STFT segment (``None`` without ``stft_dt``).
+        transform_to_domain (callable): :meth:`stft` when ``stft_dt`` is set, else :meth:`fft`.
+
+    Raises:
+        NotImplementedError: If ``output_domain_settings`` is not a
+            :class:`~lisatools.domains.WDMSettings`.
+        AssertionError: If both ``stft_dt`` and ``output_domain_settings`` are given, or
+            ``stft_dt`` is smaller than or not a multiple of ``dt``.
     """
     #: Whether this generator can evaluate a BATCH of independent parameter
     #: sets in one call, returning one result per set.
@@ -140,7 +201,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
     #:
     #: A subclass sets this True only if every row of a batch is guaranteed
     #: to share the sub-sample alignment ``pyResponseTDI`` requires; see
-    #: :class:`~lisatools.sources.bbh.waveform.GridAlignedPhenomTHMTDIWaveform`.
+    #: :class:`~lisatools.sources.bbh.gridaligned.GridAlignedPhenomTHMTDIWaveform`.
     supports_batch: bool = False
 
     def __init__(
@@ -219,7 +280,10 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
     @property
     def wrapper_kwargs(self) -> dict:
-        """Dictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
+        """Constructor keyword arguments that rebuild this generator (reproducibility, debugging).
+
+        ``stft_dt`` is reconstructed as ``nperseg * dt``.
+        """
         return {
             "waveform_t0": self.waveform_t0,
             "data_td_settings": self.domain_settings,
@@ -239,37 +303,42 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
     @property
     def force_backend(self) -> str:
-        """Name of the backend to be passed to other classes."""
+        """Short backend name (``"cpu"``, ``"cuda12x"``, ...) handed to the classes built here."""
         return self.backend_name.split("_")[-1]
 
     @property
     def xp(self) -> ArrayModule:
-        """Array module used for calculations."""
+        """Array module used for calculations (numpy or cupy, following the backend)."""
         return self.backend.xp
 
     @property
     def tdi_buffer_time(self) -> float:
-        """Buffer time in seconds to ensure proper TDI response calculation at the boundaries."""
+        """Margin [s] for the response's retarded reads at the window edges (fixed ``600.0``).
+
+        Covers the SSB-to-spacecraft projection (``<~ 500 s``) plus the TDI arm delays; used for
+        the pre-data crop in :meth:`TDPyResponseWaveformBase._apply_response` and the spline
+        padding of :class:`TDTDIOnFlyWaveformBase`.
+        """
         return 600.0
 
     @property
     def dt(self):
-        """Time step in seconds."""
+        """float: Time step in seconds (``data_td_settings.dt``)."""
         return self.domain_settings.dt
 
     @property
     def Tobs(self):
-        """Observation time in seconds."""
+        """float: Observation time in seconds (``N * dt`` of the data grid)."""
         return self.domain_settings.N * self.domain_settings.dt
 
     @property
     def data_t0(self):
-        """Start time of the data in seconds."""
+        """float: Absolute start time of the data in seconds (``data_td_settings.t0``)."""
         return self.domain_settings.t0
 
     @property
     def stft_t_arr(self):
-        """Time array for the STFT segments, if applicable."""
+        """Start times of the STFT segments (every ``nperseg``-th data time), or ``None``."""
         if self.nperseg:
             return self.domain_settings.t_arr[:: self.nperseg]
         else:
@@ -277,17 +346,17 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
     @property
     def data_times_array(self):
-        """Complete time array on which the data live."""
+        """Complete absolute time array of the data grid (``data_td_settings.t_arr``)."""
         return self.domain_settings.t_arr
 
     @property
     def orbits(self):
-        """Orbits object for on-the-fly response generation."""
+        """:class:`~lisatools.detector.Orbits` used by the response."""
         return self._orbits
 
     @orbits.setter
     def orbits(self, orbits: Orbits):
-        """Set the Orbits object."""
+        """Set the orbits; ``None`` builds ``EqualArmlengthOrbits`` and logs a warning."""
 
         if orbits is None:
             # Runtime import: detector is only imported under TYPE_CHECKING
@@ -301,7 +370,8 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
     @property
     def analysis_domain(self) -> str:
-        """The domain in which the waveform is transformed for likelihood evaluation. Currently 'STFT', 'FD', or 'WDM' (settings-object target)."""
+        """str: Analysis domain of the output: ``"WDM"`` (``output_domain_settings`` given),
+        ``"STFT"`` (``stft_dt`` given) or ``"FD"``."""
         if isinstance(self.output_domain_settings, WDMSettings):
             return "WDM"
         if self.nperseg:
@@ -327,33 +397,50 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
     def compute_tdi_channels(
         self, *args, **kwargs
     ) -> Tuple[NDArrayLike, NDArrayLike]:
-        """Time domain TDI channels computation. The output must be a tuple of (times, channels), where `times` can be a 1D array of shape (num_times,) or a 2D array of shape (num_bin, num_times) for batched generation, and `channels` is the corresponding TDI response with shape (num_channels, num_times) or (num_bin, num_channels, num_times) respectively."""
+        """Compute the time-domain TDI channels (implemented by subclasses).
+
+        Returns:
+            tuple: ``(times, channels)``. ``times`` holds absolute times [s], shape
+            ``(num_times,)`` for one source or ``(num_bin, num_times)`` for a batch;
+            ``channels`` is the TDI response, shape ``(num_channels, num_times)`` or
+            ``(num_bin, num_channels, num_times)``.
+
+        Raises:
+            NotImplementedError: Always, in the base class.
+        """
 
         raise NotImplementedError("compute_tdi_channels method must be implemented in subclass.")
 
     def get_grid_time(self, times: NDArrayLike) -> NDArrayLike:
-        """
-        For a given array of times, compute the closest points on the grid defined by the data time step.
+        """Round times to the nearest point of the data lattice ``data_t0 + k * dt``.
 
         Args:
-            times (Array): Array of times to be projected on the grid. Shape: (num_times,).
+            times: Absolute times [s], shape ``(num_times,)``.
 
         Returns:
-            Times on the target grid.  Shape: (num_times,).
+            xp.ndarray: The lattice times, same shape.
         """
         dt = self.dt
         t0 = self.data_t0
         return t0 + self.xp.round((times - t0) / dt) * dt
 
     def get_output_settings(self, times: NDArrayLike) -> DomainSettingsBase:
-        """
-        Get the settings for the output domain based on the evaluation times and the chosen analysis domain (STFT or FD).
+        """Output-domain settings for the FD or STFT target.
+
+        STFT: :func:`~lisatools.domains.get_stft_settings` on ``times`` with segment length
+        ``nperseg * dt`` and the frequency bounds. FD: :class:`~lisatools.domains.FDSettings`
+        of the full data grid (``N // 2 + 1`` bins, ``df = 1 / (N dt)``) with the frequency
+        bounds; ``times`` is unused.
 
         Args:
-            times (Array): Array of evaluation times. Shape: (num_times,).
+            times: Evaluation times [s], shape ``(num_times,)``.
 
         Returns:
             DomainSettingsBase: The settings for the output domain.
+
+        Raises:
+            NotImplementedError: For the WDM analysis domain (handled in
+                :meth:`_td_to_output_domain`).
         """
         if self.analysis_domain == "STFT":
             return get_stft_settings(
@@ -378,14 +465,21 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
     def find_bin_edges(
         self, times: NDArrayLike
     ) -> Tuple[NDArrayLike, NDArrayLike]:
-        """
-        For a given array of times, compute the edges of the bins defined by the data time step that contain the times. This is used to determine the time segments for the STFT or the frequency bins for the FD transformation.
+        """Start time and sample count of each source's output grid (the raw-array path).
+
+        STFT: the start of the STFT segment holding each source's first time, and the number
+        of samples (a multiple of ``nperseg``) up to the segment holding its last time. FD: the
+        data start and the full data length for every source.
 
         Args:
-            times (Array): Array of times. Shape: (num_times,) or (num_bin, num_times).
+            times: Absolute times [s], shape ``(num_times,)`` or ``(num_bin, num_times)``.
 
         Returns:
-            Tuple of (left_edges, grid_length) where left_edges are the edges of the bins containing the times, and grid_length is the number of bins spanned by the times.
+            tuple[xp.ndarray, xp.ndarray]: ``(left_edges, grid_length)``, each ``(num_bin,)``.
+
+        Raises:
+            NotImplementedError: For the WDM analysis domain (use
+                :meth:`get_signals_for_residuals`).
         """
         times = self.xp.atleast_2d(times)
 
@@ -417,14 +511,20 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
     def build_common_grid(
         self, times: NDArrayLike, channels: NDArrayLike
     ) -> Tuple[NDArrayLike, NDArrayLike]:
-        """
-        For a given array of times and corresponding channels, build a common grid for all sources based on the analysis domain (STFT or FD).
+        """Scatter every source's channels onto one zero-padded array (FD / STFT targets).
+
+        Each source is placed at ``rint((t - left_edge) / dt)`` on its own grid
+        (:meth:`find_bin_edges`); all grids share the longest length. Samples that fall
+        outside (and, for STFT, past the data end) are dropped.
 
         Args:
-            times (Array): Array of times. Shape: (num_bin, num_times).
-            channels (Array): Array of channels corresponding to the input times. Shape: (num_bin, num_channels, num_times).
+            times: Absolute times [s], shape ``(num_bin, num_times)`` (or ``(num_times,)``).
+            channels: Channels at ``times``, shape ``(num_bin, num_channels, num_times)`` (or
+                ``(num_channels, num_times)``; a batch axis is added).
+
         Returns:
-            Tuple of (left_edges, padded_signals) where left_edges are the edges of the bins containing the times, and padded_signals is the array of channels padded to the common-size grid.
+            tuple[xp.ndarray, xp.ndarray]: ``(left_edges, padded_signals)``; ``left_edges``
+            ``(num_bin,)``, ``padded_signals`` ``(num_bin, num_channels, max_grid_length)``.
         """
         if len(channels.shape) == 2:
             channels = channels[None, :, :]  # add a batch dimension
@@ -509,16 +609,32 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         output_domain: str = None,
         domain_kwargs: dict = None,
     ) -> DomainBase:
-        """Transform a time-domain signal to the specified output domain. If output_domain is None, defaults to self.analysis_domain.
+        """Transform one source's time-domain channels to the output domain.
+
+        With ``output_domain=None`` the target is :attr:`analysis_domain`. For a WDM target
+        (``output_domain_settings``) the channels are placed on the full data grid
+        (:func:`~lisatools.domains.place_td_signal_on_grid`), multiplied by a full-length Tukey
+        window (``tukey_alpha``; none when 0) and transformed with ``TDSignal.transform``, the
+        same chain as the data. STFT: right-padded to a multiple of the segment length and
+        aligned to the segment lattice, Tukey per segment. FD: padded to the full data length
+        and windowed at that length (as the data, ``tukey(N) -> FFT``). ``"TD"`` wraps the
+        input as a :class:`~lisatools.domains.TDSignal`.
 
         Args:
-            times_in: Time array of the input TDSignal.
-            signal_in: Signal array of the input TDSignal.
-            output_domain: Target domain ('TD', 'STFT', or 'FD'). If None, defaults to self.analysis_domain.
-            domain_kwargs: Extra kwargs forwarded to the domain settings constructor. If None, it will be derived from the input times and self.analysis_domain.
+            times_in: Absolute times [s] of the input, 1-D ``(num_times,)``.
+            signal_in: Channels at ``times_in``, ``(num_channels, num_times)``.
+            output_domain: Target domain (``"TD"``, ``"STFT"`` or ``"FD"``, case-insensitive).
+                ``None`` (default) uses :attr:`analysis_domain`, the only way to reach WDM.
+            domain_kwargs: Settings kwargs for an explicit ``output_domain``: ``big_dt`` plus
+                :func:`~lisatools.domains.get_stft_settings` kwargs for STFT, ``df`` plus
+                :class:`~lisatools.domains.FDSettings` kwargs for FD.
 
         Returns:
-            Signal in the requested output domain.
+            DomainBase: The signal in the requested domain.
+
+        Raises:
+            NotImplementedError: If ``times_in`` is not 1-D.
+            ValueError: For an unsupported explicit ``output_domain`` (including ``"WDM"``).
         """
         if len(times_in.shape) > 1:
             raise NotImplementedError(
@@ -630,20 +746,24 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
     def fft(
         self, start_times: NDArrayLike, signal_in: NDArrayLike
     ) -> Tuple[NDArrayLike, NDArrayLike]:
-        """
-        Transform pre-padded time domain data to the FD basis.
+        """Transform pre-padded time-domain data to the FD basis.
 
-        Signals must be pre-padded (via build_common_grid) before calling this
-        method — no inline padding is done here.
+        Signals must be pre-padded (via :meth:`build_common_grid`); no padding is done here.
+        A Tukey window (``tukey_alpha``) of the last-axis length multiplies ``signal_in`` IN
+        PLACE, then ``rfft(...) * dt`` runs over the last axis in batches of
+        ``fft_batch_size`` sources, and the result is sliced to ``[freq_min, freq_max]``.
 
         Args:
-            start_times (Array): Start time for each binary, shape `(num_binaries,)`.
-                Not used in the FD transform but kept for signature consistency with `stft`.
-            signal_in (Array): Time domain input signal with shape `(num_binaries, num_channels, num_times)`
+            start_times: Start time of each source, shape ``(num_binaries,)``. Unused here;
+                kept for signature consistency with :meth:`stft`.
+            signal_in: Time-domain signal, shape ``(num_binaries, num_channels, num_times)``
+                (or with an extra segment axis before the last, from :meth:`stft`). Modified in
+                place by the window.
 
         Returns:
-            signal_out (Array): The transformed signal with shape `(num_binaries, num_channels, num_freqs)`
-            start_freqs (Array): Starting frequencies for the likelihood calculation, shape `(num_binaries,)`
+            tuple[xp.ndarray, xp.ndarray]: ``(signal_out, start_freqs)``. ``signal_out`` is a
+            complex view ``(..., num_freqs)`` of the in-band bins; ``start_freqs``
+            ``(num_binaries,)`` holds the first kept frequency [Hz] for every source.
         """
         num_binaries = signal_in.shape[0]
         n = signal_in.shape[-1]
@@ -694,17 +814,20 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         start_times: NDArrayLike,
         signal_in: NDArrayLike,
     ) -> Tuple[NDArrayLike, NDArrayLike, NDArrayLike]:
-        """
-        Transform pre-padded time domain data to the STFT basis.
+        """Transform pre-padded time-domain data to the STFT basis.
+
+        Reshapes the last axis into ``(num_segments, nperseg)`` and runs :meth:`fft` on the
+        segments (per-segment Tukey window, applied in place).
 
         Args:
-            start_times (Array): Start time for each binary, shape `(num_binaries,)`.
-            signal_in (Array): Time domain input signal with shape `(num_binaries, num_channels, num_times)`
+            start_times: Start time of each source, shape ``(num_binaries,)``; passed through.
+            signal_in: Time-domain signal, shape ``(num_binaries, num_channels, num_times)``
+                with ``num_times`` a multiple of ``nperseg``.
 
         Returns:
-            signal_out (Array): The transformed signal with shape `(num_binaries, num_channels, num_stft_times, num_freqs)`
-            start_freqs (Array): Starting frequencies for the likelihood calculation, shape `(num_binaries,)`
-            start_times (Array): Starting times for the likelihood calculation, shape `(num_binaries,)`
+            tuple[xp.ndarray, xp.ndarray, xp.ndarray]: ``(signal_out, start_freqs,
+            start_times)``; ``signal_out`` has shape ``(num_binaries, num_channels,
+            num_segments, num_freqs)``.
         """
         num_binaries, num_channels = signal_in.shape[:2]
         signal_in = signal_in.reshape(
@@ -716,11 +839,21 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         return signal_out, start_freqs, start_times
 
     def __call__(self, *args, **kwargs):
-        """Generate the waveform and return the signal in the analysis domain.
+        """Generate the waveform and return the raw transform output (FD / STFT targets).
 
-        Sky/response parameters may be supplied either as explicit keyword
-        arguments or as the last N positional arguments; ``compute_tdi_channels``
-        on each subclass is responsible for peeling them off ``*args``.
+        Runs :meth:`compute_tdi_channels`, :meth:`build_common_grid` and
+        :attr:`transform_to_domain`. Sky/response parameters may be supplied either as explicit
+        keyword arguments or as the last N positional arguments; ``compute_tdi_channels`` on
+        each subclass peels them off ``*args``. For a WDM target use
+        :meth:`get_signals_for_residuals` (this path raises ``NotImplementedError``).
+
+        Args:
+            *args: Waveform parameters, forwarded to :meth:`compute_tdi_channels`.
+            **kwargs: Forwarded to :meth:`compute_tdi_channels`.
+
+        Returns:
+            tuple: The output of :meth:`fft` ``(signal_out, start_freqs)`` or :meth:`stft`
+            ``(signal_out, start_freqs, start_times)``, not a domain object.
         """
         times, channels = self.compute_tdi_channels(*args, **kwargs)
         left_edges, padded = self.build_common_grid(times, channels)
@@ -729,12 +862,19 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
     def get_signals_for_residuals(self, *args, **kwargs) -> DomainBaseArray:
         """Generate per-source domain-wrapped signals for residual operations.
 
-        Sky/response parameters may be supplied either as explicit keyword
-        arguments or as the last N positional arguments.
+        Runs :meth:`compute_tdi_channels` and :meth:`_td_to_output_domain` per source. The
+        global-fit engine rebuilds MBH residuals through this method (``MBH_LIKELIHOOD=batched``
+        keeps the stock :class:`~lisatools.sources.bbh.waveform.PhenomTHMTDIWaveform` here).
+        Sky/response parameters may be supplied either as explicit keyword arguments or as the
+        last N positional arguments.
+
+        Args:
+            *args: Waveform parameters, forwarded to :meth:`compute_tdi_channels`.
+            **kwargs: Forwarded to :meth:`compute_tdi_channels`.
 
         Returns:
-            :class:`DomainBaseArray` of per-source signals, or a single domain
-            signal when ``times`` is 1-D (single-source path).
+            DomainBaseArray | DomainBase: A :class:`~lisatools.domains.DomainBaseArray` of
+            per-source signals when ``times`` is 2-D (batch), else a single domain signal.
         """
         times, channels = self.compute_tdi_channels(*args, **kwargs)
         if times.ndim == 2:
@@ -746,8 +886,40 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
 
 class TDPyResponseWaveformBase(TDWaveformBase):
-    """
-    Base class for a time-domain waveform that uses the `pyResponseTDI` class for the TDI response calculation.
+    """Base class for a time-domain waveform whose TDI response comes from ``pyResponseTDI``.
+
+    A subclass implements :meth:`wave_gen` (one source) and, for batches, :meth:`wave_gen_batch`;
+    both return ``(t_arr, h_plus, h_cross)`` with ``t_arr`` relative to the merger.
+    :meth:`compute_tdi_channels` shifts them by ``merger_time + waveform_t0`` and applies the
+    response (:meth:`_apply_response`). The MBH
+    :class:`~lisatools.sources.bbh.waveform.PhenomTHMTDIWaveform` is the production subclass.
+
+    Args:
+        waveform_t0: See :class:`TDWaveformBase`.
+        data_td_settings: See :class:`TDWaveformBase`.
+        tdi_generation: See :class:`TDWaveformBase`. Default ``"2nd generation"``.
+        tdi_channels: See :class:`TDWaveformBase`. Default ``"XYZ"``.
+        sampling_frequency: Sampling frequency [Hz] of the response. Default ``0.4``.
+        orbits: See :class:`TDWaveformBase`.
+        order: Lagrange interpolation order of ``pyResponseTDI``. Default ``35``.
+        tukey_alpha: See :class:`TDWaveformBase`. Default ``0.01``.
+        stft_dt: See :class:`TDWaveformBase`.
+        freq_min: See :class:`TDWaveformBase`. Default ``1e-5``.
+        freq_max: See :class:`TDWaveformBase`. Default ``1.0``.
+        fft_batch_size: See :class:`TDWaveformBase`. Default ``1``.
+        signal_duration: Initial response length [s] (``num_pts = int(signal_duration / dt)``);
+            ``None`` uses :attr:`Tobs`. Each call resets ``response.num_pts`` to its own window.
+        buffer_time: Response garbage buffer [s]: the strain is zero-padded by this much after
+            its end, and the first ``buffer_time / dt`` output samples are zeroed. Default
+            ``5000``.
+        run_async: Forwarded to the batched ``pyResponseTDI`` API. Default ``False``.
+        output_domain_settings: See :class:`TDWaveformBase`.
+        force_backend: See :class:`TDWaveformBase`. Default ``"cpu"``.
+
+    Attributes:
+        response (pyResponseTDI): The response object, shared by every call.
+        buffer_time (float): As above.
+        run_async (bool): As above.
     """
 
     def __init__(
@@ -807,7 +979,9 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
     @property
     def wrapper_kwargs(self) -> dict:
-        """Dictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
+        """Constructor kwargs of :class:`TDWaveformBase` plus ``order``, ``signal_duration``,
+        ``buffer_time`` and ``run_async`` (``signal_duration`` is the response's current
+        ``num_pts * dt``)."""
         base_kwargs = super().wrapper_kwargs
         base_kwargs.update(
             {
@@ -822,25 +996,30 @@ class TDPyResponseWaveformBase(TDWaveformBase):
     def wave_gen(
         self, *args, **kwargs
     ) -> Tuple[NDArrayLike, NDArrayLike, NDArrayLike]:
-        """Generate the waveform for a single source.
+        """Generate the polarizations of a single source (implemented by subclasses).
+
+        Called as ``wave_gen(*args, ra, dec, merger_time, **kwargs)`` by :meth:`_call_single`.
 
         Returns:
-            Tuple of (t_arr, h_plus, h_cross).
+            tuple: ``(t_arr, h_plus, h_cross)``, 1-D, with ``t_arr`` [s] relative to the merger.
 
+        Raises:
+            NotImplementedError: Always, in the base class.
         """
         raise NotImplementedError("wave_gen method must be implemented in subclass.")
 
     def wave_gen_batch(self, *args, **kwargs) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Generate waveforms for a batch of sources.
+        """Generate the polarizations of a batch of sources (implemented by subclasses).
 
-        Subclasses that support batched waveform generation should override this
-        method to return pre-masked, padded arrays. The batch loop in
-        ``_call_batched`` will apply per-source masking and the TDI response.
+        Subclasses that support batched generation override this to return rectangular,
+        already-masked arrays; :meth:`_call_batched` passes them to :meth:`_apply_response`.
 
         Returns:
-            Tuple of (times_batch, h_plus_batch, h_cross_batch),
-            each of shape (Nbatch, Ntimes).
+            tuple: ``(times_batch, h_plus_batch, h_cross_batch)``, each ``(Nbatch, Ntimes)``,
+            times [s] relative to each source's merger.
 
+        Raises:
+            NotImplementedError: Always, in the base class.
         """
         raise NotImplementedError(
             "wave_gen_batch is not implemented for this waveform. "
@@ -856,18 +1035,44 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         dec: float | NDArrayLike,
         merger_time: float | NDArrayLike,
     ) -> Tuple[NDArrayLike, NDArrayLike]:
-        """Apply the TDI response to a batch of sources.
+        """Apply the TDI response to one source or a batch, cropped to the data window.
+
+        Steps: inputs are moved onto :attr:`xp`; absolute times are ``t_arr + merger_time +
+        waveform_t0``; the samples before ``data_t0 - tdi_buffer_time`` are cropped (by the
+        smallest safe amount across the batch, which stays rectangular); the strain
+        ``h_plus + 1j h_cross`` is zero-padded by ``buffer_time``; the per-source sub-sample
+        offset ``t0_shift_to_data`` (in ``(-dt/2, dt/2]``) puts the response on the data
+        lattice; ``pyResponseTDI.get_projections`` / ``get_tdi_delays`` run (batched API, or a
+        per-source loop on the legacy one); the padding is removed and the first
+        ``buffer_time / dt`` samples zeroed; non-finite output is zeroed (a WARNING counts the
+        ones inside the data span); everything before ``data_t0`` is cropped.
+
+        ``ra`` / ``dec`` are passed to the response as its ``lam`` / ``beta`` and are read in the
+        orbits' frame: ICRS (RA, Dec) for the run's ``frame="icrs"`` orbits.
 
         Args:
-            t_arr: Time array relative to zero, shape (Ntimes,) or (Nbatch, Ntimes).
-            h_plus: Plus polarization, shape (Ntimes,) or (Nbatch, Ntimes).
-            h_cross: Cross polarization, shape (Ntimes,) or (Nbatch, Ntimes).
-            ra: Right ascension in radians, float or shape (Nbatch,).
-            dec: Declination in radians, float or shape (Nbatch,).
-            merger_time: Time of merger in seconds (relative to waveform_t0), float or shape (Nbatch,).
+            t_arr: Times [s] relative to the merger, ``(Ntimes,)`` or ``(Nbatch, Ntimes)``.
+            h_plus: Plus polarization, same shape.
+            h_cross: Cross polarization, same shape.
+            ra: Right ascension [rad]: a Python ``float`` (single source) or ``(Nbatch,)``.
+            dec: Declination [rad], same shape as ``ra``.
+            merger_time: Merger time [s] relative to ``waveform_t0``, same shape as ``ra``.
 
         Returns:
-            Tuple of (times_batch, channels_batch) where times_batch is the time array after shifting and padding with shape (Nbatch, Ntimes), and channels_batch is the TDI response with shape (Nbatch, num_channels, num_times).
+            tuple[xp.ndarray, xp.ndarray]: ``(times, channels)``: absolute times on the data
+            lattice from ``data_t0`` on, ``(Nbatch, Ntimes)``, and the TDI channels
+            ``(Nbatch, num_channels, Ntimes)``. A single source (``ra`` a ``float``) returns
+            ``(Ntimes,)`` and ``(num_channels, Ntimes)``. A one-row batch on the batched
+            response API can return ``(1, Ntimes)`` times with ``(num_channels, Ntimes)``
+            channels (the response squeezes its batch axis; see
+            :class:`~lisatools.sources.batching.BatchedDomainSignalGen`).
+
+        Raises:
+            LISAToolsException: Its batch-refusal subclass (see the shared-window guard in the
+                code; a source-inspection test looks for the name there) if the batch's rows
+                would start the data window at different samples (one shared crop would cut
+                some rows at the wrong place); the caller falls back to per-row evaluation.
+            ValueError: With ``DEBUG_MODE``, on NaN / Inf input or a window outside the orbits.
         """
         single_source = isinstance(ra, float)
 
@@ -1170,7 +1375,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         merger_time: float,
         **kwargs,
     ) -> Tuple[NDArrayLike, NDArrayLike]:
-        """Handle single-source waveform generation and return a Tuple of times and channels."""
+        """One source: :meth:`wave_gen`, then :meth:`_apply_response`; ``(times, channels)``."""
 
         t_arr, h_plus, h_cross = self.wave_gen(*args, ra, dec, merger_time, **kwargs)
 
@@ -1186,11 +1391,10 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         merger_time: NDArrayLike,
         **kwargs,
     ) -> Tuple[NDArrayLike, NDArrayLike]:
-        """Handle batched waveform generation and return a Tuple of times and channels.
+        """A batch: :meth:`wave_gen_batch` then one :meth:`_apply_response` call for all rows.
 
-        Loops over the batch dimension for the TDI response (which does not support
-        batching natively), then optionally projects all signals onto a common STFT
-        grid when ``self.force_uniform_stft`` is True.
+        Returns:
+            tuple[xp.ndarray, xp.ndarray]: ``(times, channels)`` as in :meth:`_apply_response`.
         """
         times_batch, hplus_batch, hcross_batch = self.wave_gen_batch(*args, ra, dec, merger_time, **kwargs)
 
@@ -1204,17 +1408,30 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         merger_time: float | NDArrayLike = None,
         **kwargs,
     ) -> Tuple[NDArrayLike, NDArrayLike]:
-        """Time domain TDI channels computation. In the case of multiple sources, the TDI response is applied sequentially to each source and the results are stacked together.
+        """Compute the time-domain TDI channels of one source or a batch.
+
+        If any of ``ra``, ``dec``, ``merger_time`` is ``None``, the last three positional
+        arguments are taken as ``(ra, dec, merger_time)``. A scalar ``ra`` runs
+        :meth:`_call_single`; a 1-D ``ra`` runs :meth:`_call_batched` (one response call for
+        the whole batch).
 
         Args:
-            *args: Arguments for the wave_gen / wave_gen_batch method.
-            ra: Right ascension in radians.  Scalar for single source, 1-D array for batch.
-            dec: Declination in radians.  Same shape as ``ra``.
-            merger_time: Time of merger in seconds.  Same shape as ``ra``.
-            **kwargs: Keyword arguments for the wave_gen / wave_gen_batch method.
+            *args: Intrinsic waveform parameters for :meth:`wave_gen` / :meth:`wave_gen_batch`
+                (optionally followed by ``ra, dec, merger_time``).
+            ra: Right ascension [rad] (ICRS with ICRS orbits). Scalar for one source, 1-D for a
+                batch.
+            dec: Declination [rad]. Same shape as ``ra``.
+            merger_time: Merger time [s] relative to ``waveform_t0``. Same shape as ``ra``.
+            **kwargs: Keyword arguments for :meth:`wave_gen` / :meth:`wave_gen_batch`.
 
         Returns:
-            Tuple of (times, channels) where `times` is the time array after shifting and padding, and `channels` are the TDI variables with shape (num_channels, num_times) for single source or (num_bin, num_channels, num_times) for batch.
+            tuple[xp.ndarray, xp.ndarray]: ``(times, channels)``: absolute times on the data
+            lattice and the TDI channels, ``(num_channels, num_times)`` for one source or
+            ``(num_bin, num_channels, num_times)`` for a batch (see :meth:`_apply_response`).
+
+        Raises:
+            BatchNotLaunchable: From :meth:`_apply_response` (or the subclass batch
+                generator) when a batch cannot share one evaluation.
         """
         if ra is None or dec is None or merger_time is None:
             *args, ra, dec, merger_time = args
@@ -1226,16 +1443,36 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
 
 class TDTDIOnFlyWaveformBase(TDWaveformBase):
-    """
-    Base class for a time domain waveform that computes the LISA response with the "tdi on the fly" method.
+    """Base class for a time-domain waveform with the TDI-on-the-fly response.
+
+    A subclass implements :meth:`get_amp_phase` (per-mode amplitude and phase on a possibly
+    sparse grid) and :meth:`process_amp_phase` (the response's sign / scale convention).
+    :meth:`compute_tdi_channels` splines each ``(source, mode)`` pair, evaluates the response
+    (:class:`~lisatools.response.tdionfly.TDTDIonTheFly`) on the input grid, and samples the
+    summed TDI channels on a dense data-lattice grid. Base of
+    :class:`~lisatools.sources.bbh.waveform.PhenomTHMTDIOnFlyWaveform` (the MBH
+    ``use_tdionfly`` path, off in production).
 
     Args:
-        waveform_t0: Initial time for the waveform in seconds. It will be added to the sampled merger time to get the absolute time for the waveform generation.
-        dt: float,
-        Tobs: float,
-        data_t0: float = None,
-        tukey_alpha: float = 0.01,
-        force_backend: str = "cpu",
+        waveform_t0: Epoch [s] added to the sampled merger time to get absolute times.
+        data_td_settings: See :class:`TDWaveformBase`.
+        tdi_generation: See :class:`TDWaveformBase`. Default ``"2nd generation"``.
+        tdi_channels: Must be ``"XYZ"`` (the only supported set). Default ``"XYZ"``.
+        sampling_frequency: Sampling frequency [Hz] handed to the response. Default ``0.4``.
+        orbits: See :class:`TDWaveformBase`.
+        tukey_alpha: See :class:`TDWaveformBase`. Default ``0.01``.
+        stft_dt: See :class:`TDWaveformBase`.
+        freq_min: See :class:`TDWaveformBase`. Default ``0.0``.
+        freq_max: See :class:`TDWaveformBase`. Default ``1.0``.
+        fft_batch_size: See :class:`TDWaveformBase`. Default ``1``.
+        zero_inclination: If ``True``, the response is fed ``inclination = 0`` for every mode
+            (for amplitudes that already carry the spherical-harmonic factors). Default
+            ``False``.
+        output_domain_settings: See :class:`TDWaveformBase`.
+        force_backend: See :class:`TDWaveformBase`. Default ``"cpu"``.
+
+    Raises:
+        NotImplementedError: If ``tdi_channels != "XYZ"``.
     """
 
     def __init__(
@@ -1281,7 +1518,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
 
     @property
     def wrapper_kwargs(self):
-        """Dictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
+        """Constructor kwargs of :class:`TDWaveformBase` plus ``zero_inclination``."""
         base_kwargs = super().wrapper_kwargs
         base_kwargs.update(
             {
@@ -1292,9 +1529,10 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
 
     @property
     def max_length(self) -> int:
-        """
-        maximum number of evaluation time points that can be stored in a gpu register.
-        These may not be enough in some regions of the parameter space
+        """int: Number of evaluation times kept by :meth:`get_evaluation_times` (``2000``).
+
+        The base class keeps the LAST ``max_length`` nodes; this may not be enough in some
+        regions of the parameter space (the MBH subclass overrides the selection).
         """
         return 2_000
 
@@ -1303,50 +1541,65 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         *args,
         **kwargs,
     ) -> Tuple[NDArrayLike, NDArrayLike, NDArrayLike]:
-        """
-        Generate amplitude and phase arrays for each mode of a batch of sources.
-        Returns also the time array.
+        """Generate per-mode amplitude and phase for a batch of sources (implemented by subclasses).
+
+        Called by :meth:`compute_tdi_channels` as ``get_amp_phase(*args, inclination, psi, ra,
+        dec, merger_time, **kwargs)`` with every argument at least 1-D.
 
         Returns:
-            Tuple of (t_arr, amp, phase).
+            tuple: ``(t_arr, amp, phase)``; ``t_arr`` [s] relative to the merger,
+            ``(Nbatch, num_times)`` (or one row per mode); ``amp`` and ``phase``
+            ``(Nbatch, num_modes, num_times)``.
 
+        Raises:
+            NotImplementedError: Always, in the base class.
         """
         raise NotImplementedError("amp_phase_gen method must be implemented in subclass.")
 
     def process_amp_phase(
         self, amp: NDArrayLike, phase: NDArrayLike
     ) -> Tuple[NDArrayLike, NDArrayLike]:
-        """
-        Process the amplitude and phase arrays to be fed to the TDI on-the-fly response generator.
+        """Map amplitude and phase to the TDI-on-the-fly convention (implemented by subclasses).
 
-        Parameters
-        ----------
-        amp: Amplitude array of shape (Nbatch, num_modes, num_times).
-        phase: Phase array of shape (Nbatch, num_modes, num_times).
+        Args:
+            amp: Amplitude, shape ``(Nbatch, num_modes, num_times)``.
+            phase: Phase, shape ``(Nbatch, num_modes, num_times)``.
 
-        Returns
-        -------
-        Tuple of (processed_amp, processed_phase).
+        Returns:
+            tuple: ``(processed_amp, processed_phase)``, same shapes.
+
+        Raises:
+            NotImplementedError: Always, in the base class.
         """
 
         raise NotImplementedError("process_amp_phase method must be implemented in subclass.")
 
     def stack_parameter(self, param: np.ndarray, num_modes: int) -> NDArrayLike:
-        """
-        Stack a parameter array for use in the TDI on-the-fly response generator.
-        Given a parameter array of shape (Nbatch,), stack it to shape (Nbatch * num_modes,) by repeating each entry num_modes times. This is needed to match the expected input shape for the TDI on-the-fly response generator when using multiple modes per source.
+        """Repeat each per-source value once per mode for the per-``(source, mode)`` response.
+
+        Args:
+            param: Per-source values, shape ``(Nbatch,)``.
+            num_modes: Modes per source.
+
+        Returns:
+            xp.ndarray: Shape ``(Nbatch * num_modes,)``, each entry repeated ``num_modes`` times.
         """
         param = self.xp.asarray(param)
         return self.xp.repeat(param, num_modes)
 
     def get_tdi_buffers(self, delta_t: np.ndarray) -> Tuple[int, int, float, float]:
-        """
-        Get the number of buffer points to add at the beginning and end of the time array based on the TDI buffer time and the maximum time step in the input time array.
+        """Node counts that span :attr:`tdi_buffer_time` at each end of the input grid.
+
+        ``left_dt`` / ``right_dt`` are the smallest first / last step across rows;
+        ``start_buffer = max(int(tdi_buffer_time / left_dt), 1)`` and likewise
+        ``end_buffer`` (floored; :meth:`pad` rounds up instead).
 
         Args:
-            delta_t (Array): Array of time steps between consecutive time points, shape (num_binaries * num_modes, num_times - 1).
+            delta_t: Steps between consecutive input times, shape
+                ``(num_binaries * num_modes, num_times - 1)``.
+
         Returns:
-            Tuple of (start_buffer, end_buffer, left_dt, right_dt) in number of points and time steps.
+            tuple[int, int, float, float]: ``(start_buffer, end_buffer, left_dt, right_dt)``.
         """
 
         left_dt = self.xp.min(delta_t[:, 0])
@@ -1363,16 +1616,21 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         input_amplitudes: NDArrayLike,
         input_phases: NDArrayLike,
     ) -> Tuple[NDArrayLike, NDArrayLike, NDArrayLike]:
-        """
-        Add a 500 s buffer at both sides to make sure that we can compute tdi on the times we are actually interested in.
+        """Extend the spline input by at least :attr:`tdi_buffer_time` (600 s) at both ends.
+
+        Adds ``ceil(tdi_buffer_time / left_dt)`` nodes before and
+        ``ceil(tdi_buffer_time / right_dt)`` after (steps from :meth:`get_tdi_buffers`), with
+        edge-held amplitude and phase, so the response's retarded reads stay inside the
+        amplitude / phase splines.
 
         Args:
-            input_times (Array): input time array, shape (num_binaries * num_modes, num_times)
-            input_amplitudes (Array): input amplitude array, shape (num_binaries * num_modes, num_times)
-            input_phases (Array): input phase array, shape (num_binaries * num_modes, num_times)
+            input_times: Input times, shape ``(num_binaries * num_modes, num_times)``.
+            input_amplitudes: Input amplitudes, same shape.
+            input_phases: Input phases, same shape.
 
         Returns:
-            Padded time, amplitude and phase arrays with shape (num_binaries * num_modes, num_times + 2 * buffer_length).
+            tuple: Padded ``(times, amplitudes, phases)``, each
+            ``(num_binaries * num_modes, pad_left + num_times + pad_right)``.
         """
         delta_t = self.xp.diff(input_times, axis=-1)
 
@@ -1411,14 +1669,18 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         return padded_times, padded_amplitudes, padded_phases
 
     def get_evaluation_times(self, input_times: NDArrayLike) -> NDArrayLike:
-        """
-        Get the time array on which to evaluate the TDI on-the-fly response. By default, this uses the same as the input time array from the amplitude and phase generation, but subclasses can override this method to define a different evaluation grid if needed (e.g. a regular grid).
+        """Times at which the TDI-on-the-fly response is evaluated (the response spline nodes).
+
+        The base class drops :meth:`get_tdi_buffers`'s ``start_buffer`` / ``end_buffer`` nodes
+        at the two ends and keeps the last :attr:`max_length` of the rest. Subclasses override
+        this to choose a different grid.
 
         Args:
-            input_times (Array): times used for amp/phase generation, shape (num_binaries  * num_modes, num_times)
+            input_times: Times of the amplitude / phase input, shape
+                ``(num_binaries * num_modes, num_times)``.
 
         Returns:
-            evaluation times of shape (num_binaries * num_modes, num_eval_times).
+            xp.ndarray: Evaluation times, shape ``(num_binaries * num_modes, num_eval_times)``.
         """
         delta_t = self.xp.diff(input_times, axis=-1)
 
@@ -1431,8 +1693,17 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         return evaluation_times
 
     def get_dense_times(self, eval_times: NDArrayLike) -> NDArrayLike:
-        """
-        Get a dense time array on which to evaluate the TDI on-the-fly response. This can be used to ensure that the output response is sampled on a regular grid, even if the input amplitude and phase arrays are sampled irregularly.
+        """Regular output grid on the data lattice covering each row's evaluation times.
+
+        Each row starts at the lattice point (step ``dt``, or the STFT segment length) at or
+        before its first evaluation time; all rows share ``ceil(max duration / dt) + 1``
+        samples (rounded up to a multiple of ``nperseg`` for STFT).
+
+        Args:
+            eval_times: Evaluation times, shape ``(num_rows, num_eval_times)``.
+
+        Returns:
+            xp.ndarray: Dense absolute times, shape ``(num_rows, num_times)``, step ``dt``.
         """
 
         t0 = self.data_t0
@@ -1462,20 +1733,29 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         merger_time: NDArrayLike = None,
         **kwargs,
     ) -> Tuple[NDArrayLike, NDArrayLike]:
-        """
-        Generate the on-the-fly response for a batch of sources, and return the computed TDI channels.
+        """Generate the TDI-on-the-fly response of a batch of sources.
+
+        If ``inclination`` is ``None``, the last five positional arguments are taken as
+        ``(inclination, psi, ra, dec, merger_time)``. Steps: :meth:`get_amp_phase` and
+        :meth:`process_amp_phase`; absolute times ``t + merger_time + waveform_t0``; one
+        response row per ``(source, mode)`` on :meth:`get_evaluation_times` with the input
+        padded by :meth:`pad`; evaluation on :meth:`get_dense_times` (zero outside each row's
+        spline support); the modes summed per source.
 
         Args:
-            *args: positional arguments for the amplitude and phase generation method.
-            inclination (Array): Inclination angles for the sources, shape (Nbatch,). If `self.zero_inclination`, this will be set to zero when passed to the response to avoid double-counting the spherical harmonic contribution.
-            psi (Array): Polarization angles for the sources, shape (Nbatch,).
-            ra (Array): Right ascension for the sources, shape (Nbatch,).
-            dec (Array): Declination for the sources, shape (Nbatch,).
-            merger_time (Array): merger time with respect to `waveform_t0`, shape (Nbatch,).
-            **kwargs: keyword arguments for the amplitude and phase generation method.
+            *args: Intrinsic parameters for :meth:`get_amp_phase` (optionally followed by
+                ``inclination, psi, ra, dec, merger_time``).
+            inclination: Inclination [rad], shape ``(Nbatch,)``. Replaced by zeros for the
+                response when ``zero_inclination`` is set.
+            psi: Polarization angle [rad], shape ``(Nbatch,)``.
+            ra: Right ascension [rad] (in the orbits' frame), shape ``(Nbatch,)``.
+            dec: Declination [rad], shape ``(Nbatch,)``.
+            merger_time: Merger time [s] relative to ``waveform_t0``, shape ``(Nbatch,)``.
+            **kwargs: Keyword arguments for :meth:`get_amp_phase`.
 
         Returns:
-            Tuple of (dense_times, tdi_channels) where `dense_times` has shape (Nbatch, num_times) and `tdi_channels` has shape (Nbatch, num_TDI_channels, num_times).
+            tuple[xp.ndarray, xp.ndarray]: ``(dense_times, tdi_channels)`` with shapes
+            ``(Nbatch, num_times)`` and ``(Nbatch, 3, num_times)`` (XYZ).
         """
         if inclination is None:
             *args, inclination, psi, ra, dec, merger_time = args
@@ -1513,7 +1793,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         # step 2: Define the time array on which we are gonna evaluate the respone. it will be taken from the non padded one.
         evaluation_times = self.get_evaluation_times(input_times)
 
-        # now padd with 500 seconds on each side
+        # now pad with at least tdi_buffer_time (600 s) on each side
         padded_times, padded_amplitudes, padded_phases = self.pad(
             input_times, input_amplitudes, input_phases
         )

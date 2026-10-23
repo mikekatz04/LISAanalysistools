@@ -5,8 +5,13 @@ cost lands on whichever python frame next synchronizes, and python-heavy frames
 are inflated ~3x by the profiler itself. These helpers accumulate wall time with
 an explicit device sync at each stage boundary instead.
 
-Off by default (near-zero overhead); enable with ``MBHTDIONFLY_TIMING=1``.
-Dump with :func:`report_timing`.
+Off by default (near-zero overhead); enable with ``MBHTDIONFLY_TIMING=1`` (any value other
+than ``"0"``, read once at import). Dump with :func:`report_timing`; when enabled the report is
+also printed at interpreter exit and on SIGTERM / SIGINT. Used by the TDI-on-the-fly response
+(:mod:`lisatools.response.tdionfly`).
+
+Module state: ``TIMING`` (the switch), ``TIMERS`` (``{stage name: seconds}``) and
+``TIMER_COUNTS`` (``{stage name: calls}``), process-global.
 """
 
 import os
@@ -21,6 +26,7 @@ TIMER_COUNTS: dict = defaultdict(int)
 
 
 def _sync(xp) -> None:
+    """Synchronize the current CUDA device when ``xp`` is not numpy; swallow any failure."""
     if xp is not np:
         try:
             xp.cuda.runtime.deviceSynchronize()
@@ -29,7 +35,22 @@ def _sync(xp) -> None:
 
 
 class stage:
-    """Context manager accumulating device-synced wall time into ``TIMERS``."""
+    """Context manager accumulating device-synced wall time into ``TIMERS``.
+
+    When ``TIMING`` is on, syncs the device on enter and exit and adds the elapsed wall time
+    to ``TIMERS[name]`` (and one call to ``TIMER_COUNTS[name]``). When off it does nothing.
+    Exceptions propagate.
+
+    Args:
+        name: Accumulator name.
+        xp (module): Array module used to pick the sync (``numpy`` skips it).
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.utils.stagetimer import stage
+        >>> with stage("build", np):
+        ...     x = np.ones(4)
+    """
 
     __slots__ = ("name", "xp", "t0")
 
@@ -58,6 +79,7 @@ def record(name: str, dt: float) -> None:
 
 
 def _atexit_report() -> None:  # pragma: no cover - diagnostic only
+    """Print :func:`report_timing` (registered with ``atexit`` when ``TIMING`` is on)."""
     print("\n" + report_timing(), flush=True)
 
 
@@ -66,7 +88,8 @@ def _signal_report(signum, frame) -> None:  # pragma: no cover - diagnostic only
 
     Slurm sends SIGTERM before SIGKILL at walltime; without this a job that
     runs out of time loses the whole accumulated report, since atexit does not
-    run on an uncaught fatal signal.
+    run on an uncaught fatal signal. After printing, restores the default handler and
+    re-sends the signal to this process.
     """
     print(f"\n[stagetimer] signal {signum} -- dumping accumulated timers",
           flush=True)
@@ -88,7 +111,17 @@ if TIMING:
 
 
 def report_timing(reset: bool = False) -> str:
-    """Human-readable dump of the accumulated stage timers."""
+    """Return a human-readable dump of the accumulated stage timers.
+
+    One line per stage, sorted by total time: seconds, percent of the ``"total"`` stage (or
+    of the sum of all stages when there is none), call count, seconds per call.
+
+    Args:
+        reset: Clear ``TIMERS`` and ``TIMER_COUNTS`` after formatting. Default ``False``.
+
+    Returns:
+        str: The report, or a one-line "no data" message when nothing was recorded.
+    """
     if not TIMERS:
         return "stage timing: no data (set MBHTDIONFLY_TIMING=1)"
     total = TIMERS.get("total") or sum(TIMERS.values())

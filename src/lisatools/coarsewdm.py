@@ -1,4 +1,4 @@
-"""Coarse-grained likelihood utilities for real WDM noise inference.
+r"""Coarse-grained likelihood utilities for real WDM noise inference.
 
 The data-dependent sample covariance is computed once by averaging products of
 fine WDM coefficients over adjacent time columns.  Noise models are evaluated
@@ -10,6 +10,35 @@ fine-grid covariance.  Consequently, normalization terms depending only on the
 data and frozen degrees of freedom are omitted.  The returned likelihood is
 valid for MCMC and tempering, but not as an absolutely normalized likelihood
 for evidence calculations.
+
+Per coarse pixel ``(m, q)`` (layer ``m``, cell ``q``) the likelihood is
+
+.. math::
+
+    \ln L = -\frac{1}{2} \sum_{m, q} Q_{\rm eff}(m, q)
+        \left[ \mathrm{tr}\left(C_{mq}^{-1} P_{mq}\right) + \ln |\det C_{mq}| \right],
+
+with :math:`P_{mq}` the 3x3 XYZ sample covariance of the fine coefficients in the
+cell and :math:`C_{mq}` the model covariance on the coarse grid
+(:class:`~lisatools.domains.CoarseWDMSettings`).
+
+Entry points:
+
+* :class:`CoarseWDMStatistic` + :func:`coarse_wdm_log_likelihood`: one shared data
+  statistic (noise-only runs; used by
+  :meth:`~lisatools.analysiscontainer.AnalysisContainer.likelihood` when the
+  container carries coarse statistics);
+* :class:`CoarseWDMRuntime` + :func:`build_coarse_P_batch` +
+  :func:`coarse_wdm_log_likelihood_batch`: per-walker statistics for all-source runs
+  (the noise move's coarse sidecar);
+* :func:`compute_qeff` (frozen dof) and :func:`coarse_q_scan` (choose ``Q``).
+
+Stock knobs (set up in :mod:`lisatools.globalfit.run`): ``COARSE_Q`` (``1`` = off),
+``COARSE_GPU_MODE`` (``off`` / ``auto`` / ``search_approx`` /
+``delayed_acceptance``), ``COARSE_USE_WS``, ``COARSE_FIDUCIAL``. The ``all_sources``
+stock variant defaults to ``COARSE_Q=8`` with ``COARSE_GPU_MODE=delayed_acceptance``;
+the 9-month and 12-month launchers set ``COARSE_Q=1`` and ``COARSE_GPU_MODE=off``, so
+this module is not on their likelihood path.
 """
 
 from __future__ import annotations
@@ -24,6 +53,16 @@ from .utils.utility import get_array_module
 
 
 def _coarse_sample_covariance(signal: WDMSignal, settings: CoarseWDMSettings):
+    """Cell-averaged 3x3 sample covariance ``P[a, b, m, q] = mean_k d_a[m, k] d_b[m, k]``.
+
+    The mean runs over the fine active columns ``k`` of cell ``q``. Returns an
+    ``xp.ndarray`` of shape ``(3, 3, Nf_active, Ncoarse)``.
+
+    Raises:
+        TypeError: If ``signal`` is not a :class:`~lisatools.domains.WDMSignal`.
+        ValueError: For complex, batched or non-3-channel data, or settings that do
+            not match ``settings.fine_settings``.
+    """
     if not isinstance(signal, WDMSignal):
         raise TypeError("signal must be a WDMSignal.")
     if getattr(signal, "is_complex", False) or np.iscomplexobj(signal.arr):
@@ -46,7 +85,23 @@ def _coarse_sample_covariance(signal: WDMSignal, settings: CoarseWDMSettings):
 
 @dataclass
 class CoarseWDMStatistic:
-    """Precomputed real-WDM sample covariance and frozen effective dof."""
+    """Precomputed real-WDM sample covariance and frozen effective dof.
+
+    Build it with :meth:`from_wdm_signal`; score it with
+    :func:`coarse_wdm_log_likelihood` (one model) or
+    :func:`coarse_wdm_log_likelihood_batch` (a covariance batch).
+
+    Args:
+        P: Coarse sample covariance, ``(3, 3, Nf_active, Ncoarse)``.
+        Qeff: Effective dof per coarse pixel, ``(Nf_active, Ncoarse)``.
+        settings: The coarse grid.
+        Qeff_channels: Optional per-channel dof, ``(3, Nf_active, Ncoarse)``.
+
+    Raises:
+        TypeError: If ``settings`` is not a
+            :class:`~lisatools.domains.CoarseWDMSettings`.
+        ValueError: If an array has the wrong shape.
+    """
 
     P: object
     Qeff: object
@@ -86,7 +141,26 @@ class CoarseWDMStatistic:
         qeff=None,
         qeff_channels=None,
     ) -> "CoarseWDMStatistic":
-        """Build the statistic once from fine WDM data and a fiducial model."""
+        """Build the statistic once from fine WDM data and a fiducial model.
+
+        Args:
+            signal: Fine, real, unbatched 3-channel WDM data on
+                ``coarse_settings.fine_settings``.
+            coarse_settings: The coarse grid.
+            fiducial_sens_mat_fine: Fiducial fine covariance (a sensitivity matrix
+                with ``sens_mat``, or the ``(3, 3, Nf_active, Nt_active)`` array) for
+                the Welch--Satterthwaite dof; needed when ``use_ws`` and no ``qeff``.
+            use_ws: Welch--Satterthwaite dof (``True``) or Bartlett cell sizes.
+            qeff: Precomputed dof (overrides the fiducial; requires ``use_ws``).
+            qeff_channels: Precomputed per-channel dof to store with ``qeff``.
+
+        Returns:
+            CoarseWDMStatistic: The statistic.
+
+        Raises:
+            ValueError: If ``qeff`` is given with ``use_ws=False``, or from
+                :func:`compute_qeff` / the covariance builder.
+        """
         P = _coarse_sample_covariance(signal, coarse_settings)
         if qeff is None:
             Qeff, channels = compute_qeff(
@@ -107,7 +181,12 @@ class CoarseWDMStatistic:
         return cls(P=P, Qeff=Qeff, settings=coarse_settings, Qeff_channels=channels)
 
     def update_from_residual(self, residual_signal: WDMSignal) -> None:
-        """Recompute the data statistic in place from a fine residual signal."""
+        """Recompute the data statistic in place from a fine residual signal.
+
+        Args:
+            residual_signal: Fine WDM residual on ``settings.fine_settings`` (same
+                checks as :meth:`from_wdm_signal`). ``Qeff`` is left unchanged.
+        """
         updated = _coarse_sample_covariance(residual_signal, self.settings)
         self.P[...] = updated
 
@@ -123,6 +202,19 @@ def build_coarse_P_batch(
     single einsum contraction, with a leading walker axis. ``chunk_bytes``
     bounds the walker chunk via the largest cell block
     (``8 B * 3 * Nf_active * max_cell`` per walker).
+
+    Args:
+        residuals: Real fine residuals ``(nwalkers, 3, Nf_active, Nt_active)``
+            (numpy or cupy; the output follows).
+        settings: The coarse grid.
+        chunk_bytes: Byte budget per walker chunk. Default 256 MiB.
+
+    Returns:
+        ``xp.ndarray``: ``(nwalkers, 3, 3, Nf_active, Ncoarse)``.
+
+    Raises:
+        TypeError: If ``settings`` is not :class:`~lisatools.domains.CoarseWDMSettings`.
+        ValueError: For a wrong shape or complex input.
     """
     if not isinstance(settings, CoarseWDMSettings):
         raise TypeError("settings must be CoarseWDMSettings.")
@@ -193,8 +285,30 @@ class CoarseWDMRuntime:
     pickles/deepcopies (``__getstate__``), so the object never smuggles
     statistics across MPI or onto the settings tree.
 
-    ``mode``: ``"off"`` | ``"search_approx"`` | ``"delayed_acceptance"``
-    (the only mode valid for production PE).
+    Built by :mod:`lisatools.globalfit.run` when ``COARSE_Q > 1`` and
+    ``COARSE_GPU_MODE`` is not ``off`` on an all-source run, and stored as
+    ``general_info.coarse_wdm_runtime``; the noise move refreshes the statistics
+    (:meth:`refresh_P`) and scores proposals with :meth:`coarse_log_like_batch`.
+
+    Args:
+        coarse_settings: The coarse grid.
+        qeff: Frozen effective dof ``(Nf_active, Ncoarse)`` (required when
+            ``use_ws``).
+        qeff_channels: Optional per-channel dof ``(3, Nf_active, Ncoarse)``.
+        use_ws: Welch--Satterthwaite (``True``) or Bartlett weights.
+        mode: ``"off"`` | ``"auto"`` (the noise move picks ``search_approx`` in
+            search / RJ stages and ``delayed_acceptance`` otherwise) |
+            ``"search_approx"`` (coarse everywhere; an optimizer, not a sampler) |
+            ``"delayed_acceptance"`` (coarse stage-1 screen, fine stage-2
+            correction: the only mode valid for production PE).
+        batch_bytes: ``chunk_bytes`` for :func:`build_coarse_P_batch`. Default 256 MiB.
+        fiducial_digest: Short hash of the fiducial configuration (for logging).
+        coarse_backend: The coarse sensitivity backend (runtime-only).
+
+    Raises:
+        TypeError: If ``coarse_settings`` is not
+            :class:`~lisatools.domains.CoarseWDMSettings`.
+        ValueError: For an unknown ``mode``.
     """
 
     coarse_settings: CoarseWDMSettings
@@ -268,6 +382,7 @@ class CoarseWDMRuntime:
 
     @staticmethod
     def _to_host(arr):
+        """``arr`` as a NumPy array (``None`` passes through)."""
         if arr is None:
             return None
         if isinstance(arr, np.ndarray):
@@ -291,7 +406,15 @@ class CoarseWDMRuntime:
         :class:`AnalysisContainer`, or a stub) or are plain arrays. The
         correctness-first lifecycle refreshes every walker at the start of
         each noise proposal block; partial refreshes (residual epochs) are a
-        later optimization and deliberately unsupported here.
+        later optimization and deliberately unsupported here. Walkers are grouped
+        by owning device and each group's statistics are built on that device.
+
+        Args:
+            acs: Sequence of containers (or arrays), indexable by walker.
+            walkers: Must be ``None`` (all walkers).
+
+        Raises:
+            NotImplementedError: If ``walkers`` is given.
         """
         if walkers is not None:
             raise NotImplementedError(
@@ -327,6 +450,17 @@ class CoarseWDMRuntime:
         the single-group store accepts any walkers with ``device=None``).
         Multi-device callers iterate their own device grouping — exactly how
         the scoring batches are dispatched.
+
+        Args:
+            walkers: Walker indices (all owned by ``device``).
+            device: Owning device id, or ``None`` for the single-group store.
+
+        Returns:
+            ``xp.ndarray``: The rows, in the order of ``walkers``.
+
+        Raises:
+            RuntimeError: If :meth:`refresh_P` has not run.
+            KeyError: If ``device`` has no group or does not own every walker.
         """
         if not self._P_store:
             raise RuntimeError(
@@ -350,7 +484,14 @@ class CoarseWDMRuntime:
         return P[self.xp.asarray(pos)]
 
     def _template_stat(self, device=None) -> "CoarseWDMStatistic":
-        """Per-device statistic template carrying the (frozen) device-local qeff."""
+        """Per-device statistic template carrying the (frozen) device-local qeff.
+
+        Its ``P`` is a zero placeholder (scoring passes the walkers' rows as
+        ``per_row_P``). Built once per device and cached.
+
+        Raises:
+            ValueError: If ``use_ws`` is set but no frozen ``qeff`` is held.
+        """
         if device not in self._stat_templates:
             from .utils.device import device_context
 
@@ -390,6 +531,18 @@ class CoarseWDMRuntime:
         ``device``: the owning device of every row (None = CPU / the
         single-device group). Multi-device callers dispatch one call per
         device group, each under that device's context.
+
+        Args:
+            covariances: Candidate coarse covariances ``(batch, 3, 3, Nf, Ncoarse)``
+                (``Nf`` = ``Nf_active`` or ``len(frequency_indices)``).
+            walker_inds: ``(batch,)`` walker of each row (its statistic is used).
+            device: Owning device of every row.
+            noise_only: Return only the log-determinant term.
+            frequency_indices: Optional active-layer subset (see
+                :func:`coarse_wdm_log_likelihood_batch_frequency_terms`).
+
+        Returns:
+            ``xp.ndarray``: ``(batch,)`` log-likelihoods.
         """
         from .utils.device import device_context
 
@@ -404,6 +557,7 @@ class CoarseWDMRuntime:
 
 
 def _fine_covariance_array(fiducial_sens_mat_fine):
+    """The covariance array of a sensitivity matrix (its ``sens_mat``), an array, or ``None``."""
     if fiducial_sens_mat_fine is None:
         return None
     return getattr(fiducial_sens_mat_fine, "sens_mat", fiducial_sens_mat_fine)
@@ -416,11 +570,37 @@ def compute_qeff(
     use_ws: bool = True,
     return_channels: bool = False,
 ):
-    """Compute frozen channelwise Welch--Satterthwaite effective dof.
+    r"""Compute frozen channelwise Welch--Satterthwaite effective dof.
 
     Each diagonal channel is moment-matched independently, then the three dof
     values are averaged.  Computing the ratio after first averaging X/Y/Z would
-    hide opposing channel drifts and is deliberately not used.
+    hide opposing channel drifts and is deliberately not used. For channel ``a``
+    and cell ``q`` with fine diagonal values :math:`S_k`:
+
+    .. math::
+
+        Q_a = \min\left(\frac{(\sum_k S_k)^2}{\sum_k S_k^2},\ \mathrm{size}_q\right),
+
+    zero for a non-finite or non-positive cell; ``qeff`` is the channel mean where
+    all three channels are valid and ``0`` (cell inactive) otherwise. With
+    ``use_ws=False`` the Bartlett weights (the cell sizes) are returned instead.
+
+    Args:
+        fiducial_sens_mat_fine: Fiducial fine covariance, a sensitivity matrix with
+            ``sens_mat`` or the ``(3, 3, Nf_active, Nt_active)`` array. Unused when
+            ``use_ws=False``.
+        coarse_settings: The coarse grid.
+        use_ws: Welch--Satterthwaite (``True``, default) or Bartlett.
+        return_channels: Also return the per-channel dof.
+
+    Returns:
+        ``xp.ndarray`` or tuple: ``qeff`` of shape ``(Nf_active, Ncoarse)``, or
+        ``(qeff, channels)`` with ``channels`` of shape ``(3, Nf_active, Ncoarse)``.
+
+    Raises:
+        TypeError: If ``coarse_settings`` is not
+            :class:`~lisatools.domains.CoarseWDMSettings`.
+        ValueError: If the fiducial covariance is missing (WS) or misshapen.
     """
     if not isinstance(coarse_settings, CoarseWDMSettings):
         raise TypeError("coarse_settings must be CoarseWDMSettings.")
@@ -462,7 +642,24 @@ def compute_qeff(
 
 
 def coarse_wdm_log_likelihood_terms(stat: CoarseWDMStatistic, sens_mat):
-    """Return ``(quadratic_term, logdet_term)`` for the coarse likelihood."""
+    """Return ``(quadratic_term, logdet_term)`` for the coarse likelihood.
+
+    ``quadratic = -0.5 * sum(Qeff * tr(invC P))`` and
+    ``logdet = -0.5 * sum(Qeff * log|detC|)`` over the valid coarse pixels
+    (finite ``Qeff > 0``, finite non-zero ``detC``, finite ``invC`` and ``P``).
+
+    Args:
+        stat: The data statistic.
+        sens_mat: Coarse sensitivity matrix with ``basis_settings == stat.settings``
+            and ``invC`` / ``detC`` (``invC`` shaped like ``stat.P``).
+
+    Returns:
+        tuple: ``(quadratic, logdet)`` scalars (``xp`` 0-d arrays).
+
+    Raises:
+        TypeError: If ``stat`` is not a :class:`CoarseWDMStatistic`.
+        ValueError: If the basis or the ``invC`` shape does not match.
+    """
     if not isinstance(stat, CoarseWDMStatistic):
         raise TypeError("stat must be a CoarseWDMStatistic.")
     settings = getattr(sens_mat, "basis_settings", None)
@@ -506,6 +703,15 @@ def coarse_wdm_log_likelihood(
 
     ``noise_only=True`` returns only the weighted log-determinant term, matching
     :meth:`AnalysisContainer.likelihood`'s existing public semantics.
+
+    Args:
+        stat: The data statistic.
+        sens_mat: Coarse sensitivity matrix on ``stat.settings``.
+        noise_only: Return only the log-determinant term.
+
+    Returns:
+        float: The log-likelihood (or the raw ``xp`` scalar when ``.item()`` is
+        unavailable).
     """
     quadratic, logdet = coarse_wdm_log_likelihood_terms(stat, sens_mat)
     out = logdet if noise_only else quadratic + logdet
@@ -525,27 +731,39 @@ def coarse_wdm_log_likelihood_batch_frequency_terms(
 ):
     """Score a covariance batch and retain one likelihood term per layer.
 
-    Parameters
-    ----------
-    stat:
-        Shared data statistic.
-    covariance:
-        Array shaped ``(batch, 3, 3, Nf_active, Ncoarse)``.  When
-        ``frequency_indices`` is supplied, the frequency axis instead has
-        ``len(frequency_indices)`` entries in that order.
-    frequency_indices:
-        Optional active-frequency indices selecting the matching slices of the
-        shared data statistic and effective degrees of freedom.  This supports
-        an exact-baseline likelihood correction when only one additive noise
-        component changes in a strict subband.
+    The 3x3 determinant and inverse of every row are formed in one vectorized
+    pass (non-finite entries sanitized exactly like
+    ``SensitivityMatrixBase._setup_det_and_inv``), then the per-pixel terms of
+    :func:`coarse_wdm_log_likelihood_terms` are summed over the coarse time axis.
 
-    Notes
-    -----
-    The returned shape is ``(batch, n_frequency)``.  Retaining the frequency
-    axis lets a split-component move cache an exact full-band baseline and
-    replace only the layers touched by its variable component.  Use
-    :func:`coarse_wdm_log_likelihood_batch` for the ordinary scalar-per-row
-    reduction.
+    Args:
+        stat: Shared data statistic (its ``Qeff``; and its ``P`` unless
+            ``per_row_P`` is given).
+        covariance: Array shaped ``(batch, 3, 3, Nf_active, Ncoarse)``.  When
+            ``frequency_indices`` is supplied, the frequency axis instead has
+            ``len(frequency_indices)`` entries in that order.
+        noise_only: Keep only the log-determinant term.
+        frequency_indices: Optional active-frequency indices selecting the matching
+            slices of the data statistic and effective degrees of freedom.  This
+            supports an exact-baseline likelihood correction when only one additive
+            noise component changes in a strict subband.
+        per_row_P: Optional per-walker statistics ``(batch, 3, 3, Nf_active,
+            Ncoarse)`` on the full active grid, one row per covariance row (the
+            all-source sidecar).
+
+    Returns:
+        ``xp.ndarray``: Shape ``(batch, n_frequency)``.
+
+    Raises:
+        TypeError: If ``stat`` is not a :class:`CoarseWDMStatistic`.
+        ValueError: For misshapen ``covariance``, ``per_row_P`` or
+            ``frequency_indices``.
+
+    Note:
+        Retaining the frequency axis lets a split-component move cache an exact
+        full-band baseline and replace only the layers touched by its variable
+        component.  Use :func:`coarse_wdm_log_likelihood_batch` for the ordinary
+        scalar-per-row reduction.
     """
     if not isinstance(stat, CoarseWDMStatistic):
         raise TypeError("stat must be a CoarseWDMStatistic.")
@@ -647,6 +865,17 @@ def coarse_wdm_log_likelihood_batch(
     one ``AnalysisContainer.likelihood`` call per proposal row.  The 3x3
     adjugate, quadratic form, and log-determinant reduction are vectorized
     across the complete batch and run inside NumPy/CuPy's native loops.
+
+    Args:
+        stat: Shared data statistic.
+        covariance: ``(batch, 3, 3, Nf, Ncoarse)`` candidate covariances.
+        noise_only: Keep only the log-determinant term.
+        frequency_indices: Optional active-layer subset.
+        per_row_P: Optional per-row statistics.
+
+    Returns:
+        ``xp.ndarray``: ``(batch,)`` log-likelihoods, the frequency sum of
+        :func:`coarse_wdm_log_likelihood_batch_frequency_terms`.
     """
     terms = coarse_wdm_log_likelihood_batch_frequency_terms(
         stat,
@@ -659,6 +888,7 @@ def coarse_wdm_log_likelihood_batch(
 
 
 def _coarsen_covariance(fine_sens_mat, coarse_settings: CoarseWDMSettings):
+    """Coarse sensitivity matrix whose covariance is the cell mean of a fine one."""
     from .sensitivity import SensitivityMatrixBase
 
     covariance = _fine_covariance_array(fine_sens_mat)
@@ -676,7 +906,31 @@ def coarse_q_scan(
     *,
     use_ws: bool = True,
 ):
-    """Measure coarse-likelihood error and nominal speedup for candidate Q."""
+    """Measure coarse-likelihood error and nominal speedup for candidate Q.
+
+    The offline tool for choosing ``COARSE_Q`` (driven by
+    ``scripts/noise/coarse_q_scan.py``). For each ``Q`` it builds the coarse grid
+    and statistic, compares the coarse fiducial likelihood with the fine one
+    (:func:`lisatools.diagnostic.residual_full_source_and_noise_likelihood`), and,
+    with ``comparison_sens_mat``, the coarse-vs-fine error of the likelihood
+    DIFFERENCE between two noise models (what an MCMC acceptance sees).
+
+    Args:
+        fine_settings: The fine :class:`~lisatools.domains.WDMSettings`.
+        fiducial_sens_mat: Fiducial fine sensitivity matrix.
+        Q_list: Candidate cell sizes.
+        data: Fine WDM data.
+        comparison_sens_mat: Optional second fine model.
+        use_ws: Welch--Satterthwaite (``True``) or Bartlett weights.
+
+    Returns:
+        list[dict]: One dict per ``Q`` with keys ``Q``, ``Ncoarse``,
+        ``nominal_speedup`` (``Nt_active / Ncoarse``), ``qeff_ratio_min`` /
+        ``qeff_ratio_median`` (``Qeff / cell size``), ``qeff_channel_ratio_min`` /
+        ``qeff_channel_ratio_median`` (per channel), ``worst_diagonal_fractional_variation``
+        (per channel, within a cell), ``fiducial_logl_gap`` (coarse - fine), and
+        ``delta_logl_gap`` when ``comparison_sens_mat`` is given.
+    """
     from .diagnostic import residual_full_source_and_noise_likelihood
 
     fine_fiducial = residual_full_source_and_noise_likelihood(data, fiducial_sens_mat)

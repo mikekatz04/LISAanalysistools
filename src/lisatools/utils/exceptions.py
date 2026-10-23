@@ -1,8 +1,17 @@
-"""Definition of LISA Analysis Tools package common exceptions"""
+"""Definition of LISA Analysis Tools package common exceptions.
+
+All package exceptions derive from :class:`LISAToolsException`. The two raised and caught
+on the production path are :class:`WaveformDomainError` (parameters outside a waveform
+model's validity domain, scored at the log-likelihood floor) and :class:`BatchNotLaunchable`
+(a batched launch refuses a batch, the caller falls back to per-row evaluation). The
+remaining classes mirror ``few.utils.exceptions`` and are not raised anywhere in
+``lisatools``.
+"""
 
 try:
     from exceptiongroup import ExceptionGroup
 except (ImportError, ModuleNotFoundError):
+    # Python >= 3.11: the builtin ExceptionGroup.
     ExceptionGroup = ExceptionGroup
 
 
@@ -12,18 +21,21 @@ class LISAToolsException(Exception):
     pass
 
 
+# TODO check: keep/remove/document -- never raised or caught in lisatools; copied from few.utils.exceptions
 class CudaException(LISAToolsException):
     """Base class for CUDA-related exceptions."""
 
     pass
 
 
+# TODO check: keep/remove/document -- never raised or caught in lisatools; copied from few.utils.exceptions
 class CuPyException(LISAToolsException):
     """Base class for CuPy-related exceptions."""
 
     pass
 
 
+# TODO check: keep/remove/document -- never raised in lisatools (jax/backend.py raises gpubackendtools' MissingDependency)
 class MissingDependency(LISAToolsException):
     """Exception raised when a required dependency is missing."""
 
@@ -51,54 +63,67 @@ class BatchNotLaunchable(LISAToolsException):
     """
 
 
+# TODO check: keep/remove/document -- never raised or caught in lisatools; copied from few.utils.exceptions
 class InvalidInputFile(LISAToolsException):
     """Exception raised when the content of an input file does not match expectations."""
 
 
+# TODO check: keep/remove/document -- never raised; lisatools has no configuration system (copied from few.utils.exceptions)
 class ConfigurationError(LISAToolsException):
     """Exception raised when configuration setup fails."""
 
 
+# TODO check: keep/remove/document -- never raised; lisatools has no configuration system (copied from few.utils.exceptions)
 class ConfigurationMissing(ConfigurationError):
     """Exception raised when an expected configuration entry is missing."""
 
 
+# TODO check: keep/remove/document -- never raised; lisatools has no configuration system (copied from few.utils.exceptions)
 class ConfigurationValidationError(ConfigurationError):
     """Exception raised when a configuration entry is invalid."""
 
 
+# TODO check: keep/remove/document -- never raised; lisatools has no FileManager (copied from few.utils.exceptions)
 class FileManagerException(LISAToolsException):
     """Exception raised by the FileManager."""
 
 
+# TODO check: keep/remove/document -- never raised; lisatools has no FileManager (copied from few.utils.exceptions)
 class FileNotInRegistry(FileManagerException):
     """Exception raised when a requested file is not in file registry."""
 
 
+# TODO check: keep/remove/document -- never raised; lisatools has no FileManager (copied from few.utils.exceptions)
 class FileNotFoundLocally(FileManagerException):
     """Exception raised when file not found locally but expected to be."""
 
 
+# TODO check: keep/remove/document -- never raised; lisatools has no FileManager (copied from few.utils.exceptions)
 class FileInvalidChecksum(FileManagerException):
     """Exception raised when file has invalid checksum."""
 
 
+# TODO check: keep/remove/document -- never raised; lisatools has no FileManager (copied from few.utils.exceptions)
 class FileDownloadException(FileManagerException):
     """Exception raised if file download failed."""
 
 
+# TODO check: keep/remove/document -- never raised; lisatools has no FileManager (copied from few.utils.exceptions)
 class FileDownloadNotFound(FileDownloadException):
     """Exception raised if file is not found at expected URL."""
 
 
+# TODO check: keep/remove/document -- never raised; lisatools has no FileManager (copied from few.utils.exceptions)
 class FileDownloadConnectionError(FileDownloadException):
     """Exception raised in case of connection error during download."""
 
 
+# TODO check: keep/remove/document -- never raised; lisatools has no FileManager (copied from few.utils.exceptions)
 class FileDownloadIntegrityError(FileDownloadException):
     """Exception raised in case of integrity error after download."""
 
 
+# TODO check: keep/remove/document -- never raised; lisatools has no FileManager (copied from few.utils.exceptions)
 class FileManagerDisabledAccess(FileManagerException):
     """Exception raised when trying to access a file whose tags are disabled"""
 
@@ -122,5 +147,6 @@ class WaveformDomainError(LISAToolsException):
 
 
 ### Trajectory-related exceptions
+# TODO check: keep/remove/document -- never raised; sources/emri/domain.py catches few.utils.exceptions.TrajectoryOffGridException instead
 class TrajectoryOffGridException(Exception):
     """Exception raised when a trajectory goes off-grid (except for the lower boundary in p)."""

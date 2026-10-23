@@ -12,6 +12,12 @@ which carries the ``"lisatools"`` backend prefix and the
 ``GPU_RECOMMENDED_WITH_JAX`` helper. Existing consumers (including GB / SOBBH
 subclasses that override ``_BACKEND_PREFIX``) keep working unchanged; new code
 should inherit ``LISAToolsParallelModule`` directly.
+
+Example:
+    >>> from lisatools.response.parallelbase import FastLISAResponseParallelModule
+    >>> from lisatools.utils.parallelbase import LISAToolsParallelModule
+    >>> FastLISAResponseParallelModule is LISAToolsParallelModule
+    True
 """
 
 from ..utils.parallelbase import LISAToolsParallelModule

@@ -1,3 +1,10 @@
+"""Type aliases for annotations that accept numpy or cupy arrays.
+
+- ``NDArrayLike``: ``Union[np.ndarray, cp.ndarray]`` for static type checkers (when cupy is
+  importable), plain ``np.ndarray`` at runtime so importing this module never loads cupy.
+- ``ArrayModule``: ``types.ModuleType``, the type of an ``xp`` array module (``numpy`` /
+  ``cupy``).
+"""
 from typing import Union, TYPE_CHECKING
 import numpy as np
 from types import ModuleType

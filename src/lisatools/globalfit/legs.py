@@ -20,6 +20,19 @@ ratchet count CYCLES (cursor wraps), not rows.
 Composition: ``GB_SEARCH_LEGS=1`` (launcher) puts ``leg_ends="auto"`` on the
 numbered search stages' combine and ``legs=True`` on their recipe step. Off
 (default) is today's one row per cycle, byte-identical.
+
+Where the pieces live. The driver (``scripts/fstat_proposal/run_combined_staged.py``)
+passes ``combine_kwargs=dict(leg_ends="auto")`` and ``step_kwargs=dict(legs=True)``
+to ``Stage(kind="gb_search")``; :class:`~lisatools.globalfit.moves.globalfitmove.GFCombineMove`
+resolves the names with :func:`leg_ends_from_names` and keeps a :class:`LegCursor`
+as ``gf_legs`` (one leg per propose); on stage entry
+:meth:`~lisatools.globalfit.recipe.SearchStageProfileStep._legs_enter` positions
+that cursor from the store (``saved_after``, ``saved_after_history``,
+``stage_move_order`` on the
+:class:`~lisatools.globalfit.hdfbackend.GFHDFBackend`). The 9mo / 12mo
+production runs export ``GB_SEARCH_LEGS=1``: ``gb_search_1`` and
+``gb_search_2`` store one row per leg; ``gb_search_seed`` runs with
+``legs=False`` (one row per cycle).
 """
 
 from __future__ import annotations
@@ -39,6 +52,28 @@ def leg_ends_from_names(order: Sequence[str], ends=None) -> List[str]:
     An explicit iterable is validated against ``order`` (a misspelled or
     absent leg-ender would silently merge two legs, which is exactly the
     failure this refuses).
+
+    Args:
+        order: The stage's move names, in cycle order.
+        ends (str | Iterable[str], optional): ``None`` / ``"auto"`` for every
+            name starting with :data:`DEFAULT_LEG_END_PREFIX`, or an explicit
+            list of leg-ender names.
+
+    Returns:
+        list[str]: The leg-enders, in the order they appear in ``order``.
+
+    Raises:
+        ValueError: ``"auto"`` with no ``in_model*`` move in ``order``; an
+            explicit name not in ``order``; an empty explicit list.
+
+    Example:
+        >>> from lisatools.globalfit.legs import leg_ends_from_names
+        >>> order = ["rj_warm_search", "in_model", "rj_fstat_search",
+        ...          "in_model_fstat", "mbh_pe"]
+        >>> leg_ends_from_names(order)
+        ['in_model', 'in_model_fstat']
+        >>> leg_ends_from_names(order, ["in_model_fstat"])
+        ['in_model_fstat']
     """
     order = list(order)
     if ends is None or ends == "auto":
@@ -60,11 +95,40 @@ def leg_ends_from_names(order: Sequence[str], ends=None) -> List[str]:
 class LegCursor:
     """A cursor over an ordered move list, advancing one leg per propose.
 
+    A leg runs from the cursor up to and including the next leg-ender; the
+    LAST leg also runs the tail after the last leg-ender. Owned by the stage
+    combine (:class:`~lisatools.globalfit.moves.globalfitmove.GFCombineMove`,
+    attribute ``gf_legs``), which calls :meth:`plan` / :meth:`advance` once
+    per propose; positioned on resume by
+    :meth:`~lisatools.globalfit.recipe.SearchStageProfileStep._legs_enter`
+    through :meth:`set_after` and :meth:`cycles_from_history`.
+
+    Args:
+        order: The stage's move names, in cycle order.
+        ends: The leg-ender names, already resolved (for example by
+            :func:`leg_ends_from_names`). Validated against ``order``. Pass a
+            list: the string ``"auto"`` is NOT resolved here (it would be
+            split into characters and rejected).
+
     Attributes:
         order: the stage's move names in order.
         ends: the leg-ender names (a subset of ``order``, in order).
         cursor: index into ``order`` of the next move to run.
         cycles: completed cycles (cursor wraps) since the stage started.
+
+    Example:
+        >>> from lisatools.globalfit.legs import LegCursor, leg_ends_from_names
+        >>> order = ["rj_warm_search", "in_model", "rj_fstat_search",
+        ...          "in_model_fstat", "mbh_pe"]
+        >>> cur = LegCursor(order, leg_ends_from_names(order))
+        >>> cur.plan()
+        ([0, 1], 'in_model', False)
+        >>> cur.advance()
+        >>> cur.plan()
+        ([2, 3, 4], 'in_model_fstat', True)
+        >>> cur.advance()
+        >>> cur.cycles
+        1
     """
 
     def __init__(self, order: Sequence[str], ends: Iterable[str]):
@@ -76,6 +140,7 @@ class LegCursor:
 
     @property
     def nlegs(self) -> int:
+        """Number of legs per cycle (= number of leg-enders)."""
         return len(self.ends)
 
     @property
@@ -88,7 +153,13 @@ class LegCursor:
 
         The LAST leg runs through the tail of the list (the moves after the
         last leg-ender -- ridge Gibbs, the source moves -- belong to it), so
-        the row saved after it holds the state after the whole cycle.
+        the row saved after it holds the state after the whole cycle. A
+        cursor at or past the end of ``order`` is first wrapped to 0.
+
+        Returns:
+            tuple[list[int], str, bool]: Indices into ``order`` to run in this
+            propose, the name the row will be saved after, and whether this
+            is the last leg of the cycle.
         """
         n = len(self.order)
         if self.cursor >= n:
@@ -118,7 +189,17 @@ class LegCursor:
         EARLY (see :meth:`end_early_at`; the gated noise head when it changed
         the noise) is a valid saved-after name too. Returns False and starts
         at the head when ``name`` is None or not in this list -- an old
-        store, or a changed composition.
+        store, or a changed composition. A row saved after the LAST
+        leg-ender also resumes at the head (cursor 0; that cycle is
+        complete). Does not change :attr:`cycles`.
+
+        Args:
+            name: The ``saved_after`` name of the last stored row of this
+                stage.
+
+        Returns:
+            bool: True when ``name`` was found and the cursor positioned
+            after it.
         """
         if name is None or name not in self.order:
             self.cursor = 0
@@ -129,11 +210,20 @@ class LegCursor:
         self.cursor = (self.order.index(name) + 1) % len(self.order)
         return True
 
+    # TODO check: keep/remove/document -- only via gf_leg_end_now, set only by NoiseRatchetGate (GALFOR_RATCHET=0 in 9mo/12mo)
     def end_early_at(self, index: int) -> None:
         """End the current leg right after move ``index`` (before its static
         leg-ender): the row is saved after THAT move and the rest of the leg
         runs in the next propose. Only a move past the last static leg-ender
-        (the tail) wraps the cycle."""
+        (the tail) wraps the cycle.
+
+        Called by :class:`~lisatools.globalfit.moves.globalfitmove.GFCombineMove`
+        when a move in the leg sets ``gf_leg_end_now`` on itself (the gated
+        noise head of the galfor ratchet).
+
+        Args:
+            index: Index into :attr:`order` of the move the row is saved after.
+        """
         index = int(index)
         self.cursor = index + 1
         if index >= self._end_idx[-1] or self.cursor >= len(self.order):
@@ -141,7 +231,15 @@ class LegCursor:
             self.cycles += 1
 
     def cycles_from_history(self, names: Iterable[Optional[str]]) -> int:
-        """Completed cycles = rows saved after the LAST leg-ender."""
+        """Completed cycles = rows saved after the LAST leg-ender.
+
+        Args:
+            names: The ``saved_after`` names of this stage's stored rows
+                (``GFHDFBackend.saved_after_history``).
+
+        Returns:
+            int: How many of them equal the last leg-ender.
+        """
         last = self.ends[-1]
         return sum(1 for n in names if n == last)
 

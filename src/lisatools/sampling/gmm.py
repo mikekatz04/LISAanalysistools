@@ -1,4 +1,40 @@
-"""Base class for mixture models."""
+"""Vectorized Gaussian-mixture fitting (EM) over many independent sample groups.
+
+A batched fork of scikit-learn's ``GaussianMixture`` (BSD-3-Clause; see the
+author lines below): every array carries a leading ``n_groups`` axis, so one
+EM run fits an independent mixture to each group (one GB band, one leaf, one
+cluster) on numpy or cupy. Only ``covariance_type="full"`` with the
+``"random_from_data"`` initialization works (``"random"`` is coded but fails
+on an invalid normalization axis); the other scikit-learn options raise
+``NotImplementedError``. The commented-out blocks are the unported
+scikit-learn code, kept for reference.
+
+Entry points:
+
+- :class:`GaussianMixtureModel`: the batched EM fitter.
+- :class:`GMMFit`: maps each group's samples into the :math:`[-1, 1]^d` cube of
+  its own min/max box, fits a :class:`GaussianMixtureModel` there, and
+  evaluates / draws in physical coordinates (adding the map's log-Jacobian).
+- :func:`vec_fit_gmm_min_bic`: per-group sweep of the component count that
+  keeps the minimum-BIC fit; returns the component lists or a
+  :class:`~lisatools.sampling.prior.FullGaussianMixtureModel`.
+- :func:`fit_gb_gmm_rj_container`: GB samples -> fitted mixture -> the 8/9-column
+  eryn RJ proposal container.
+
+Callers. Run path (9mo / 12mo): the ``GB_WARM_SELF`` self-refit
+(:mod:`lisatools.globalfit.warmstart.self_refit`) runs the ``fit_from_store``
+step, whose :func:`~lisatools.globalfit.warmstart.fit_from_store.fit_cluster_gmms`
+calls :func:`vec_fit_gmm_min_bic` with ``return_components=True`` (so
+:class:`GMMFit` and :class:`GaussianMixtureModel` run there). Off the
+production path: the GB GMM refit move
+(:class:`~lisatools.globalfit.moves.gbspecialstretch.GBSpecialRJRefitMove`,
+not built with ``include_refit=False``) and :func:`fit_gb_gmm_rj_container`,
+whose only caller
+:class:`~lisatools.globalfit.moves.gbspecialstretch.GBSpecialRJSerialSearchMCMC`
+is built but never staged in the production stage lists, and the offline
+F-statistic GMM layer :func:`~lisatools.sampling.fstat_proposal.fit_gmm_to_stacked`
+(scripts only).
+"""
 
 # Authors: The scikit-learn developers
 # SPDX-License-Identifier: BSD-3-Clause
@@ -35,16 +71,18 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# TODO check: keep/remove/document -- no callers (its scikit-learn users are commented out)
 def _check_shape(param, param_shape, name, xp=None):
-    """Validate the shape of the input parameter 'param'.
+    """Validate the shape of the input parameter ``param``.
 
-    Parameters
-    ----------
-    param : array
+    Args:
+        param (array-like): Parameter to check.
+        param_shape (tuple): Expected shape.
+        name (str): Parameter name for the error message.
+        xp (module, optional): Array module; default numpy.
 
-    param_shape : tuple
-
-    name : str
+    Raises:
+        ValueError: The shape differs from ``param_shape``.
     """
     if xp is None:
         xp = np
@@ -348,24 +386,18 @@ def _check_shape(param, param_shape, name, xp=None):
 
 
 def _estimate_gaussian_covariances_full(resp, X, nk, means, reg_covar, xp=None):
-    """Estimate the full covariance matrices.
+    """Estimate the full covariance matrices of every group's components.
 
-    Parameters
-    ----------
-    resp : array-like of shape (n_samples, n_components)
+    Args:
+        resp (xp.ndarray): Responsibilities, ``(n_groups, n_samples, n_components)``.
+        X (xp.ndarray): Data, ``(n_groups, n_samples, n_features)``.
+        nk (xp.ndarray): Effective counts per component, ``(n_groups, n_components)``.
+        means (xp.ndarray): Component means, ``(n_groups, n_components, n_features)``.
+        reg_covar (float): Added to every covariance diagonal.
+        xp (module, optional): Array module; default numpy.
 
-    X : array-like of shape (n_samples, n_features)
-
-    nk : array-like of shape (n_components,)
-
-    means : array-like of shape (n_components, n_features)
-
-    reg_covar : float
-
-    Returns
-    -------
-    covariances : array, shape (n_components, n_features, n_features)
-        The covariance matrix of the current components.
+    Returns:
+        xp.ndarray: Covariances, ``(n_groups, n_components, n_features, n_features)``.
     """
     if xp is None:
         xp = np
@@ -464,33 +496,21 @@ def _estimate_gaussian_covariances_full(resp, X, nk, means, reg_covar, xp=None):
 
 
 def _estimate_gaussian_parameters(X, resp, reg_covar, covariance_type, xp=None):
-    """Estimate the Gaussian distribution parameters.
+    """Estimate the Gaussian distribution parameters (the M step) per group.
 
-    Parameters
-    ----------
-    X : array-like of shape (n_samples, n_features)
-        The input data array.
+    Args:
+        X (xp.ndarray): Data, ``(n_groups, n_samples, n_features)``.
+        resp (xp.ndarray): Responsibilities, ``(n_groups, n_samples, n_components)``.
+        reg_covar (float): Regularization added to the covariance diagonals.
+        covariance_type (str): Only ``"full"`` is implemented (any other value
+            raises ``KeyError``).
+        xp (module, optional): Array module; default numpy.
 
-    resp : array-like of shape (n_samples, n_components)
-        The responsibilities for each data sample in X.
-
-    reg_covar : float
-        The regularization added to the diagonal of the covariance matrices.
-
-    covariance_type : {'full', 'tied', 'diag', 'spherical'}
-        The type of precision matrices.
-
-    Returns
-    -------
-    nk : array-like of shape (n_components,)
-        The numbers of data samples in the current components.
-
-    means : array-like of shape (n_components, n_features)
-        The centers of the current components.
-
-    covariances : array-like
-        The covariance matrix of the current components.
-        The shape depends of the covariance_type.
+    Returns:
+        tuple[xp.ndarray, xp.ndarray, xp.ndarray]: ``(nk, means, covariances)``:
+        effective counts ``(n_groups, n_components)`` (unnormalized, plus
+        ``10 eps``), means ``(n_groups, n_components, n_features)`` and
+        covariances ``(n_groups, n_components, n_features, n_features)``.
     """
     if xp is None:
         xp = np
@@ -508,22 +528,24 @@ def _estimate_gaussian_parameters(X, resp, reg_covar, covariance_type, xp=None):
 
 
 def _compute_precision_cholesky(covariances, covariance_type, xp=None):
-    """Compute the Cholesky decomposition of the precisions.
+    """Compute the Cholesky factors of the precision matrices.
 
-    Parameters
-    ----------
-    covariances : array-like
-        The covariance matrix of the current components.
-        The shape depends of the covariance_type.
+    For each component, ``L = cholesky(cov)`` and the returned factor is
+    ``(L^{-1})^T``, so ``prec_chol prec_chol^T`` is the precision matrix.
 
-    covariance_type : {'full', 'tied', 'diag', 'spherical'}
-        The type of precision matrices.
+    Args:
+        covariances (xp.ndarray): ``(n_groups, n_components, n_features, n_features)``.
+        covariance_type (str): ``"full"``; anything else raises
+            ``NotImplementedError``.
+        xp (module, optional): Array module; default numpy.
 
-    Returns
-    -------
-    precisions_cholesky : array-like
-        The cholesky decomposition of sample precisions of the current
-        components. The shape depends of the covariance_type.
+    Returns:
+        xp.ndarray: Precision Cholesky factors, same shape as ``covariances``.
+
+    Raises:
+        ValueError: A covariance is not positive definite (collapsed or
+            singleton component).
+        NotImplementedError: ``covariance_type`` is not ``"full"``.
     """
     if xp is None:
         xp = np
@@ -635,26 +657,21 @@ def _compute_precision_cholesky(covariances, covariance_type, xp=None):
 ###############################################################################
 # Gaussian mixture probability estimators
 def _compute_log_det_cholesky(matrix_chol, covariance_type, n_features, xp=None):
-    """Compute the log-det of the cholesky decomposition of matrices.
+    """Compute the log-determinant of triangular Cholesky factors.
 
-    Parameters
-    ----------
-    matrix_chol : array-like
-        Cholesky decompositions of the matrices.
-        'full' : shape of (n_components, n_features, n_features)
-        'tied' : shape of (n_features, n_features)
-        'diag' : shape of (n_components, n_features)
-        'spherical' : shape of (n_components,)
+    Sums the logs of the diagonal entries.
 
-    covariance_type : {'full', 'tied', 'diag', 'spherical'}
+    Args:
+        matrix_chol (xp.ndarray): Triangular factors,
+            ``(n_groups, n_components, n_features, n_features)``.
+        covariance_type (str): ``"full"``; anything else raises
+            ``NotImplementedError``.
+        n_features (int): Number of features.
+        xp (module, optional): Array module; default numpy.
 
-    n_features : int
-        Number of features.
-
-    Returns
-    -------
-    log_det_precision_chol : array-like of shape (n_components,)
-        The determinant of the precision matrix for each component.
+    Returns:
+        xp.ndarray: ``(n_groups, n_components)`` log-determinants (for a
+        precision Cholesky factor: half the log-determinant of the precision).
     """
     if xp is None:
         xp = np
@@ -684,26 +701,20 @@ def _compute_log_det_cholesky(matrix_chol, covariance_type, n_features, xp=None)
 
 
 def _estimate_log_gaussian_prob(X, means, precisions_chol, covariance_type, xp=None):
-    """Estimate the log Gaussian probability.
+    """Estimate the per-component log Gaussian density of every sample.
 
-    Parameters
-    ----------
-    X : array-like of shape (n_samples, n_features)
+    Args:
+        X (xp.ndarray): Data, ``(n_groups, n_samples, n_features)``.
+        means (xp.ndarray): ``(n_groups, n_components, n_features)``.
+        precisions_chol (xp.ndarray): Precision Cholesky factors,
+            ``(n_groups, n_components, n_features, n_features)``.
+        covariance_type (str): ``"full"``; anything else raises
+            ``NotImplementedError``.
+        xp (module, optional): Array module; default numpy.
 
-    means : array-like of shape (n_components, n_features)
-
-    precisions_chol : array-like
-        Cholesky decompositions of the precision matrices.
-        'full' : shape of (n_components, n_features, n_features)
-        'tied' : shape of (n_features, n_features)
-        'diag' : shape of (n_components, n_features)
-        'spherical' : shape of (n_components,)
-
-    covariance_type : {'full', 'tied', 'diag', 'spherical'}
-
-    Returns
-    -------
-    log_prob : array, shape (n_samples, n_components)
+    Returns:
+        xp.ndarray: ``(n_groups, n_samples, n_components)`` log densities
+        (unweighted).
     """
     if xp is None:
         xp = np
@@ -766,15 +777,17 @@ def draw_multinomial_vec(n_samples, weights, random_state, xp=None):
     counts.
 
     Args:
-        n_samples: Number of categorical draws per group.
-        weights: Array of shape ``(n_groups, n_components)`` of per-group
-            mixture weights (rows must sum to one).
-        random_state: Object exposing a ``rand`` method (numpy / cupy
-            ``random``) used to draw uniforms.
-        xp: Array module (numpy or cupy). Defaults to numpy.
+        n_samples (int): Number of categorical draws per group.
+        weights (xp.ndarray): Array of shape ``(n_groups, n_components)`` of
+            per-group mixture weights (renormalized per row here).
+        random_state (object): Object exposing ``multinomial(n, pvals)``
+            (numpy / cupy ``random`` or a ``RandomState``); called once per
+            group.
+        xp (module, optional): Array module (numpy or cupy). Defaults to numpy.
 
     Returns:
-        Integer counts array of shape ``(n_groups, n_components)``.
+        xp.ndarray: Integer counts of shape ``(n_groups, n_components)``; each
+        row sums to ``n_samples``.
     """
     if xp is None:
         xp = np
@@ -844,199 +857,87 @@ def draw_multinomial_vec(n_samples, weights, random_state, xp=None):
 
 
 class GaussianMixtureModel:
-    """Gaussian Mixture.
+    """Batched Gaussian mixture model fitted by EM, one mixture per group.
 
-    Representation of a Gaussian mixture model probability distribution.
-    This class allows to estimate the parameters of a Gaussian mixture
-    distribution.
+    A fork of scikit-learn's ``GaussianMixture`` with a leading ``n_groups``
+    axis on every array: :meth:`fit` takes ``X`` of shape
+    ``(n_groups, n_samples, n_features)`` and runs EM on all groups at once,
+    freezing a group once its lower-bound change drops below ``tol``. Runs on
+    numpy, or on cupy when ``gpu`` is a device index. In the global fit it is
+    constructed only through :class:`GMMFit` (``init_params="random_from_data"``,
+    ``max_iter=1000``).
 
-    Read more in the :ref:`User Guide <gmm>`.
+    Args:
+        n_components (int, optional): Components per group. Default ``1``.
+        covariance_type (str, optional): Only ``"full"`` is implemented; the
+            scikit-learn ``"tied"`` / ``"diag"`` / ``"spherical"`` raise
+            ``NotImplementedError`` (or ``KeyError``) during :meth:`fit`.
+            Default ``"full"``.
+        tol (float, optional): Convergence threshold on the per-group change
+            of the lower bound (the mean log-likelihood). Default ``1e-3``.
+        reg_covar (float, optional): Non-negative value added to every
+            covariance diagonal. Default ``1e-6``.
+        max_iter (int, optional): Maximum EM iterations. ``0`` raises
+            ``NotImplementedError``. Default ``100``.
+        n_init (int, optional): Number of initializations (see
+            :meth:`fit_predict` for which trial is kept). Default ``1``.
+        init_params (str, optional): ``"random_from_data"`` (initial means are
+            ``n_components`` data points, the same sample indices in every
+            group) is the working option. ``"random"`` (random
+            responsibilities) currently fails: its normalization sums over an
+            invalid axis. ``"kmeans"`` and ``"k-means++"`` raise
+            ``NotImplementedError``, so the default ``"kmeans"`` must be
+            overridden.
+        weights_init: Not implemented; anything but ``None`` raises
+            ``NotImplementedError`` in :meth:`fit`.
+        means_init: Not implemented; as ``weights_init``.
+        precisions_init: Not implemented; as ``weights_init``.
+        random_state (int, RandomState or None, optional): ``None`` uses the
+            array module's global ``random`` (unseeded); an ``int`` is turned
+            into ``xp.random.RandomState(seed)``; anything else is used as is.
+            Drives the initialization and :meth:`sample`. Default ``None``.
+        warm_start (bool, optional): Kept from scikit-learn: with ``True`` a
+            second :meth:`fit` skips the initialization, but
+            :meth:`fit_predict` re-zeroes the parameter arrays before that
+            point, so a warm-started fit runs EM from all-zero parameters and
+            does not work. Default ``False``.
+        verbose (int, optional): ``1`` logs each initialization and every
+            ``verbose_interval`` iterations; ``>= 2`` adds timings but raises
+            ``TypeError`` at the end of an initialization (it formats the
+            per-group lower-bound array as a scalar). Default ``0``.
+        verbose_interval (int, optional): Iterations between verbose log
+            lines. Default ``10``.
+        gpu (int, optional): CUDA device index; when set, computes with cupy
+            and calls ``cupy.cuda.runtime.setDevice(gpu)`` at construction.
+            ``None`` (default) computes with numpy.
 
-    .. versionadded:: 0.18
+    Attributes:
+        weights_ (xp.ndarray): ``(n_groups, n_components)`` weights.
+        means_ (xp.ndarray): ``(n_groups, n_components, n_features)``.
+        covariances_ (xp.ndarray): ``(n_groups, n_components, n_features, n_features)``.
+        precisions_cholesky_ (xp.ndarray): Precision Cholesky factors, same
+            shape as ``covariances_``.
+        precisions_ (xp.ndarray): Precision matrices, same shape.
+        inv_covs_ (xp.ndarray): ``inv(covariances_)`` (set at the end of
+            :meth:`fit`).
+        det_covs_ (xp.ndarray): ``det(covariances_)``, ``(n_groups, n_components)``.
+        converged_ (xp.ndarray): ``(n_groups,)`` bool, EM converged per group.
+        n_iter_ (xp.ndarray): ``(n_groups,)`` EM iterations used per group.
+        lower_bound_ (xp.ndarray): ``(n_groups,)`` final lower bound.
+        lower_bounds_ (list): One entry per EM iteration of the kept
+            initialization; every entry is the same lower-bound array object,
+            so all of them show its final values.
 
-    Parameters
-    ----------
-    n_components : int, default=1
-        The number of mixture components.
-
-    covariance_type : {'full', 'tied', 'diag', 'spherical'}, default='full'
-        String describing the type of covariance parameters to use.
-        Must be one of:
-
-        - 'full': each component has its own general covariance matrix.
-        - 'tied': all components share the same general covariance matrix.
-        - 'diag': each component has its own diagonal covariance matrix.
-        - 'spherical': each component has its own single variance.
-
-        For an example of using `covariance_type`, refer to
-        :ref:`sphx_glr_auto_examples_mixture_plot_gmm_selection.py`.
-
-    tol : float, default=1e-3
-        The convergence threshold. EM iterations will stop when the
-        lower bound average gain is below this threshold.
-
-    reg_covar : float, default=1e-6
-        Non-negative regularization added to the diagonal of covariance.
-        Allows to assure that the covariance matrices are all positive.
-
-    max_iter : int, default=100
-        The number of EM iterations to perform.
-
-    n_init : int, default=1
-        The number of initializations to perform. The best results are kept.
-
-    init_params : {'kmeans', 'k-means++', 'random', 'random_from_data'}, \
-    default='kmeans'
-        The method used to initialize the weights, the means and the
-        precisions.
-        String must be one of:
-
-        - 'kmeans' : responsibilities are initialized using kmeans.
-        - 'k-means++' : use the k-means++ method to initialize.
-        - 'random' : responsibilities are initialized randomly.
-        - 'random_from_data' : initial means are randomly selected data points.
-
-        .. versionchanged:: v1.1
-            `init_params` now accepts 'random_from_data' and 'k-means++' as
-            initialization methods.
-
-    weights_init : array-like of shape (n_components, ), default=None
-        The user-provided initial weights.
-        If it is None, weights are initialized using the `init_params` method.
-
-    means_init : array-like of shape (n_components, n_features), default=None
-        The user-provided initial means,
-        If it is None, means are initialized using the `init_params` method.
-
-    precisions_init : array-like, default=None
-        The user-provided initial precisions (inverse of the covariance
-        matrices).
-        If it is None, precisions are initialized using the 'init_params'
-        method.
-        The shape depends on 'covariance_type'::
-
-            (n_components,)                        if 'spherical',
-            (n_features, n_features)               if 'tied',
-            (n_components, n_features)             if 'diag',
-            (n_components, n_features, n_features) if 'full'
-
-    random_state : int, RandomState instance or None, default=None
-        Controls the random seed given to the method chosen to initialize the
-        parameters (see `init_params`).
-        In addition, it controls the generation of random samples from the
-        fitted distribution (see the method `sample`).
-        Pass an int for reproducible output across multiple function calls.
-        See :term:`Glossary <random_state>`.
-
-    warm_start : bool, default=False
-        If 'warm_start' is True, the solution of the last fitting is used as
-        initialization for the next call of fit(). This can speed up
-        convergence when fit is called several times on similar problems.
-        In that case, 'n_init' is ignored and only a single initialization
-        occurs upon the first call.
-        See :term:`the Glossary <warm_start>`.
-
-    verbose : int, default=0
-        Enable verbose output. If 1 then it prints the current
-        initialization and each iteration step. If greater than 1 then
-        it prints also the log probability and the time needed
-        for each step.
-
-    verbose_interval : int, default=10
-        Number of iteration done before the next print.
-
-    Attributes
-    ----------
-    weights_ : array-like of shape (n_components,)
-        The weights of each mixture components.
-
-    means_ : array-like of shape (n_components, n_features)
-        The mean of each mixture component.
-
-    covariances_ : array-like
-        The covariance of each mixture component.
-        The shape depends on `covariance_type`::
-
-            (n_components,)                        if 'spherical',
-            (n_features, n_features)               if 'tied',
-            (n_components, n_features)             if 'diag',
-            (n_components, n_features, n_features) if 'full'
-
-        For an example of using covariances, refer to
-        :ref:`sphx_glr_auto_examples_mixture_plot_gmm_covariances.py`.
-
-    precisions_ : array-like
-        The precision matrices for each component in the mixture. A precision
-        matrix is the inverse of a covariance matrix. A covariance matrix is
-        symmetric positive definite so the mixture of Gaussian can be
-        equivalently parameterized by the precision matrices. Storing the
-        precision matrices instead of the covariance matrices makes it more
-        efficient to compute the log-likelihood of new samples at test time.
-        The shape depends on `covariance_type`::
-
-            (n_components,)                        if 'spherical',
-            (n_features, n_features)               if 'tied',
-            (n_components, n_features)             if 'diag',
-            (n_components, n_features, n_features) if 'full'
-
-    precisions_cholesky_ : array-like
-        The cholesky decomposition of the precision matrices of each mixture
-        component. A precision matrix is the inverse of a covariance matrix.
-        A covariance matrix is symmetric positive definite so the mixture of
-        Gaussian can be equivalently parameterized by the precision matrices.
-        Storing the precision matrices instead of the covariance matrices makes
-        it more efficient to compute the log-likelihood of new samples at test
-        time. The shape depends on `covariance_type`::
-
-            (n_components,)                        if 'spherical',
-            (n_features, n_features)               if 'tied',
-            (n_components, n_features)             if 'diag',
-            (n_components, n_features, n_features) if 'full'
-
-    converged_ : bool
-        True when convergence of the best fit of EM was reached, False otherwise.
-
-    n_iter_ : int
-        Number of step used by the best fit of EM to reach the convergence.
-
-    lower_bound_ : float
-        Lower bound value on the log-likelihood (of the training data with
-        respect to the model) of the best fit of EM.
-
-    lower_bounds_ : array-like of shape (`n_iter_`,)
-        The list of lower bound values on the log-likelihood from each
-        iteration of the best fit of EM.
-
-    n_features_in_ : int
-        Number of features seen during :term:`fit`.
-
-        .. versionadded:: 0.24
-
-    feature_names_in_ : ndarray of shape (`n_features_in_`,)
-        Names of features seen during :term:`fit`. Defined only when `X`
-        has feature names that are all strings.
-
-        .. versionadded:: 1.0
-
-    See Also
-    --------
-    BayesianGaussianMixture : Gaussian mixture model fit with a variational
-        inference.
-
-    Examples
-    --------
-    >>> import numpy as np
-    >>> from sklearn.mixture import GaussianMixture
-    >>> X = np.array([[1, 2], [1, 4], [1, 0], [10, 2], [10, 4], [10, 0]])
-    >>> gm = GaussianMixture(n_components=2, random_state=0).fit(X)
-    >>> gm.means_
-    array([[10.,  2.],
-           [ 1.,  2.]])
-    >>> gm.predict([[0, 0], [12, 3]])
-    array([1, 0])
-
-    For a comparison of Gaussian Mixture with other clustering algorithms, see
-    :ref:`sphx_glr_auto_examples_cluster_plot_cluster_comparison.py`
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.sampling.gmm import GaussianMixtureModel
+        >>> X = np.random.default_rng(0).normal(size=(3, 500, 2))
+        >>> gmm = GaussianMixtureModel(
+        ...     n_components=2, init_params="random_from_data", random_state=0
+        ... )
+        >>> _ = gmm.fit(X)
+        >>> gmm.weights_.shape, gmm.means_.shape, gmm.logpdf(X).shape
+        ((3, 2), (3, 2, 2), (3, 500))
     """
 
     # _parameter_constraints: dict = {
@@ -1123,14 +1024,14 @@ class GaussianMixtureModel:
 
     @property
     def logsumexp(self):
-        """``logsumexp`` implementation matching the active array module."""
+        """callable: ``logsumexp`` matching the array module (scipy or cupyx.scipy)."""
         if self.use_gpu:
             return logsumexp_gpu
         else:
             return logsumexp_cpu
 
     def _print_verbose_msg_init_end(self, lb, init_has_converged):
-        """Print verbose message on the end of iteration."""
+        """Log the end of one initialization (how many groups converged) when verbose."""
         converged_msg = (
             f"converged {init_has_converged.sum()} out of {init_has_converged.shape[0]}."
         )
@@ -1143,7 +1044,12 @@ class GaussianMixtureModel:
             )
 
     def _check_parameters(self, X):
-        """Check the Gaussian mixture parameters are well defined."""
+        """Reject user-provided initial parameters (not implemented in the batched fork).
+
+        Raises:
+            NotImplementedError: Any of ``weights_init`` / ``means_init`` /
+                ``precisions_init`` is set.
+        """
         _, _, n_features = X.shape
 
         if self.weights_init is not None:
@@ -1165,7 +1071,7 @@ class GaussianMixtureModel:
             )
 
     def _print_verbose_msg_iter_end(self, n_iter, diff_ll):
-        """Print verbose message on initialization."""
+        """Log the EM iteration every ``verbose_interval`` iterations when verbose."""
         if n_iter % self.verbose_interval == 0:
             if self.verbose == 1:
                 logger.info("  Iteration %d" % n_iter)
@@ -1191,15 +1097,16 @@ class GaussianMixtureModel:
             self._initialize(X, None)
 
     def _initialize_parameters_inner(self, X, random_state):
-        """Initialize the model parameters.
+        """Initialize the responsibilities by ``init_params`` and set the parameters.
 
-        Parameters
-        ----------
-        X : array-like of shape  (n_groups, n_samples, n_features)
+        Args:
+            X (xp.ndarray): Data, ``(n_groups, n_samples, n_features)``.
+            random_state (object): Random generator (``choice`` / ``uniform``)
+                for the chosen initialization.
 
-        random_state : RandomState
-            A random number generator instance that controls the random seed
-            used for the method chosen to initialize the parameters.
+        Raises:
+            NotImplementedError: ``init_params`` is ``"kmeans"`` or
+                ``"k-means++"``.
         """
         n_groups, n_samples, _ = X.shape
 
@@ -1238,13 +1145,12 @@ class GaussianMixtureModel:
         self._initialize(X, resp)
 
     def _initialize(self, X, resp):
-        """Initialization of the Gaussian mixture parameters.
+        """Set the initial weights, means, covariances and precision factors.
 
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-
-        resp : array-like of shape (n_samples, n_components)
+        Args:
+            X (xp.ndarray): Data, ``(n_groups, n_samples, n_features)``.
+            resp (xp.ndarray or None): Initial responsibilities,
+                ``(n_groups, n_samples, n_components)``.
         """
         n_groups, n_samples, _ = X.shape
         weights, means, covariances = None, None, None
@@ -1269,18 +1175,14 @@ class GaussianMixtureModel:
             )
 
     def score_samples(self, X):
-        """Compute the log-likelihood of each sample.
+        """Compute the mixture log-density of each sample under its group's mixture.
 
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-            List of n_features-dimensional data points. Each row
-            corresponds to a single data point.
+        Args:
+            X (xp.ndarray): ``(n_groups, n_samples, n_features)``; group ``g`` of
+                ``X`` is scored with mixture ``g``.
 
-        Returns
-        -------
-        log_prob : array, shape (n_samples,)
-            Log-likelihood of each sample in `X` under the current model.
+        Returns:
+            xp.ndarray: ``(n_groups, n_samples)`` log-densities.
         """
         # check_is_fitted(self)
         # X = validate_data(self, X, reset=False)
@@ -1288,21 +1190,15 @@ class GaussianMixtureModel:
         return self.logsumexp(self._estimate_weighted_log_prob(X), axis=-1)
 
     def score(self, X, y=None):
-        """Compute the per-sample average log-likelihood of the given data X.
+        """Compute the per-group mean log-density of ``X``.
 
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_dimensions)
-            List of n_features-dimensional data points. Each row
-            corresponds to a single data point.
+        Args:
+            X (xp.ndarray): ``(n_groups, n_samples, n_features)``.
+            y: Ignored (scikit-learn API).
 
-        y : Ignored
-            Not used, present for API consistency by convention.
-
-        Returns
-        -------
-        log_likelihood : float
-            Log-likelihood of `X` under the Gaussian mixture model.
+        Returns:
+            xp.ndarray: ``(n_groups,)`` mean of :meth:`score_samples` over the
+            samples.
         """
         return self.score_samples(X).mean(axis=-1)
 
@@ -1310,19 +1206,16 @@ class GaussianMixtureModel:
         """Alias for :meth:`score_samples`."""
         return self.score_samples(X)
 
+    # TODO check: keep/remove/document -- no callers (scikit-learn API kept from the fork)
     def predict_proba(self, X):
-        """Evaluate the components' density for each sample.
+        """Return the component responsibilities of each sample.
 
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-            List of n_features-dimensional data points. Each row
-            corresponds to a single data point.
+        Args:
+            X (xp.ndarray): ``(n_groups, n_samples, n_features)``.
 
-        Returns
-        -------
-        resp : array, shape (n_samples, n_components)
-            Density of each Gaussian component for each sample in X.
+        Returns:
+            xp.ndarray: ``(n_groups, n_samples, n_components)`` posterior
+            component probabilities.
         """
         # check_is_fitted(self)
         # X = validate_data(self, X, reset=False)
@@ -1332,21 +1225,17 @@ class GaussianMixtureModel:
     def _estimate_log_prob_resp(self, X, converged=None):
         """Estimate log probabilities and responsibilities for each sample.
 
-        Compute the log probabilities, weighted log probabilities per
-        component and responsibilities for each sample in X with respect to
-        the current state of the model.
+        Only the groups with ``converged == False`` are evaluated.
 
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
+        Args:
+            X (xp.ndarray): ``(n_groups, n_samples, n_features)``.
+            converged (xp.ndarray, optional): ``(n_groups,)`` bool; default all
+                ``False``.
 
-        Returns
-        -------
-        log_prob_norm : array, shape (n_samples,)
-            log p(X)
-
-        log_responsibilities : array, shape (n_samples, n_components)
-            logarithm of the responsibilities
+        Returns:
+            tuple[xp.ndarray, xp.ndarray]: ``(log_prob_norm, log_resp)``:
+            ``log p(x)`` of shape ``(n_active, n_samples)`` and the log
+            responsibilities ``(n_active, n_samples, n_components)``.
         """
         if converged is None:
             converged = self.xp.full(X.shape[0], False)
@@ -1359,15 +1248,15 @@ class GaussianMixtureModel:
         return log_prob_norm, log_resp
 
     def _estimate_weighted_log_prob(self, X, converged=None):
-        """Estimate the weighted log-probabilities, log P(X | Z) + log weights.
+        """Estimate the weighted log-probabilities, ``log P(X | Z) + log weights``.
 
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
+        Args:
+            X (xp.ndarray): ``(n_groups, n_samples, n_features)``.
+            converged (xp.ndarray, optional): ``(n_groups,)`` bool; converged
+                groups are skipped. Default all ``False``.
 
-        Returns
-        -------
-        weighted_log_prob : array, shape (n_samples, n_component)
+        Returns:
+            xp.ndarray: ``(n_active, n_samples, n_components)``.
         """
         if converged is None:
             converged = self.xp.full(X.shape[0], False)
@@ -1378,20 +1267,28 @@ class GaussianMixtureModel:
         )
 
     def sample(self, n_samples=1, flat=False):
-        """Generate random samples from the fitted Gaussian distribution.
+        """Generate random samples from the fitted mixtures.
 
-        Parameters
-        ----------
-        n_samples : int, default=1
-            Number of samples to generate.
+        Component counts come from :func:`draw_multinomial_vec`; the draws are
+        ``mean + L z`` with ``L = cholesky(cov)``, written contiguously per
+        component (so samples are grouped by component, not shuffled).
 
-        Returns
-        -------
-        X : array, shape (n_samples, n_features)
-            Randomly generated sample.
+        Args:
+            n_samples (int, optional): Samples per group. Default ``1``.
+            flat (bool, optional): If ``True``, treat all groups' components
+                as ONE mixture (weights renormalized over the whole set) and
+                draw ``n_samples`` from it (output group axis of length 1).
+                Default ``False``.
 
-        y : array, shape (nsamples,)
-            Component labels.
+        Returns:
+            tuple[xp.ndarray, xp.ndarray, xp.ndarray]: ``(X, counts, comp)``:
+            samples ``(n_groups, n_samples, n_features)`` (``n_groups = 1``
+            when ``flat``), per-component counts ``(n_groups, n_components)``
+            and the component index of each sample ``(n_groups, n_samples)``
+            (flat index ``group * n_components + k`` when ``flat``).
+
+        Raises:
+            ValueError: ``n_samples < 1``.
         """
         # check_is_fitted(self)
 
@@ -1529,37 +1426,27 @@ class GaussianMixtureModel:
         return (X, n_samples_comp, comp_out)
 
     def fit(self, X, y=None):
-        """Estimate model parameters with the EM algorithm.
+        """Estimate model parameters with the EM algorithm (see :meth:`fit_predict`).
 
-        The method fits the model ``n_init`` times and sets the parameters with
-        which the model has the largest likelihood or lower bound. Within each
-        trial, the method iterates between E-step and M-step for ``max_iter``
-        times until the change of likelihood or lower bound is less than
-        ``tol``, otherwise, a ``ConvergenceWarning`` is raised.
-        If ``warm_start`` is ``True``, then ``n_init`` is ignored and a single
-        initialization is performed upon the first call. Upon consecutive
-        calls, training starts where it left off.
+        The method fits the model ``n_init`` times and keeps the parameters
+        of the last trial in which any group's lower bound improved (see
+        :meth:`fit_predict`). Within each trial, EM iterates up to
+        ``max_iter`` times, per group, until the lower-bound change is below
+        ``tol``; if some group never converges a ``UserWarning`` is issued.
 
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-            List of n_features-dimensional data points. Each row
-            corresponds to a single data point.
+        Args:
+            X (xp.ndarray): ``(n_groups, n_samples, n_features)``.
+            y: Ignored (scikit-learn API).
 
-        y : Ignored
-            Not used, present for API consistency by convention.
-
-        Returns
-        -------
-        self : object
-            The fitted mixture.
+        Returns:
+            GaussianMixtureModel: ``self``, fitted.
         """
         # parameters are validated in fit_predict
         self.fit_predict(X, y)
         return self
 
     def _print_verbose_msg_init_beg(self, n_init):
-        """Print verbose message on initialization."""
+        """Log the start of initialization ``n_init`` when verbose (and start the timers)."""
         if self.verbose == 1:
             logger.info("Initialization %d" % n_init)
         elif self.verbose >= 2:
@@ -1569,31 +1456,30 @@ class GaussianMixtureModel:
 
     # @_fit_context(prefer_skip_nested_validation=True)
     def fit_predict(self, X, y=None):
-        """Estimate model parameters using X and predict the labels for X.
+        """Fit the batched mixtures by EM and return the final responsibility argmax.
 
-        The method fits the model n_init times and sets the parameters with
-        which the model has the largest likelihood or lower bound. Within each
-        trial, the method iterates between E-step and M-step for `max_iter`
-        times until the change of likelihood or lower bound is less than
-        `tol`, otherwise, a :class:`~sklearn.exceptions.ConvergenceWarning` is
-        raised. After fitting, it predicts the most probable label for the
-        input data points.
+        Allocates the per-group parameter arrays, then for each of ``n_init``
+        initializations runs EM, freezing each group once its lower-bound
+        change is below ``tol``. A trial's parameters are kept when ANY group's
+        lower bound improved on the best so far (all groups' parameters are
+        then taken from that trial). Ends with :meth:`_set_parameters`
+        (``store_all=True``, filling ``inv_covs_`` / ``det_covs_``) and a final
+        E step. Issues a ``UserWarning`` if some group did not converge.
 
-        .. versionadded:: 0.20
+        Args:
+            X (xp.ndarray): ``(n_groups, n_samples, n_features)``.
+            y: Ignored (scikit-learn API).
 
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-            List of n_features-dimensional data points. Each row
-            corresponds to a single data point.
+        Returns:
+            xp.ndarray: ``argmax`` of the final log responsibilities over axis
+            1 (the SAMPLE axis of the ``(n_groups, n_samples, n_components)``
+            array, so ``(n_groups, n_components)``; not per-sample labels).
+            :meth:`fit` discards it.
 
-        y : Ignored
-            Not used, present for API consistency by convention.
-
-        Returns
-        -------
-        labels : array, shape (n_samples,)
-            Component labels.
+        Raises:
+            ValueError: ``n_samples < n_components``.
+            NotImplementedError: An unsupported option (see the class
+                docstring).
         """
         # X = validate_data(self, X, dtype=[self.xp.float64, self.xp.float32], ensure_min_samples=2)
         if X.shape[1] < self.n_components:
@@ -1698,20 +1584,17 @@ class GaussianMixtureModel:
         return log_resp.argmax(axis=1)
 
     def _e_step(self, X, converged=None):
-        """E step.
+        """Run the E step on the non-converged groups.
 
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
+        Args:
+            X (xp.ndarray): ``(n_groups, n_samples, n_features)``.
+            converged (xp.ndarray, optional): ``(n_groups,)`` bool; default all
+                ``False``.
 
-        Returns
-        -------
-        log_prob_norm : float
-            Mean of the logarithms of the probabilities of each sample in X
-
-        log_responsibility : array, shape (n_samples, n_components)
-            Logarithm of the posterior probabilities (or responsibilities) of
-            the point of each sample in X.
+        Returns:
+            tuple[xp.ndarray, xp.ndarray]: ``(mean_log_prob, log_resp)``: the
+            per-group mean of ``log p(x)``, ``(n_active,)``, and the log
+            responsibilities ``(n_active, n_samples, n_components)``.
         """
         if converged is None:
             converged = self.xp.full(X.shape[0], False)
@@ -1720,15 +1603,17 @@ class GaussianMixtureModel:
         return self.xp.mean(log_prob_norm, axis=-1), log_resp
 
     def _m_step(self, X, log_resp, converged=None):
-        """M step.
+        """Run the M step in place on the non-converged groups.
 
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
+        Updates ``weights_`` (normalized per group), ``means_``,
+        ``covariances_`` and ``precisions_cholesky_`` of the active groups.
 
-        log_resp : array-like of shape (n_samples, n_components)
-            Logarithm of the posterior probabilities (or responsibilities) of
-            the point of each sample in X.
+        Args:
+            X (xp.ndarray): ``(n_groups, n_samples, n_features)``.
+            log_resp (xp.ndarray): Log responsibilities of the active groups,
+                ``(n_active, n_samples, n_components)``.
+            converged (xp.ndarray, optional): ``(n_groups,)`` bool; default all
+                ``False``.
         """
         if converged is None:
             converged = self.xp.full(X.shape[0], False)
@@ -1770,11 +1655,25 @@ class GaussianMixtureModel:
         return self.xp.log(self.weights_[~converged])
 
     def _compute_lower_bound(self, _, log_prob_norm):
-        """Return the EM lower bound (here just the per-sample log-norm)."""
+        """Return the EM lower bound: the per-group mean ``log p(x)`` from :meth:`_e_step`."""
         return log_prob_norm
 
     def _estimate_weighted_log_prob_for_flat(self, X):
-        """Weighted per-component log-probability for the flattened mixture."""
+        """Return each group's weighted log-density of ``X`` with flat-mixture weights.
+
+        The weights are renormalized over ALL groups' components, so the
+        log-sum-exp over groups of the result (as :meth:`GMMFit.logpdf` does
+        with ``flat=True``, after adding each group's log-Jacobian) is the
+        log-density of the one concatenated mixture. Must be called after
+        :meth:`fit`.
+
+        Args:
+            X (xp.ndarray): ``(n_groups, n_samples, n_features)``, each group
+                holding the same points mapped into that group's cube.
+
+        Returns:
+            xp.ndarray: ``(n_groups, n_samples)``.
+        """
         # must be converged already
         logpdf_gaussian = _estimate_log_gaussian_prob(
             X, self.means_, self.precisions_cholesky_, self.covariance_type, xp=self.xp
@@ -1796,7 +1695,16 @@ class GaussianMixtureModel:
         )
 
     def _set_parameters(self, params, store_all=False):
-        """Restore mixture parameters and recompute precisions / cached covariance inverses."""
+        """Set ``(weights_, means_, covariances_, precisions_cholesky_)`` and derived arrays.
+
+        Recomputes ``precisions_``; with ``store_all`` also ``inv_covs_`` and
+        ``det_covs_`` (used by :func:`vec_fit_gmm_min_bic`).
+
+        Args:
+            params (tuple): As returned by :meth:`_get_parameters`.
+            store_all (bool, optional): Also store the covariance inverses and
+                determinants. Default ``False``.
+        """
         (
             self.weights_,
             self.means_,
@@ -1828,7 +1736,7 @@ class GaussianMixtureModel:
             self.det_covs_ = self.xp.linalg.det(self.covariances_)
 
     def _n_parameters(self):
-        """Return the number of free parameters in the model."""
+        """Return the number of free parameters of ONE group's mixture (used by :meth:`bic`)."""
         n_groups, _, n_features = self.means_.shape
         if self.covariance_type == "full":
             cov_params = self.n_components * n_features * (n_features + 1) / 2.0
@@ -1842,26 +1750,19 @@ class GaussianMixtureModel:
         return int(cov_params + mean_params + self.n_components - 1)
 
     def bic(self, X):
-        """Bayesian information criterion for the current model on the input X.
+        """Return the Bayesian information criterion of each group's mixture on ``X``.
 
-        You can refer to this :ref:`mathematical section <aic_bic>` for more
-        details regarding the formulation of the BIC used.
+        ``BIC = -2 n mean_log_p + n_params ln n`` with ``n = n_samples``.
 
-        For an example of GMM selection using `bic` information criterion,
-        refer to :ref:`sphx_glr_auto_examples_mixture_plot_gmm_selection.py`.
+        Args:
+            X (xp.ndarray): ``(n_groups, n_samples, n_features)``.
 
-        Parameters
-        ----------
-        X : array of shape (n_samples, n_dimensions)
-            The input samples.
-
-        Returns
-        -------
-        bic : float
-            The lower the better.
+        Returns:
+            xp.ndarray: ``(n_groups,)`` BIC values (lower is better).
         """
         return -2 * self.score(X) * X.shape[1] + self._n_parameters() * np.log(X.shape[1])
 
+    # TODO check: keep/remove/document -- no callers (cross-check helper; only commented-out uses)
     def general_way_logpdf(self, X, flat=True):
         """Reference log-PDF computed directly from :math:`(x-\\mu)^T \\Sigma^{-1} (x-\\mu)`.
 
@@ -1898,21 +1799,15 @@ class GaussianMixtureModel:
         logpdf = self.logsumexp(_logpdf, axis=-1)
         return logpdf
 
+    # TODO check: keep/remove/document -- no callers; raises NotImplementedError
     def aic(self, X):
-        """Akaike information criterion for the current model on the input X.
+        """Akaike information criterion (not implemented in the batched fork).
 
-        You can refer to this :ref:`mathematical section <aic_bic>` for more
-        details regarding the formulation of the AIC used.
+        Args:
+            X (xp.ndarray): ``(n_groups, n_samples, n_features)``.
 
-        Parameters
-        ----------
-        X : array of shape (n_samples, n_dimensions)
-            The input samples.
-
-        Returns
-        -------
-        aic : float
-            The lower the better.
+        Raises:
+            NotImplementedError: Always.
         """
         raise NotImplementedError
         return -2 * self.score(X) * X.shape[0] + 2 * self._n_parameters()
@@ -1925,12 +1820,41 @@ class GMMFit:
     used to map the data linearly into :math:`[-1, 1]^d` before fitting a
     :class:`GaussianMixtureModel`. The Jacobian of this mapping is precomputed
     so that :meth:`logpdf` returns log-densities in the original coordinates.
+    The fit runs at construction, with ``covariance_type="full"``,
+    ``tol=1e-3``, ``reg_covar=1e-6``, ``max_iter=1000``, ``n_init=1`` and
+    ``init_params="random_from_data"``.
 
     Args:
-        samples_in: Array of shape ``(n_groups, n_samples, n_features)`` to
-            be fit.
-        n_components: Number of mixture components.
-        gpu: GPU device index to use; ``None`` selects CPU.
+        samples_in (xp.ndarray): Array of shape ``(n_groups, n_samples, n_features)``
+            to be fit; numpy when ``gpu`` is ``None``, cupy otherwise. Every
+            feature must have a nonzero range in every group. Required despite
+            the ``None`` default.
+        n_components (int, optional): Number of mixture components per group.
+            Default ``30``.
+        gpu (int, optional): GPU device index to use; ``None`` (default)
+            selects CPU.
+        random_state (int, optional): Seed for the EM initialization; ``None``
+            (default) is unseeded.
+
+    Raises:
+        AssertionError: ``samples_in`` is ``None`` or not an array of the
+            selected array module.
+
+    Attributes:
+        gmm (GaussianMixtureModel): The fitted mixture (cube coordinates).
+        sample_mins (xp.ndarray): ``(n_groups, n_features)`` box lower bounds.
+        sample_maxs (xp.ndarray): ``(n_groups, n_features)`` box upper bounds.
+        log_det_J (xp.ndarray): ``(n_groups,)`` log-Jacobian of the cube map.
+        n_groups (int): Number of groups.
+        ndim (int): Number of features.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.sampling.gmm import GMMFit
+        >>> samples = np.random.default_rng(1).normal(size=(2, 400, 3))
+        >>> fit = GMMFit(samples, n_components=2, random_state=1)
+        >>> fit.logpdf(samples).shape, fit.rvs(10).shape
+        ((2, 400), (2, 10, 3))
     """
 
     @property
@@ -1996,7 +1920,15 @@ class GMMFit:
         self.fitted = True
 
     def transform_to_gmm_basis(self, samples):
-        """Map physical samples into the :math:`[-1, 1]` unit-cube basis."""
+        """Map physical samples into each group's :math:`[-1, 1]` cube.
+
+        Args:
+            samples (xp.ndarray): ``(n_groups, n, n_features)``, or
+                ``(n, n_features)`` (then mapped with group 0's box only).
+
+        Returns:
+            xp.ndarray: Same shape as ``samples``, in cube coordinates.
+        """
         squeeze = samples.ndim == 2
         if squeeze:
             samples = samples[None, :]
@@ -2014,10 +1946,15 @@ class GMMFit:
         """Map :math:`[-1, 1]` unit-cube samples back into physical units.
 
         Args:
-            samples: Samples in the unit-cube basis.
-            inds_component: Optional 1D array selecting which group's
-                ``(mins, maxs)`` to use per sample (used by the flat
-                mixture path).
+            samples (xp.ndarray): Samples in the unit-cube basis,
+                ``(n_groups, n, n_features)``, or ``(n, n_features)`` (then,
+                without ``inds_component``, mapped with group 0's box only).
+            inds_component (xp.ndarray, optional): 1D array of length ``n``
+                selecting which group's ``(mins, maxs)`` to use per sample
+                (used by the flat mixture path).
+
+        Returns:
+            xp.ndarray: Same shape as ``samples``, in physical coordinates.
         """
         squeeze = samples.ndim == 2
         if squeeze:
@@ -2044,12 +1981,16 @@ class GMMFit:
         """Draw samples from the fitted mixture in physical coordinates.
 
         Args:
-            size: Output shape (per group, unless ``flat`` is set).
-            flat: If ``True``, sample from the concatenated, equally-weighted
-                mixture across all groups rather than per group.
+            size (int or tuple, optional): Number of draws (``prod(size)``; per
+                group unless ``flat`` is set). Default ``(1,)``.
+            flat (bool, optional): If ``True``, sample from the one mixture of
+                all groups' components (weights renormalized over all of them)
+                rather than per group. Default ``False``.
 
         Returns:
-            Array of samples in physical coordinates.
+            xp.ndarray: Samples in physical coordinates,
+            ``(n_groups, prod(size), n_features)``, or ``(prod(size), n_features)``
+            when ``flat``.
         """
         assert self.fitted
         if isinstance(size, int):
@@ -2074,13 +2015,16 @@ class GMMFit:
         """Evaluate the log-PDF of the fitted mixture in physical coordinates.
 
         Args:
-            x: Sample locations.
-            flat: If ``True``, treat the union of group-mixtures as a single
-                distribution and return one log-density per row of ``x``.
+            x (xp.ndarray): Sample locations, ``(n_groups, n, n_features)``
+                (group ``g`` scored with mixture ``g``); ``(n, n_features)``
+                when ``flat``.
+            flat (bool, optional): If ``True``, treat the union of
+                group-mixtures as a single distribution and return one
+                log-density per row of ``x``. Default ``False``.
 
         Returns:
-            Log-PDF values, including the log-Jacobian of the unit-cube
-            mapping.
+            xp.ndarray: ``(n_groups, n)`` log-PDF values (``(n,)`` when
+            ``flat``), including the log-Jacobian of the unit-cube mapping.
         """
 
         if not flat:
@@ -2115,12 +2059,14 @@ class GMMFit:
         """Bayesian Information Criterion of the fitted mixture at ``x``.
 
         Args:
-            x: Sample locations.
-            flat: If ``True``, evaluate using the flattened, equally-weighted
-                global mixture.
+            x (xp.ndarray): Physical sample locations,
+                ``(n_groups, n, n_features)`` (``(n, n_features)`` when ``flat``).
+            flat (bool, optional): If ``True``, tile ``x`` over every group
+                before mapping it into each cube. Default ``False``.
 
         Returns:
-            BIC values per group.
+            xp.ndarray: ``(n_groups,)`` BIC values (cube coordinates; see
+            :meth:`GaussianMixtureModel.bic`).
         """
 
         if not flat:
@@ -2167,34 +2113,55 @@ def vec_fit_gmm_min_bic(
     """Fit per-group GMMs by sweeping component count and selecting min BIC.
 
     For each group, fits :class:`GMMFit` with increasing ``n_components`` and
-    keeps the parameters at which the BIC reaches its minimum. A group is
-    declared converged once the BIC has increased at least twice past its
-    running minimum, after which it is excluded from further fits.
+    keeps the parameters at which the BIC (on the fitted samples) reaches its
+    minimum. A group is declared converged once its BIC has come out above
+    its running minimum twice (counted cumulatively), after which it is
+    excluded from further fits; the sweep stops when every group has
+    converged or at ``max_comp``.
 
     Args:
-        samples: Array of shape ``(n_groups, n_samples, n_features)``.
-        min_comp: Smallest number of components to try.
-        max_comp: Largest number of components to try.
-        n_samp_bic_test: UNUSED since 2026-09-18, kept so existing callers
-            keep working. The BIC is now evaluated on the FITTED DATA. It
-            used to be evaluated on ``n_samp_bic_test`` synthetic draws from
-            each fit, which is an entropy estimate rather than a
-            goodness-of-fit: it decreases monotonically with the component
-            count, so nothing was ever selected and every group returned
-            ``max_comp``.
-        random_state: Seed for the underlying EM. ``None`` (default) keeps
-            the historical unseeded behaviour; a value makes a refit of the
-            same samples reproducible.
-        gpu: GPU device index to use; ``None`` selects CPU.
-        verbose: If ``True``, print convergence progress.
-        return_components: If ``True``, return the raw lists
+        samples (xp.ndarray): Array of shape ``(n_groups, n_samples, n_features)``
+            (moved to the selected array module).
+        min_comp (int, optional): Smallest number of components to try.
+            Default ``1``.
+        max_comp (int, optional): Largest number of components to try.
+            Default ``30``.
+        n_samp_bic_test (int, optional): UNUSED since 2026-09-18, kept so
+            existing callers keep working. The BIC is now evaluated on the
+            FITTED DATA. It used to be evaluated on ``n_samp_bic_test``
+            synthetic draws from each fit, which is an entropy estimate rather
+            than a goodness-of-fit: it decreases monotonically with the
+            component count, so nothing was ever selected and every group
+            returned ``max_comp``.
+        gpu (int, optional): GPU device index to use (cupy, and
+            ``cupy.cuda.runtime.setDevice(gpu)``); ``None`` (default) selects CPU.
+        verbose (bool, optional): If ``True``, log convergence progress per
+            component count. Default ``False``.
+        return_components (bool, optional): If ``True``, return the raw lists
             ``[weights, means, covs, invcovs, dets, mins, maxs]`` instead of
-            a :class:`FullGaussianMixtureModel`.
+            a :class:`~lisatools.sampling.prior.FullGaussianMixtureModel`.
+            Default ``False``.
+        random_state (int, optional): Seed for the underlying EM. ``None``
+            (default) keeps the historical unseeded behaviour; a value makes a
+            refit of the same samples reproducible.
 
     Returns:
-        Either the raw component lists (when ``return_components`` is
-        ``True``) or a :class:`FullGaussianMixtureModel` constructed from
-        them.
+        list or FullGaussianMixtureModel: With ``return_components``, seven
+        lists of length ``n_groups``: per-group weights ``(K_g,)``, means
+        ``(K_g, n_features)``, covariances, inverse covariances and
+        determinants, all in that group's :math:`[-1, 1]` cube coordinates,
+        plus the group's physical box ``mins`` / ``maxs`` ``(n_features,)``.
+        Otherwise a :class:`~lisatools.sampling.prior.FullGaussianMixtureModel`
+        built from them (``use_cupy`` when ``gpu`` is set).
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.sampling.gmm import vec_fit_gmm_min_bic
+
+            # samples: (n_bands, n_samples, 6) GB posterior draws, physical columns
+            full_gmm = vec_fit_gmm_min_bic(samples, min_comp=1, max_comp=30, gpu=0)
+            logp = full_gmm.logpdf(points)  # points: (n, 6)
     """
 
     if gpu is not None:
@@ -2329,33 +2296,56 @@ def fit_gb_gmm_rj_container(
     ``ParaEnsembleSampler`` chains. Any (n_groups, n_samples, 6) sample
     block works -- per-band search chains, per-leaf PE chains, grid draws.
 
+    The only caller is
+    :class:`~lisatools.globalfit.moves.gbspecialstretch.GBSpecialRJSerialSearchMCMC`
+    (the ``rj_fstat_mcmc_search`` / ``rj_fstat_mcmc`` moves), which the 9mo /
+    12mo recipes build but never stage, so the production runs do not call it.
+
     Args:
-        samples: ``(n_groups, n_samples, 6)`` in the NON-PHASE columns of
+        samples (array-like): ``(n_groups, n_samples, 6)`` in the NON-PHASE columns of
             the GB sampling basis -- ``(lnA, f0 [mHz], fdot|Mc, cos_iota,
             alpha, sin_delta)``, i.e. columns ``[0, 1, 2, 4, 6, 7]`` of the
-            8-column sampler layout.
+            8-column sampler layout (column 0 is the distance in kpc in the
+            distance basis).
         use_chirp_mass: Column 2's meaning: ``False`` -> legacy ``fdot``
             basis, ``True`` -> chirp-mass basis (``Mc`` slot), matching the
-            run's ``GBSettings.use_chirp_mass``.
+            run's ``GBSettings.use_chirp_mass``. Default ``False``.
+        use_cupy: Array module of the returned container (match the run
+            backend). Default ``True``.
+        gpu (int, optional): GPU device index for the fit (``None`` -> CPU).
+        min_comp: Forwarded to :func:`vec_fit_gmm_min_bic`. Default ``1``.
+        max_comp: Forwarded. Default ``30``.
+        n_samp_bic_test: Forwarded (unused there). Default ``5000``.
+        verbose: Forwarded. Default ``False``.
         fdot_astro_ratio_max: When not ``None``, append a 9th
             ``fdot_astro_ratio`` column drawn from ``U[-M, M]`` (the
             fdot_astro ratio basis; the GMM still fits only the 6 intrinsic
             columns, births draw the ratio from its prior). ``None`` ->
             8-column container.
-        use_cupy: Array module of the returned container (match the run
-            backend).
-        gpu: GPU device index for the fit (``None`` -> CPU).
-        min_comp / max_comp / n_samp_bic_test / verbose: forwarded to
-            :func:`vec_fit_gmm_min_bic`.
+        use_distance: Column 0 is the luminosity distance (``"dist"`` key)
+            instead of ``"A"``. Default ``False``.
 
     Returns:
-        An eryn ``ProbDistContainer`` whose ``rvs``/``logpdf`` columns
-        follow the sampler layout (``reset_key_order`` re-maps them -- a
-        bare ``key_order = [...]`` assignment would NOT).
+        eryn.priors.ProbDistContainer: Container whose ``rvs``/``logpdf``
+        columns follow the sampler layout ``[A|dist, f0, fdot|Mc, phi0,
+        cos_iota, psi, alpha, sin_delta(, fdot_astro_ratio)]``, with ``phi0``
+        uniform on ``[0, 2 pi)`` and ``psi`` on ``[0, pi)``
+        (``reset_key_order`` re-maps them -- a bare ``key_order = [...]``
+        assignment would NOT).
 
     Raises:
-        ValueError: On non-finite samples or degenerate (zero-range)
-            features -- the failure modes the caller should log-and-skip.
+        ValueError: On a wrong sample shape, non-finite samples or degenerate
+            (zero-range) features -- the failure modes the caller should
+            log-and-skip.
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.sampling.gmm import fit_gb_gmm_rj_container
+
+            # samples: (n_bands, n_samples, 6) non-phase GB columns
+            rj_dist = fit_gb_gmm_rj_container(samples, use_chirp_mass=True, gpu=0)
+            births = rj_dist.rvs(size=100)  # (100, 8), sampler column order
     """
     from eryn.priors import ProbDistContainer, UniformDistribution
 

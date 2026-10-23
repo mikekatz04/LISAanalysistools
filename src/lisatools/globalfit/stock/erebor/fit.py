@@ -12,6 +12,16 @@ build-time resolution: the deferred general block is turned into a final
 :class:`GeneralSettings` (grid derived, window taper realized, domain
 factory built, data processor chosen) only inside
 :meth:`EreborFit.make_general_settings` — never at construction.
+
+Pipeline position: every Erebor variant (``all_sources`` in production)
+subclasses :class:`EreborFit`; :meth:`StockGlobalFit.build
+<lisatools.globalfit.stock.base.StockGlobalFit.build>` calls
+:meth:`EreborFit.make_general_settings` once, before the heavy
+:class:`~lisatools.globalfit.engine.GeneralSetup` (data load + WDM pour).
+The production launchers set the grid / band / output knobs of this block
+through the environment (``TOBS_TARGET``, ``MIN_FREQ``, ``MAX_FREQ``,
+``EDGE_CROP_WAVELETS``, ``FILE_STORE_DIR``, ``BASE_FILE_NAME``,
+``NUM_ITERATIONS``, ``NWALKERS``, ``USE_GPU``, ``GPU_BACKEND``, ...).
 """
 
 from __future__ import annotations
@@ -39,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_gpu_list(raw: str) -> typing.List[int]:
-    """GPUS env parser: comma-separated device indices."""
+    """GPUS env parser: comma-separated device indices (``"2,3"`` -> ``[2, 3]``)."""
     return [int(x) for x in raw.split(",") if x.strip() != ""]
 
 
@@ -52,6 +62,175 @@ class EreborGeneralSettings(GeneralSettings):
     grid, ``domain_settings`` from the band knobs, ``window_taper_duration``
     from ``window_tukey_alpha``); setting them explicitly overrides the
     derivation — swap whole objects, don't fight the resolver.
+
+    Reached as ``fit.general`` (headline knobs also as ``fit.<knob>``).
+    Every env knob is the capitalized field name; defaults below are this
+    class's — variants subclass it and override some (the production
+    ``AllSourcesGeneralSettings`` uses ``dt=5.0`` (re-set to 2.5 s for mojito
+    data), a fixed ``nf=720`` / ``nt=2160`` grid (cleared by the production
+    driver, so the grid derives from ``tobs_target``),
+    ``window_tukey_alpha=0.0``, ``edge_crop_wavelets`` default 20, and the
+    coarse sidecar defaults ``COARSE_Q=8`` / ``COARSE_GPU_MODE=delayed_acceptance``).
+    Inherited engine fields (``Tobs``, ``domain_settings``,
+    ``data_processor_class``, ``processor_init_kwargs``,
+    ``sensitivity_init_kwargs``, ``fixed_psd_kwargs``, ``likelihood_source_only``,
+    ``hdf_compression``, the run metadata, ...) are documented on
+    :class:`~lisatools.globalfit.engine.GeneralSettings`.
+
+    Attributes:
+        num_iterations: Sampler iterations (stored rows). Env ``NUM_ITERATIONS``
+            (legacy ``GF_NUM_ITER``). Default 500; launchers 2000.
+        nwalkers: Cold-chain walkers. Env ``NWALKERS``. Default 4; launchers 4
+            (one walker block per compute rank).
+        gpus_per_rank: Devices per compute rank. Env ``GPUS_PER_RANK``. Default
+            ``None`` = auto (a lone compute rank on a node drives all of
+            ``gpus``; several ranks get one device each). At most one of
+            ``gpus_per_rank`` / ``ranks_per_gpu`` may exceed 1. Launchers leave it
+            unset.
+        ranks_per_gpu: Compute ranks sharing one device. Env ``RANKS_PER_GPU``.
+            Default 1 (the launchers leave it unset).
+        ranks_per_block: Compute ranks sharing one walker block. Env
+            ``RANKS_PER_BLOCK``. Default ``None`` = auto,
+            ``n_blocks = gcd(nwalkers, n_compute)``; an int must divide the
+            compute-rank count (``1`` forces the plain walker-block layout).
+        ntemps: RETIRED engine ladder size, pinned to 1 (the engine runs
+            cold-chain only; each branch tempers on its own ``<BRANCH>_NTEMPS``
+            ladder). A set ``NTEMPS`` env var raises at construction.
+        random_seed: Run seed (no env). Default 103209. Per-rank build seeds
+            for prior / proposal objects derive from it
+            (:func:`~lisatools.globalfit.communication.ranks.rank_build_seed`).
+        backup_iter: Save-step cadence of the running backup copy of the store
+            (1 = every save). Env ``BACKUP_ITER``. Default 1; launchers 10.
+        midit_checkpoint: Mid-iteration checkpointing (resume from inside an
+            iteration). Env ``MIDIT_CHECKPOINT``. Default ``True``; launchers 0.
+        midit_checkpoint_min_interval: Minimum seconds between mid-iteration
+            checkpoints. Env ``MIDIT_CHECKPOINT_MIN_INTERVAL``. Default 600.0.
+        main_file_key: Store-name suffix (no env): the main HDF store is
+            ``<file_store_dir>/<base_file_name>_<main_file_key>.h5``. Default
+            ``"testing"``.
+        make_diagnostic_plots: Eryn diagnostic plots during the run. Env
+            ``MAKE_DIAGNOSTIC_PLOTS`` (legacy ``MAKE_PLOTS``). Default ``True``.
+        verbose: Console verbosity (headline knob): ``False`` keeps logs in the
+            run's log files only. Env ``VERBOSE``. Default ``False``; launchers 1.
+        progress: Progress bar only; ``None`` follows ``verbose``. Env
+            ``PROGRESS``. Default ``None``; launchers 0.
+        plot_iterations: Iterations between diagnostic-plot refreshes. Env
+            ``PLOT_ITERATIONS``. Default 100.
+        file_store_dir: Output directory of the store, logs and artifacts. Env
+            ``FILE_STORE_DIR``. Default ``"./gf_output/"``; launchers the run's
+            ``STORE_DIR``.
+        base_file_name: Store base name. Env ``BASE_FILE_NAME``. Default
+            ``"erebor_run"``; launchers ``gf_prod_9mo`` / ``gf_prod_12mo``.
+        coarse_Q: Coarse real-WDM noise likelihood factor (time columns
+            averaged per coarse cell; :mod:`lisatools.coarsewdm`); 1 = off. Env
+            ``COARSE_Q``. Default 1; launchers 1 (coarse path OFF in production).
+        coarse_use_ws: Coarse weights from Welch-Satterthwaite dof (``True``) or
+            Bartlett cell sizes. Env ``COARSE_USE_WS``. Default ``True``.
+        coarse_fiducial: Covariance the frozen coarse dof are evaluated at,
+            ``"injection"`` or ``"initial"``. Env ``COARSE_FIDUCIAL``. Default
+            ``"injection"``.
+        coarse_gpu_mode: All-source coarse sidecar: ``"off"``, ``"auto"``,
+            ``"search_approx"`` (optimization stages only) or
+            ``"delayed_acceptance"`` (the only coarse mode valid for PE). Env
+            ``COARSE_GPU_MODE``. Default ``"off"``; launchers ``off``.
+        coarse_gpu_batch_bytes: Batch memory budget of the coarse sidecar
+            (bytes). Env ``COARSE_GPU_BATCH_BYTES``. Default 256 MiB.
+        coarse_gpu_debug: Coarse sidecar debug checks. Env ``COARSE_GPU_DEBUG``.
+            Default ``False``.
+        dt: Time-domain sample spacing of the analysed data (s; no env).
+            Default 2.5.
+        tobs_target: Target observation span (s) the WDM grid is derived from
+            (:func:`~lisatools.globalfit.stock.erebor.common.derive_wdm_grid`;
+            the exact ``Tobs = Nf * Nt * dt`` lands near it). Env
+            ``TOBS_TARGET``. Default 90 d; launchers 23328000 (9mo) /
+            31104000 (12mo).
+        nf: Fixed-grid override: WDM frequency layers. Used only when ``nf`` and
+            ``nt`` are both set (then ``Tobs = nf * nt * dt``). Default ``None``.
+        nt: Fixed-grid override: WDM time columns (see ``nf``).
+        wavelet_duration_min: Lower bound (s) on the WDM wavelet duration
+            ``Nf * dt`` for the grid derivation. Env ``WAVELET_DURATION_MIN``
+            (legacy ``WAVELET_DUR_MIN``). Default 3600.0.
+        wavelet_duration_max: Upper bound (s), env ``WAVELET_DURATION_MAX``
+            (legacy ``WAVELET_DUR_MAX``). Default 4400.0.
+        min_freq: Lower edge of the analysed band (Hz; headline knob). Keep it
+            ``>= 2 * layer_df`` (a build-time warning fires otherwise: the
+            DC-adjacent layer is singular). Env ``MIN_FREQ``. Default 1e-4;
+            launchers 2.5e-4.
+        max_freq: Upper edge of the analysed band (Hz; headline knob). Env
+            ``MAX_FREQ``. Default 2.5e-2; launchers 2.5e-2.
+        window_type: Data window type (no env). Default ``"tukey"``.
+        window_tukey_alpha: Tukey alpha of the data window (fraction of
+            ``Tobs``; headline knob). Overridden at build by
+            ``window_taper_wavelets > 0``. Env ``WINDOW_TUKEY_ALPHA``. Default 0.05.
+        edge_crop_wavelets: WDM time columns excluded at each end of the
+            analysed domain (``min_time`` / ``max_time`` of every
+            likelihood-facing WDM grid). ``None`` = auto
+            (:func:`~lisatools.globalfit.stock.erebor.common.default_edge_crop_wavelets`).
+            Env ``EDGE_CROP_WAVELETS``. Default ``None``; launchers 60 (the
+            GB/VGB sig-het build refuses a crop below
+            ``ceil(0.5 * SIGHET_TUKEY_ALPHA * Nt) + 8``, see
+            :func:`~lisatools.globalfit.stock.erebor.gb.check_sighet_build_config`).
+        window_taper_wavelets: Data-window taper width in wavelets (each
+            ``Nf * dt`` s); ``> 0`` replaces ``window_tukey_alpha`` by
+            ``2 * K / Nt`` (a fixed absolute taper), 0 = use the alpha. Env
+            ``WINDOW_TAPER_WAVELETS``. Default 2.
+        tdi_chan: TDI channel set (no env). Default ``"XYZ"`` (TDI 2nd
+            generation; :func:`~lisatools.globalfit.stock.erebor.common.tdi_generation_info`).
+        nchannels: Number of TDI channels. Default 3.
+        data_mode: Stock data pipeline: ``"mojito"`` (L1 bricks under
+            ``mojito_data_path``), ``"synthetic"`` (all streams in-process) and,
+            on ``all_sources``, legacy ``"sangria"``. An explicit
+            ``data_processor_class`` always wins. A missing mojito folder falls
+            back to ``"synthetic"`` (:meth:`EreborFit.resolve_data_source`). Env
+            ``DATA_MODE`` (legacy ``DATA_PROCESSOR``). Default ``"mojito"``
+            (``blank``: ``"synthetic"``); launchers leave it unset.
+        synthetic_t_start: Start time (s) of synthetic streams. Default 10000.0
+            (keeps the TDI-2 look-back inside the orbit span).
+        mojito_data_path: Root of the mojito L1 brick cache (headline knob). Env
+            ``MOJITO_DATA_PATH``. Default
+            ``~/.mojito_cache/brickmarket/mojito_light_v1_0_0/``; launchers
+            ``/shared/data/mojito_cache``.
+        noise_file: Explicit mojito NOISE L1 brick; ``None`` auto-discovers
+            ``<mojito_data_path>/data/INSTRUMENT/L1/NOISE_*``. Env ``NOISE_FILE``.
+        psd_from_noise_file: Fixed-PSD variants only (``gb_no_fg``,
+            ``full_year_combined``): read ``[Soms_d, Sa_a]`` off the NOISE brick
+            (:meth:`EreborFit.resolve_noise_file_psd_params`). ``None`` = auto
+            (mojito data + brick found), ``True`` = required, ``False`` = stock
+            levels. Env ``PSD_FROM_NOISE_FILE``.
+        ldc_source_file: Sangria (LDC2) data file for ``data_mode="sangria"``.
+            Env ``LDC_SOURCE_FILE``. The default is a developer-machine path.
+        source_types: Mojito stream classes the L1 loader reads (no env;
+            ``("GB",)``). The production driver sets it from its own
+            ``SOURCE_TYPES`` export (``COMBINED,GB,VGB,MBHB,EMRI,SOBHB``).
+        orbits_frame: Frame the L1 orbits are loaded in. Default ``"icrs"`` (the
+            run frame: sky / polarization parameters are sampled in ICRS).
+        synthetic_injections: Injection coordinates for synthetic data:
+            ``"stock"`` (fixed tables), ``"prior"`` (seeded prior draws) or
+            ``None`` = auto (``"prior"`` after a mojito->synthetic fallback,
+            else ``"stock"``). Env ``SYNTHETIC_INJECTIONS``.
+        synthetic_injection_seed: Seed of the ``"prior"`` draws. Env
+            ``SYNTHETIC_INJECTION_SEED``. Default 1234.
+        fixed_psd_params: ``[Soms_d, Sa_a]`` (sqrt units) of the fixed
+            instrument PSD for runs WITHOUT a psd branch; becomes
+            ``fixed_psd_kwargs`` at build. Default ``None``.
+        use_gpu: Run on GPU (headline knob). ``None`` = auto (cupy importable).
+            Env ``USE_GPU``. Launchers 1.
+        gpu_backend: CUDA backend wheel (``"cuda11x"`` / ``"cuda12x"`` /
+            ``"cuda13x"``; headline knob). ``"auto"`` resolves to the wheel
+            matching the cupy runtime
+            (:func:`~lisatools.globalfit.stock.erebor.common.resolve_gpu_backend`);
+            explicit values are honored verbatim. Env ``GPU_BACKEND``. Default
+            ``"auto"``; launchers ``cuda13x``.
+        gpus: Device indices (headline knob); ``None`` -> ``[0]`` on the GPU
+            path. Env ``GPUS`` (``"0"`` or ``"2,3"``).
+
+    Example:
+        .. code-block:: python
+
+            fit = erebor.all_sources(nwalkers=4)
+            fit.general.tobs_target = 30 * 86400.0   # or env TOBS_TARGET
+            fit.general.edge_crop_wavelets = 60
+            fit.min_freq = 2.5e-4                     # headline knob -> fit.general
     """
 
     # --- run shape (env-backed) ---
@@ -59,22 +238,24 @@ class EreborGeneralSettings(GeneralSettings):
         default_factory=env_default("NUM_ITERATIONS", 500, int)
     )
     nwalkers: int = dataclasses.field(default_factory=env_default("NWALKERS", 4, int))
-    #: multi-rank layout (design spec 2026-09-15, Decision 2). ``gpus_per_rank``
-    #: None = AUTO: a lone compute rank on a node drives the node's whole
-    #: ``gpus`` pool (today's in-process multi-GPU run at ``-n 1``); several
-    #: compute ranks on a node get one device each. An int pins it. At most one
-    #: of the two may exceed 1. Plain attributes, never headline knobs.
+    # multi-rank layout (design spec 2026-09-15, Decision 2). ``gpus_per_rank``
+    # None = AUTO: a lone compute rank on a node drives the node's whole
+    # ``gpus`` pool (today's in-process multi-GPU run at ``-n 1``); several
+    # compute ranks on a node get one device each. An int pins it. At most one
+    # of the two may exceed 1. Plain attributes, never headline knobs.
+    # (Plain ``#`` comments: the class docstring's Attributes section documents
+    # these fields, so they are not rendered twice.)
     gpus_per_rank: typing.Optional[int] = dataclasses.field(
         default_factory=env_default("GPUS_PER_RANK", None, int)
     )
     ranks_per_gpu: int = dataclasses.field(default_factory=env_default("RANKS_PER_GPU", 1, int))
-    #: R -- compute ranks sharing ONE walker block, the axis that makes
-    #: ``n_gpus > nwalkers`` legal (2026-09-23). ``None`` = AUTO:
-    #: ``n_blocks = gcd(nwalkers, n_compute)``, i.e. maximize walker blocks
-    #: and only then replicate, because a block is the cheap axis (GB is
-    #: sublinear in block width) while a replica costs a whole ACA. An int
-    #: pins it and must divide the compute-rank count. ``1`` forces today's
-    #: walker-block layout and then ``nwalkers`` must divide ``n_compute``.
+    # R -- compute ranks sharing ONE walker block, the axis that makes
+    # ``n_gpus > nwalkers`` legal (2026-09-23). ``None`` = AUTO:
+    # ``n_blocks = gcd(nwalkers, n_compute)``, i.e. maximize walker blocks
+    # and only then replicate, because a block is the cheap axis (GB is
+    # sublinear in block width) while a replica costs a whole ACA. An int
+    # pins it and must divide the compute-rank count. ``1`` forces today's
+    # walker-block layout and then ``nwalkers`` must divide ``n_compute``.
     ranks_per_block: typing.Optional[int] = dataclasses.field(
         default_factory=env_default("RANKS_PER_BLOCK", None, int)
     )
@@ -218,8 +399,8 @@ class EreborGeneralSettings(GeneralSettings):
     # --- data source ---
     # Which stock data processor the variant builds when the user has not
     # swapped one in wholesale. Allowed values are variant-defined (every
-    # variant supports "synthetic"; gb_no_fg/full_year default "mojito",
-    # all_sources defaults "sangria"). One assignment (or
+    # variant supports "synthetic"; every variant but blank ("synthetic")
+    # defaults "mojito"; all_sources also keeps legacy "sangria"). One assignment (or
     # DATA_MODE=<mode>) swaps the whole data pipeline; an explicit
     # ``data_processor_class`` always wins over this knob.
     data_mode: str = dataclasses.field(
@@ -309,14 +490,17 @@ class EreborGeneralSettings(GeneralSettings):
 
     @property
     def tdi_gen(self) -> int:
+        """TDI generation (1 or 2) implied by ``tdi_chan``."""
         return tdi_generation_info(self.tdi_chan)[0]
 
     @property
     def tdi_gen_str(self) -> str:
+        """``"1st generation"`` / ``"2nd generation"`` for ``tdi_chan``."""
         return tdi_generation_info(self.tdi_chan)[1]
 
     @property
     def wavelet_duration_bounds(self) -> typing.Tuple[float, float]:
+        """``(wavelet_duration_min, wavelet_duration_max)`` in seconds."""
         return (self.wavelet_duration_min, self.wavelet_duration_max)
 
 
@@ -327,6 +511,28 @@ class EreborFit(StockGlobalFit):
     ``fit.general``): everything in :attr:`_HEADLINE_KNOBS`. All other
     general fields: ``fit.general.<field>``; per-branch fields:
     ``fit.<branch>.<field>``; whole-object swaps everywhere.
+
+    The headline knobs are the base set (``nwalkers``, ``ntemps``, ``dt``,
+    ``num_iterations``, ``file_store_dir``, ``base_file_name``, ``gpus``,
+    ``gpu_backend``, ``verbose``) plus ``tobs_target``, ``min_freq``,
+    ``max_freq``, ``tdi_chan``, ``window_tukey_alpha``, ``mojito_data_path``
+    and ``use_gpu``. Constructor arguments are those of
+    :class:`~lisatools.globalfit.stock.base.StockGlobalFit`.
+
+    Build-time resolution (:meth:`make_general_settings`, called once by
+    :meth:`~lisatools.globalfit.stock.base.StockGlobalFit.build`):
+    :meth:`resolve_data_source` -> deepcopy of ``self.general`` ->
+    :meth:`adjust_general` (variant hook) -> compute backend
+    (:func:`~lisatools.globalfit.stock.erebor.common.resolve_compute`) -> WDM
+    grid and exact ``Tobs`` -> window taper -> edge crop -> DC-layer warning
+    -> :meth:`make_domain_settings` -> data processor
+    (:meth:`set_default_processor` unless ``data_processor_class`` is set),
+    preprocess / sensitivity kwargs -> :meth:`finalize_general` (variant hook).
+    Each branch block is then completed by :meth:`prepare_branch_settings`.
+
+    The class attribute ``general_settings_class`` is the general-block
+    dataclass :meth:`default_general` instantiates (variants point it at their
+    subclass, e.g. ``AllSourcesGeneralSettings``).
     """
 
     general_settings_class: typing.ClassVar[type] = EreborGeneralSettings
@@ -344,13 +550,20 @@ class EreborFit(StockGlobalFit):
     # -- defaults ------------------------------------------------------------
 
     def default_general(self) -> EreborGeneralSettings:
+        """A fresh ``general_settings_class()`` (env-backed defaults read now)."""
         return type(self).general_settings_class()
 
     # -- derived views (recompute from current knobs; mutation-safe) -----------
 
     @property
     def wdm_grid(self) -> typing.Tuple[int, int, float, float]:
-        """``(Nf, Nt, wavelet_duration, Tobs)`` from the current grid knobs."""
+        """``(Nf, Nt, wavelet_duration [s], Tobs [s])`` from the current grid knobs.
+
+        The fixed ``nf`` / ``nt`` override wins; otherwise
+        :func:`~lisatools.globalfit.stock.erebor.common.derive_wdm_grid` on
+        ``tobs_target`` / ``dt`` / the wavelet-duration bounds. Recomputed on
+        every access (safe after knob edits; no build needed).
+        """
         gs = self.general
         if gs.nf is not None and gs.nt is not None:
             return gs.nf, gs.nt, gs.nf * gs.dt, gs.nf * gs.nt * gs.dt
@@ -358,13 +571,18 @@ class EreborFit(StockGlobalFit):
 
     @property
     def layer_df(self) -> float:
+        """WDM layer width ``1 / (2 * Nf * dt)`` (Hz) of the current :attr:`wdm_grid`."""
         Nf, _, _, _ = self.wdm_grid
         return 1.0 / (2 * Nf * self.general.dt)
 
     # -- build-time resolution --------------------------------------------------
 
     def adjust_general(self, gs: EreborGeneralSettings) -> None:
-        """Variant hook: mutate the copied general block before resolution."""
+        """Variant hook: mutate the copied general block before resolution.
+
+        Args:
+            gs: The build-time copy of ``self.general`` (mutate in place).
+        """
 
     def resolve_data_source(self) -> None:
         """Resolve the data source on the FIT-LEVEL general block (idempotent).
@@ -381,6 +599,15 @@ class EreborFit(StockGlobalFit):
         Deliberately mutates ``self.general`` (not just the build-time
         copy): branch preparation reads the fit-level block, so the data
         processor and the branch injections must resolve identically.
+
+        In synthetic + ``"prior"`` mode with a ``gb`` branch and
+        ``gb_injection_params is None``, the GB rows are drawn here with
+        :func:`~lisatools.globalfit.stock.erebor.injections.make_gb_injections`
+        over the GB branch band.
+
+        Raises:
+            ValueError: When ``synthetic_injections`` is not ``"stock"``,
+                ``"prior"`` or ``None``.
         """
         gs = self.general
         if gs.data_mode == "mojito" and not os.path.isdir(gs.mojito_data_path):
@@ -432,6 +659,19 @@ class EreborFit(StockGlobalFit):
         analytic instrument model to the brick's tabulated
         ``noise_estimates`` (:func:`lisatools.sensitivity.estimate_noise_params_from_file`).
         Results are cached per file path on the fit instance.
+
+        Args:
+            gs: The build-time general block (``psd_from_noise_file``,
+                ``data_mode``, ``mojito_data_path``, ``noise_file``,
+                ``tdi_gen`` are read).
+
+        Returns:
+            list[float] | None: ``[Soms_d, Sa_a]`` (sqrt units), or ``None``
+            when not wanted / not available.
+
+        Raises:
+            FileNotFoundError: ``psd_from_noise_file=True`` and no brick.
+            ValueError: ``psd_from_noise_file=True`` and the fit failed.
         """
         from .noise import noise_params_from_file, resolve_noise_file
 
@@ -475,6 +715,19 @@ class EreborFit(StockGlobalFit):
         the L1 loader — when the run uses mojito data and the brick is found,
         else ``"synthetic"`` (the FD-correlated draw). Explicit strings are
         validated and passed through; ``"mojito"`` requires mojito data.
+        In production (``ADD_INSTRUMENT_NOISE`` unset -> ``True``, mojito data
+        with the NOISE brick present) this resolves to ``"mojito"``.
+
+        Args:
+            gs: General block carrying ``add_instrument_noise`` (a variant
+                field, e.g. on ``AllSourcesGeneralSettings``).
+
+        Returns:
+            bool | str: ``False``, ``"synthetic"`` or ``"mojito"``.
+
+        Raises:
+            ValueError: For an unrecognized value, or ``"mojito"`` without
+                ``data_mode == "mojito"``.
         """
         from .noise import resolve_noise_file
 
@@ -524,6 +777,23 @@ class EreborFit(StockGlobalFit):
         return (lo, hi) if lo < hi else (1.0e-3, 1.0e-2)
 
     def make_general_settings(self) -> EreborGeneralSettings:
+        """Resolve the fit-level general block into the final build-time block.
+
+        See the class docstring for the step order. Always resolved on the
+        copy: ``gpus`` / ``gpu_backend``, ``edge_crop_wavelets`` (an unset
+        value becomes the auto crop) and, when ``window_taper_wavelets > 0``,
+        ``window_tukey_alpha`` (``2 * K / Nt``). Filled only when unset on the
+        copy: ``Tobs`` (``Nf * Nt * dt``), ``window_taper_duration``
+        (``alpha * Tobs``), ``domain_settings``, ``data_processor_class`` /
+        ``processor_init_kwargs``, ``preprocess_kwargs``,
+        ``sensitivity_init_kwargs`` and ``fixed_psd_kwargs`` (from
+        ``fixed_psd_params``). Logs a warning when ``min_freq`` resolves to
+        WDM layer 0 or 1.
+
+        Returns:
+            EreborGeneralSettings: The resolved copy (``self.general`` itself
+            only receives the :meth:`resolve_data_source` edits).
+        """
         self.resolve_data_source()
         gs = deepcopy(self.general)
         self.adjust_general(gs)
@@ -616,7 +886,11 @@ class EreborFit(StockGlobalFit):
         return gs
 
     def finalize_general(self, gs: EreborGeneralSettings) -> None:
-        """Variant hook: last-touch mutation after Tobs/domain are resolved."""
+        """Variant hook: last-touch mutation after Tobs/domain are resolved.
+
+        Args:
+            gs: The resolved build-time block (mutate in place).
+        """
 
     def make_domain_settings(
         self,
@@ -626,7 +900,22 @@ class EreborFit(StockGlobalFit):
         wavelet_duration: float,
         edge_crop: int,
     ):
-        """Default domain block: WDM factory on the derived grid."""
+        """Default domain block: WDM factory on the derived grid.
+
+        Args:
+            gs: The build-time general block (``min_freq`` / ``max_freq``).
+            Nf: WDM frequency layers.
+            Nt: WDM time columns.
+            wavelet_duration: ``Nf * dt`` (s).
+            edge_crop: Columns excluded at each end
+                (``min_time = edge_crop * wavelet_duration``,
+                ``max_time = (Nt - edge_crop) * wavelet_duration``).
+
+        Returns:
+            callable: :meth:`WDMSettings.make_factory
+            <lisatools.domains.WDMSettings.make_factory>` output, a
+            ``(times, dt, force_backend) -> WDMSettings`` factory.
+        """
         return WDMSettings.make_factory(
             Nf=Nf,
             Nt=Nt,
@@ -637,11 +926,26 @@ class EreborFit(StockGlobalFit):
         )
 
     def default_preprocess_kwargs(self) -> dict:
-        """Variant hook: kwargs merged over the engine's preprocess defaults."""
+        """Variant hook: kwargs merged over the engine's preprocess defaults.
+
+        Returns:
+            dict: ``{"normalize": False}`` in the base.
+        """
         return dict(normalize=False)
 
     def set_default_processor(self, gs: EreborGeneralSettings) -> None:
-        """Default data source: mojito L1 loader on ``gs.source_types``."""
+        """Default data source: mojito L1 loader on ``gs.source_types``.
+
+        Sets ``gs.data_processor_class`` to
+        :class:`~lisatools.globalfit.preprocessing.L1ProcessingStep` with
+        :class:`~lisatools.detector.L1Orbits` in ``gs.orbits_frame``. Variants
+        override it (``all_sources`` uses
+        :class:`~lisatools.globalfit.stock.erebor.injections.L1ProcessingStepWithSyntheticNoise`
+        for mojito data).
+
+        Args:
+            gs: The build-time general block (mutated in place).
+        """
         from lisatools.detector import L1Orbits
         from lisatools.globalfit.preprocessing import L1ProcessingStep
 
@@ -663,6 +967,21 @@ class EreborFit(StockGlobalFit):
     # -- branch preparation ---------------------------------------------------
 
     def prepare_branch_settings(self, name: str, general_setup: GeneralSetup) -> Settings:
+        """Base resolution plus the shared Erebor bindings for one branch.
+
+        On top of :meth:`StockGlobalFit.prepare_branch_settings
+        <lisatools.globalfit.stock.base.StockGlobalFit.prepare_branch_settings>`
+        (``Tobs`` / ``dt`` / ``build_seed``), a branch that declares
+        ``domain_settings`` and leaves it ``None`` gets the run's resolved
+        domain, and an unset ``log_dir`` becomes ``general_setup.file_store_dir``.
+
+        Args:
+            name: Branch name.
+            general_setup: The built general setup.
+
+        Returns:
+            Settings: The completed deepcopy of ``fit.<name>``.
+        """
         settings = super().prepare_branch_settings(name, general_setup)
         # Common Erebor bindings: every branch runs on the resolved domain
         # and logs beside the run output.

@@ -8,6 +8,16 @@ keeps the per-row container path. A data span shorter than the window
 (3-month runs, the lite smokes) clamps the window to the data
 (:func:`mbh_window_layers`) instead of refusing the build.
 
+Production (9mo / 12mo, ``MBH_LIKELIHOOD=batched``): stock name ``mbh_pe``, built by
+``recipe.MBHBatchedMoveBuilder`` from ``source_runtime.build_mbh_move_runtime``; it runs
+in ``source_search``, every cycle of ``gb_search_1`` / ``gb_search_2`` and in ``full_pe``.
+The window and batch sizes come from the ``SourceMBHSettings`` fields
+``MBH_BATCH_MAX_SIZE`` (8), ``MBH_WINDOW_BEFORE_DAYS`` (90), ``MBH_WINDOW_AFTER_DAYS``
+(10), ``MBH_WINDOW_PAD_DAYS`` (4) and ``MBH_WINDOW_MARGIN_DAYS`` (1), converted to
+seconds by ``resolve_mbh_batched_cfg`` (``MBH_WINDOW_DECIMATE``, default 1, launchers 2,
+sets the windowed generator's sampling, not the move). Entry points:
+:class:`MBHBatchedLikeMove` and :func:`mbh_window_layers`.
+
 :class:`MBHBatchedLikeMove` keeps ALL of :class:`ResidualAddOneRemoveOneMove`'s
 choreography (per-leaf expose/fold, in-model repeats, per-leaf tempering,
 cold-chain bookkeeping) and swaps the scoring and fill paths, exactly as
@@ -157,10 +167,9 @@ def mbh_window_layers(
     start in place, so ``wdm.t0`` is 0 or ``data_t0`` depending on build
     order -- the batched move always passes ``t0_abs`` explicitly.
 
-    Returns ``dict(n_start, Nt_keep, n_pad, n_pad_lo, n_pad_hi)``: kept layers
-    ``[n_start, n_start + Nt_keep)`` cover ``[t - before - margin, t + after +
-    margin]`` snapped OUTWARD to layer boundaries, clamped to the data's
-    ACTIVE time box ``[ind_min_t, ind_max_t]``. The transform segment is
+    Kept layers ``[n_start, n_start + Nt_keep)`` cover ``[t - before - margin,
+    t + after + margin]`` snapped OUTWARD to layer boundaries, clamped to the
+    data's ACTIVE time box ``[ind_min_t, ind_max_t]``. The transform segment is
     ``[n_start - n_pad_lo, n_start + Nt_keep + n_pad_hi)``, always
     ``Nt_keep + 2 n_pad`` layers long, clamped to the grid ``[0, Nt)``:
 
@@ -189,9 +198,37 @@ def mbh_window_layers(
     A window that covers the whole active box AND the whole grid is the stock
     full-grid transform restricted to the active box. Logged once per
     geometry (``[MBH_BATCH]``, INFO). ``n_pad`` keeps the CONFIGURED pad; the
-    actual pads are ``n_pad_lo`` / ``n_pad_hi``. Only a geometry with no
-    valid segment raises: an empty active box, or a whole-grid segment on an
-    odd-length grid.
+    actual pads are ``n_pad_lo`` / ``n_pad_hi``.
+
+    Args:
+        wdm (WDMSettings): The run's WDM grid (``layer_dt``, ``Nt``,
+            ``ind_min_t`` / ``ind_max_t``, ``t0``).
+        t_merge_abs (float): Absolute merger time, s.
+        window_before (float): Kept span before the merger, s.
+        window_after (float): Kept span after the merger, s.
+        window_pad (float): Transform pad on each side of the kept box, s
+            (rounded UP to whole layers).
+        window_margin (float): Extra kept span on both sides, s (the
+            hysteresis band of :meth:`MBHBatchedLikeMove._leaf_window`).
+        t0_abs (float, optional): Absolute time of layer 0, s. Default
+            ``None`` uses ``wdm.t0``.
+
+    Returns:
+        dict: ``dict(n_start, Nt_keep, n_pad, n_pad_lo, n_pad_hi)``, all ``int``
+        layer counts / indices (``n_pad`` is the configured pad).
+
+    Raises:
+        ValueError: Only a geometry with no valid segment: an empty active
+            box, or a whole-grid segment on an odd-length grid.
+
+    Example:
+        .. code-block:: python
+
+            geom = mbh_window_layers(wdm, t_merge_abs=t0 + 1.2e7,
+                                     window_before=90 * 86400.0, window_after=10 * 86400.0,
+                                     window_pad=4 * 86400.0, window_margin=86400.0,
+                                     t0_abs=t0)
+            box = slice(geom["n_start"], geom["n_start"] + geom["Nt_keep"])
     """
     layer_dt = float(wdm.layer_dt)
     t0 = float(wdm.t0) if t0_abs is None else float(t0_abs)
@@ -245,18 +282,14 @@ def mbh_window_layers(
 class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
     """Add/remove move for the MBH branch scored through the batched windowed path.
 
-    Args:
-        *args: Positional arguments of :class:`ResidualAddOneRemoveOneMove`.
-            ``waveform_gen`` stays the SLOW exact generator (or ``None`` to use
-            the containers' installed one): it still owns the cross-check.
-        batched_gen: the windowed sub-transform adapter
-            (:class:`~lisatools.sources.batching.MBHWindowedWDMSignalGen`), or a
-            ``DeviceLocalWaveGen`` resolving to one per device. Must expose
-            ``set_window``, ``window_key``, ``waveform_t0``, ``t_plunge_snap``
-            and ``t0_abs`` (the absolute time of WDM layer 0).
-        batch_max_size: rows per generator launch (``MBH_BATCH_MAX_SIZE``).
-        window_before, window_after, window_pad, window_margin: seconds.
-        **kwargs: Keyword arguments of the base. ``dcga`` must be ``None``.
+    The ``propose(model, state)`` contract is the base class's
+    (:meth:`ResidualAddOneRemoveOneMove.propose_local` on every compute rank's walker
+    block, through the :class:`~lisatools.globalfit.moves.walkerfanout.WalkerFanoutMixin`
+    ``propose``): per leaf, expose the cold-chain source, :meth:`setup_likelihood_here`,
+    score ``prev_logl`` and the in-model repeats through :meth:`compute_like_local`, swap
+    the per-leaf ladder, record ``<d|h>`` / ``<h|h>``, fold back. The tempered ensemble
+    is the ``mbh`` sub-state; the base writes it and mirrors row 0 into the main state
+    (``_sync_cold_row``). This class replaces the scoring and the expose / fold fill.
 
     Window hysteresis relies on the walkers' spread in merger time (the
     posterior width, plus hot-rung excursions) staying inside
@@ -266,6 +299,57 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
     ``outside_box`` in the ``[MBH_BATCH]`` telemetry; the module docstring
     has the production case, ``MBH_REJECT_OUTSIDE_BOX=0`` the old truncated
     scoring).
+
+    Args:
+        *args: Positional arguments of :class:`ResidualAddOneRemoveOneMove`.
+            ``waveform_gen`` stays the SLOW exact generator (or ``None`` to use
+            the containers' installed one): it still owns the cross-check.
+        batched_gen: the windowed sub-transform adapter
+            (:class:`~lisatools.sources.batching.MBHWindowedWDMSignalGen`), or a
+            ``DeviceLocalWaveGen`` resolving to one per device. Must expose
+            ``set_window``, ``window_key``, ``waveform_t0``, ``t_plunge_snap``
+            and ``t0_abs`` (the absolute time of WDM layer 0). Required.
+        batch_max_size (int): rows per generator launch (``MBH_BATCH_MAX_SIZE``).
+            Default 8, floored at 1.
+        window_before (float): kept span before the leaf's median merger, s.
+            Default 90 d.
+        window_after (float): kept span after it, s. Default 10 d.
+        window_pad (float): segment-transform pad on each side, s. Default 4 d.
+        window_margin (float): hysteresis margin, s. Default 1 d.
+        **kwargs: Keyword arguments of the base. ``dcga`` must be ``None``.
+
+    Raises:
+        ValueError: ``dcga`` given, ``batched_gen`` missing, a non-WDM run domain,
+            or a window with no valid geometry on the grid (:func:`mbh_window_layers`).
+
+    Attributes:
+        batched_gen: See ``batched_gen``.
+        n_batch_fallbacks (int): Chunks the generator refused (container path).
+        check_ll_tol (float): ``MBH_CHECK_LL_TOL`` (default ``0.5`` nat).
+
+    Note:
+        Env knobs read by this class or by the base with the ``MBH`` prefix:
+        ``MBH_REJECT_OUTSIDE_BOX`` (``0``/``false``/``off``/``no`` disables),
+        ``MBH_BATCHED_FILL`` (default ``1``; anything else uses the base's dense
+        per-row expose / fold), ``MBH_CHECK_LL`` (base default ``ADDREMOVE_CHECK_LL``
+        then ``1``; launchers ``0``), ``MBH_CHECK_LL_EVERY`` (class default every 10th
+        visit), ``MBH_CHECK_LL_TOL`` and ``MBH_RECORD_DH`` (class default ``1``).
+
+    Example:
+        Built by the stock layer (``source_runtime.build_mbh_move_runtime``):
+
+        .. code-block:: python
+
+            from lisatools.globalfit.recipe import MBHBatchedMoveBuilder
+
+            _, moves = MBHBatchedMoveBuilder(
+                wave_gen=slow.get_signals_for_residuals,  # stock phentax generator
+                batched_gen=batched,  # per-device windowed adapter
+                batch_max_size=8,
+                window_before=90 * 86400.0, window_after=10 * 86400.0,
+                window_pad=4 * 86400.0, window_margin=86400.0,
+            ).build(None, curr, acs, priors, state)
+            mbh_pe = moves[0]
     """
 
     _record_dh_default = "1"
@@ -324,8 +408,9 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
         )
         #: rows whose in-data merger falls outside the locked kept box are
         #: scored at the floor (rejected) instead of through a truncated
-        #: template; ``{BRANCH}_REJECT_OUTSIDE_BOX=0`` restores the truncated
-        #: scoring (module docstring: the job 769 phantom).
+        #: template; on by default, ``{BRANCH}_REJECT_OUTSIDE_BOX=0``
+        #: (``MBH_REJECT_OUTSIDE_BOX``) restores the truncated scoring (module
+        #: docstring: the job 769 phantom).
         self.reject_outside_box = (
             os.environ.get(f"{self._dbg_prefix}_REJECT_OUTSIDE_BOX", "1").strip().lower()
             not in ("0", "false", "off", "no")
@@ -342,6 +427,7 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
 
     @staticmethod
     def _new_stats():
+        """Fresh per-leaf telemetry dict for the ``[MBH_BATCH]`` line (:meth:`_flush_stats`)."""
         # ``leaf`` is recorded when accumulation STARTS (first scored chunk),
         # so the flush -- which runs at the NEXT leaf's setup -- labels the
         # numbers with the leaf they belong to.
@@ -355,6 +441,7 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
     # ------------------------------------------------------------------
 
     def _adapter(self):
+        """The windowed adapter for the CURRENT device (resolves a ``DeviceLocalWaveGen``)."""
         resolve = getattr(self.batched_gen, "_resolve", None)
         return resolve() if callable(resolve) else self.batched_gen
 
@@ -421,6 +508,21 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
         return val
 
     def _leaf_window(self, leaf, coords_ws, allow_rebuild):
+        """The locked window geometry of ``leaf`` (cached in ``_leaf_windows``).
+
+        The reference time is the stock epoch plus the median ``t_plunge``
+        (waveform-basis column 10) of ``coords_ws``. A cached window is kept
+        unless ``allow_rebuild`` and the reference moved more than
+        ``window_margin``; then it is rebuilt with :func:`mbh_window_layers`
+        (logged). ``allow_rebuild`` is True on setup / expose, False on
+        fold-back.
+
+        Returns:
+            dict: The :func:`mbh_window_layers` geometry plus ``t_ref`` (s).
+
+        Raises:
+            RuntimeError: A fold-back reached a leaf no expose has windowed.
+        """
         t_ref = self._stock_waveform_t0() + float(np.median(coords_ws[:, _T_PLUNGE_COL]))
         win = self._leaf_windows.get(leaf)
         if win is not None and (
@@ -448,6 +550,7 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
 
     @staticmethod
     def _apply_window(adapter, geom):
+        """Set ``geom``'s window on ``adapter`` unless its ``window_key`` already matches."""
         key = (geom["n_start"], geom["Nt_keep"], geom["n_pad_lo"], geom["n_pad_hi"])
         if getattr(adapter, "window_key", None) != key:
             adapter.set_window(*key)
@@ -464,6 +567,7 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
             yield
 
     def _primary_device(self):
+        """``acs.gpus[0]`` as an int, or ``None`` on a CPU / no-GPU ACA."""
         gpus = getattr(getattr(self, "acs", None), "gpus", None)
         return None if gpus is None else int(np.atleast_1d(gpus)[0])
 
@@ -473,7 +577,12 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
 
     @staticmethod
     def _split_rows_static(holder, idx):
-        """``[(device, positions)]`` grouping ``idx`` rows by owning walker shard."""
+        """``[(device, positions)]`` grouping ``idx`` rows by owning walker shard.
+
+        ``device`` is ``None`` when ``holder.gpus`` is ``None``; a single-shard
+        holder returns one group with every position. Also used by the EMRI and
+        SOBBH moves.
+        """
         idx = np.asarray(idx, dtype=np.int64).reshape(-1)
         n_shards = len(holder.linear_data_arr)
         if holder.gpus is None:
@@ -488,6 +597,7 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
         ]
 
     def _split_rows(self, idx):
+        """:meth:`_split_rows_static` on this move's ACA."""
         return self._split_rows_static(self.acs, idx)
 
     # ------------------------------------------------------------------
@@ -543,6 +653,29 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
         super().setup_likelihood_here(coords)
 
     def compute_like_local(self, coords_in, data_index):
+        """Rank-local batched windowed scorer (the base ``compute_like`` calls it).
+
+        Rows whose in-data merger falls outside the leaf's locked kept box are
+        counted (``outside_box``) and, with ``reject_outside_box``, left at the
+        floor. The rest are grouped by owning shard, chunked by
+        ``batch_max_size`` and scored by :meth:`_score_chunk` under the shard's
+        cupy + JAX device contexts. Side outputs ``self._last_d_h`` /
+        ``self._last_h_h`` hold the per-row ``<r|h>`` / ``<h|h>``.
+
+        Args:
+            coords_in (xp.ndarray): Waveform-basis rows, shape ``(n, 11)`` (column
+                10 is ``t_plunge`` relative to the stock epoch).
+            data_index (xp.ndarray): Walker (container) index per row, shape ``(n,)``.
+
+        Returns:
+            np.ndarray: ``(n,)`` log-likelihoods,
+            ``offset[walker] + <r|h> - 1/2 <h|h>``; ``-1e300`` for a
+            non-finite, rejected or non-generatable row.
+
+        Raises:
+            RuntimeError: Called before :meth:`setup_likelihood_here`, or the
+                current leaf has no window.
+        """
         if self._dcga is not None:  # unreachable (ctor guard); keep loud
             raise NotImplementedError("MBHBatchedLikeMove has no DCGA path.")
         if self._exposed_offset is None:
@@ -610,6 +743,7 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
         return out
 
     def _generate(self, adapter, coords):
+        """Batched windowed templates for ``coords``, ``t_plunge`` shifted to the snapped epoch."""
         params = np.array(coords, dtype=np.float64, copy=True)
         params[:, _T_PLUNGE_COL] -= float(self._gen_attr(adapter, "t_plunge_snap"))
         return adapter(*params.T, **self._gen_kwargs)
@@ -639,6 +773,13 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
         return WDMSignal(tmpl.arr, new_box)
 
     def _score_chunk(self, adapter, coords, idx, leaf):
+        """Score one chunk: ``(ll, <r|h>, <h|h>)``, each ``(n,)``.
+
+        A refused batch (``BatchNotLaunchable`` / ``WaveformDomainError``) goes
+        through the per-row container path (warned once per leaf, counted in
+        ``n_batch_fallbacks``, NaN records). A JAX / equinox runtime failure goes
+        to :meth:`_score_rows_isolating_failures`. Any other exception raises.
+        """
         t_gen = time.perf_counter()
         try:
             tmpl = self._generate(adapter, coords)
@@ -773,6 +914,13 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
             )
 
     def _score_templates(self, tmpl, idx):
+        """``(ll, <r|h>, <h|h>)`` for the template stack ``tmpl`` against walkers ``idx``.
+
+        The stack is re-labelled onto the containers' box, then each distinct
+        walker gets one batched ``inner_product`` pair against its residual and
+        PSD sliced to that box; one host pull per chunk. ``ll`` adds the
+        exposed-residual offset of each row's walker.
+        """
         like_kw = {
             k: v for k, v in (self.waveform_like_kwargs or {}).items()
             if k not in ("psd", "complex", "include_psd_info")
@@ -820,6 +968,15 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
     # ------------------------------------------------------------------
 
     def _apply_cold_chain_sources(self, coords, sign):
+        """Expose (``sign=+1``, ``r += h``) or fold back (``sign=-1``) the leaf's cold rows.
+
+        One row per walker (row position = walker). Batched windowed templates
+        in the leaf's window (rebuilt only on expose), applied with
+        ``acs.signal_operation``; a refused chunk falls back to the containers'
+        per-row ``apply_signal_from_params``. Non-finite rows are skipped.
+        ``MBH_BATCHED_FILL`` other than ``1`` uses the base's dense per-row pass.
+        One ``[MBH_FILL]`` line per call.
+        """
         what = "EXPOSE (r += h)" if sign > 0 else "FOLD-BACK (r -= h)"
         if os.environ.get("MBH_BATCHED_FILL", "1").strip() != "1":
             logger.info(
@@ -927,6 +1084,7 @@ class MBHBatchedLikeMove(ResidualAddOneRemoveOneMove):
         logger.warning(msg)
 
     def _flush_stats(self):
+        """Log the finished leaf's ``[MBH_BATCH]`` line (if it scored rows) and reset."""
         st = self._stats
         if st["rows"]:
             logger.info(

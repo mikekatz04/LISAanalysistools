@@ -1,4 +1,22 @@
-"""Prior distributions and density helpers for LISA sampling."""
+"""Prior distributions and density helpers for LISA sampling.
+
+Global-fit (9mo / 12mo run path) classes:
+
+- :class:`LogUniformLinear`: the log-uniform prior on a LINEAR column; the
+  stock MBH mass-ratio column ``Q = m1/m2`` on ``[1, 10]``.
+- :class:`EMRIKerrDomainPrior`: the EMRI prior container with the FEW Kerr
+  eccentric-equatorial domain-of-validity cut.
+
+General use: :class:`FullGaussianMixtureModel` (the concatenated per-band
+Gaussian mixture built from GB posterior fits; see
+:mod:`lisatools.sampling.gmm`; its global-fit builders, the GB GMM refit move
+and :func:`~lisatools.sampling.gmm.fit_gb_gmm_rj_container`, are not staged
+in the 9mo / 12mo runs) and :class:`SNRPrior` (the analytic SNR prior, LATW
+tutorial 07).
+The amplitude-from-SNR family (:class:`AmplitudeFromSNR`,
+:class:`AmplitudeFrequencySNRPrior`, :class:`GBPriorWrap`) is legacy with no
+live callers.
+"""
 
 import numpy as np
 from eryn.moves.multipletry import logsumexp
@@ -71,11 +89,22 @@ class LogUniformLinear(UniformDistribution):
     Args:
         minimum: Lower bound of the physical column; must be ``> 0``.
         maximum: Upper bound of the physical column; must be ``> minimum``.
+        name: Optional parameter name, passed to the base class as ``name``.
+            Default ``None``.
         **kwargs: Forwarded to :class:`eryn.priors.analytical.UniformDistribution`
-            (``name``, ``use_cupy``, ``return_gpu``, ...).
+            (``use_cupy``, ``return_gpu``, ...).
 
     Raises:
         ValueError: If ``minimum <= 0`` or ``maximum <= minimum``.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.sampling.prior import LogUniformLinear
+        >>> prior = LogUniformLinear(1.0, 10.0)
+        >>> prior.minimum, prior.maximum
+        (1.0, 10.0)
+        >>> bool(np.isneginf(prior.logpdf(np.array([0.5]))[0]))
+        True
     """
 
     def __init__(self, minimum: float, maximum: float, name: str | None = None, **kwargs):
@@ -110,18 +139,44 @@ class LogUniformLinear(UniformDistribution):
         return self.xp.where(mask, -self.xp.log(safe) - self._log_norm, -self.xp.inf)
 
     def rvs(self, size: int | tuple = (1,), **kwargs):
-        """Draw ``exp(U(ln min, ln max))`` -- values in ``[minimum, maximum]``."""
+        """Draw ``exp(U(ln min, ln max))`` -- values in ``[minimum, maximum]``.
+
+        Args:
+            size: Output shape; an ``int`` means ``(size,)``.
+                Default ``(1,)``.
+            **kwargs: Ignored (eryn prior API).
+
+        Returns:
+            xp.ndarray: Draws of shape ``size`` (host array unless ``use_cupy``
+            and ``return_gpu``).
+        """
         if isinstance(size, int):
             size = (size,)
         u = self.xp.random.uniform(self._log_min, self._log_max, size=size)
         return self._to_device(self.xp.exp(u))
 
     def logpdf(self, x, **kwargs):
-        """``-ln x - ln(ln(max/min))`` inside the box, ``-inf`` outside."""
+        """Return ``-ln x - ln(ln(max/min))`` inside the box, ``-inf`` outside.
+
+        Args:
+            x (array-like): Physical (linear) values.
+            **kwargs: Ignored (eryn prior API).
+
+        Returns:
+            xp.ndarray: float64 log-density, same shape as ``x``.
+        """
         return self._to_device(self._logpdf_raw(x))
 
     def pdf(self, x, **kwargs):
-        """``exp(logpdf(x))`` -- ``1 / (x ln(max/min))`` inside the box, 0 outside."""
+        """Return ``exp(logpdf(x))`` -- ``1 / (x ln(max/min))`` inside the box, 0 outside.
+
+        Args:
+            x (array-like): Physical (linear) values.
+            **kwargs: Ignored (eryn prior API).
+
+        Returns:
+            xp.ndarray: float64 density, same shape as ``x``.
+        """
         return self._to_device(self.xp.exp(self._logpdf_raw(x)))
 
 
@@ -143,13 +198,34 @@ class EMRIKerrDomainPrior(ProbDistContainer):
     evaluation to a parameter subset, since the joint constraint is undefined
     there.
 
+    Built by :meth:`~lisatools.globalfit.stock.erebor.emri.EMRISetup.init_sampling_info`
+    as the ``"emri"`` prior, with the column indices of ``a`` / ``p0`` / ``e0``
+    read off the stock EMRI sampling basis and ``xI_fill`` from the leaves'
+    ``xI0`` (prograde ``1.0`` when they mix).
+
     Args:
-        priors_in: As for :class:`ProbDistContainer`.
-        a_index: Column of the spin ``a`` in the sampling basis.
-        p0_index: Column of the initial semi-latus rectum ``p0``.
-        e0_index: Column of the initial eccentricity ``e0``.
+        priors_in (dict): As for :class:`~eryn.priors.ProbDistContainer`.
+        a_index: Column of the spin ``a`` in the sampling basis. Default ``2``.
+        p0_index: Column of the initial semi-latus rectum ``p0``. Default ``3``.
+        e0_index: Column of the initial eccentricity ``e0``. Default ``4``.
         xI_fill: Fill value used for ``x0`` (``+1`` or ``-1``) in the waveform
             basis (the stock EMRI transform fills ``x0``; it is not sampled).
+            Default ``1.0``.
+        **kwargs: Forwarded to :class:`~eryn.priors.ProbDistContainer`
+            (``use_cupy``, ``return_gpu``).
+
+    Example:
+        .. code-block:: python
+
+            from eryn.prior import uniform_dist
+            from lisatools.sampling.prior import EMRIKerrDomainPrior
+
+            # columns (logm1, m2, a, p0, e0) as in the stock basis; the cut reads 2, 3, 4
+            prior = EMRIKerrDomainPrior(
+                {i: uniform_dist(lo, hi) for i, (lo, hi) in enumerate(boxes)},
+                a_index=2, p0_index=3, e0_index=4, xI_fill=1.0,
+            )
+            x = prior.rvs(size=100)  # (100, 5), every row inside the FEW domain
     """
 
     def __init__(
@@ -168,7 +244,7 @@ class EMRIKerrDomainPrior(ProbDistContainer):
         self.xI_fill = float(xI_fill)
 
     def _in_domain(self, x) -> np.ndarray:
-        """Boolean mask over rows of ``x`` (sampling basis) inside the FEW domain."""
+        """Return the boolean ``(N,)`` mask of sampling-basis rows inside the FEW domain."""
         from ..sources.emri.domain import emri_kerr_domain_mask
 
         x_np = np.atleast_2d(asnumpy(x))
@@ -180,6 +256,20 @@ class EMRIKerrDomainPrior(ProbDistContainer):
         )
 
     def logpdf(self, x, keys=None, **kwargs):
+        """Return the container log-prior with out-of-domain rows set to ``-inf``.
+
+        Args:
+            x (xp.ndarray): ``(ndim,)`` or ``(N, ndim)`` sampling-basis points.
+            keys (list, optional): Component subset (see
+                :meth:`eryn.priors.ProbDistContainer.logpdf`); when given, the
+                domain cut is skipped.
+            **kwargs: Forwarded to the base :meth:`logpdf`.
+
+        Returns:
+            float or xp.ndarray: As the base class (a float for 1-D ``x``), with
+            ``-inf`` where :func:`~lisatools.sources.emri.domain.emri_kerr_domain_mask`
+            is ``False``.
+        """
         lp = super().logpdf(x, keys=keys, **kwargs)
         if keys is not None:
             return lp
@@ -191,6 +281,23 @@ class EMRIKerrDomainPrior(ProbDistContainer):
         return xp_here.where(xp_here.asarray(ok), lp, -np.inf)
 
     def rvs(self, size=1, keys=None, max_tries: int = 1000, **kwargs):
+        """Draw prior samples, redrawing out-of-domain rows until all are valid.
+
+        Args:
+            size (int or tuple): Leading output shape. Default ``1``.
+            keys (list, optional): Component subset; when given, the base draw
+                is returned unchanged (no domain cut).
+            max_tries: Maximum resampling rounds. Default ``1000``.
+            **kwargs: Forwarded to the base :meth:`rvs`.
+
+        Returns:
+            np.ndarray: Host array of shape ``size + (ndim,)`` (always numpy on
+            the cut path).
+
+        Raises:
+            RuntimeError: Some rows are still out of domain after ``max_tries``
+                rounds.
+        """
         out = super().rvs(size=size, keys=keys, **kwargs)
         if keys is not None:
             return out
@@ -213,6 +320,7 @@ class EMRIKerrDomainPrior(ProbDistContainer):
         return flat.reshape(shape)
 
 
+# TODO check: keep/remove/document -- no callers (only a commented-out line in stock/erebor/gb.py)
 class AmplitudeFrequencySNRPrior:
     """Joint prior on GB amplitude and frequency expressed via SNR.
 
@@ -326,11 +434,22 @@ class SNRPrior:
 
         p(\\rho) = \\frac{3 \\rho}{4 \\rho_*^2 (1 + \\rho / (4 \\rho_*))^5} \\quad \\rho > 0,
 
-    along with its CDF and an inverse-CDF sampler.
+    along with its CDF and an inverse-CDF sampler (closed-form root of the
+    quartic ``cdf(rho) = u``). The density peaks at :math:`\\rho = \\rho_*`.
 
     Args:
-        rho_star: Characteristic SNR scale :math:`\\rho_*`.
-        use_cupy: If ``True``, evaluate using ``cupy`` arrays.
+        rho_star (float): Characteristic SNR scale :math:`\\rho_*`.
+        use_cupy (bool, optional): If ``True``, evaluate with ``cupy`` arrays
+            (inputs must then be cupy arrays). Default ``False``.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.sampling.prior import SNRPrior
+        >>> prior = SNRPrior(rho_star=10.0)
+        >>> prior.rvs(size=1000).shape
+        (1000,)
+        >>> float(prior.cdf(np.array([0.0]))[0])
+        0.0
     """
 
     def __init__(self, rho_star, use_cupy=False):
@@ -339,6 +458,7 @@ class SNRPrior:
 
     @property
     def use_cupy(self):
+        """bool: Evaluate with ``cupy`` (inputs must then be cupy arrays)."""
         return self._use_cupy
 
     @use_cupy.setter
@@ -346,7 +466,14 @@ class SNRPrior:
         self._use_cupy = use_cupy
 
     def pdf(self, rho):
-        """Evaluate the SNR PDF, returning zero for non-positive SNR."""
+        """Evaluate the SNR PDF, returning zero for non-positive SNR.
+
+        Args:
+            rho (xp.ndarray): SNR values (an array; boolean indexing is used).
+
+        Returns:
+            xp.ndarray: Density, same shape as ``rho``.
+        """
 
         xp = np if not self.use_cupy else cp
 
@@ -358,12 +485,33 @@ class SNRPrior:
         return p
 
     def logpdf(self, rho):
-        """Return ``log(pdf(rho))``."""
+        """Return ``log(pdf(rho))`` (``-inf`` for non-positive SNR).
+
+        Args:
+            rho (xp.ndarray): SNR values.
+
+        Returns:
+            xp.ndarray: Log-density, same shape as ``rho``.
+        """
         xp = np if not self.use_cupy else cp
         return xp.log(self.pdf(rho))
 
     def cdf(self, rho):
-        """Evaluate the analytic CDF of the SNR prior."""
+        r"""Evaluate the analytic CDF of the SNR prior.
+
+        .. math::
+
+            F(\rho) = 1 - \frac{256 \rho_*^3 (\rho + \rho_*)}{(\rho + 4 \rho_*)^4},
+            \quad \rho > 0,
+
+        and 0 for non-positive SNR.
+
+        Args:
+            rho (xp.ndarray): SNR values.
+
+        Returns:
+            xp.ndarray: CDF values, same shape as ``rho``.
+        """
         xp = np if not self.use_cupy else cp
         c = xp.zeros_like(rho)
         good = rho > 0.0
@@ -380,11 +528,14 @@ class SNRPrior:
     def rvs(self, size=1):
         """Draw SNR samples via inverse-CDF sampling.
 
+        Uses the global ``numpy.random`` (or ``cupy.random``) stream.
+
         Args:
-            size: Output shape; an integer is interpreted as a 1-tuple.
+            size (int or tuple, optional): Output shape; an integer is
+                interpreted as a 1-tuple. Default ``1``.
 
         Returns:
-            Array of SNR samples with shape ``size``.
+            xp.ndarray: SNR samples with shape ``size``.
         """
         if isinstance(size, int):
             size = (size,)
@@ -502,6 +653,7 @@ class SNRPrior:
         return rho
 
 
+# TODO check: keep/remove/document -- only caller is AmplitudeFrequencySNRPrior (no callers)
 class AmplitudeFromSNR:
     """Convert between GB amplitude and optimal SNR for a given LISA noise model.
 
@@ -664,6 +816,7 @@ class AmplitudeFromSNR:
         return (rho, f0)
 
 
+# TODO check: keep/remove/document -- imported by moves/gbspecialstretch.py, only named in comments
 class GBPriorWrap:
     """Wrap a GB parameter prior so amplitude is sampled jointly with frequency.
 
@@ -765,23 +918,74 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
 
     Each input list provides the parameters of an independently-fit GMM in
     its own ``(mins, maxs)``-bounded box (typically one per GB frequency
-    band). The component lists are concatenated into a single flat mixture
-    with weights re-normalized so the global PDF integrates to one. ``logpdf``
-    is evaluated via a backend C/CUDA kernel that only sums components whose
-    bounding box covers the query point.
+    band; the output of :func:`~lisatools.sampling.gmm.vec_fit_gmm_min_bic`
+    with ``return_components=True``). Each sub-mixture lives in its box's
+    mapped coordinates ``2 (x - mins) / (maxs - mins) - 1`` (the
+    :math:`[-1, 1]^d` cube); the density in physical coordinates adds the
+    map's log-Jacobian. The component lists are concatenated into one flat
+    mixture and every sub-mixture's weights (which must each sum to 1) are
+    divided by the number of sub-domains, so each sub-domain carries equal
+    total weight and the global PDF integrates to one.
+
+    Column 1 is the frequency column: :meth:`logpdf` sums, per point, only
+    the components whose frequency window (mapped coordinate within
+    ``[-limit, limit]`` of their box) contains the point's column 1. For
+    ``ndim == 6`` (the 6 non-phase GB columns) it uses the backend
+    ``compute_logpdf`` C/CUDA kernel; any other ``ndim`` uses the numpy/cupy
+    mirror :meth:`_logpdf_xp` (same math).
+
+    Built by the GB GMM refit move
+    (:class:`~lisatools.globalfit.moves.gbspecialstretch.GBSpecialRJRefitMove`,
+    ``use_cupy=True``) and by :func:`~lisatools.sampling.gmm.vec_fit_gmm_min_bic`
+    (without ``return_components``), and used as the joint component of the
+    6 non-phase GB columns in an eryn :class:`~eryn.priors.ProbDistContainer`.
+    Neither builder runs in the 9mo / 12mo runs (``include_refit=False``; the
+    serial-search move is never staged).
 
     Args:
-        weights: List of per-mixture weight arrays (one entry per
-            sub-domain).
-        means: List of per-mixture mean arrays.
-        covs: List of per-mixture covariance arrays.
-        invcovs: List of per-mixture inverse-covariance arrays.
-        dets: List of per-mixture covariance-determinant arrays.
-        mins: List of per-sub-domain coordinate lower bounds.
-        maxs: List of per-sub-domain coordinate upper bounds.
-        limit: Mapped-coordinate distance (in the unit-cube basis) beyond
-            which a component contribution is dropped from ``logpdf``.
-        use_cupy: If ``True``, store data on GPU and use the GPU backend.
+        weights (list[xp.ndarray]): Per-sub-domain weight arrays ``(K_i,)``,
+            each summing to 1.
+        means (list[xp.ndarray]): Per-sub-domain means ``(K_i, ndim)`` in
+            mapped coordinates.
+        covs (list[xp.ndarray]): Per-sub-domain covariances
+            ``(K_i, ndim, ndim)`` in mapped coordinates.
+        invcovs (list[xp.ndarray]): Per-sub-domain inverse covariances.
+        dets (list[xp.ndarray]): Per-sub-domain covariance determinants
+            ``(K_i,)``.
+        mins (list[xp.ndarray]): Per-sub-domain lower bounds ``(ndim,)``
+            (physical units).
+        maxs (list[xp.ndarray]): Per-sub-domain upper bounds ``(ndim,)``.
+        limit (float, optional): Half-width, in mapped units of column 1, of
+            each component's frequency window in :meth:`logpdf`. Default
+            ``10.0``.
+        use_cupy (bool, optional): If ``True``, store the arrays on the GPU
+            and construct the backend with ``force_backend="gpu"``; otherwise
+            ``"cpu"``. Default ``False``.
+
+    Raises:
+        AssertionError: The concatenated, rescaled weights do not sum to 1.
+
+    Attributes:
+        ndim (int): Dimension of the mixture.
+        weights (xp.ndarray): Flat, rescaled weights ``(C,)``.
+        means (xp.ndarray): ``(C, ndim)``.
+        covs (xp.ndarray): ``(C, ndim, ndim)``.
+        chols (xp.ndarray): Cholesky factors of ``covs`` (used by :meth:`rvs`).
+        indexing (xp.ndarray): Sub-domain index of each flat component ``(C,)``.
+        mins (xp.ndarray): ``(n_sub, ndim)`` box lower bounds.
+        maxs (xp.ndarray): ``(n_sub, ndim)`` box upper bounds.
+        log_det_J (xp.ndarray): Per-component log-Jacobian of the box map.
+
+    Example:
+        >>> import numpy as np
+        >>> from lisatools.sampling.prior import FullGaussianMixtureModel
+        >>> eye = np.eye(2)[None]
+        >>> gmm = FullGaussianMixtureModel(
+        ...     [np.array([1.0])], [np.zeros((1, 2))], [eye], [eye], [np.ones(1)],
+        ...     [np.array([0.0, 1.0])], [np.array([1.0, 2.0])],
+        ... )
+        >>> gmm.rvs(size=4).shape, gmm.logpdf(np.array([[0.5, 1.5]])).shape
+        ((4, 2), (1,))
     """
 
     def __init__(
@@ -862,12 +1066,19 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
     def logpdf(self, x):
         """Evaluate the log-PDF at the input points.
 
+        For ``ndim == 6`` the points are sorted by column 1, matched to the
+        components whose frequency window contains them, and summed by the
+        backend ``compute_logpdf`` kernel; a ``ValueError`` from a stale CPU
+        binding falls back (with one ``RuntimeWarning``) to :meth:`_logpdf_xp`.
+        Other ``ndim`` go straight to :meth:`_logpdf_xp`.
+
         Args:
-            x: Array of shape ``(n, ndim)``.
+            x (xp.ndarray): Array of shape ``(n, ndim)`` in physical
+                coordinates (cupy when ``use_cupy``).
 
         Returns:
-            Log-density values of shape ``(n,)``. Points falling outside
-            every sub-domain box are returned as ``-inf``.
+            xp.ndarray: Log-density values of shape ``(n,)``. Points outside
+            every component's frequency window are ``-inf``.
         """
 
         if self.use_cupy:
@@ -988,6 +1199,13 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
         components (``-inf`` when none). Vectorized in single array ops per
         point batch (numpy or cupy) -- used for every ``ndim != 6`` mixture,
         where the compiled kernel (``PDF_NDIM == 6``) cannot run.
+
+        Args:
+            x (xp.ndarray): ``(n, ndim)`` physical coordinates.
+            batch_size: Points per vectorized batch. Default ``4096``.
+
+        Returns:
+            xp.ndarray: ``(n,)`` log-density.
         """
         xp = cp if self.use_cupy else np
         x = xp.asarray(x)
@@ -1017,23 +1235,43 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
             out[s:e] = xp.where(xp.isfinite(m), val, -np.inf)
         return out
 
+    # TODO check: keep/remove/document -- no callers (logpdf paths inline the same map)
     def map_input(self, x, mins, maxs):
         """Map physical coordinates into the :math:`[-1, 1]^d` box."""
         return ((x - mins) / (maxs - mins)) * 2.0 - 1.0
 
     def map_back_frequency(self, x, mins, maxs):
-        """Map :math:`[-1, 1]^d` coordinates back into physical units."""
+        """Map :math:`[-1, 1]^d` coordinates back into physical units.
+
+        Despite the name, it maps any column (``(x + 1) / 2 (maxs - mins) + mins``,
+        broadcasting); it is used for the column-1 frequency windows and for
+        :meth:`rvs`.
+
+        Args:
+            x (xp.ndarray or float): Mapped coordinates.
+            mins (xp.ndarray): Box lower bounds (broadcastable to ``x``).
+            maxs (xp.ndarray): Box upper bounds.
+
+        Returns:
+            xp.ndarray: Physical coordinates.
+        """
         return (x + 1.0) * 1.0 / 2.0 * (maxs - mins) + mins
 
     def rvs(self, size=(1,)):
         """Draw samples from the mixture distribution.
 
+        Picks a flat component by its weight, draws ``mean + L z`` with
+        ``L L^T = cov`` in that component's mapped coordinates, and maps the
+        draw back through its sub-domain box. Uses the global
+        ``numpy.random`` / ``cupy.random`` stream.
+
         Args:
-            size: Sample shape; an integer is interpreted as a 1-tuple.
+            size (int or tuple, optional): Sample shape; an integer is
+                interpreted as a 1-tuple. Default ``(1,)``.
 
         Returns:
-            Array of shape ``size + (ndim,)`` of samples in physical
-            coordinates.
+            xp.ndarray: Array of shape ``size + (ndim,)`` of samples in physical
+            coordinates (not clipped to the box).
         """
 
         if isinstance(size, int):

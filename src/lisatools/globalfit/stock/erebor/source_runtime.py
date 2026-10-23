@@ -1,25 +1,47 @@
 """Shared EMRI / SOBBH / MBH source-branch runtime for stock global fits.
 
-Extracted verbatim from ``full_year_combined`` so that variant *and*
-``all_sources`` share a single source of truth for the phentax / TDI-on-the-fly
-source branches:
+The single source of truth for the three source branches of
+``erebor.all_sources`` (the 9mo / 12mo production variant) and the legacy
+``full_year_combined`` variant (it was extracted from the latter). What it
+holds, in pipeline order:
 
-- ``SourceMBHSettings`` / ``SourceEMRISettings`` / ``SourceSOBBHSettings`` —
-  the per-branch knob blocks (phentax MBH default, TDI-on-the-fly SOBBH
-  default, legacy-ResponseWrapper EMRI), each with a per-branch
-  ``use_tdionfly`` toggle (``USE_TDIONFLY`` env flips both).
-- ``prepare_{emri,sobbh,mbh}_branch`` — wide-prior branch resolution
-  (catalogue vs synthetic injection, transform containers, initialize kwargs).
-- ``SourceSignalGen`` + the cached ``get_*_wave_wrap`` template generators —
-  the engine-side ``signal_gen`` adapters (built lazily post-deepcopy).
-- ``build_{emri,sobbh,mbh}_move_runtime`` / ``build_source_moves`` — the
-  runtime PE-move builders wrapping ``EMRIMoveBuilder`` / ``SOBBHMoveBuilder`` /
-  ``MBHMoveBuilder`` / ``build_mbh_moves_phenom``.
+- **Knob blocks** :class:`SourceMBHSettings` / :class:`SourceEMRISettings` /
+  :class:`SourceSOBBHSettings` (``fit.mbh`` / ``fit.emri`` / ``fit.sobbh``):
+  the waveform path (``use_tdionfly``; ``USE_TDIONFLY`` flips both MBH and
+  SOBBH), the scoring path (``MBH_LIKELIHOOD`` / ``EMRI_LIKELIHOOD`` /
+  ``SOBBH_LIKELIHOOD``, launchers ``batched`` / ``direct`` / ``lookup``) and
+  the source warm start.
+- **Branch preparation** :func:`prepare_mbh_branch` / :func:`prepare_emri_branch`
+  / :func:`prepare_sobbh_branch`, called by the variant's ``_prepare_*`` hooks
+  at build time: catalogue (mojito) or synthetic injections, transform
+  containers, priors, inner-move stacks (:func:`make_mbh_inner_moves`, the MBH
+  sky-mode hops), the MBH proposal-frame map
+  (:func:`make_mbh_proposal_frame_map`, ``MBH_PROPOSAL_FRAME``) and the SOBBH
+  chirp bound.
+- **Scoring-path resolution** :func:`resolve_mbh_batched_cfg`,
+  :func:`resolve_emri_direct_cfg` and :func:`source_signal_cfg`: the ``auto``
+  modes resolved once, into one plain-value ``cfg`` dict.
+- **Engine-side generators** :class:`SourceSignalGen` (registered as each
+  branch's ``signal_gen`` by ``attach_runtime_objects``) over the cached
+  getters (:func:`get_emri_wave_wrap`, :func:`get_emri_direct_gen`,
+  :func:`get_sobbh_wave_wrap`, :func:`get_sobbh_chunked_signal_gen`,
+  :func:`get_mbh_phenom_gen`, :func:`get_mbh_windowed_gen`, ...), all keyed by
+  device in one module-level cache.
+- **Move builders** :func:`build_source_moves` (called by the variant's
+  ``setup_recipe``) and :func:`build_mbh_move_runtime` /
+  :func:`build_emri_move_runtime` / :func:`build_sobbh_move_runtime`, which
+  wrap the recipe's :class:`~lisatools.globalfit.recipe.MBHBatchedMoveBuilder`,
+  :class:`~lisatools.globalfit.recipe.EMRIDirectMoveBuilder`,
+  :class:`~lisatools.globalfit.recipe.SOBBHChunkedMoveBuilder` and their stock
+  counterparts, with :class:`DeviceLocalWaveGen` handles.
+- **Per-device replicas** for multi-GPU walker shards (orbits, WDM settings,
+  TDI configs and the GB computation objects of the band router,
+  :func:`_device_local_gb_comp`).
 
 The consuming variant supplies a ``general`` settings object exposing
 ``data_mode`` / ``n_injections`` / ``mbh_waveform_t0`` / ``sobbh_reference_time``
-(duck-typed); everything here is behaviour-identical to the original
-``full_year_combined`` implementation.
+/ ``tdi_chan`` / ``tdi_gen_str`` / ``nchannels`` / ``min_freq`` / ``max_freq``
+(duck-typed).
 """
 
 from __future__ import annotations
@@ -278,6 +300,27 @@ def _device_local_gb_comp(comp, xp, device, primary_device):
     Built once per (comp, device) and kept for the whole run
     (memory-lifecycle rule: allocate-once, persist; module-level cache, never
     the settings tree, never the proposal-lifetime holder).
+
+    Called by the GB shard router (``gbbands._RoutedBandEngine`` /
+    ``_comp_for``) only for a MULTI-SHARD holder whose shard device differs
+    from the comp's build device, i.e. when one compute rank owns more than
+    one GPU; never on the production layouts (one GPU per compute rank).
+
+    Args:
+        comp (object): The prototype comp (``None`` passes through).
+        xp (module): ``numpy`` or ``cupy``.
+        device (int or None): Target device; ``None`` = the CPU path.
+        primary_device (int or None): The prototype's own device.
+
+    Returns:
+        object: ``comp`` itself (CPU path, own device, or an unhandled comp
+        shape), else the cached device-local replica.
+
+    Warning:
+        A sig-het replica comes without the lookup table and the anchor
+        engine (see :func:`_build_gb_comp_replica`), so with the launchers'
+        ``SIGHET_REF_BUILD=lookup`` it raises ``RuntimeError`` at its first
+        ``setup_in_model``.
     """
     if comp is None or device is None or primary_device is None:
         return comp
@@ -302,7 +345,9 @@ def _device_local_gb_comp(comp, xp, device, primary_device):
 #: from ``_g`` (rather than a second stash) keeps the sig-het class free of
 #: replica-only state; the recorded values are already RESOLVED (snapped
 #: ``nt_layer``, resolved ``n_cp_build``), and both resolutions are
-#: idempotent, so a rebuild reproduces the prototype exactly.
+#: idempotent, so a rebuild reproduces the prototype's KNOBS exactly. The
+#: lookup table and the anchor engine are not in ``_g`` and are NOT
+#: reproduced (see the Warning of :func:`_build_gb_comp_replica`).
 _SIGHET_REPLICA_KNOBS = {
     "nt_layer": "nt_layer",
     "n_sparse_fd": "n_sparse_fd",
@@ -326,7 +371,50 @@ _SIGHET_REPLICA_KNOBS = {
 
 
 def _build_gb_comp_replica(comp, xp, device, primary_device):
-    """Construct one GB comp replica (called inside ``device``'s context)."""
+    """Construct one GB comp replica (called inside ``device``'s context).
+
+    The sig-het wrapper (a comp with a ``chunked`` delegate and a
+    ``for_band_engine`` factory) is rebuilt through its class's
+    ``for_band_engine`` around a device-local replica of the delegate, with the
+    knobs read back from its ``_g`` dict through :data:`_SIGHET_REPLICA_KNOBS`
+    (a comp without ``_g`` is returned shared). A chunked-het / FD comp is
+    rebuilt from its recorded ``args`` / ``kwargs`` with device-local domain
+    settings and TDI config and the prototype's configured orbits object.
+    Anything else is returned unchanged.
+
+    Args:
+        comp (object): The prototype comp.
+        xp (module): ``numpy`` or ``cupy``.
+        device (int): Target device.
+        primary_device (int): The prototype's device.
+
+    Returns:
+        object: The replica, or ``comp`` itself when it cannot be rebuilt.
+
+    Warning:
+        The sig-het replica DROPS the lookup table and the anchor engine.
+        ``GBSignalHetComputations.for_band_engine`` never records
+        ``lookup_table`` / ``lookup_n_nodes`` / ``lookup_k_coarse`` /
+        ``anchor_engine`` in ``_g`` (they live on ``_ref_lookup`` /
+        ``_anchor_engine``), so the rebuilt engine has neither. With the
+        launchers' ``SIGHET_REF_BUILD`` / ``SIGHET_ANCHOR_ENGINE`` /
+        ``SIGHET_INFOMAT_ENGINE`` = ``lookup`` the first lookup-dependent call
+        on a non-primary shard -- the block-start ``setup_in_model``, or a
+        ``GB_CHOL_CACHE`` information-matrix refresh -- raises
+        ``RuntimeError``; with the env unset but ``fit.gb.sighet_ref_build =
+        "lookup"`` set in code, the replica silently falls back (FD reference,
+        chunked anchor) and diverges from the primary shard. This happens only
+        when one compute rank owns more than one GPU: ``GPUS_PER_RANK >= 2``
+        (with at least that many walkers per rank), ``GF_LEGACY_RANK_LAYOUT=1``
+        (the head computes alone on the whole per-node pool of a multi-GPU
+        node; the documented rollback of the 1-node ``NGPUS=2`` shape), or a
+        lone compute rank on a multi-GPU node (``mpiexec -n 1``, or the
+        in-process driver with ``GPUS=0,1``).
+        The production layouts (``NGPUS=4``, and ``NGPUS=8 GF_GPU_ROUTING=1``)
+        give every compute rank one GPU and never build a replica. Not fixed
+        (2026-10-22; G2 review): a fix would record the lookup arguments and
+        the anchor engine, or re-attach the prototype's ``_ref_lookup``.
+    """
     # --- sig-het wrapper: rebuilt through its own factory -----------------
     chunked = getattr(comp, "chunked", None)
     if chunked is not None and hasattr(type(comp), "for_band_engine"):
@@ -425,7 +513,21 @@ def _wrap_device_and_orbits(general_info):
 
 
 def default_source_ids() -> dict:
-    """Per-class source IDs; env MBHB_IDS / EMRI_IDS / SOBHB_IDS override."""
+    """Per-class source IDs; env MBHB_IDS / EMRI_IDS / SOBHB_IDS override.
+
+    Defaults ``{"MBHB": [], "EMRI": [1], "SOBHB": []}``. A set env var is a
+    comma-separated id list (empty entries skipped, so an empty value gives
+    ``[]`` and drops that class). The default factory of
+    ``full_year_combined``'s ``mojito_source_ids``; ``all_sources`` has its
+    own field default and the driver fills it from the same env vars.
+
+    Returns:
+        dict: ``{"MBHB": [...], "EMRI": [...], "SOBHB": [...]}`` of ``int``
+        lists (:func:`~lisatools.globalfit.preprocessing.normalize_source_ids`).
+
+    Raises:
+        ValueError: An id that is not an integer.
+    """
     ids = {"MBHB": [], "EMRI": [1], "SOBHB": []}
     for cls in ("MBHB", "EMRI", "SOBHB"):
         env_ids = os.environ.get(f"{cls}_IDS")
@@ -435,7 +537,13 @@ def default_source_ids() -> dict:
 
 
 def _env_optional_duration(var: str, default: float):
-    """Env float with ''/'none' -> None (MBH_WAVEFORM_DURATION semantics)."""
+    """Env float with ''/'none' -> None (MBH_WAVEFORM_DURATION semantics).
+
+    Returns:
+        Callable: A ``dataclasses.field`` default factory: ``default`` when
+        ``var`` is unset, ``None`` for an empty or ``none`` value, else
+        ``float(value)``.
+    """
 
     def _factory():
         raw = os.environ.get(var)
@@ -459,7 +567,100 @@ MBH_DEFAULT_WAVEFORM_DURATION = YRSID_SI / 12.0
 class SourceMBHSettings(MBHSettings):
     """MBH branch block. Default waveform path: LEGACY phentax response
     (``use_tdionfly=False``); default scoring path ``likelihood="auto"`` (the
-    batched windowed likelihood wherever the run can use it)."""
+    batched windowed likelihood wherever the run can use it).
+
+    ``fit.mbh`` of ``erebor.all_sources`` (aliased there as
+    ``AllSourcesMBHSettings``) and of ``full_year_combined``. Adds the
+    waveform, scoring-path, window and warm-start fields below to
+    :class:`~lisatools.globalfit.stock.erebor.mbh.MBHSettings` (ladder,
+    inner moves, eigen knobs, sky hops, proposal frame: see there). Env knob
+    names are given per field; the launcher values are those of
+    ``submit_gf_9mo_v9.sh`` / ``submit_gf_12mo.sh``.
+
+    Attributes:
+        num_prop_repeats: Inner-move repeats per leaf visit (the expose / fold
+            round trip and the ``prev_logl`` batch are paid once per visit).
+            Env ``MBH_NUM_PROP_REPEATS``. Default 2; launchers 25.
+        ndim: Sampling dimension, 11.
+        use_tdionfly: Waveform path: ``False`` = legacy phentax
+            ``PhenomTHMTDIWaveform`` (:func:`get_mbh_phenom_gen`), ``True`` =
+            TDI-on-the-fly (:func:`get_mbh_tdionfly_wave_wrap`; blocks the
+            batched path). Env ``USE_TDIONFLY`` (shared with the SOBBH block).
+            Default ``False``; launchers unset.
+        higher_modes: phentax modes. Default ``(21, 33, 44)``.
+        phenom_tol: phentax ``atol`` / ``rtol``. Default ``1e-12``.
+        start_freq: phentax start frequency (Hz). Default ``7e-5``.
+        response_order: Response Lagrange order. Env ``MBH_RESPONSE_ORDER``.
+            Default 8; launchers 8.
+        likelihood: Scoring path, ``"auto"`` / ``"batched"`` / ``"full"``
+            (:func:`resolve_mbh_batched_cfg`; ``auto`` -> ``batched`` unless
+            ``USE_TDIONFLY=1``, a non-WDM run domain or a conflicting
+            ``MBH_WAVEFORM_DURATION``). Env ``MBH_LIKELIHOOD``. Default
+            ``"auto"``; launchers ``batched``.
+        batch_max_size: Rows per batched generator launch. Env
+            ``MBH_BATCH_MAX_SIZE``. Default 8; launchers 8.
+        window_before_days: Per-leaf window, days before the median cold-chain
+            merger; also the generated inspiral length of BOTH generators on
+            the batched path. Env ``MBH_WINDOW_BEFORE_DAYS``. Default 90.0.
+        window_after_days: Days after the merger. Env
+            ``MBH_WINDOW_AFTER_DAYS``. Default 10.0.
+        window_pad_days: Discarded segment edge (days); must cover
+            ``buffer_time``. Env ``MBH_WINDOW_PAD_DAYS``. Default 4.0.
+        window_margin_days: Margin around the kept box (days). Env
+            ``MBH_WINDOW_MARGIN_DAYS``. Default 1.0.
+        window_decimate: Batched window lattice DECIMATION factor (not the
+            mass ratio): generate, respond and WDM-transform at
+            ``decimate * dt`` on ``Nf / decimate`` layers. Env
+            ``MBH_WINDOW_DECIMATE``. Default 1; launchers 2.
+        buffer_time: Response buffer (s) zeroed at the lattice head. Default
+            15000.0.
+        waveform_duration: phentax generation window (s); ``None`` = the full
+            data span. Env ``MBH_WAVEFORM_DURATION`` (empty or ``none`` ->
+            ``None``). Default ``YRSID_SI / 12``; overridden by the window
+            length on the batched path.
+        tdionfly_margin: TDI-on-the-fly window margin (s) past the data span.
+            Default :data:`MBH_TDIONFLY_MARGIN` (6 days).
+        logM_prior: ``ln(M / Msun)`` uniform-prior box. Default
+            ``(ln 1e5, ln 1e8)``.
+        dist_prior: Distance uniform-prior box (Gpc). Default ``(0.1, 150.0)``.
+        t_plunge_pad: Headroom (s) of the ``t_plunge`` prior past the
+            merger-window buffer. Default 3600.0.
+        mbh_merger_time_buffer: Merger-window filter: a catalogue MBHB is kept
+            iff ``observation_start <= t_merge < observation_end + buffer``
+            (s); the ``t_plunge`` prior's upper edge follows it. Env
+            ``MBH_MERGER_TIME_BUFFER``. Default 7 days; launchers 1209600 (14
+            days).
+        source_warm_start_store: Seed store of the source warm start
+            (:mod:`lisatools.globalfit.warmstart.sources`): on a FRESH store,
+            a leaf whose catalogue id is in the seed store with seed optimal
+            SNR above ``source_warm_start_snr_min`` starts at the seed's last
+            cold-chain positions. ``None`` = off; inert on a resume. Env
+            ``SOURCE_WARM_START_STORE`` (shared by mbh / emri / sobbh);
+            launchers the run's seed store (``GF_SEED_STORE``).
+        source_warm_start_snr_min: SNR threshold (strict). Env
+            ``SOURCE_WARM_START_SNR_MIN`` (shared). Default 10.0; launchers 10.
+        source_warm_start_snr_unknown: A seed record without an SNR:
+            ``"refuse"`` (default), ``"truth"`` (injection start) or
+            ``"warm"`` (seed start). Env ``SOURCE_WARM_START_SNR_UNKNOWN``
+            (shared).
+        source_warm_start_ids: The SEED run's catalogue ids for this branch
+            (after its own merger-window filter), any order; ``"none"``
+            disables the branch's warm start. Env
+            ``MBH_SOURCE_WARM_START_IDS``. Launchers ``2,5,16,18`` (9mo) /
+            ``2,5,7,12,16,18`` (12mo).
+        injection_ids: THIS run's catalogue ids in leaf order; COMPUTED by
+            :func:`prepare_mbh_branch` (never an env knob).
+
+    Example:
+        .. code-block:: python
+
+            from lisatools.globalfit.stock import erebor
+
+            fit = erebor.all_sources(nwalkers=4)
+            fit.mbh.likelihood = "batched"      # or env MBH_LIKELIHOOD=batched
+            fit.mbh.window_decimate = 2
+            fit.mbh.mbh_merger_time_buffer = 14 * 86400.0
+    """
 
     # In-model stretch repeats per leaf visit: the expose/fold residual
     # round-trip and the prev_logl batch are paid once per visit, so more
@@ -587,7 +788,51 @@ class SourceEMRISettings(EMRISettings):
     """EMRI branch block. ``likelihood`` picks the template family for BOTH the add/remove
     scoring and the engine's templates (residual rebuilds, fills): the direct-to-WDM lookup
     template by default (``auto`` on a WDM / XYZ run), the legacy ResponseWrapper path with
-    ``full``; the move's cross-check always uses the latter."""
+    ``full``; the move's cross-check always uses the latter.
+
+    ``fit.emri`` of ``erebor.all_sources`` (``AllSourcesEMRISettings``) and of
+    ``full_year_combined``. Adds the fields below to
+    :class:`~lisatools.globalfit.stock.erebor.emri.EMRISettings` (priors,
+    ladder, eigen knobs: see there). Launcher values are those of
+    ``submit_gf_9mo_v9.sh`` / ``submit_gf_12mo.sh``; their other EMRI knobs
+    (``EMRI_DIRECT_LOOKUP``, ``EMRI_CHECK_LL``, ``EMRI_IDS``, ...) are read
+    elsewhere.
+
+    Attributes:
+        num_prop_repeats: Inner-move repeats per leaf visit. Env
+            ``EMRI_NUM_PROP_REPEATS``. Default 2; launchers 25.
+        ndim: Sampling dimension, 12.
+        response_order: ResponseWrapper Lagrange order of the production wrap.
+            Default 40.
+        likelihood: ``"auto"`` / ``"direct"`` / ``"full"``
+            (:func:`resolve_emri_direct_cfg`): ``direct`` scores with
+            :class:`~lisatools.globalfit.moves.EMRIDirectLikeMove` and makes
+            the engine templates direct-to-WDM too; ``auto`` -> ``direct``
+            unless the run domain is not (identifiably) WDM or the channels are
+            not XYZ. Env ``EMRI_LIKELIHOOD``. Default ``"auto"``; launchers
+            ``direct``.
+        batch_max_size: Rows per direct generation (each row holds a full-grid
+            ``(3, Nf, Nt)`` float64 accumulator). Env ``EMRI_BATCH_MAX_SIZE``.
+            Default 8; launchers 8.
+        direct_table: n_ref WDM lookup-table path; ``None`` / empty = the
+            canonical file in the run folder (``general.file_store_dir``),
+            built and saved there when missing. Env ``EMRI_DIRECT_TABLE``.
+            Launchers empty.
+        direct_response: TDI-on-the-fly kernel of the direct template:
+            ``"dense"`` (``TDDenseTDIWaveform``) or ``"spline"``. Env
+            ``EMRI_DIRECT_RESPONSE``. Default ``"dense"``; launchers ``dense``.
+        traj_workers: Worker processes integrating a direct batch's
+            trajectories (``few.trajectory.pool``); 0 = serial. Env
+            ``EMRI_TRAJ_WORKERS``. Default 0; launchers 8.
+        source_warm_start_store: See
+            :attr:`SourceMBHSettings.source_warm_start_store` (shared knob).
+        source_warm_start_snr_min: Shared; see :class:`SourceMBHSettings`.
+        source_warm_start_snr_unknown: Shared; see :class:`SourceMBHSettings`.
+        source_warm_start_ids: The seed run's EMRI catalogue ids. Env
+            ``EMRI_SOURCE_WARM_START_IDS``. Launchers ``0,...,7``.
+        injection_ids: This run's catalogue ids in leaf order; COMPUTED by
+            :func:`prepare_emri_branch`.
+    """
 
     num_prop_repeats: int = dataclasses.field(
         default_factory=env_default("EMRI_NUM_PROP_REPEATS", 2, int)
@@ -649,7 +894,81 @@ class SourceEMRISettings(EMRISettings):
 
 @dataclasses.dataclass
 class SourceSOBBHSettings(SOBBHSettings):
-    """SOBBH branch block. Default path: TDI-ON-THE-FLY (validated)."""
+    """SOBBH branch block. Default path: TDI-ON-THE-FLY (validated).
+
+    ``fit.sobbh`` of ``erebor.all_sources`` (``AllSourcesSOBBHSettings``) and
+    of ``full_year_combined``. "TDI-on-the-fly" is the exact generator
+    (``use_tdionfly``); the default SCORING path is ``likelihood="lookup"``,
+    which also renders the engine templates and the move's residual expose /
+    fold. Adds the fields below to
+    :class:`~lisatools.globalfit.stock.erebor.sobbh.SOBBHSettings` (priors,
+    ladder, eigen knobs: see there). Launcher values are those of
+    ``submit_gf_9mo_v9.sh`` / ``submit_gf_12mo.sh``.
+
+    Attributes:
+        num_prop_repeats: Inner-move repeats per leaf visit. Env
+            ``SOBBH_NUM_PROP_REPEATS``. Default 2; launchers 25.
+        ndim: Sampling dimension, 11.
+        use_tdionfly: Exact generator: ``True`` = ``SOBBHTDIonFly``
+            (:class:`~lisatools.globalfit.stock.erebor.wrappers.SOBBHTDIonFlyWaveWrap`),
+            ``False`` = the legacy ResponseWrapper. Env ``USE_TDIONFLY``
+            (shared with the MBH block). Default ``True``; launchers unset.
+        n_grid: ``SOBBHTDIonFly`` amplitude / phase grid size (also the lookup
+            comp's). Default 2048.
+        buffer_time: ``SOBBHTDIonFly`` time buffer (s; also the lookup
+            comp's). Default 5000.0.
+        response_order: Legacy ResponseWrapper order. Default 40.
+        likelihood: ``"lookup"`` (``SOBBHLookupComputations`` behind a
+            per-device ``SOBBHLookupRouter``; :func:`get_sobbh_lookup_router`),
+            ``"chunked"`` (``bbhx.sobbhcomps.SOBBHWDMComputations``;
+            :func:`get_sobbh_chunked_comp`) or ``"full"`` (the exact container
+            path, required for FD / STFT domains). Env ``SOBBH_LIKELIHOOD``.
+            Default ``"lookup"``; launchers ``lookup``.
+        nt_sub: Chunked path only: chunk length in WDM layers; 0 = AUTO
+            (:func:`resolve_sobbh_nt_sub`). Env ``SOBBH_NT_SUB``. Default 32.
+        sweep_max_layers: Chunked path only: target intra-chunk carrier sweep
+            (layers per chunk) of the AUTO / check rule. Env
+            ``SOBBH_SWEEP_MAX_LAYERS``. Default 3.5.
+        chirp_fdot_max: Worst leading-order fdot (Hz/s) at the window end
+            over the branch's injected sources; COMPUTED by
+            :func:`prepare_sobbh_branch` (never an env knob).
+        n_sparse: Chunked path: ``N_sparse``. Env ``SOBBH_N_SPARSE``. Default
+            256.
+        n_pad: Chunked path: ``n_pad``. Env ``SOBBH_N_PAD``. Default 4.
+        m_band_half_width: Scoring band half-width (WDM layers) of the move's
+            fast comp. The chunked comp uses it; the lookup comp ignores it
+            (``lookup_num_m_layers`` sets its band). Env
+            ``SOBBH_M_BAND_HALF_WIDTH``. Default 1; launchers 3 (inert under
+            ``lookup``).
+        fill_m_band_half_width: Band half-width of the engine-side template
+            fill (:func:`get_sobbh_chunked_signal_gen`; wide on purpose, the
+            fill truncation lands in the shared residual). Used by the chunked
+            comp, ignored by the lookup comp. Env
+            ``SOBBH_FILL_M_BAND_HALF_WIDTH``. Default 8.
+        lookup_table_path: n_ref lookup table; empty = find or build the run
+            folder's canonical table (:func:`resolve_sobbh_lookup_table`). Must
+            carry the run's layer duration ``Nf * dt``. Env
+            ``SOBBH_LOOKUP_TABLE_PATH``. Default ``""``; launchers empty.
+        lookup_num_m_layers: Layers each side of the carrier per pixel. Env
+            ``SOBBH_LOOKUP_NUM_M_LAYERS``. Default 2.
+        lookup_eval_dt: Response evaluation step (s) of the amplitude / phase
+            splines. Env ``SOBBH_LOOKUP_EVAL_DT``. Default 43200.0; launchers
+            43200.
+        lookup_interp: Table interpolation, ``"spline"``, ``"cubic"`` or
+            ``"linear"``. Env ``SOBBH_LOOKUP_INTERP``. Default ``"spline"``.
+        lookup_row_batch: Rows per tracer / lookup block. Env
+            ``SOBBH_LOOKUP_ROW_BATCH``. Default 32; launchers 32.
+        lookup_kernel: The fused C++/CUDA lookup: ``"auto"`` (when the backend
+            has it), ``"kernel"`` (required) or ``"python"``. Env
+            ``SOBBH_LOOKUP_KERNEL``. Default ``"auto"``; launchers ``kernel``.
+        source_warm_start_store: Shared; see :class:`SourceMBHSettings`.
+        source_warm_start_snr_min: Shared; see :class:`SourceMBHSettings`.
+        source_warm_start_snr_unknown: Shared; see :class:`SourceMBHSettings`.
+        source_warm_start_ids: The seed run's SOBBH catalogue ids. Env
+            ``SOBBH_SOURCE_WARM_START_IDS``. Launchers ``0,...,5``.
+        injection_ids: This run's catalogue ids in leaf order; COMPUTED by
+            :func:`prepare_sobbh_branch`.
+    """
 
     num_prop_repeats: int = dataclasses.field(
         default_factory=env_default("SOBBH_NUM_PROP_REPEATS", 2, int)
@@ -671,9 +990,15 @@ class SourceSOBBHSettings(SOBBHSettings):
     # 2026-07-30 default); "full" = the exact full-TD container path (the
     # escape hatch — required for FD/STFT domains, DCGA). All three drive the
     # same SOBBHChunkedLikeMove except "full".
-    # The residual expose/fold stays on the exact generator either way, and
-    # the built-in fast-vs-slow cross-check stays on (thin it with
-    # SOBBH_CHECK_LL_EVERY=10 in production; SOBBH_CHECK_LL=0 disables).
+    # The residual expose/fold does NOT stay on the exact generator: since
+    # 2026-08-28 SOBBHChunkedLikeMove folds a leaf in/out with ONE batched
+    # fill_global_wdm of its fast comp per visit (lookup or chunked), and
+    # the engine-side templates are that comp's fill too
+    # (get_sobbh_chunked_signal_gen). SOBBH_CHUNKED_FILL=0 restores a per-row
+    # pass through the engine's installed generator. The exact SOBBHTDIonFly
+    # wrap is the move's own slow generator: the built-in fast-vs-slow
+    # cross-check (base default on; the launchers set SOBBH_CHECK_LL=0,
+    # SOBBH_CHECK_LL_EVERY=30) and the "full" path.
     likelihood: str = dataclasses.field(
         default_factory=env_default("SOBBH_LIKELIHOOD", "lookup", str)
     )
@@ -790,6 +1115,14 @@ def sobbh_leading_order_fdot(m1_msun, m2_msun, f_hz):
     stays with the waveform classes. fdot = (96/5) pi^{8/3} (G Mc/c^3)^{5/3}
     f^{11/3}; conservative-enough for a chunk-size bound (spin corrections
     are percent-level at these frequencies and clamped anyway).
+
+    Args:
+        m1_msun (float or array_like): Primary mass (solar masses).
+        m2_msun (float or array_like): Secondary mass (solar masses).
+        f_hz (float or array_like): GW frequency (Hz).
+
+    Returns:
+        np.ndarray: ``df/dt`` (Hz/s), broadcast over the inputs.
     """
     m1 = np.asarray(m1_msun, dtype=float)
     m2 = np.asarray(m2_msun, dtype=float)
@@ -813,6 +1146,16 @@ def sobbh_fdot_max_at_window_end(full_basis, tobs, f_cap=None):
     or chirp past ``f_cap`` (the run's max_freq) is capped at ``f_cap`` --
     the sweep bound then reflects the fastest chirp the band can hold.
     Returns 0.0 for an empty basis (auto/check become no-ops).
+
+    Args:
+        full_basis (array_like): ``(n, 11)`` (or one ``(11,)``) injection-basis
+            rows.
+        tobs (float): Window length (s).
+        f_cap (float, optional): Frequency cap (Hz), the run's ``max_freq``;
+            ``None`` = no cap (an in-window merger then gives ``inf``).
+
+    Returns:
+        float: The maximum fdot (Hz/s) over the rows.
     """
     rows = np.atleast_2d(np.asarray(full_basis, dtype=float))
     if rows.size == 0:
@@ -860,6 +1203,30 @@ def resolve_sobbh_nt_sub(nt_sub, fdot_max, Nt, layer_dt, layer_df,
     value is returned unchanged but warned about above the collapse
     threshold. ``fdot_max`` None/0 -> nothing to size against: auto
     falls back to 32, explicit values pass silently.
+
+    Called by :func:`get_sobbh_chunked_comp` (``SOBBH_LIKELIHOOD=chunked``
+    only; the lookup comp has no chunks).
+
+    Args:
+        nt_sub (int): ``SOBBH_NT_SUB``; 0 = AUTO.
+        fdot_max (float or None): Worst end-of-window fdot (Hz/s), the
+            branch's ``chirp_fdot_max``.
+        Nt (int): WDM time layers of the run grid (AUTO picks a divisor).
+        layer_dt (float): WDM layer duration (s).
+        layer_df (float): WDM layer bandwidth (Hz).
+        sweep_max_layers (float): Target sweep (layers per chunk) of AUTO.
+        log_name (str): Log-line prefix. Default ``"sobbh"``.
+
+    Returns:
+        int: The chunk length (``nt_sub`` itself when explicit).
+
+    Example:
+        >>> from lisatools.globalfit.stock.erebor.source_runtime import (
+        ...     resolve_sobbh_nt_sub)
+        >>> resolve_sobbh_nt_sub(0, None, 6480, 3600.0, 1.0 / 7200.0, 3.5)
+        32
+        >>> resolve_sobbh_nt_sub(16, None, 6480, 3600.0, 1.0 / 7200.0, 3.5)
+        16
     """
     nt_sub = int(nt_sub)
     if not fdot_max:
@@ -915,6 +1282,16 @@ def synthetic_injection_mode(gs) -> tuple:
     Prior-mode draws apply only to synthetic data; anything else keeps the
     stock tables. The SAME values feed the data processor and the branch
     preparation so the injected data and the branch injection tables agree.
+
+    Args:
+        gs (object): The general settings block (``data_mode``,
+            ``synthetic_injections``, ``synthetic_injection_seed``; read with
+            ``getattr``).
+
+    Returns:
+        tuple[str, int or None]: ``("stock", None)`` unless ``data_mode`` is
+        ``"synthetic"``, then ``(gs.synthetic_injections or "stock",
+        gs.synthetic_injection_seed)``.
     """
     if getattr(gs, "data_mode", None) != "synthetic":
         return "stock", None
@@ -923,6 +1300,20 @@ def synthetic_injection_mode(gs) -> tuple:
 
 
 def source_catalogue(general_setup: GeneralSetup, cls: str) -> typing.Optional[dict]:
+    """The loaded catalogue entry of one source class, or ``None``.
+
+    Reads ``general_setup.catalogue`` (else the data processor's
+    ``catalogue``). An entry whose per-source rows are empty (the
+    synthetic-mode placeholders) counts as absent. The ``prepare_*_branch``
+    functions call it only in mojito mode.
+
+    Args:
+        general_setup: The built general setup.
+        cls: Catalogue class key, ``"MBHB"``, ``"EMRI"`` or ``"SOBHB"``.
+
+    Returns:
+        dict or None: ``{source_id: {parameter: value, ...}}`` for the class.
+    """
     cat = getattr(general_setup, "catalogue", None) or getattr(
         general_setup.data_processor, "catalogue", {}
     )
@@ -963,6 +1354,12 @@ def apply_emri_mode_selection_threshold(emri) -> typing.Optional[float]:
     An explicit ``waveform_kwargs[mode_selection_threshold]`` wins over the
     ``eps`` field; ``eps=None`` means FEW's own default stands. Pure and
     idempotent; returns ``None`` for "FEW default".
+
+    Args:
+        emri (EMRISettings): The EMRI block (``waveform_kwargs``, ``eps``).
+
+    Returns:
+        float or None: The threshold to deliver per call, or ``None``.
     """
     kwargs = emri.waveform_kwargs if emri.waveform_kwargs is not None else {}
     if EMRI_MODE_SELECTION_THRESHOLD_KEY in kwargs:
@@ -972,6 +1369,37 @@ def apply_emri_mode_selection_threshold(emri) -> typing.Optional[float]:
 
 
 def prepare_emri_branch(emri, general_setup: GeneralSetup, gs):
+    """Resolve the EMRI block for this run (in place); the variant's ``_prepare_emri`` hook.
+
+    Fills, each only when unset: ``initialize_kwargs`` (a FEW
+    ``FastKerrEccentricEquatorialFlux`` + ResponseWrapper description; no
+    reader on the stock path, which builds its generators from
+    :func:`source_signal_cfg`), ``injection`` (sampling basis, through the
+    transform's inverse) with ``injection_ids``, ``fill_values`` (per-leaf
+    ``[xI0, Phi_theta0]``) and ``waveform_kwargs`` (``{}``), ``inner_moves``
+    (:func:`~lisatools.globalfit.stock.erebor.common.resolve_inner_moves`).
+    Empty ``*_lims`` (``logm1``, ``m2``, ``a``, ``p0``, ``e0``) become ``None``,
+    i.e. the wide :class:`~lisatools.globalfit.stock.erebor.emri.EMRISetup`
+    defaults. Rows come from the mojito catalogue in ``"mojito"`` mode (the
+    SPECIAL EMRI frame: ecliptic-polar sky, raw file spin angles;
+    :func:`~lisatools.sources.emri.emri_catalogue_to_waveform_basis`, ids
+    sorted), else from
+    :func:`~lisatools.globalfit.stock.erebor.injections.make_emri_injections`.
+    Sets ``nleaves_min = nleaves_max = gs.n_injections["EMRI"]``. The
+    mode-selection threshold is deliberately NOT stamped here
+    (:func:`apply_emri_mode_selection_threshold`).
+
+    Args:
+        emri (SourceEMRISettings): The EMRI block (mutated).
+        general_setup: The built general setup (``Tobs``, ``dt``,
+            ``data_t0``, ``force_backend``, the catalogue).
+        gs (object): The general settings block (``n_injections``,
+            ``data_mode``, ``tdi_gen_str``, ``tdi_chan``, synthetic-injection
+            fields).
+
+    Returns:
+        SourceEMRISettings: ``emri``.
+    """
     from eryn.moves import StretchMove
 
     n = gs.n_injections["EMRI"]
@@ -1035,6 +1463,35 @@ def prepare_emri_branch(emri, general_setup: GeneralSetup, gs):
 
 
 def prepare_sobbh_branch(sobbh, general_setup: GeneralSetup, gs):
+    """Resolve the SOBBH block for this run (in place); the variant's ``_prepare_sobbh`` hook.
+
+    Fills, each only when unset: ``initialize_kwargs`` (a ``SOBBHWaveform`` +
+    ResponseWrapper description; no reader on the stock path),
+    ``injection`` (sampling basis, row by row through the SOBBH transform's
+    inverse) with ``injection_ids``, ``chirp_fdot_max``
+    (:func:`sobbh_fdot_max_at_window_end` over the injection rows, capped at
+    ``gs.max_freq``; the chunked path's ``Nt_sub`` rule reads it),
+    ``fill_values`` (empty), ``waveform_kwargs`` (``{}``) and ``inner_moves``
+    (:func:`~lisatools.globalfit.stock.erebor.common.resolve_inner_moves`).
+    Empty ``*_lims`` (``logm1``, ``logm2``, ``s1``, ``s2``, ``f_low``) become
+    ``None`` (the wide defaults). Rows come from the mojito catalogue in
+    ``"mojito"`` mode
+    (:func:`~lisatools.globalfit.stock.erebor.injections.sobbh_catalogue_to_waveform_basis`:
+    RA in the ``lam`` slot, Dec in the ``beta`` slot; ids sorted), else from
+    :func:`~lisatools.globalfit.stock.erebor.injections.make_sobbh_injections`.
+    Sets ``nleaves_min = nleaves_max = gs.n_injections["SOBHB"]``.
+
+    Args:
+        sobbh (SourceSOBBHSettings): The SOBBH block (mutated).
+        general_setup: The built general setup (``Tobs``, ``dt``,
+            ``data_t0``, ``force_backend``, the catalogue).
+        gs (object): The general settings block (``n_injections``,
+            ``data_mode``, ``tdi_gen_str``, ``tdi_chan``, ``max_freq``,
+            synthetic-injection fields).
+
+    Returns:
+        SourceSOBBHSettings: ``sobbh``.
+    """
     from eryn.moves import StretchMove
 
     from .injections import SOBBH_INJECTION_PARAMS_FULL_BASIS  # noqa: F401
@@ -1099,6 +1556,52 @@ def prepare_sobbh_branch(sobbh, general_setup: GeneralSetup, gs):
 
 
 def prepare_mbh_branch(mbh, general_setup: GeneralSetup, gs):
+    """Resolve the MBH block for this run (in place); the variant's ``_prepare_mbh`` hook.
+
+    Steps, in order (each ``mbh`` field only when unset):
+
+    1. ``initialize_kwargs`` -> :func:`make_mbh_initialize_kwargs`.
+    2. Injection rows (sampling basis): the mojito catalogue in ``"mojito"``
+       mode (:func:`~lisatools.globalfit.recipe.mbh_catalogue_to_sampling_basis`,
+       ids sorted), else
+       :func:`~lisatools.globalfit.stock.erebor.injections.make_mbh_injections`.
+    3. Merger-window filter: keep a source iff ``obs_start <= t_plunge <
+       obs_end + mbh_merger_time_buffer``, with ``obs_start = data_t0 -
+       gs.mbh_waveform_t0`` (the ``t_plunge`` epoch) and ``obs_end =
+       obs_start + Tobs``; the dropped ids are logged, and an empty result is a
+       WARNING (zero leaves). ``injection`` / ``injection_ids`` get the
+       filtered rows and ids, and ``nleaves_min = nleaves_max`` follow the
+       filtered count, not ``gs.n_injections["MBHB"]``.
+    4. ``transform`` -> the stock direct-ICRS container
+       (:func:`~lisatools.globalfit.stock.erebor.transforms.make_mbh_transform_container`).
+    5. ``priors``: ``logM`` uniform on ``logM_prior``; ``Q = m1 / m2``
+       log-uniform on ``[1, 10]`` in the LINEAR column
+       (:class:`~lisatools.sampling.prior.LogUniformLinear`, not eryn's
+       ln-space log-uniform); spins ``(-1, 1)``; ``dist`` uniform on
+       ``dist_prior`` (Gpc); ``phi_ref`` ``[0, 2 pi)``; ``cos_iota`` and
+       ``sin_delta`` ``(-1, 1)``; ``psi`` ``[0, pi)``; ``alpha`` ``[0, 2 pi)``;
+       ``t_plunge`` from ``obs_start`` to ``obs_end + buffer +
+       t_plunge_pad``.
+    6. ``periodic`` (``phi_ref`` / ``alpha`` 2 pi, ``psi`` pi) and
+       ``waveform_kwargs`` (``{}``).
+    7. ``inner_moves`` -> :func:`make_mbh_inner_moves` (with the sky-mode
+       hops), then ``proposal_frame_map`` -> :func:`make_mbh_proposal_frame_map`
+       (built whatever ``proposal_frame`` says).
+
+    Args:
+        mbh (SourceMBHSettings): The MBH block (mutated).
+        general_setup: The built general setup (``data_t0``, ``Tobs``, the
+            orbits, the catalogue, ...).
+        gs (object): The general settings block (``n_injections``,
+            ``data_mode``, ``mbh_waveform_t0``, synthetic-injection fields).
+
+    Returns:
+        SourceMBHSettings: ``mbh``.
+
+    Raises:
+        ValueError: Out-of-range sky-move weights or a non-stock basis with
+            sky hops (:func:`make_mbh_inner_moves`).
+    """
     from eryn.moves import StretchMove
     from eryn.prior import ProbDistContainer, uniform_dist
 
@@ -1227,6 +1730,30 @@ def make_mbh_inner_moves(mbh, general_setup, gs) -> list:
     fractions come from ``mbh.sky_move_{both,lat,long}_weight``; the
     ``inner_move_kind`` stack takes the remainder. Every weight at 0 gives
     the bare stack.
+
+    The base stack is
+    :func:`~lisatools.globalfit.stock.erebor.common.make_default_inner_moves`
+    of the block's ``inner_move_kind`` / ``eigen_jump_*`` / ``de_jump_*``
+    fields, its weights rescaled to ``1 - sum(sky weights)``. Without orbits
+    on ``general_setup`` the hops fall back to the analytic phase (a
+    WARNING: they then land off the symmetric modes by the orbit's phase at
+    the epoch). Production (launchers 0.02 / 0.04 / 0.02, ``MBH_DE_JUMP_MIX``
+    0.1): the eigen move and the cross-walker difference jump share 0.92
+    (0.9 : 0.1 of it), plus the three hops.
+
+    Args:
+        mbh (MBHSettings): The MBH block (weights, ``inner_move_kind``,
+            ``transform`` when set).
+        general_setup: The built general setup (``orbits``).
+        gs (object): The general settings block (``mbh_waveform_t0``).
+
+    Returns:
+        list: ``[(move, weight), ...]`` with weights summing to 1.
+
+    Raises:
+        ValueError: A weight outside ``[0, 1]``, weights summing to 1 or more,
+            or (with any hop on) a transform whose basis does not carry the
+            stock ICRS columns at :data:`MBH_SKY_MOVE_IND_MAP`.
     """
     from lisatools.sampling.moves.skymodehop import ConstellationPhase, SkyMove
 
@@ -1319,6 +1846,22 @@ def make_mbh_proposal_frame_map(mbh, general_setup, gs):
     at the constellation). Built whatever the knob says (inert with
     ``"sampling"``); ``None`` when the branch's basis is not the stock one
     (the knob is then refused by ``check_proposal_frame``).
+
+    With ``proposal_frame == "lisa"`` it logs one INFO line naming the map
+    (plus the analytic-phase WARNING when no orbits are available). Stamped
+    on the move by :func:`stamp_source_move_settings` as
+    ``proposal_frame_map``.
+
+    Args:
+        mbh (MBHSettings): The MBH block (``transform``, ``inner_moves``,
+            ``proposal_frame``).
+        general_setup: The built general setup (``orbits``).
+        gs (object): The general settings block (``mbh_waveform_t0``).
+
+    Returns:
+        LISAFrameMap or None: The map on :data:`MBH_SKY_MOVE_IND_MAP` with
+        ``coord_frame="icrs"``, or ``None`` for a non-stock basis (a
+        WARNING).
     """
     from lisatools.sampling.moves.skymodehop import ConstellationPhase, LISAFrameMap, SkyMove
 
@@ -1365,6 +1908,17 @@ def check_proposal_frame(move) -> None:
     frame columns in those bases) or an unknown value fails before the run
     starts instead of at the branch's first propose. A no-op for moves outside
     the add/remove family.
+
+    Called by :func:`build_source_moves` on every built source move, after
+    :func:`stamp_source_move_settings`; logs one INFO line (``[MBH] proposals
+    in the lisa frame (...)``) when a frame map is active.
+
+    Args:
+        move (object): A built source PE move.
+
+    Raises:
+        ValueError: From the move's ``_frame_map``: an unknown frame value, or
+            ``"lisa"`` on a branch without a frame map.
     """
     resolve = getattr(move, "_frame_map", None)
     if callable(resolve):
@@ -1377,7 +1931,18 @@ def check_proposal_frame(move) -> None:
 
 
 def make_mbh_initialize_kwargs(mbh, general_setup: GeneralSetup, gs) -> dict:
-    """``PhenomTHMTDIWaveform`` construction kwargs for the legacy MBH path."""
+    """``PhenomTHMTDIWaveform`` construction kwargs for the legacy MBH path.
+
+    Stored on ``mbh.initialize_kwargs`` by :func:`prepare_mbh_branch`. Read
+    only by :func:`~lisatools.globalfit.recipe.build_mbh_moves_phenom` when it
+    is called without a ``wave_gen``; the stock builders always pass one
+    (:func:`build_mbh_move_runtime`), so the stock path never uses these.
+
+    Returns:
+        dict: ``data_td_settings``, ``waveform_t0`` (``gs.mbh_waveform_t0``),
+        ``orbits`` (GPU orbits when the run has GPUs), ``output_domain_settings``,
+        ``tukey_alpha`` and ``force_backend``.
+    """
     return dict(
         data_td_settings=general_setup.data_td_settings,
         waveform_t0=gs.mbh_waveform_t0,
@@ -1403,7 +1968,14 @@ def run_domain_settings_class(domain_settings):
     ``domain_settings`` is what ``general.domain_settings`` holds: a settings
     instance (its class), a ``make_factory`` factory (the class it declares as
     ``domain_settings_class``), a hand-written factory (``None``: unknown), or
-    ``None``."""
+    ``None``.
+
+    Args:
+        domain_settings (object): The run-domain spec.
+
+    Returns:
+        type or None: The settings class, or ``None`` when unknown.
+    """
     from lisatools.domains import DomainSettingsBase
 
     if isinstance(domain_settings, DomainSettingsBase):
@@ -1421,7 +1993,15 @@ def run_domain_spec(general_info):
     object as ``.settings`` and replaces its own ``domain_settings`` with the
     built instance. Returning the SPEC makes the moves' resolution see what
     the injection saw (identical even for a hand-written factory, which is
-    ``unknown`` at both sites); the built instance is the fallback."""
+    ``unknown`` at both sites); the built instance is the fallback.
+
+    Args:
+        general_info (GeneralSetup): The built general setup.
+
+    Returns:
+        object: ``general_info.settings.domain_settings`` when set, else
+        ``general_info.domain_settings``.
+    """
     spec = getattr(getattr(general_info, "settings", None), "domain_settings", None)
     return spec if spec is not None else getattr(general_info, "domain_settings", None)
 
@@ -1492,6 +2072,23 @@ def resolve_mbh_batched_cfg(mbh, *, domain_settings) -> dict:
     length. The discarded segment pad must also cover ``buffer_time``: the
     response ZEROES the first ``buffer_time`` of the lattice head, so a
     shorter pad would let that dead stretch reach the kept box.
+
+    Args:
+        mbh (SourceMBHSettings): The MBH block (``likelihood``, ``window_*``,
+            ``batch_max_size``, ``waveform_duration``, ``buffer_time``,
+            ``use_tdionfly``).
+        domain_settings: The run-domain spec (keyword-only, required).
+
+    Returns:
+        dict: ``mbh_likelihood`` (``"batched"`` / ``"full"``),
+        ``mbh_batch_max_size``, ``mbh_window_before`` / ``_after`` / ``_pad``
+        / ``_margin`` (s), ``mbh_waveform_duration`` (s or ``None``) and
+        ``mbh_window_decimate`` (1 on the full path).
+
+    Raises:
+        ValueError: An unknown ``MBH_LIKELIHOOD``, ``MBH_WINDOW_DECIMATE < 1``,
+            an explicit ``batched`` the run cannot serve, or (batched) a
+            window pad shorter than ``buffer_time``.
     """
     mode = str(mbh.likelihood)
     if mode not in MBH_LIKELIHOOD_MODES:
@@ -1568,6 +2165,16 @@ def mbh_injection_duration(mbh, *, domain_settings):
     moves): the raw ``mbh.waveform_duration`` on the ``full`` path, the
     window length (``window_before``) on the ``batched`` path, so the
     injected signal and the templates agree on the inspiral length.
+
+    Args:
+        mbh (SourceMBHSettings): The MBH block.
+        domain_settings: The run-domain spec (keyword-only, required).
+
+    Returns:
+        float or None: The duration (s); ``None`` = the full data span.
+
+    Raises:
+        ValueError: As :func:`resolve_mbh_batched_cfg`.
     """
     return resolve_mbh_batched_cfg(mbh, domain_settings=domain_settings)[
         "mbh_waveform_duration"
@@ -1580,6 +2187,22 @@ def snap_waveform_t0_to_lattice(waveform_t0: float, data_t0: float, dt: float):
     ``snap = waveform_t0_snapped - waveform_t0``; callers subtract it from
     every ``t_plunge`` so absolute merger times are unchanged (PR #82 remedy
     for ``GridAlignedPhenomTHMTDIWaveform._check_alignable``).
+
+    Args:
+        waveform_t0 (float): The epoch to snap (s).
+        data_t0 (float): Data start (s), a lattice point.
+        dt (float): Lattice step (s); ``decimation * dt`` on a decimated
+            window.
+
+    Returns:
+        tuple[float, float]: ``(snapped, snap)``; the nearest lattice point
+        (``numpy.rint``, ties to even).
+
+    Example:
+        >>> from lisatools.globalfit.stock.erebor.source_runtime import (
+        ...     snap_waveform_t0_to_lattice)
+        >>> snap_waveform_t0_to_lattice(13.0, 0.0, 5.0)
+        (15.0, 2.0)
     """
     offset = float(waveform_t0) - float(data_t0)
     k = int(np.rint(offset / float(dt)))
@@ -1608,6 +2231,21 @@ def resolve_emri_direct_cfg(emri, *, domain_settings, tdi_chan) -> dict:
     is the RESOLVED mode, never ``auto``. The lookup table is not required to exist: the
     getter finds it (``EMRI_DIRECT_TABLE`` or the run folder's canonical file) or builds
     and saves it.
+
+    Args:
+        emri (SourceEMRISettings): The EMRI block; a plain ``EMRISettings``
+            without the scoring-path fields resolves to ``full``.
+        domain_settings: The run-domain spec (keyword-only, required).
+        tdi_chan: The run's channel set (keyword-only), e.g. ``"XYZ"``.
+
+    Returns:
+        dict: ``emri_likelihood`` (``"direct"`` / ``"full"``),
+        ``emri_batch_max_size``, ``emri_direct_table``,
+        ``emri_direct_response`` and ``emri_traj_workers``.
+
+    Raises:
+        ValueError: An unknown ``EMRI_LIKELIHOOD``, or an explicit ``direct``
+            the run cannot serve.
     """
     from lisatools.domains import WDMSettings
 
@@ -1663,7 +2301,32 @@ def source_signal_cfg(gs, mbh, sobbh, emri, *, domain_settings) -> dict:
     ``domain_settings``: the run-domain SPEC, for the MBH and EMRI scoring-path
     resolutions (:func:`resolve_mbh_batched_cfg`, :func:`resolve_emri_direct_cfg`);
     variants pass ``run_domain_spec(self.general_info)`` so it matches the injection
-    sites' (``general.domain_settings`` of the resolved general settings)."""
+    sites' (``general.domain_settings`` of the resolved general settings).
+
+    Built once per run by the variant's ``attach_runtime_objects`` from the
+    PREPARED branch blocks (``source_info[name].settings``: the SOBBH chirp bound
+    exists only there) and carried by every :class:`SourceSignalGen`;
+    :func:`find_source_cfg` recovers it for :func:`build_source_moves`.
+
+    Args:
+        gs (object): The general settings block (``tdi_chan``, ``tdi_gen_str``,
+            ``nchannels``, ``data_mode``, ``sobbh_reference_time``,
+            ``mbh_waveform_t0``, ``min_freq``, ``max_freq``).
+        mbh (SourceMBHSettings): The prepared MBH block.
+        sobbh (SourceSOBBHSettings): The prepared SOBBH block.
+        emri (SourceEMRISettings): The prepared EMRI block.
+        domain_settings: The run-domain spec (keyword-only, required).
+
+    Returns:
+        dict: Plain values only (picklable): the resolved MBH and EMRI
+        scoring-path entries, the TDI / data-mode entries, ``mbh_*``,
+        ``emri_*`` and ``sobbh_*`` knobs, and ``mbh_phenom_kwargs`` (the
+        phentax generator kwargs).
+
+    Raises:
+        ValueError: From :func:`resolve_mbh_batched_cfg` /
+            :func:`resolve_emri_direct_cfg`.
+    """
     _mbh_batched = resolve_mbh_batched_cfg(mbh, domain_settings=domain_settings)
     _emri_direct = resolve_emri_direct_cfg(
         emri, domain_settings=domain_settings, tdi_chan=gs.tdi_chan
@@ -1721,6 +2384,11 @@ def source_signal_cfg(gs, mbh, sobbh, emri, *, domain_settings) -> dict:
     )
 
 
+#: Module-level cache of every heavy, unpicklable runtime generator / comp of
+#: this module (wave wraps, direct / windowed generators, SOBBH comps and
+#: routers), keyed by kind, ``id(general_info)``, channel count, the current
+#: device and the cfg values that shape the object. Never stored on the
+#: settings tree, so the pre-build fit stays picklable.
 _WAVE_WRAP_CACHE = {}
 
 
@@ -1734,6 +2402,22 @@ def get_emri_wave_wrap(general_info, cfg):
     peer-access flood off the primary device that gave EMRI zero 2-GPU
     speedup. On CPU / single-GPU this collapses to one entry, byte-identical
     to the old path.
+
+    The response phase epoch is the catalogue reference time
+    (``MOJITO_REFERENCE_TIME``) in mojito mode, else the data start; the
+    integer-sample part of the offset to the data start is the wrap's
+    ``offset_int`` and the sub-sample remainder its ``t0_shift_to_data``. The
+    mode-selection threshold rides the wrap's per-call ``runtime_kwargs``.
+    The production wrap of ``EMRI_LIKELIHOOD=full``; under ``direct`` the
+    move's cross-check / fallback generator and the FEW generator the direct
+    template reuses (:func:`get_emri_direct_gen`).
+
+    Args:
+        general_info (GeneralSetup): The built general setup.
+        cfg (dict): :func:`source_signal_cfg` output.
+
+    Returns:
+        EMRIWaveWrap: The cached wrap for the current device.
     """
     xp, dev, orbits, domain_settings = _wrap_device_and_orbits(general_info)
     # The mode-selection threshold is part of the key: it changes the template
@@ -1802,6 +2486,23 @@ def get_sobbh_wave_wrap(general_info, cfg):
     and BUILT per current device, so each walker shard generates on its OWN
     device -- no peer access off the primary device. On CPU / single-GPU this
     collapses to one entry, byte-identical to the old path.
+
+    The exact SOBBH generator. On the production ``lookup`` (and ``chunked``)
+    paths it is only the move's own slow generator (the ``SOBBH_CHECK_LL``
+    cross-check, off on the launchers, and the own-generator fallback): the
+    engine templates and the residual expose / fold go through the fast comp
+    (:func:`get_sobbh_chunked_signal_gen`, ``SOBBHChunkedLikeMove``). Under
+    ``SOBBH_LIKELIHOOD=full`` it serves every SOBBH template.
+
+    Args:
+        general_info (GeneralSetup): The built general setup.
+        cfg (dict): :func:`source_signal_cfg` output (``sobbh_use_tdionfly``
+            picks the wrap).
+
+    Returns:
+        ~wrappers.SOBBHTDIonFlyWaveWrap or ~wrappers.SOBBHWaveWrap: The cached wrap for the
+        current device (both classes from
+        :mod:`~lisatools.globalfit.stock.erebor.wrappers`).
     """
     xp, dev, orbits, domain_settings = _wrap_device_and_orbits(general_info)
     key = ("sobbh", id(general_info), cfg["nchannels"], dev)
@@ -1868,6 +2569,16 @@ def get_mbh_tdionfly_wave_wrap(general_info, cfg):
     the ``id(orbits)``-keyed generator cache fans out per device. The caller
     (:meth:`SourceSignalGen.__call__`) enters device_context+jax_device_context
     so both the build and the call land on the owning device.
+
+    Only with ``USE_TDIONFLY=1`` (``mbh.use_tdionfly``; the launchers leave it
+    unset, so production runs the phentax path).
+
+    Args:
+        general_info (GeneralSetup): The built general setup.
+        cfg (dict): :func:`source_signal_cfg` output.
+
+    Returns:
+        MBHTDIonFlyWaveWrap: The cached wrap for the current device.
     """
     xp = _general_info_xp(general_info)
     dev = current_device(xp)
@@ -1919,6 +2630,23 @@ def get_mbh_phenom_gen(general_info, cfg):
     :func:`jax_device_context`, with its phentax JAX tables local too. On CPU /
     single-GPU the primary device reuses the shared orbits, so this collapses
     to the original single cached generator.
+
+    On the batched path (``cfg["mbh_likelihood"] == "batched"``, production)
+    the generator is built on the lattice-snapped epoch (snapped with the
+    same ``mbh_window_decimate`` factor as :func:`get_mbh_windowed_gen`) and
+    wrapped in :class:`SnappedEpochMBHGen`, so the engine's residual
+    rebuilds and the move's cross-check evaluate the same absolute merger
+    as the windowed scorer.
+
+    Args:
+        general_info (GeneralSetup): The built general setup.
+        cfg (dict): :func:`source_signal_cfg` output (``mbh_phenom_kwargs``,
+            ``mbh_waveform_t0``, ``mbh_likelihood``, ``mbh_window_decimate``,
+            TDI entries).
+
+    Returns:
+        PhenomTHMTDIWaveform or SnappedEpochMBHGen: The cached generator
+        (the latter when the snap is non-zero).
     """
     xp = _general_info_xp(general_info)
     primary = _primary_device(general_info)
@@ -1977,6 +2705,18 @@ class SnappedEpochMBHGen:
     lattice exactly like the batched windowed generator (MBH_LIKELIHOOD=
     batched only). ``waveform_t0`` reports the STOCK epoch the rows are
     relative to; every other attribute forwards to ``gen``.
+
+    Built and cached by :func:`get_mbh_phenom_gen` when the snap is non-zero.
+
+    Args:
+        gen (PhenomTHMTDIWaveform): The generator on the snapped epoch.
+        snap (float): ``snapped epoch - stock epoch`` (s), from
+            :func:`snap_waveform_t0_to_lattice`.
+
+    Attributes:
+        gen (PhenomTHMTDIWaveform): See ``gen``.
+        t_plunge_snap (float): ``snap``; subtracted from every row's
+            ``t_plunge``.
     """
 
     def __init__(self, gen, snap):
@@ -1985,9 +2725,17 @@ class SnappedEpochMBHGen:
 
     @property
     def waveform_t0(self):
+        """The STOCK epoch (s): ``gen.waveform_t0 - t_plunge_snap``."""
         return float(self.gen.waveform_t0) - self.t_plunge_snap
 
     def _shift(self, args, kwargs):
+        """``(args, kwargs)`` with ``t_plunge`` shifted by ``-t_plunge_snap``.
+
+        The ``merger_time`` keyword when given, else the last positional.
+
+        Raises:
+            TypeError: Neither a positional nor ``merger_time`` is given.
+        """
         if kwargs.get("merger_time") is not None:
             kwargs = dict(kwargs)
             kwargs["merger_time"] = kwargs["merger_time"] - self.t_plunge_snap
@@ -1999,10 +2747,12 @@ class SnappedEpochMBHGen:
         return tuple(args), kwargs
 
     def get_signals_for_residuals(self, *args, **kwargs):
+        """``gen.get_signals_for_residuals`` on the shifted rows (engine rebuilds, the move)."""
         args, kwargs = self._shift(args, kwargs)
         return self.gen.get_signals_for_residuals(*args, **kwargs)
 
     def compute_tdi_channels(self, *args, **kwargs):
+        """``gen.compute_tdi_channels`` on the shifted rows."""
         args, kwargs = self._shift(args, kwargs)
         return self.gen.compute_tdi_channels(*args, **kwargs)
 
@@ -2027,6 +2777,23 @@ def get_mbh_windowed_gen(general_info, cfg):
     the data lattice; the adapter carries ``waveform_t0`` (snapped),
     ``t_plunge_snap`` and ``t0_abs = general_info.data_t0`` (the absolute time
     of WDM layer 0) for the move.
+
+    The batched MBH move's scorer (``MBH_LIKELIHOOD=batched``, launchers):
+    generated over ``waveform_duration = window_before`` with
+    ``MBH_WINDOW_DECIMATE`` (launchers 2) on a ``decimation * dt`` lattice
+    of its own TD settings. Cached per device and per generator-shaping cfg.
+
+    Args:
+        general_info (GeneralSetup): The built general setup.
+        cfg (dict): :func:`source_signal_cfg` output.
+
+    Returns:
+        MBHWindowedWDMSignalGen: The adapter, with ``waveform_t0`` and
+        ``t_plunge_snap`` set.
+
+    Raises:
+        ValueError: A non-WDM run domain, or a decimation that does not divide
+            the data length ``N``.
     """
     from lisatools.domains import TDSettings, WDMSettings
     from lisatools.sources.batching import MBHWindowedWDMSignalGen
@@ -2133,6 +2900,34 @@ class SourceSignalGen:
     live in this module's cache — never on the instance. Attached to the
     runtime Setups post-deepcopy (``attach_runtime_objects``), so the
     pre-build fit config stays picklable.
+
+    Template family per branch (the resolved ``cfg``): EMRI the direct-to-WDM
+    template under ``emri_likelihood == "direct"`` (:func:`get_emri_direct_gen`),
+    else :func:`get_emri_wave_wrap`; SOBBH the fast comp's fill under
+    ``lookup`` / ``chunked`` (:func:`get_sobbh_chunked_signal_gen`), else
+    :func:`get_sobbh_wave_wrap`; MBH the phentax generator's
+    ``get_signals_for_residuals`` (:func:`get_mbh_phenom_gen`), or
+    :func:`get_mbh_tdionfly_wave_wrap` with ``USE_TDIONFLY=1``. The engine
+    uses it for residual rebuilds (``setup_acs``); the add/remove moves'
+    per-row expose / fold (the containers' installed generator) uses it too:
+    always for EMRI and on the MBH / SOBBH ``full`` paths; on the batched MBH
+    and fast SOBBH paths only with ``MBH_BATCHED_FILL=0`` /
+    ``SOBBH_CHUNKED_FILL=0`` (their defaults are batched fills of the move's
+    own scorer).
+
+    Args:
+        branch (str): ``"emri"``, ``"sobbh"`` or ``"mbh"``.
+        transform (TransformContainer): The branch transform (sampling ->
+            waveform basis).
+        general_info (GeneralSetup): The built general setup.
+        cfg (dict): :func:`source_signal_cfg` output.
+
+    Example:
+        .. code-block:: python
+
+            cfg = source_signal_cfg(gs, mbh, sobbh, emri,
+                                    domain_settings=run_domain_spec(general_info))
+            info.signal_gen = SourceSignalGen("mbh", info.transform, general_info, cfg)
     """
 
     def __init__(self, branch, transform, general_info, cfg):
@@ -2155,6 +2950,13 @@ class SourceSignalGen:
                 per-leaf fills (e.g. EMRI xI0/Phi_theta0) and
                 ``apply_transform=True``; ignored otherwise.
             **kwargs: Forwarded to the wave wrap.
+
+        Returns:
+            DomainBase: The template in the run domain (a ``WDMSignal`` on the
+            WDM runs).
+
+        Raises:
+            ValueError: An unknown ``branch``.
         """
         params_arr = np.asarray(params, dtype=float)
         params_in = (
@@ -2190,9 +2992,10 @@ class SourceSignalGen:
                     *params_in, **kwargs
                 )
             if self.branch == "sobbh":
-                # chunked mode: the ENGINE-side template/residual generator
-                # is the chunked-het fill too (wide FILL band; same family
-                # as the move's scoring kernel), so residual bookkeeping,
+                # lookup / chunked mode: the ENGINE-side template/residual
+                # generator is the fast comp's fill too (the lookup comp in
+                # production; the chunked comp with its wide FILL band; same
+                # family as the move's scoring kernel), so residual bookkeeping,
                 # load-time rebuilds, and scoring are mutually consistent
                 # and all fast. The move's cross-check stays independent —
                 # it verifies against the slow tdionfly wrap explicitly.
@@ -2298,6 +3101,18 @@ class DeviceLocalWaveGen:
     keys into the device-local ``_WAVE_WRAP_CACHE`` — cupy's current
     device is thread-local — so each split lazily builds and uses its own
     replica, exactly like the engine ``signal_gen`` path already does.
+
+    Args:
+        getter (Callable): ``getter(general_info, cfg) -> generator``, one of
+            this module's cached getters (e.g. :func:`get_emri_wave_wrap`).
+        general_info (GeneralSetup): The built general setup.
+        cfg (dict): :func:`source_signal_cfg` output.
+
+    Example:
+        .. code-block:: python
+
+            wave_gen = DeviceLocalWaveGen(get_emri_wave_wrap, curr.general_info, cfg)
+            template = wave_gen(*waveform_params)   # this device's wrap
     """
 
     def __init__(self, getter, general_info, cfg):
@@ -2306,6 +3121,7 @@ class DeviceLocalWaveGen:
         self._cfg = cfg
 
     def _resolve(self):
+        """The generator for the CURRENT device (the getter's cached entry)."""
         return self._getter(self._general_info, self._cfg)
 
     def __call__(self, *params, **kwargs):
@@ -2337,6 +3153,22 @@ def get_emri_direct_gen(general_info, cfg):
     The lookup table is ``EMRI_DIRECT_TABLE`` or, unset, the canonical file in the run's
     folder (``general_info.file_store_dir``); when missing it is built and saved there
     first (one builder under a lock file, the other ranks wait), so a restart finds it.
+
+    Production (``EMRI_LIKELIHOOD=direct``, ``EMRI_DIRECT_RESPONSE=dense``,
+    ``EMRI_TRAJ_WORKERS=8``): the scorer of ``EMRIDirectLikeMove`` and the
+    engine-side EMRI template (:class:`SourceSignalGen`).
+
+    Args:
+        general_info (GeneralSetup): The built general setup.
+        cfg (dict): :func:`source_signal_cfg` output (``emri_direct_table``,
+            ``emri_direct_response``, ``emri_traj_workers``, the threshold).
+
+    Returns:
+        EMRIDirectWDMSignalGen: The cached adapter for the current device.
+
+    Raises:
+        ValueError: A non-WDM run domain, or a lookup table built for another
+            ``(Nf, dt)``.
     """
     from lisatools import wdm_lookup_store
     from lisatools.domains import WDMLookupTable, WDMSettings
@@ -2402,7 +3234,20 @@ def build_emri_move_runtime(curr, acs, priors, state, cfg):
     ``cfg["emri_likelihood"] == "direct"`` (scoring through the direct-to-WDM template; the
     residual expose/fold through the containers' installed generator, which in that mode is
     the direct template as well -- :class:`SourceSignalGen`; the cross-check and the fallback
-    on the production wrap), else the stock per-row move."""
+    on the production wrap), else the stock per-row move.
+
+    Args:
+        curr (GlobalFitSetup): The built run (``general_info``,
+            ``source_info["emri"]``).
+        acs (AnalysisContainerArray): The shared containers.
+        priors (dict): The shared priors.
+        state (GFState): The current state.
+        cfg (dict): :func:`source_signal_cfg` output.
+
+    Returns:
+        ResidualAddOneRemoveOneMove: The ``emri_pe`` move
+        (``EMRIDirectLikeMove`` on the direct path).
+    """
     wave_gen = DeviceLocalWaveGen(get_emri_wave_wrap, curr.general_info, cfg)
     if cfg.get("emri_likelihood", "full") == "direct":
         direct = DeviceLocalWaveGen(get_emri_direct_gen, curr.general_info, cfg)
@@ -2426,6 +3271,22 @@ def get_sobbh_chunked_comp(general_info, cfg):
     ``reference_time`` (f_low / phi_c are defined there; the bbhx C++ t_ref
     fix makes the kernel intrinsics honor it). ``d_d = 0``: the move folds
     the exposed-residual ``<r|r>`` in via its per-walker offset.
+
+    ``SOBBH_LIKELIHOOD=chunked`` only (production uses ``lookup``). The chunk
+    length comes from :func:`resolve_sobbh_nt_sub`, with WARNINGs when the
+    fill or scoring band half-width is too narrow for the resolved sweep.
+
+    Args:
+        general_info (GeneralSetup): The built general setup.
+        cfg (dict): :func:`source_signal_cfg` output (``sobbh_nt_sub``,
+            ``sobbh_chirp_fdot_max``, ``sobbh_n_sparse``, ``sobbh_n_pad``, ...).
+
+    Returns:
+        bbhx.sobbhcomps.SOBBHWDMComputations: The cached comp for the current
+        device.
+
+    Raises:
+        ValueError: A non-WDM run domain.
     """
     from lisatools.domains import WDMSettings
 
@@ -2520,6 +3381,21 @@ def resolve_sobbh_lookup_table(general_info, cfg, *, force_backend=None):
     the SAME file ``EMRI_LIKELIHOOD=direct`` uses), found there (``"found"``) or built and
     saved there first (``"built"``, one builder under a lock file while other ranks wait,
     ``"waited"``; :mod:`lisatools.wdm_lookup_store`), so a restart never rebuilds it.
+
+    Args:
+        general_info (GeneralSetup): The built general setup
+            (``domain_settings``, ``file_store_dir``).
+        cfg (dict): :func:`source_signal_cfg` output
+            (``sobbh_lookup_table_path``).
+        force_backend (str, optional): Backend for a table build; default the
+            run's.
+
+    Returns:
+        tuple[str, str]: ``(absolute path, status)``.
+
+    Raises:
+        ValueError: An explicit path that does not exist, or no path and no
+            run folder.
     """
     from lisatools import wdm_lookup_store
 
@@ -2557,6 +3433,24 @@ def get_sobbh_lookup_comp(general_info, cfg):
     comes from :func:`resolve_sobbh_lookup_table` (``SOBBH_LOOKUP_TABLE_PATH`` or the run
     folder's find-or-build canonical file), loads on the run's backend and must carry the run
     domain's layer duration.
+
+    Production (``SOBBH_LIKELIHOOD=lookup``): one comp per device, reached
+    through :func:`get_sobbh_lookup_router`. Built with ``d_d=0`` (the move
+    adds the exposed-residual offset itself) and the ``sobbh_lookup_*``,
+    ``sobbh_n_grid`` and ``sobbh_buffer_time`` cfg entries; the chunked-path
+    knobs do not apply.
+
+    Args:
+        general_info (GeneralSetup): The built general setup.
+        cfg (dict): :func:`source_signal_cfg` output.
+
+    Returns:
+        SOBBHLookupComputations: The cached comp for the current device.
+
+    Raises:
+        ValueError: A non-WDM run domain, a table that cannot be located
+            (:func:`resolve_sobbh_lookup_table`), or a table whose layer
+            duration differs from the run's.
     """
     from lisatools.domains import WDMLookupTable, WDMSettings
     from lisatools.sources.sobbh.wdm_direct import SOBBHLookupComputations
@@ -2609,7 +3503,15 @@ def get_sobbh_lookup_comp(general_info, cfg):
 def get_sobbh_lookup_router(general_info, cfg):
     """The (cached) :class:`~lisatools.sources.sobbh.wdm_direct.SOBBHLookupRouter` over
     :func:`get_sobbh_lookup_comp`: one lookup comp per device, each built on first use under
-    that device's context, every call sent to the current device's (multi-GPU walker shards)."""
+    that device's context, every call sent to the current device's (multi-GPU walker shards).
+
+    Args:
+        general_info (GeneralSetup): The built general setup.
+        cfg (dict): :func:`source_signal_cfg` output.
+
+    Returns:
+        SOBBHLookupRouter: The cached router (one per run and channel count).
+    """
     from lisatools.sources.sobbh.wdm_direct import SOBBHLookupRouter
 
     key = ("sobbh_lookup_router", id(general_info), cfg["nchannels"])
@@ -2623,7 +3525,19 @@ def get_sobbh_lookup_router(general_info, cfg):
 
 def get_sobbh_fast_comp(general_info, cfg):
     """The vectorized SOBBH comp ``cfg["sobbh_likelihood"]`` selects
-    (``"lookup"``, the default: the per-device router; ``"chunked"``)."""
+    (``"lookup"``, the default: the per-device router; ``"chunked"``).
+
+    Args:
+        general_info (GeneralSetup): The built general setup.
+        cfg (dict): :func:`source_signal_cfg` output.
+
+    Returns:
+        object: :func:`get_sobbh_lookup_router` or :func:`get_sobbh_chunked_comp`.
+
+    Raises:
+        ValueError: ``sobbh_likelihood`` is not one of
+            :data:`SOBBH_FAST_LIKELIHOODS`.
+    """
     kind = cfg.get("sobbh_likelihood", "full")
     if kind == "chunked":
         return get_sobbh_chunked_comp(general_info, cfg)
@@ -2634,16 +3548,30 @@ def get_sobbh_fast_comp(general_info, cfg):
 
 
 def get_sobbh_chunked_signal_gen(general_info, cfg):
-    """Engine-convention SOBBH template generator backed by the chunked fill.
+    """Engine-convention SOBBH template generator backed by the fast comp's fill.
 
     Returns a cached (per device) callable ``fn(*waveform_params, ...) ->
-    WDMSignal`` that renders the template via ``fill_global_wdm`` on the
-    active-band grid — the SAME family the move's scoring kernel uses, so
-    residual bookkeeping, load-time rebuilds, and scoring stay mutually
-    consistent (and all fast). Band width = ``SOBBH_FILL_M_BAND_HALF_WIDTH``
-    (wide: the truncation lands in the shared residual). The move's
-    fast-vs-slow cross-check remains independent — it explicitly verifies
-    against the slow tdionfly wrap.
+    WDMSignal`` that renders the template via ``fill_global_wdm`` of
+    :func:`get_sobbh_fast_comp` (the lookup router in production, the
+    chunked comp under ``SOBBH_LIKELIHOOD=chunked``) on the active-band grid
+    — the SAME family the move's scoring kernel uses, so residual
+    bookkeeping, load-time rebuilds, and scoring stay mutually consistent
+    (and all fast). Band width = ``SOBBH_FILL_M_BAND_HALF_WIDTH`` for the
+    chunked comp (wide: the truncation lands in the shared residual); the
+    lookup comp ignores it. The move's fast-vs-slow cross-check remains
+    independent — it explicitly verifies against the slow tdionfly wrap.
+
+    The callable takes the first 11 positionals as ONE waveform-basis row
+    (converted with ``SOBBHChunkedLikeMove.to_chunked_basis``) and accepts
+    and ignores ``apply_transform`` / ``leaf_inds`` / other keywords (the
+    transform was applied by :class:`SourceSignalGen`).
+
+    Args:
+        general_info (GeneralSetup): The built general setup.
+        cfg (dict): :func:`source_signal_cfg` output.
+
+    Returns:
+        Callable: The cached generator for the current device.
     """
     xp, dev, orbits, domain_settings = _wrap_device_and_orbits(general_info)
     key = (
@@ -2682,6 +3610,29 @@ def get_sobbh_chunked_signal_gen(general_info, cfg):
 
 
 def build_sobbh_move_runtime(curr, acs, priors, state, cfg):
+    """SOBBH PE move: the fast-comp move on ``lookup`` / ``chunked``, else the stock one.
+
+    With ``cfg["sobbh_likelihood"]`` in :data:`SOBBH_FAST_LIKELIHOODS`
+    (production ``lookup``) builds
+    :class:`~lisatools.globalfit.moves.SOBBHChunkedLikeMove` through
+    :class:`~lisatools.globalfit.recipe.SOBBHChunkedMoveBuilder` with
+    ``chunked_comp`` = :func:`get_sobbh_fast_comp` and
+    ``m_band_half_width`` = ``SOBBH_M_BAND_HALF_WIDTH``; with ``full`` the
+    stock per-row move (:class:`~lisatools.globalfit.recipe.SOBBHMoveBuilder`).
+    Either way ``wave_gen`` is a :class:`DeviceLocalWaveGen` over
+    :func:`get_sobbh_wave_wrap` (the exact generator: the move's cross-check
+    and fallback on the fast path).
+
+    Args:
+        curr (GlobalFitSetup): The built run.
+        acs (AnalysisContainerArray): The shared containers.
+        priors (dict): The shared priors.
+        state (GFState): The current state.
+        cfg (dict): :func:`source_signal_cfg` output.
+
+    Returns:
+        ResidualAddOneRemoveOneMove: The ``sobbh_pe`` move.
+    """
     wave_gen = DeviceLocalWaveGen(get_sobbh_wave_wrap, curr.general_info, cfg)
     if cfg.get("sobbh_likelihood", "full") in SOBBH_FAST_LIKELIHOODS:
         comp = get_sobbh_fast_comp(curr.general_info, cfg)
@@ -2701,7 +3652,29 @@ def build_mbh_move_runtime(curr, acs, priors, state, cfg):
     """MBH PE move: batched windowed (``cfg["mbh_likelihood"] == "batched"``,
     the resolved ``auto`` default on a WDM legacy-response run), stretch RJ
     move on the tdionfly wrap, or the stock ``build_mbh_moves_phenom`` builder
-    around the cached phentax generator."""
+    around the cached phentax generator.
+
+    Batched (production): :class:`~lisatools.globalfit.recipe.MBHBatchedMoveBuilder`
+    with ``wave_gen`` the late-bound ``get_signals_for_residuals`` of a
+    :class:`DeviceLocalWaveGen` over :func:`get_mbh_phenom_gen` (the slow
+    generator: cross-check and fallback), ``batched_gen`` one over
+    :func:`get_mbh_windowed_gen` and the window / batch-size cfg entries.
+    ``full`` (legacy response): :func:`~lisatools.globalfit.recipe.build_mbh_moves_phenom`
+    with ``subtract_initial=False`` (the engine already subtracted). With
+    ``USE_TDIONFLY=1``: :class:`~lisatools.globalfit.recipe.MBHMoveBuilder` on
+    :func:`get_mbh_tdionfly_wave_wrap`.
+
+    Args:
+        curr (GlobalFitSetup): The built run (``source_info["mbh"]``).
+        acs (AnalysisContainerArray): The shared containers.
+        priors (dict): The shared priors.
+        state (GFState): The current state.
+        cfg (dict): :func:`source_signal_cfg` output.
+
+    Returns:
+        ResidualAddOneRemoveOneMove: The ``mbh_pe`` move
+        (``MBHBatchedLikeMove`` on the batched path).
+    """
     mbh_info = curr.source_info["mbh"]
     if cfg.get("mbh_likelihood", "full") == "batched":
         slow = DeviceLocalWaveGen(get_mbh_phenom_gen, curr.general_info, cfg)
@@ -2731,7 +3704,16 @@ def build_mbh_move_runtime(curr, acs, priors, state, cfg):
 
 
 def find_source_cfg(curr):
-    """Recover the plain-value cfg carried by a branch's ``SourceSignalGen``."""
+    """Recover the plain-value cfg carried by a branch's ``SourceSignalGen``.
+
+    Args:
+        curr (GlobalFitSetup): The built run (``engine_info.branch_names``,
+            ``source_info``).
+
+    Returns:
+        dict or None: The first branch's ``SourceSignalGen.cfg``, or ``None``
+        when no branch carries one (``all_sources.setup_recipe`` then raises).
+    """
     for name in curr.engine_info.branch_names:
         sg = getattr(curr.source_info[name], "signal_gen", None)
         if isinstance(sg, SourceSignalGen):
@@ -2754,7 +3736,11 @@ def build_source_moves(curr, acs, priors, state, cfg) -> dict:
     ``full`` scores ONE ROW AT A TIME through
     ``AnalysisContainer.build_template`` (the base
     ``ResidualAddOneRemoveOneMove`` path).
-    ``sobbh_pe`` uses the batched chunked-heterodyne kernel.
+    ``sobbh_pe`` (:func:`build_sobbh_move_runtime`) is the vectorized
+    ``SOBBHChunkedLikeMove`` on the fast comp ``cfg["sobbh_likelihood"]``
+    selects: the WDM lookup comp by default and in production
+    (``SOBBH_LIKELIHOOD=lookup``), the chunked-heterodyne kernel with
+    ``chunked``; ``full`` builds the stock per-row move.
 
     ``emri_pe`` (``cfg["emri_likelihood"]``, the RESOLVED mode: ``auto`` -- the default --
     is ``direct`` on a WDM / XYZ run): ``direct`` builds
@@ -2763,6 +3749,27 @@ def build_source_moves(curr, acs, priors, state, cfg) -> dict:
     chunk; the expose/fold through the installed generator, the direct template too);
     ``full`` scores per row through the production container path (~1040 ms/row on the
     6-mo probe, job 373).
+
+    Every built move then gets :func:`stamp_source_move_settings` (the
+    branch's :data:`SOURCE_MOVE_SETTINGS_ATTRS`, including the MBH proposal
+    frame and its map) and :func:`check_proposal_frame`. Called by the
+    variants' ``setup_recipe`` when an ``mbh_pe`` / ``emri_pe`` / ``sobbh_pe``
+    stock name is requested.
+
+    Args:
+        curr (GlobalFitSetup): The built run.
+        acs (AnalysisContainerArray): The shared containers.
+        priors (dict): The shared priors.
+        state (GFState): The current state.
+        cfg (dict): :func:`source_signal_cfg` output (:func:`find_source_cfg`).
+
+    Returns:
+        dict: ``{"mbh_pe": move, "emri_pe": move, "sobbh_pe": move}`` for the
+        source branches present on ``curr``.
+
+    Raises:
+        ValueError: An impossible ``{BRANCH}_PROPOSAL_FRAME``
+            (:func:`check_proposal_frame`).
     """
     stock_moves = {}
     if "mbh" in curr.source_info:
@@ -2801,6 +3808,11 @@ def stamp_source_move_settings(move, info) -> None:
 
     Only onto a move that has the attribute (the add/remove family) and
     only where it is still ``None``; a field left ``None`` changes nothing.
+
+    Args:
+        move (object): A built source PE move (mutated).
+        info (object): The branch Setup / settings
+            (``curr.source_info[branch]``).
     """
     for attr in SOURCE_MOVE_SETTINGS_ATTRS:
         val = getattr(info, attr, None)
