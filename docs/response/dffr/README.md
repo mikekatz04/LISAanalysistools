@@ -5,7 +5,7 @@ short-time Fourier transform (STFT) likelihood of galactic binaries in lisaanaly
 and GBGPU. The work is in progress on the branch `feat-dffr` of both repositories. Since step 5,
 `STFTGBComputations(..., response="dffr")` selects DFFR (see "How to select it" below), and since
 part 4c it has a Fisher matrix (see "The Fisher matrix" below). Since 2026-10-20 every step has run
-on a full A100 as well; the validation of step 6 is in progress.
+on a full A100 as well; the validation of step 6 is done, and the review of step 7 follows.
 
 | Document | Content |
 | --- | --- |
@@ -59,7 +59,7 @@ final layout is recorded here once the steps in `plan.md` are done.
 | LAT | `cutils/lat_fresnel.hh` | The Fresnel integrals, their auxiliary functions and the derivatives of these, with DFFR's numerics, shared by `STFTFresnel` and DFFR. The header records its branches, their accuracy and its assumptions. `STFTFresnelWrap.compute_fresnel_functions` evaluates it for tests. | built (step 2) |
 | LAT | `cutils/lat_stft_kernels.hh` | Likelihood kernels written against a tile of pixels, so that both responses feed the same consumers (see "The tile seam" below). `ColumnTile` feeds them the existing response; the Fisher kernel keeps its own loop. Step 4 adds the band-bin-first pixel map and the launch path above 48 kB of shared memory. | built (steps 3 and 4) |
 | LAT | `cutils/lat_dffr_kernels.hh` | DFFR settings, source-model contract, windowed transform, closed-form TDI weights of both generations, segment table, the DFFR tile, two diagnostics of a batch of sources (compact templates, segment table), and the DFFR Fisher matrix. The header records the definitions, conventions, accuracy and assumptions. | built (step 4, Fisher in part 4c) |
-| LAT | `cutils/lat_dffr_diagnostics.{hh,cu}` | Three source-independent diagnostics for `tests/test_dffr.py`: the bounded sub-interval integral, the windowed transform and the closed-form TDI coefficients, as methods of `STFTFresnelWrap` and `KinematicsTableWrap`. | built (step 4); removed after step 6 |
+| LAT | `cutils/lat_dffr_diagnostics.{hh,cu}` | Three source-independent diagnostics for `tests/test_dffr.py`: the bounded sub-interval integral, the windowed transform and the closed-form TDI coefficients, as methods of `STFTFresnelWrap` and `KinematicsTableWrap`. | built (step 4); removed in step 6 (validation item 6), a copy kept outside the repository |
 | LAT | `response/tdiconfig.py` | `TDIConfig.generation`: 1 or 2 for the stock combinations, `None` otherwise. | built (step 4) |
 | GBGPU | `cutils/gb_physics.hh` | The GB phase, frequency and amplitude formulas, shared by `GBTDIonTheFly` and the DFFR source model. | built (step 4) |
 | GBGPU | `cutils/gb_dffr_source.hh` | `GBDFFRSource`, the galactic-binary source model of DFFR (see "Source model and components" below), with the parameters that leave the reception states unchanged. | built (step 4, that list in part 4c) |
@@ -239,6 +239,16 @@ Mojito binaries have no amplitude evolution. FastGB and jaxgb's JaxGB and JaxGBa
 6.8e-4 to 2.5e-3 and lie up to 1.3σ off, because they form TDI with one arm length; jaxgb's link
 responses, combined by pytdi with the time-varying light travel times as the Mojito pipeline
 does, reproduce the data to rounding.
+
+In the global fit (`tests.md`, step 6, item 5): the galactic-binary block runs on the same
+Mojito-light data, over the 713 days the preprocessing leaves, once with each response, for the
+56 catalogue binaries from 9.6 to 20.4 mHz, started at their catalogue values, with 32 walkers and
+24 temperatures on one A100 each, for 1.45 days. With identical settings an iteration takes 17
+minutes with DFFR and 32 with TDI on the fly; DFFR evaluates the in-model likelihoods 3.4 times
+faster. Over the 67 iterations both runs reached, the two give the same posteriors within the
+sampling noise of the chains: widths within 1 % at the median, means within 0.24σ. The walkers,
+all started at the injection, were still spreading in f0, ḟ, φ0 and ψ when the runs stopped, a
+property of the GB move, so these parameters are not yet converged posteriors.
 
 ## The Fisher matrix
 

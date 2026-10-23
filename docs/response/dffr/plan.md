@@ -15,7 +15,7 @@ branch `feat-dffr` in both repositories.
 | 3 | Tile seam | Done, CPU and GPU | 2026-10-18, GPU on 2026-10-19 | Every output of the seven kernels, swap included, is bit-identical to the step 2 code on the CPU (144 and 26 arrays, against a frozen environment of the step 2 code), with the same test outcomes. CPU timings lie within run-to-run noise at 27 of 30 points; the other three differ by at most 0.7 %, within the drift between runs of identical code. ptxas gives every kernel at least the blocks per SM of step 2 on the A100 (sm_80) and the H100 (sm_90). On the A100 every output is bit-identical to step 2 except `fill_global_stft`, whose atomic additions round differently from run to run (at most 8.6e-17 of its peak, within the GPU criterion of 1e-15), with the same test outcomes. In the interleaved GPU timings of step 6, 27 of 35 points lie within the run-to-run noise and the other 8 within 0.7 %, accepted by the author as drift, as on the CPU. Results in `tests.md`. Corrected on 2026-10-18 in step 4: the register counts of step 3 were those of each kernel's own file; in the linked module every kernel has 244 registers on the A100 and 222 on the H100, in step 2 and step 3 alike, so 2 blocks per SM, and the conclusion holds. |
 | 4 | DFFR kernels | 4a, 4b and 4c: done, CPU and GPU; the DFFR Fisher misses its A100 timing gate (step 6) | 2026-10-18, 4c on 2026-10-19, GPU on 2026-10-20 | The DFFR numerics, tile and galactic-binary model are built. The existing response stays bit-identical to step 3 on the CPU (144 and 26 arrays), with the same test outcomes and CPU timings within run-to-run noise or faster. Against standalone dffr on the same kinematics table, templates, global fill and segment table are bit-identical and the inner products agree to 6.3e-15. With the linear envelope of production, DFFR and the existing response differ by a median mismatch of 5.6e-10. Linked registers give the DFFR kernels 2 to 3 blocks of 128 threads per SM and the existing kernels 2; register caps and device link-time optimisation are timed in step 6. Part 4c, after step 5, adds the DFFR Fisher matrix as a kernel of its own: it matches a reference built from `fill_global` templates to 3.3e-15 of sqrt(F_ii F_jj), lies on the plateau of its steps (1.1e-5 against the criterion of 1e-3), and leaves every output of step 5 bit-identical. On the CPU it misses its timing gate at batch 64 by 13 % with the installed `-Os` build of GBGPU's CPU module, and takes 0.30 to 0.42 of the time of the existing Fisher with the module at `-O3`. On the A100 the existing response stays bit-identical to step 3 except `fill_global_stft` (rounding of its atomic additions); the exchange with standalone dffr on its GPU backend agrees within 1.7e-14; two DFFR CUDA tests that ask for CPU-level agreement fail and are recorded (author's decision). Part 4c on the A100 changes DFFR's swap, F-statistic and swap gradient at rounding level against step 5 (nvcc compiles an out-of-line function differently), which the author accepted. The DFFR Fisher misses its A100 gate from 1000 sources (1.34 to 1.47 times the existing Fisher on nine parameters, 1.06 to 1.09 at 1000 sources on eight); it is optimised in step 6. Results in `tests.md`. |
 | 5 | Wiring into `STFTGBComputations` | Done, CPU and GPU; GPU timings in step 6 | 2026-10-19, GPU on 2026-10-20 | `STFTGBComputations(response="dffr")` runs DFFR in its six likelihood methods and gives the outputs of the DFFR entry points bit for bit; through it, the exchange with standalone dffr is bit-identical to step 4. The existing response stays bit-identical to step 4 (144 and 26 arrays), with the same test outcomes, and keeps its CPU timings: on the same binaries, the step 5 Python changes none of them measurably. With the envelope on, DFFR's gradient noise is unchanged in f0, ḟ, f̈, φ0, λ and β, so its gradients follow the group's envelope. On the CPU, DFFR takes 0.28 to 0.40 of the time of the existing response. On the A100 the existing response stays bit-identical to step 4 except `fill_global_stft`, DFFR through the comp is reproducible like the existing response and agrees with its CPU outputs to 8.0e-15 (templates and inner products), and the comparisons with standalone dffr and with the existing response give the CPU numbers. Results in `tests.md`. |
-| 6 | Validation | Started: standalone dffr against the integration, GPU timings of the steps, the DFFR Fisher optimised, the occupancy A/B closed, all on the A100; validation items 1 (accuracy against a time-domain truth, window convention), 2 (the step 0 cases through both responses), 3 (likelihood surfaces of four waveforms) and 4 (six waveforms on the Mojito-light data) done | 2026-10-19 to 2026-10-21 | The standalone package passes its own suite on the A100 (51 of 51) with a CUDA 13 backend added for this comparison. On the same inputs, a year of one-day segments and 10 000 sources on the ESA orbits, DFFR in `STFTGBComputations` takes 4 to 7 % more time per source than standalone dffr in `fill_global` and 6 to 13 % more in `get_ll`; (d\|h) and (h\|h) agree to 1.4e-15 of their peaks. In the interleaved GPU timings of the steps, DFFR is 2.1 to 8.8 times faster than the existing response in every likelihood method from 1000 sources. The DFFR Fisher, with its final reduction staged in dynamic shared memory and its tables built in waves straight into the Fisher tables, takes 0.51 to 0.63 of the time of the existing Fisher and meets its A100 gate at every batch size; its outputs are unchanged bit for bit on the CPU and the GPU, `fill_global` aside. The occupancy A/B changed nothing in the build: a register cap of 168 on `domains.cu` makes the existing response 4 to 15 % faster but two DFFR methods up to 1 % slower and moves inner products at rounding level, so the author left it out. Against a year of a time-domain truth (lisagwresponse and pytdi) at 0.5 and 20 mHz, with 60 side bins and the periodic window on the data, DFFR's templates reach a flat mismatch of 4.8e-10 to 6.8e-10 at 20 mHz, as the standalone package did in step 0, and at 0.5 mHz a noise-weighted mismatch 50 to 100 times below that of the existing response. LAT's symmetric data window adds a mismatch of 3.6e-8, which the author judged insignificant against the 6.4e-4 to 8.8e-4 that production's 10 side bins leave, so production keeps it. On the eight cases of the step 0 truth, DFFR in the comp reproduces the standalone package's accuracy to two or three digits. In one-parameter likelihood scans against a year of that truth at SNR 100, each waveform in its own domain with X, Y, Z and the full CSD, DFFR puts every peak within 0.002σ of the truth with the widths of its Fisher matrix; TDI on the fly stays within 0.016σ in the STFT and the FD; FastGB is off by up to 6.6σ, lacking the combination X + Y + Z, which carries much of the weight at 0.5 mHz. On the Mojito-light data, preprocessed as the global fit does, DFFR matches the five binaries of highest frequency (15.6 to 20.4 mHz, SNR 67 to 223) to mismatches of 3.1e-8 to 5.8e-8, or up to 4.5e-7 beside a louder binary, and puts every peak in f0, ḟ, φ0, ψ, λ and β within 0.003σ of the truth; FastGB and jaxgb's JaxGB and JaxGBaccurate miss by 6.8e-4 to 2.5e-3 and up to 1.3σ, from their TDI with one arm length, while jaxgb's link responses combined by pytdi reproduce the Mojito data to rounding. Results in `tests.md`. |
+| 6 | Validation | Done: standalone dffr against the integration, GPU timings of the steps, the DFFR Fisher optimised, the occupancy A/B closed, all on the A100; validation items 1 (accuracy against a time-domain truth, window convention), 2 (the step 0 cases through both responses), 3 (likelihood surfaces of four waveforms), 4 (six waveforms on the Mojito-light data), 5 (a global fit of the high-frequency binaries with each response) and 6 (the source-independent DFFR diagnostics removed from LAT) done | 2026-10-19 to 2026-10-23 | The standalone package passes its own suite on the A100 (51 of 51) with a CUDA 13 backend added for this comparison. On the same inputs, a year of one-day segments and 10 000 sources on the ESA orbits, DFFR in `STFTGBComputations` takes 4 to 7 % more time per source than standalone dffr in `fill_global` and 6 to 13 % more in `get_ll`; (d\|h) and (h\|h) agree to 1.4e-15 of their peaks. In the interleaved GPU timings of the steps, DFFR is 2.1 to 8.8 times faster than the existing response in every likelihood method from 1000 sources. The DFFR Fisher, with its final reduction staged in dynamic shared memory and its tables built in waves straight into the Fisher tables, takes 0.51 to 0.63 of the time of the existing Fisher and meets its A100 gate at every batch size; its outputs are unchanged bit for bit on the CPU and the GPU, `fill_global` aside. The occupancy A/B changed nothing in the build: a register cap of 168 on `domains.cu` makes the existing response 4 to 15 % faster but two DFFR methods up to 1 % slower and moves inner products at rounding level, so the author left it out. Against a year of a time-domain truth (lisagwresponse and pytdi) at 0.5 and 20 mHz, with 60 side bins and the periodic window on the data, DFFR's templates reach a flat mismatch of 4.8e-10 to 6.8e-10 at 20 mHz, as the standalone package did in step 0, and at 0.5 mHz a noise-weighted mismatch 50 to 100 times below that of the existing response. LAT's symmetric data window adds a mismatch of 3.6e-8, which the author judged insignificant against the 6.4e-4 to 8.8e-4 that production's 10 side bins leave, so production keeps it. On the eight cases of the step 0 truth, DFFR in the comp reproduces the standalone package's accuracy to two or three digits. In one-parameter likelihood scans against a year of that truth at SNR 100, each waveform in its own domain with X, Y, Z and the full CSD, DFFR puts every peak within 0.002σ of the truth with the widths of its Fisher matrix; TDI on the fly stays within 0.016σ in the STFT and the FD; FastGB is off by up to 6.6σ, lacking the combination X + Y + Z, which carries much of the weight at 0.5 mHz. On the Mojito-light data, preprocessed as the global fit does, DFFR matches the five binaries of highest frequency (15.6 to 20.4 mHz, SNR 67 to 223) to mismatches of 3.1e-8 to 5.8e-8, or up to 4.5e-7 beside a louder binary, and puts every peak in f0, ḟ, φ0, ψ, λ and β within 0.003σ of the truth; FastGB and jaxgb's JaxGB and JaxGBaccurate miss by 6.8e-4 to 2.5e-3 and up to 1.3σ, from their TDI with one arm length, while jaxgb's link responses combined by pytdi reproduce the Mojito data to rounding. In the global fit of the 56 Mojito binaries from 9.6 to 20.4 mHz, with 32 walkers and 24 temperatures on one A100, an iteration takes 17 minutes with DFFR and 32 with TDI on the fly, and over equal iterations the two give the same posteriors within the sampling noise (widths within 1 % at the median, means within 0.24σ). Without the diagnostics, LAT and GBGPU give the same outputs bit for bit (the GPU's atomic `fill` aside, within 1.2e-16 of its peak) and the same test outcomes. Results in `tests.md`. |
 | 7 | Review of documentation and scripts | Not started | | |
 
 ## Context
@@ -129,8 +129,8 @@ LAT (source-independent):
   (`dffr_information_matrix_kernel<SourceT, Rows>` and its host launcher).
 - `cutils/lat_dffr_diagnostics.{hh,cu}` (step 4): three source-independent diagnostics (bounded
   sub-interval integral, windowed transform, closed-form TDI coefficients), methods of
-  `STFTFresnelWrap` and `KinematicsTableWrap` for `tests/test_dffr.py`. They leave LAT after step
-  6; a copy stays in the author's work folder.
+  `STFTFresnelWrap` and `KinematicsTableWrap` for `tests/test_dffr.py`. They left LAT in step 6
+  (validation item 6); a copy stays in the author's work folder.
 - `response/tdiconfig.py`: `TDIConfig.generation`, 1 or 2 for the stock combinations, `None`
   otherwise, so that the comp can pick DFFR's closed form.
 
@@ -369,7 +369,7 @@ with a review after each.
   - the segment table, 1012 bytes per row, and the pixel.
 
   `TDIConfig.generation` names the stock combinations. Three diagnostics on the existing wraps
-  (`lat_dffr_diagnostics.{hh,cu}`) feed `tests/test_dffr.py`.
+  (`lat_dffr_diagnostics.{hh,cu}`) feed `tests/test_dffr.py`; both left LAT in step 6.
 - 4b, three pieces:
   - In `lat_stft_kernels.hh`: the band-bin-first pixel map `StftBandBinMap<Rows>`;
     `stft_prepare_dynamic_shared`, which raises a kernel's limit on dynamic shared memory above
@@ -420,10 +420,10 @@ with a review after each.
     164 bytes of spills per Fresnel evaluation, and the DFFR swap on the H100;
   - device link-time optimisation lifts the DFFR kernels to 3 blocks, except the swap gradient on
     the H100, but leaves the existing kernels at 2 (255 registers).
-- Tests: `tests/test_dffr.py` (LAT) and `tests/test_stft_gb_dffr.py` (GBGPU); the exchange with
-  standalone dffr; DFFR against the existing response; and the bit identity of the existing
-  response against the frozen step 3 code. Driver: `scripts/dffr/run_step4.sh`. The tests of the
-  Fisher matrix are those of part 4c below. Results in `tests.md`.
+- Tests: `tests/test_dffr.py` (LAT, removed in step 6) and `tests/test_stft_gb_dffr.py` (GBGPU);
+  the exchange with standalone dffr; DFFR against the existing response; and the bit identity of
+  the existing response against the frozen step 3 code. Driver: `scripts/dffr/run_step4.sh`. The
+  tests of the Fisher matrix are those of part 4c below. Results in `tests.md`.
 
 #### Part 4c: the DFFR Fisher matrix
 
@@ -601,8 +601,9 @@ the error with the DFFR Fisher matrix.
   author's decisions:
   - The data of the global fit's high-frequency settings
     (`mojito_input/gb_high_freq_global_fit_settings.py`): the galaxy plus the instrument noise,
-    read and preprocessed as the global fit does, filters included, over 1.92 years instead of 9
-    months, the longest span that the trim of 200 h at each end leaves.
+    read and preprocessed as the global fit does, filters included, over 1.92 years (701 one-day
+    segments) instead of 9 months. The trim of 200 h at each end leaves 713.8 days, so up to 713
+    segments fit, as item 5 uses.
   - The STFT window and side bins of items 1 to 3 (periodic Tukey with a taper of 1e4 s, 60 side
     bins) instead of the settings file's taper of 71 s and the 10 side bins of production.
   - The catalogue's amplitudes, so SNRs of 67 to 223; the five binaries of highest frequency (15.6
@@ -689,9 +690,44 @@ the error with the DFFR Fisher matrix.
 - The three source-independent diagnostics of step 4 (`lat_dffr_diagnostics.{hh,cu}`, their wrap
   methods and `tests/test_dffr.py`) leave LAT after this step. A copy stays in the author's work
   folder.
-- Global-fit smoke run on the Mojito STFT settings with `response="dffr"`: resolved-GB
-  subtraction and log-likelihoods against the existing response; optionally, a short GB
-  parameter-estimation comparison with trace and corner plots and a convergence table.
+
+  Validation item 6 (2026-10-22). The author's decisions: the removal only, the other open points
+  of these documents stay for the review of step 7; `tests/test_dffr.py` goes as a whole, its test
+  of `TDIConfig.generation` included, since the DFFR tests of GBGPU need that generation;
+  `scripts/dffr/dffr_unit_numbers.py`, which prints the measured errors behind those tests, goes
+  with it, and so does part `unit_numbers` of `run_step4.sh`; the copy in the work folder holds the
+  four files. The build rules, the three wrap methods and their type alias go as well. The code is
+  checked in a frozen environment against the shared one, which is rebuilt only after the global-fit
+  runs of item 5 end, because they use it. Results in `tests.md`.
+- Global-fit run with `response="dffr"`, in place of the first plan's smoke run on the Mojito STFT
+  settings: the parameter estimation of the galactic-binary block on Mojito-light data, run once
+  with each response on the same data, settings and random seed, the posteriors compared with each
+  other and with the injected values, with traces, corner plots and a table of the comparison.
+  Validation item 5 (2026-10-21 to 2026-10-23). The author's decisions:
+  - The settings of `mojito_input/gb_high_freq_global_fit_settings.py`, copied to
+    `scripts/dffr/gb_high_freq_globalfit_settings.py` with the changes below; the tracked settings
+    file stays as it is. One file gives both runs, through one settings function per response.
+  - All the data the trim of 200 h at each end leaves: 713 one-day segments.
+  - The STFT taper of 1e4 s on LAT's symmetric window, as production, and 16 side bins.
+  - Every binary above 9.75 mHz sampled, with the guard binaries below that the band layout takes
+    in, and the upper limit raised until the two binaries of highest frequency lie well inside the
+    sampled range: a grid from 9.514 mHz (bin 822) to 23.0 mHz, 38 bands, 36 of them sampled
+    (f0 from 9.578 to 22.898 mHz).
+  - The start at the injection: every catalogue binary in the sampled range, 56, at its catalogue
+    values; 64 leaf slots and the reversible jump of the production move on.
+  - 32 walkers and 24 temperatures, one A100 per run, each run stopped after 1.45 days of wall
+    clock.
+  - Before the runs, a test of a few iterations of both responses on the A100 of the development
+    job, then the runs on new nodes.
+  - A report of the run health, the speed and memory, the offsets from the injected values and the
+    two posteriors per binary (KS, bias and width in σ, autocorrelation time, traces, corners).
+  Done on 2026-10-23 (results in `tests.md`). Compared over the 67 iterations both runs reached,
+  the two responses give the same posteriors within the sampling noise of the chains: widths
+  within 1 % at the median, means within 0.24σ. In f0, ḟ, φ0 and ψ the walkers, all started at
+  the injection, were still spreading when the runs stopped, so the comparison shows the same
+  likelihood under the same sampler rather than converged posteriors of these parameters; the
+  author closed the item on the runs as they are and recorded the slow spread as a property of
+  the GB move. An iteration takes 17.2 minutes with DFFR and 31.6 with TDI on the fly.
 
 ### Step 7: review of documentation and scripts
 
@@ -986,3 +1022,36 @@ the error with the DFFR Fisher matrix.
     - Steps of the existing Fisher on L1 orbits: between its default and tenfold steps it changes
       by up to 1.6e-3 of sqrt(F_ii F_jj) in β, above the criterion of 1e-3 that DFFR meets with
       1.1e-5.
+- The galactic-binary block of the global fit, seen in the runs of validation item 5 (2026-10-22),
+  alike with both responses. Recorded; none of it is DFFR's, and the comparison of item 5 holds
+  because both runs share it:
+  - Memory per cell. A cell of the GB move, one (temperature, walker, band), holds its band's store
+    window of the walker's residual and its own copy of the inverse 3×3 CSD over the same window,
+    and a template twin. With 713 one-day segments and the widest window of the layout (555 bins,
+    set by the top band), that is 18.1 + 54.3 + 18.1 MiB, about 153 MiB measured. The CSD copy is
+    the same for the 24 temperatures of a walker, and with fixed noise for every walker; most
+    bands need 66 bins or fewer. Batches of 512 cells ran out of the A100's 40 GiB next to the
+    15.1 GiB that 32 walkers take, so the runs use 64 cells per proposal batch and 2 (band,
+    walker) rows per tempering batch. A likelihood call of 64 binaries costs about as much as one
+    of 200 to 300, since each binary is one thread block and the A100 holds 216 to 324 of them at
+    once, so the batch size, not the response, sets most of the time per iteration.
+  - Out-of-window births. The ḟ prior is one range for all bands, down to -4.7e-11 Hz/s, while
+    each band's store window holds the tracks of its own frequency. Prior births in hot chains
+    with large negative ḟ have tracks that leave their window; their likelihood is then evaluated
+    on part of the template. Tempering swaps carry some of them, with amplitudes at the prior's
+    lower edge, into cold walkers (3 of 32 walkers in the DFFR run after 14 iterations), and the
+    move's rebuild of ln L after the stage then differs from its own bookkeeping by up to 79,
+    against 0.4 to 1 otherwise.
+  - Range of the sampled f0. The sampled range ends at the last band edge below the top of the
+    grid. Over 713 days the bands above 17 mHz are 3 to 11 mHz wide (the largest ḟ of
+    mass-transferring binaries times the span, with a safety factor of 4), so one bin more at the
+    start of the grid moves that end from 22.90 to 19.92 mHz, and the grid of 10 to 22 mHz of the
+    settings file leaves out the two binaries of highest frequency.
+  - Leaf order. The move writes the leaves of a walker back in band order, not in the order they
+    were injected, so a leaf slot does not identify a binary; `globalfit_report.py` matches the
+    leaves to the injected binaries by f0.
+  - Slow spread of the phase parameters. Started at one point, the walkers took more than 120
+    iterations of 50 Fisher jumps each to spread over the posterior in f0, ḟ, φ0 and ψ, against
+    about 30 for ln A, cos ι and the sky angles; at 67 iterations their posterior means still sat
+    closer to the injection than converged posteriors do. A start scattered by each binary's
+    Fisher matrix, or longer runs, would give converged posteriors of these parameters.

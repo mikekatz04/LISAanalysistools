@@ -1083,7 +1083,8 @@ kernels included. Result: 144 of 144 and 26 of 26 arrays bit-identical, pass
 
 ### Unit tests
 
-**`tests/test_dffr.py` (LAT).** The source-independent DFFR stages, through three diagnostic
+**`tests/test_dffr.py` (LAT; it left LAT in step 6, item 6, with its diagnostics and
+`dffr_unit_numbers.py`).** The source-independent DFFR stages, through three diagnostic
 methods on existing wraps: `STFTFresnelWrap.compute_dffr_sub_intervals` and
 `compute_dffr_windowed_kernels`, and `KinematicsTableWrap.compute_dffr_link_coefficients`. The
 measured values come from part `unit_numbers` (`scripts/dffr/dffr_unit_numbers.py`,
@@ -2742,9 +2743,10 @@ is no gate.
   `mojito_input/gb_high_freq_global_fit_settings.py`: `L1ProcessingStep`, a high-pass at 1e-5 Hz
   and a low-pass at 0.1 Hz (order-2 Butterworth, each run forward and backward), downsampling to
   5 s (`resample_poly` with a Kaiser window of β = 31) and 200 h trimmed from each end; then the
-  first 1.92 years, the longest span the trim leaves, where the settings file takes 9 months. Both
-  domains use the 701 whole one-day segments of that span, which starts 720 850.5 s after the
-  catalogue's reference time.
+  first 1.92 years, where the settings file takes 9 months. Both domains use the 701 whole one-day
+  segments of that span, which starts 720 850.5 s after the catalogue's reference time. (Corrected
+  on 2026-10-22: this entry called 1.92 years the longest span the trim leaves. The trim leaves
+  713.8 of the 730.5 days, 713 whole segments, which item 5 uses.)
 - Orbits: LAT's `L1Orbits` from the noise file (ICRS, `MOJITO_AVERAGE_ARMLENGTH`), as the global
   fit loads them, for the comps, FastGB and the noise weights. The signal codes take the file's
   time-varying light travel times; the constant arm length enters only FastGB. jaxgb takes
@@ -2908,6 +2910,212 @@ Review checks of the item, in `$OUT/validation/mojito/dev/`:
    9.9e-5 high: the amplitude evolution of its model, which the Mojito binaries lack. pytdi ran in
    chunks of 2^20 samples, each with 400 samples of its neighbours on both sides, on 20 processes;
    the rebuild of the pipeline's TDI above shows that the chunks give the series of one evaluation.
+
+**Item 5 of the validation: a global fit of the high-frequency galactic binaries with each
+response** (2026-10-21 to 2026-10-23). The fifth item of the author's scope, in place of the first
+plan's smoke run on the Mojito STFT settings: the parameter estimation of the galactic-binary block
+of the global fit, started at the injected values, run once with TDI on the fly and once with
+DFFR on the same data, settings and random seed, each for 1.45 days on one A100. The two posteriors
+are compared with each other and with the injected values; the numbers are recorded, there is no
+gate.
+
+- Code: LAT 764a94ed with the new `scripts/dffr/gb_high_freq_globalfit_settings.py`,
+  `run_globalfit.sbatch` and `globalfit_report.py` and the parts `globalfit_*` of `run_step6.sh`;
+  GBGPU 11d5159.
+- Data: the galaxy and the instrument noise of Mojito light, read and preprocessed as in item 4,
+  but over all 713 whole one-day segments that the trim of 200 h at each end leaves (713.8 days),
+  from 720 850.5 s after the catalogue's reference time. STFT: LAT's symmetric Tukey window of
+  taper 1e4 s (α = 0.1157), as production; 16 side bins; noise weights of `XYZSensitivityBackend`
+  at its default levels with the options of item 4, fixed (no noise branch).
+- Grid and bands: the active bins run from 9.514 mHz (bin 822 of the 1/(1 day) grid) to 23.0 mHz.
+  The band layout of the GB block gives 38 bands, 36 of them sampled (f0 from 9.578 to 22.898 mHz)
+  and the two at the ends as buffers. The sampled range ends at the last band edge below the top of
+  the grid, and the bands above 17 mHz are 3 to 11 mHz wide over 713 days: one bin more at the
+  start moves that end to 19.92 mHz, and the settings file's grid of 10 to 22 mHz samples only up
+  to 19.53 mHz, without the two binaries of highest frequency. The settings file therefore fixes
+  the start by its bin and stops if a catalogue binary above 9.75 mHz lies outside the sampled
+  range.
+- Start: every catalogue binary in the sampled range, 56 (45 above 10 mHz), at its catalogue values
+  in every walker and temperature, mapped as in item 4. A sky-averaged estimate with each binary's
+  inclination gives optimal SNRs of 16 to 288; it reads 16 % and 19 % below DFFR's SNR for two
+  binaries of item 4. 25 of the 36 sampled bands hold binaries, at most 4 each. The list of
+  iteratively resolved binaries that the settings file reads is not on SURF Spider.
+- Sampler: the production move `rj_prior` (`GBSpecialRJPriorMove`): each iteration, every leaf slot
+  of every chain gets one birth or death proposal from the prior, and every live binary 50 in-model
+  jumps along its Fisher matrix; then swaps between the temperatures of each band. 64 leaf slots,
+  32 walkers, 24 temperatures (the settings file's ladder 1/1.2^k, the last at 1e-4), random seed
+  5701424 in both runs.
+- Batches: 64 cells (temperature, walker, band) per proposal batch and 2 (band, walker) rows of 24
+  temperatures per tempering batch. A cell holds its band's window of 555 bins of the residual
+  (18.1 MiB), of the inverse 3×3 CSD (54.3 MiB) and of a template twin (18.1 MiB). The settings
+  file's 512 and 128 ran out of the A100's 40 GiB in the first test.
+- Stop: a recipe step of the settings file ends a run after the first iteration that completes
+  1.45 days after the start, inside the Slurm limit of 1.5 days.
+- Test before the runs (job 41556413, A100 of wn-gb-02, 2026-10-21 23:47 to 2026-10-22 02:19,
+  part `globalfit_smoke`, 3 iterations each): both responses kept all 56 binaries in every cold
+  walker and stopped through the recipe step. TDI on the fly took 31.1 min per iteration (its
+  in-model likelihood evaluations 1008 s, tempering 409 s), DFFR 18.3 min (301 s and 452 s); the
+  GPU memory peaked at 31.2 and 28.6 GiB.
+- Runs: jobs 41632927 (TDI on the fly) and 41632928 (DFFR), one A100 each on wn-gb-01, from
+  2026-10-22 02:20. Over their first 7 and 14 iterations: 1894 s and 1028 s per iteration (the
+  in-model likelihood evaluations 1003 s and 300 s), a GPU memory peak of 31.1 and 28.7 GiB.
+- The author's decisions of 2026-10-21 and 2026-10-22: the settings of
+  `gb_high_freq_global_fit_settings.py` with the taper of 1e4 s and 16 side bins for both runs; all
+  713 segments; every binary above 9.75 mHz sampled, guards allowed, the upper limit raised until
+  the two binaries of highest frequency lie inside; the start at the injection of every catalogue
+  binary in the sampled range; 64 leaf slots with the reversible jump on; 32 walkers and 24
+  temperatures; one A100 per run and 1.45 days of wall clock; the test of a few iterations on the
+  development job before the runs; the run folders under `global_fit_runs/` with a copy of the
+  settings file, the report in `$OUT/validation/globalfit/`.
+- Commands, from the LAT root. Test, inside the job:
+  `PYTHON=$PYTHON scripts/dffr/run_step6.sh --device gpu $OUT globalfit_smoke`. Runs, per response
+  R in `tdi_on_the_fly` and `dffr`, after creating `<runs>/gb_high_freq_R`:
+  `PYTHON=$PYTHON GLOBAL_FIT_RUNS_DIR=<runs> sbatch --job-name=gf_R
+  --output=<runs>/gb_high_freq_R/slurm_%j.out scripts/dffr/run_globalfit.sbatch R $OUT`. Report:
+  `python scripts/dffr/globalfit_report.py --runs <runs>/gb_high_freq_tdi_on_the_fly
+  <runs>/gb_high_freq_dffr --output $OUT/validation/globalfit`.
+  Files: the run folders `<runs>/gb_high_freq_{tdi_on_the_fly,dffr}/` (backend, logs, settings copy,
+  GPU memory log), outside the repository; the test in `$OUT/validation/globalfit_smoke/`; the
+  report in `$OUT/validation/globalfit/` (`report.txt`, `summary.json`, `health.png`,
+  `speed_memory.png`, `convergence.png`, `truth_offsets.png`, `comparison_{bias,sd_ratio,ks}.png`,
+  and per binary `traces/` and `corners/`), written by the closing chain `final_chain.sh` there.
+- Metrics, cold chain only: each run's posterior per binary from the walkers after the first 25 %
+  of its iterations, the leaves matched to the injected binaries by f0; (mean - injected)/σ per
+  run; the two runs compared over the first iterations both reached, as the runs stop on a wall
+  clock and not on an iteration count, by the difference of the means in σ of TDI on the fly, the
+  ratio of the widths and a two-sample KS test of thinned samples; the MCMC noise of these from
+  each run's integrated autocorrelation time. Convergence: the spread of the cold walkers per
+  iteration, median over the binaries, and the dispersion of (mean - injected)/σ over the
+  binaries, which is 1 for converged posteriors in data with noise.
+
+Results. The runs stopped on 2026-10-23 at 13:25 (DFFR) and 13:41 (TDI on the fly). Run health
+and speed, medians per iteration:
+
+| | TDI on the fly | DFFR |
+| --- | --- | --- |
+| Iterations | 67 | 122 |
+| Time per iteration | 31.6 min | 17.2 min |
+| In-model likelihood evaluations | 1001 s | 298 s |
+| In-model Fisher matrices | 22.4 s | 8.5 s |
+| RJ step | 27.0 s | 10.2 s |
+| Tempering | 454 s | 390 s |
+| GPU memory, peak | 31.1 GiB | 28.7 GiB |
+| Injected binaries alive in every cold walker | 56 of 56 at every iteration | 56 of 56 at every iteration |
+| In-model acceptance, cold chain | 0.463 | 0.463 |
+| ln L rebuilt after the move's bookkeeping drifted, times (largest drift) | 134 (233) | 244 (160) |
+
+Comparison of the two posteriors over the first 67 iterations of each run (16 dropped), over the 56
+binaries; the difference of the means in σ of TDI on the fly:
+
+| Parameter | Median of the difference | Largest difference | Width ratio DFFR / TDI on the fly, median (5 % to 95 %) | KS above its 95 % level |
+| --- | --- | --- | --- | --- |
+| ln A | 0.033 | 0.20 | 0.998 (0.940 to 1.093) | 16 % |
+| f0 | 0.065 | 0.23 | 0.993 (0.908 to 1.065) | 30 % |
+| ḟ | 0.075 | 0.24 | 0.989 (0.901 to 1.070) | 32 % |
+| φ0 | 0.059 | 0.22 | 0.998 (0.927 to 1.093) | 39 % |
+| cos ι | 0.040 | 0.19 | 1.003 (0.950 to 1.081) | 14 % |
+| ψ | 0.037 | 0.20 | 1.003 (0.923 to 1.092) | 25 % |
+| α | 0.026 | 0.08 | 0.990 (0.938 to 1.026) | 5 % |
+| sin δ | 0.023 | 0.10 | 0.996 (0.937 to 1.042) | 7 % |
+
+Convergence, per parameter:
+
+| Parameter | ln A | f0 | ḟ | φ0 | cos ι | ψ | α | sin δ |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Spread growth over the last quarter of the first 67 iterations, TDI on the fly | 1.026 | 1.060 | 1.023 | 1.023 | 1.043 | 1.055 | 1.006 | 0.997 |
+| The same, DFFR | 0.992 | 1.066 | 1.076 | 1.052 | 1.000 | 1.073 | 0.982 | 0.967 |
+| Spread at iteration 122 over iteration 67, DFFR | 0.979 | 1.059 | 1.031 | 1.109 | 0.976 | 1.054 | 0.976 | 1.032 |
+| Dispersion of (mean - injected)/σ, TDI on the fly | 0.99 | 0.69 | 0.61 | 0.74 | 0.95 | 0.59 | 0.92 | 1.05 |
+| The same, DFFR | 1.05 | 0.81 | 0.73 | 0.80 | 1.00 | 0.59 | 0.94 | 1.04 |
+
+- At equal iterations the two responses give the same posteriors within the sampling noise of the
+  chains: the widths agree to 1 % at the median, the means differ by 0.02σ to 0.08σ at the median
+  and by at most 0.24σ. In the sky angles, which have settled, the differences and the KS tests
+  are what independent samples give (5 % to 7 % beyond the 95 % level). In f0, ḟ, φ0 and ψ, 25 % to
+  45 % lie beyond twice their noise: the walkers, started at one point, still spread along these
+  correlated directions (next block), and the noise from the autocorrelation time of a spreading
+  chain is too small. The deterministic difference of the two responses is far below: item 3 puts
+  their peaks within 0.003σ of each other.
+- Both runs follow the same spread curves iteration by iteration. ln A, cos ι and the sky angles
+  settle within about 30 iterations; f0, ḟ, φ0 and ψ still spread by 2 % to 8 % over the last
+  quarter of the first 67 iterations and, in the DFFR run, by 3 % to 11 % more up to iteration 122.
+  Their posterior means stay closer to the injection than converged posteriors do (dispersion 0.59
+  to 0.81 instead of 1). The comparison therefore shows that DFFR gives the sampler the same
+  likelihood as TDI on the fly, not converged posteriors of the phase parameters.
+- A first look over each run's own iterations made DFFR 13 % to 15 % wider in f0, ḟ and φ0: an
+  effect of its larger iteration count while the walkers still spread, gone at equal iterations.
+- Speed: with identical settings an iteration takes 1.84 times less with DFFR, its in-model
+  likelihood evaluations 3.4 times less and its Fisher matrices 2.6 times less. Tempering, mostly
+  the building of the swap buffers, gains little (1.16).
+
+Observations, alike in both runs (the galactic-binary block, not the response):
+
+- Spurious binaries in the cold chains. The ḟ prior is one range for all bands, down to -4.7e-11
+  Hz/s, while each band's store window holds the tracks of its own frequency. Prior births in hot
+  chains with large negative ḟ have tracks that leave their window (1.1 % of the evaluated
+  templates in both runs), and tempering swaps carry some into cold walkers: up to 4 (TDI on the
+  fly) and 3 (DFFR) in one walker, with amplitudes at the prior's lower edge (6 to 8e-24) and ḟ of
+  -1e-11 to -4.5e-11 Hz/s. After such swaps the move's rebuild of ln L differs from its own
+  bookkeeping by up to 233 and 160, against 0.4 to 1 otherwise. The report matches leaves to the
+  injected binaries and counts the others.
+- Slow spread of the phase parameters: from a start at one point, the in-model jumps along each
+  binary's Fisher matrix take more than 120 iterations of 50 jumps to spread the walkers over the
+  posterior in f0, ḟ, φ0 and ψ, while ln A, cos ι and the sky angles settle within about 30. The
+  author recorded this as a property of the move (2026-10-23) and closed the item on the runs as
+  they are.
+- Leaf order: the move writes the leaves of a walker back in band order, not in the order they
+  were injected; the report matches leaves to binaries by f0, within 1e-5 mHz (the binaries lie
+  8e-4 mHz apart or more, posterior widths of f0 are below 3e-7 mHz).
+
+**Item 6 of the validation: the source-independent DFFR diagnostics leave LAT** (2026-10-22). The
+three diagnostics of step 4 served the unit tests of the DFFR stages and the measured errors behind
+them. LAT keeps no code that only those tests use, so they leave the repository, as the plan
+foresaw; copies of the four files stay in the author's work folder
+(`$OUT/removed/lat_dffr_diagnostics/`).
+
+- Removed: `src/lisatools/cutils/lat_dffr_diagnostics.{hh,cu}`, their copy rule and their two
+  entries in `cutils/CMakeLists.txt`; `STFTFresnelWrap.compute_dffr_sub_intervals` and
+  `compute_dffr_windowed_kernels` (`binding_domains.hpp`) and
+  `KinematicsTableWrap.compute_dffr_link_coefficients` (`binding_detector.hpp`), with their
+  bindings in `binding_detector.cxx` and the type alias `kinematics_complex_array_type`, which only
+  the last one used; `tests/test_dffr.py`, its test of `TDIConfig.generation` included;
+  `scripts/dffr/dffr_unit_numbers.py` and part `unit_numbers` of `run_step4.sh`. The header comment
+  of `lat_dffr_kernels.hh` no longer names the file.
+- Kept: `dffr_link_coefficients` in `lat_dffr_kernels.hh`, which the DFFR kernels use, and
+  `TDIConfig.generation`, which the comp needs; the DFFR tests of GBGPU still exercise it.
+- Code: LAT 764a94ed with the removal (`$OUT/regression/step6_item6/item6.diff`) and GBGPU
+  11d5159, built into the frozen environment `$OUT/item6_env` by `build_base_env.sh` (20 min). The
+  reference is the shared environment, which still holds the diagnostics and is rebuilt only after
+  the global-fit runs of item 5, which use it.
+- Checks on the A100 of job 41556413 (wn-gb-02), both environments in turn; for the shared one the
+  LAT tests of a clean clone at 764a94ed:
+
+| Check | Shared environment (before) | Frozen environment (after) | Result |
+| --- | --- | --- | --- |
+| The three methods bound, CPU and CUDA 13 backends | all three on both | none | as intended |
+| Golden outputs, existing response, CPU (6 configurations) | | 144 of 144 bit-identical | pass |
+| The same on the GPU | | 141 of 144 bit-identical; `fill` within 4.2e-18 to 4.3e-17 of its peak | pass (`fill` held to 1e-15) |
+| Golden outputs, DFFR, CPU (2 configurations on the ESA orbits; L1 orbits) | | 50 of 50 and 25 of 25 bit-identical | pass |
+| The same on the GPU | | 48 of 50 and 24 of 25 bit-identical; `fill` within 4.3e-17 to 1.2e-16 of its peak | pass |
+| LAT suite | 302 tests: 256 passed, 7 failed, 12 errors, 27 skipped | 292 tests: 246, 7, 12, 27 | the 10 tests of `test_dffr.py`, all passed before, are gone; no other outcome changed |
+| GBGPU suite | 84 tests: 72 passed, 6 failed, 6 errors | the same | no outcome changed |
+
+- The failures and errors are the same in both environments and do not touch the diagnostics:
+  among them the six cross-domain tests of `test_stft_gb_crossdomain.py`, waveform tests of
+  `test_gbgpu.py` and `test_thirdbody.py`, `DFFRGPUTest.test_compact_template_equals_fill_global`
+  (recorded in part 4c), the flow tests of the unused `gbspecialstretch` family, and tests of
+  `test_sensitivity.py`, `test_detector.py` and `test_response_alignment.py`.
+- Command, inside the job: `$OUT/regression/step6_item6/item6_chain.sh` (it applies `item6.diff`
+  to a clone of LAT at 764a94ed, builds the environment with `scripts/dffr/build_base_env.sh`, and
+  compares with `stft_golden_outputs.py --compare-files` and the work folder's `test_outcomes.py`).
+  Files: `$OUT/regression/step6_item6/` (`bindings.log`, `golden_*_after_vs_before.txt`,
+  `test_outcomes.txt`, `before/` and `after/` with the captures and the suite logs).
+- The shared environment, rebuilt after the runs of item 5 ended (2026-10-23, 13:48 to 14:03,
+  `ONLY="lisa-analysis-tools GBGPU" ./install_erebor_spider.sh` in the closing chain of item 5),
+  against the frozen environment: none of the three methods bound on either backend; the golden
+  outputs bit-identical on the CPU (144 of 144, DFFR 50 of 50 and 25 of 25) and on the GPU but for
+  `fill` (within 1.1e-16 of its peak); the LAT suite (292 tests) and the GBGPU suite (84) with the
+  same outcome for every test. Files: `$OUT/regression/step6_item6/rebuilt/`.
 
 ## Step 7: review of documentation and scripts
 
