@@ -9,7 +9,6 @@
 #include "PSD.hpp"
 #include "galactic_response.hpp"
 #include "domains.hpp"
-#include "lat_dffr_diagnostics.hh"
 #include <string>
 #include <iostream>
 #include <nanobind/nanobind.h>
@@ -132,13 +131,9 @@ class OrbitsWrap {
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
 #define KinematicsTableWrap KinematicsTableWrapGPU
 using kinematics_array_type = nb::ndarray<double, nb::device::cuda, nb::c_contig>;
-using kinematics_complex_array_type =
-    nb::ndarray<std::complex<double>, nb::device::cuda, nb::c_contig>;
 #else
 #define KinematicsTableWrap KinematicsTableWrapCPU
 using kinematics_array_type = nb::ndarray<double, nb::device::cpu, nb::c_contig>;
-using kinematics_complex_array_type =
-    nb::ndarray<std::complex<double>, nb::device::cpu, nb::c_contig>;
 #endif
 
 class KinematicsTableWrap {
@@ -181,24 +176,6 @@ class KinematicsTableWrap {
 
     // The orbit arrays must live on the device of the table arrays.
     void build(OrbitsWrap* orbits_wrap) { orbits_wrap->orbits->get_kinematics_table(&table); };
-
-    // Diagnostic: DFFR's closed-form TDI coefficients of every link in every channel, at zeroth
-    // order in the delays, [(segment * 3 + channel) * 6 + link], at one carrier per segment.
-    void compute_dffr_link_coefficients(kinematics_complex_array_type coefficients_out,
-                                        kinematics_array_type carrier_frequencies,
-                                        int tdi_generation)
-    {
-        const size_t segments = static_cast<size_t>(table.num_time_segments);
-        if (coefficients_out.size() != 18 * segments)
-            throw std::invalid_argument("coefficients_out has " +
-                                        std::to_string(coefficients_out.size()) +
-                                        " elements, expected " + std::to_string(18 * segments) +
-                                        ".");
-        dffr_link_coefficients_wrap(reinterpret_cast<cmplx*>(coefficients_out.data()), &table,
-                                    checked_pointer(carrier_frequencies, "carrier_frequencies",
-                                                    segments),
-                                    tdi_generation);
-    };
 
     // ! Checked on both backends: a short array would be overwritten past its end without notice.
     static double* checked_pointer(kinematics_array_type array, const std::string& name, size_t expected)

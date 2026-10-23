@@ -7,8 +7,8 @@
 // both gradients), and two diagnostics of a batch of sources (compact template, segment table).
 // Ported from the standalone package direct-fast-fresnel-response at commit 01530a5
 // (src/dffr/cutils/dffr.cu). A source package (GBGPU for galactic binaries) instantiates the tile
-// and the diagnostics with its source model; the source-independent diagnostics of LAT are in
-// lat_dffr_diagnostics.cu. docs/response/dffr/README.md describes the response and its integration.
+// and the diagnostics with its source model. docs/response/dffr/README.md describes the response
+// and its integration.
 //
 // * Response. Within one segment the signal that reaches spacecraft s is a linear chirp under a
 // * slowly varying envelope, expanded about the segment midpoint, so its windowed transform is a

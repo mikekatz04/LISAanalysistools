@@ -470,14 +470,6 @@ void detector_part(nb::module_ &m) {
     .def("build", &KinematicsTableWrap::build, nb::arg("orbits"),
          nb::call_guard<nb::gil_scoped_release>(),
          "Fill the table at the segment midpoints from an OrbitsWrap on the same device.")
-    .def("compute_dffr_link_coefficients", &KinematicsTableWrap::compute_dffr_link_coefficients,
-         nb::arg("coefficients_out").noconvert(), nb::arg("carrier_frequencies").noconvert(),
-         nb::arg("tdi_generation"),
-         nb::call_guard<nb::gil_scoped_release>(),
-         "Diagnostic: DFFR's closed-form TDI coefficients at zeroth order in the delays.\n\n"
-         "coefficients_out[(segment * 3 + channel) * 6 + link] receives the coefficient of the\n"
-         "link in the channel (X, Y, Z), with the delays exp(-2 pi i f L) at the table's light\n"
-         "travel times and carrier_frequencies[segment]. tdi_generation is 1 or 2.")
     .def_prop_ro("first_segment_midpoint",
                  [](const KinematicsTableWrap &self) { return self.table.first_segment_midpoint; })
     .def_prop_ro("segment_time",
@@ -711,26 +703,7 @@ void domains_part(nb::module_ &m) {
          "linear_envelope has NO effect here (by design): this API receives\n"
          "no response stencil, hence no per-segment amplitude slope; the\n"
          "envelope correction acts only on the likelihood/fill paths where\n"
-         "FresnelColumn::setup derives the slope from the +-D TDI samples.")
-    .def("compute_dffr_sub_intervals", &STFTFresnelWrap::compute_dffr_sub_intervals,
-         nb::arg("kernel_out"), nb::arg("moment_out"), nb::arg("lower_bounds"),
-         nb::arg("upper_bounds"), nb::arg("detunings"), nb::arg("chirp_rates"),
-         nb::arg("chirp_rate_floor"), nb::arg("num"),
-         nb::call_guard<nb::gil_scoped_release>(),
-         "Diagnostic: the bounded sub-interval integral of DFFR and its first moment.\n\n"
-         "kernel_out receives int_a^b exp(i [2 pi detuning tau + pi alpha tau^2]) dtau and\n"
-         "moment_out the same integral with an extra tau in the integrand. A chirp rate alpha\n"
-         "closer to zero than chirp_rate_floor is moved to the floor, its sign kept.")
-    .def("compute_dffr_windowed_kernels", &STFTFresnelWrap::compute_dffr_windowed_kernels,
-         nb::arg("kernel_out"), nb::arg("moment_out"), nb::arg("effective_frequencies"),
-         nb::arg("chirp_rates"), nb::arg("frequencies"), nb::arg("chirp_rate_floor"),
-         nb::arg("num"),
-         nb::call_guard<nb::gil_scoped_release>(),
-         "Diagnostic: DFFR's windowed transform of a linear chirp and its first moment.\n\n"
-         "With tau measured from the segment midpoint and the window of this object,\n"
-         "  kernel = e^{-i pi f dt} int w(tau) e^{i [2 pi (f_eff - f) tau + pi alpha tau^2]} dtau,\n"
-         "  moment = the same integral with an extra tau in the integrand,\n"
-         "the Fourier origin at the segment start.");
+         "FresnelColumn::setup derives the slope from the +-D TDI samples.");
 }
 
 

@@ -241,53 +241,6 @@ public:
             return_pointer_and_check_length(arguments, "arguments", num, 1),
             num);
     }
-
-    // Diagnostic: DFFR's bounded sub-interval integral and its first moment about tau = 0, so both
-    // can be compared with the integrals they represent.
-    void compute_dffr_sub_intervals(
-        array_type<std::complex<double>> kernel_out,
-        array_type<std::complex<double>> moment_out,
-        array_type<double> lower_bounds,
-        array_type<double> upper_bounds,
-        array_type<double> detunings,
-        array_type<double> chirp_rates,
-        double chirp_rate_floor,
-        int num)
-    {
-        dffr_sub_intervals_wrap(
-            reinterpret_cast<cmplx*>(
-                return_pointer_and_check_length(kernel_out, "kernel_out", num, 1)),
-            reinterpret_cast<cmplx*>(
-                return_pointer_and_check_length(moment_out, "moment_out", num, 1)),
-            return_pointer_and_check_length(lower_bounds, "lower_bounds", num, 1),
-            return_pointer_and_check_length(upper_bounds, "upper_bounds", num, 1),
-            return_pointer_and_check_length(detunings, "detunings", num, 1),
-            return_pointer_and_check_length(chirp_rates, "chirp_rates", num, 1),
-            chirp_rate_floor, num);
-    }
-
-    // Diagnostic: DFFR's windowed transform with this object's window and segment, and its first
-    // moment about the segment midpoint.
-    void compute_dffr_windowed_kernels(
-        array_type<std::complex<double>> kernel_out,
-        array_type<std::complex<double>> moment_out,
-        array_type<double> effective_frequencies,
-        array_type<double> chirp_rates,
-        array_type<double> frequencies,
-        double chirp_rate_floor,
-        int num)
-    {
-        dffr_windowed_kernels_wrap(
-            reinterpret_cast<cmplx*>(
-                return_pointer_and_check_length(kernel_out, "kernel_out", num, 1)),
-            reinterpret_cast<cmplx*>(
-                return_pointer_and_check_length(moment_out, "moment_out", num, 1)),
-            fresnel,
-            return_pointer_and_check_length(effective_frequencies, "effective_frequencies", num, 1),
-            return_pointer_and_check_length(chirp_rates, "chirp_rates", num, 1),
-            return_pointer_and_check_length(frequencies, "frequencies", num, 1),
-            chirp_rate_floor, num);
-    }
 };
 
 #endif // __BINDING_DOMAINS_HPP__
