@@ -679,9 +679,9 @@ Point-in-time; use them to recognise an order of magnitude, not as a spec.
   inside a leg loses that leg.
 - Store surgery (copy a leaf, re-rung, rewind, salvage) only on a STOPPED
   store, dry run first, on a copy when the user says so. Only
-  `copy_store_leaf.py` and `migrate_gb_shutoff_persist.py` refuse a store
-  written in the last 300 s (`--live-window`); for the others confirm the job
-  is dead yourself.
+  `copy_store_leaf.py`, `set_store_sources_to_injection.py` and
+  `migrate_gb_shutoff_persist.py` refuse a store written in the last 300 s
+  (`--live-window`); for the others confirm the job is dead yourself.
 - A `git pull` on the cluster changes a RUNNING job's imports (editable
   install): pull only with the job stopped.
 - A composition change inside a search stage makes the leg resume restart
@@ -690,31 +690,28 @@ Point-in-time; use them to recognise an order of magnitude, not as a spec.
 - `NULL_CHECK_ONLY=1` twice (old vs new waveform path) on a store copy is
   the way to prove a path switch is lnL-neutral before it goes live
   (`|delta| <~ 1 nat per walker`).
-- Pushing a stopped run's non-GB sources (VGB, MBHB, SOBBH, EMRI) back to the
+- Putting a stopped run's non-GB sources (VGB, MBHB, SOBBH, EMRI) back at the
   catalogue injection (Mike 2026-10-22: they "always start at the catalog
-  injected values rather than the last run's values"):
-  `scripts/flagship/relaunch_sources_at_injection.sh LAUNCHER [BRANCHES]`
-  (e.g. `STAGE_SKIP_NOISE=1 scripts/flagship/relaunch_sources_at_injection.sh
-  scripts/flagship/submit_gf_12mo.sh`). It arms
-  `{BRANCH}_RESET_TO_INJECTION_ON_RESUME=1` for that one launch; at the resume
-  `lisatools.globalfit.source_reset` puts every leaf, walker and rung of the
-  main state and the branch sub-state at this launch's own injection rows
-  (exact, no `START_FACTOR` scatter), clears their per-leaf `d_h` / `h_h`
-  (NaN until the move runs) and drops their entries from
-  `<store>_eigen_tables.pkl` (backup `.pre_source_reset_<job>`), and the
-  `setup_acs` rebuild derives the residual and lnL. No file is edited before
-  the job starts. Read one `[SOURCE-RESET] <branch>: N leaves x W walkers set
-  to the catalogue injection ...` line per branch (with the cold chain's
-  largest |change| per leaf) and the sidecar line; a row-count or column
-  mismatch against the stored leaves refuses the launch (the leaf ORDER
-  follows this launch's sorted ids, as on any resume). Requeue-safe:
-  `<store>_source_reset.json` records the job, its restart count, the row
-  and the time, so the same job REQUEUED after saving a row, or resuming a
-  mid-iteration checkpoint written after the reset, skips (`[SOURCE-RESET]
-  skipped`); if the job dies before its first saved row, rerun the script
-  rather than relaunch bare. A later bare relaunch resumes normally. New runs start there anyway: the
-  parent-run source warm start is off by default since the same date
-  (`SOURCE_WARM_START_STORE` empty).
+  injected values rather than the last run's values"; the store is edited
+  while the run is stopped, the relaunch is a separate step):
+  `scripts/fstat_proposal/set_store_sources_to_injection.py --store STORE.h5
+  --branch mbh --walker 0 --leaf 3` (one walker, one leaf), `--all-leaves`,
+  `--all-walkers`, or `--branch all --all-walkers --all-leaves`; dry run, then
+  `--apply`, then the usual launch line. It writes the LAST row only: the
+  chosen pairs' main cold row and every rung of `sub_backend/<b>/chain` =
+  the exact injection, `d_h` / `h_h` = NaN; the rows are the run's own (the
+  catalogue under the `L1_folder` and the ids of
+  `*_artifacts/run_settings.log`, sorted ids = leaf order, the stock
+  converters, `prepare_vgb_branch` for VGB), refused unless they match the
+  stored `(nleaves, ndim)`. The dry run prints each leaf's catalogue id and
+  how far every walker sits from it (`CHECK` = far on every walker: MBHB 10,
+  the prior-only leaf, shows it). Eigen-sidecar entries of leaves reset on
+  every walker are dropped (backup `.srcinj.bak`); the resume rebuilds the
+  residual and lnL. Expect extra GB band REOPENS in the first cycle after
+  it: the moved sources shift every walker's band residuals against the
+  valve's stored per-band best (more search, not a bias). New runs start
+  there anyway: the parent-run source warm start is off by default since
+  the same date (`SOURCE_WARM_START_STORE` empty).
 
 ---
 

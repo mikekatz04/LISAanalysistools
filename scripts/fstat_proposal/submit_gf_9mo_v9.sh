@@ -5362,9 +5362,9 @@ export VGB_START_FACTOR=0.0
 # OFF BY DEFAULT SINCE 2026-10-22 (Mike: the non-GB sources "always start at
 # the catalog injected values rather than the last run's values"): every
 # source leaf starts at exact truth (*_START_FACTOR=0 above). Opt back in for
-# one launch with SOURCE_WARM_START_STORE=$GF_SEED_STORE on the line; to push a
-# stopped run's sources back to the injection use
-# scripts/flagship/relaunch_sources_at_injection.sh.
+# one launch with SOURCE_WARM_START_STORE=$GF_SEED_STORE on the line; to put a
+# stopped run's sources back at the injection, edit its store first with
+# scripts/fstat_proposal/set_store_sources_to_injection.py, then relaunch.
 export SOURCE_WARM_START_STORE=${SOURCE_WARM_START_STORE-}
 export SOURCE_WARM_START_SNR_MIN=${SOURCE_WARM_START_SNR_MIN:-10}
 export MBH_SOURCE_WARM_START_IDS=${MBH_SOURCE_WARM_START_IDS:-2,5,16,18}

@@ -94,13 +94,6 @@ class EMRISettings(Settings):
     ladder_reset_on_resume: bool = dataclasses.field(
         default_factory=env_default("EMRI_LADDER_RESET_ON_RESUME", False, bool)
     )
-    # RESUME: True puts every EMRI leaf, walker and rung back at this launch's
-    # catalogue injection before the first iteration (Mike 2026-10-22). One
-    # launch only, armed by scripts/flagship/relaunch_sources_at_injection.sh;
-    # inert on a fresh store. See lisatools.globalfit.source_reset.
-    reset_to_injection_on_resume: bool = dataclasses.field(
-        default_factory=env_default("EMRI_RESET_TO_INJECTION_ON_RESUME", False, bool)
-    )
     # Lost-rung guard of the add/remove move: at each leaf visit a rung whose
     # lnL sits more than this many nats below the leaf's cold rung (beyond
     # the rung's expected tempering drop) is re-anchored to the cold state.

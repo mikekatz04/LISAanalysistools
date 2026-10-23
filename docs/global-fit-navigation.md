@@ -227,7 +227,6 @@ the cadence knob also sets the adaptation cadence.
 | `GFHDFBackend`, `ModuleSubBackend` | `globalfit/hdfbackend.py` | the store writer/reader; `save_step`, `add_recipe`, `completed_recipe_step` (stage stamps, routed through the saver since 5bf31e7b), `write_saved_after`, `_validate_resume_readable`, the running backup copy. |
 | the store layout | section 5 | |
 | `midit_checkpoint.py` | `globalfit/` | mid-iteration pickle of the state (`MIDIT_CHECKPOINT`; OFF on the legged search launch lines). The rewind trap is in its docstring. |
-| `source_reset.py` | `globalfit/` | the one-launch push of a STOPPED run's non-GB sources back to the catalogue injection (Mike 2026-10-22: they "always start at the catalog injected values rather than the last run's values"). Knobs `{VGB,MBH,EMRI,SOBBH}_RESET_TO_INJECTION_ON_RESUME` (Settings fields `reset_to_injection_on_resume`, off; never exported by a launcher, armed for one launch by `scripts/flagship/relaunch_sources_at_injection.sh LAUNCHER [BRANCHES]`). `GlobalFit.load_info` calls `maybe_reset_on_resume` last, on a LOADED state only: every leaf, walker and rung of the main state and the sub-state ladder go to this launch's `source_info[b].injection` (exact; the rows a fresh start uses), inds on; the `setup_acs` rebuild then derives the residual and lnL; their `d_h` / `h_h` read NaN until the move runs and their `<store>_eigen_tables.pkl` entries are dropped (backup `.pre_source_reset_<job>`). Refuses a missing injection, rows that do not match the stored `(nleaves, ndim)` exactly, an absent branch; warns on a knob for an unconfigured branch; a fresh start is reported, not reset. Requeue-safe through `<store>_source_reset.json` (job id, `SLURM_RESTART_COUNT`, stored row, time: the same job requeued onto a later row or a post-reset mid-iteration checkpoint skips; equal restart counts = a deliberate relaunch, applied). Log: `[SOURCE-RESET] <b>: N leaves x W walkers set to the catalogue injection ...` |
 | `residual_snapshot.py` | `globalfit/` | `<store>_residual_snapshot.npz` every `GF_RESIDUAL_SNAPSHOT_EVERY` rows (default 3, not in the launcher; 0 = off), every cold walker since 1f1289cf; what the monitor's residual panels draw. |
 | `legs.py` | `globalfit/` | `LegCursor`, `leg_ends_from_names`; resume by the saved-after NAME. |
 | `noise_ratchet.py` | `globalfit/` | the galfor ratchet (nudge / hold / release). Dropped from production 2026-10-03; the 6mo store's `gb_search_3` still carries it. |
@@ -399,6 +398,9 @@ All dry-run by default, all meant for a STOPPED store, all with a "why this
 exists" docstring. `reset_recipe_stage.py` (re-open / rewind a stage; sets
 the midit checkpoint aside), `copy_store_leaf.py` (copy one source leaf
 between walkers on every rung; built for the stuck EMRI 3 walker-0 case),
+`set_store_sources_to_injection.py` (put chosen VGB / MBHB / SOBBH / EMRI
+(walker, leaf) pairs back at the catalogue injection on every rung of the
+last row; rows rebuilt from the run's catalogue ids, Mike 2026-10-22),
 `rerung_store_branches.py` (change a branch's rung count; `--repair-unlimited`),
 `salvage_recipe_group.py` / `repair_recipe_group.py` (torn recipe headers),
 `compact_gf_store.py`, `graft_noise_state.py`, `rescale_store_walkers.py`
