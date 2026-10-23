@@ -81,10 +81,14 @@ def _wanted_rows(ds, keep, it):
 
 
 def extract(src_path, dst_path, keep, fallback_path=None, cold_keep=None,
-            gzip_level=4, shuffle=False):
+            gzip_level=4, shuffle=False, iteration=None):
     # gzip_level / shuffle: the dataset filters. The output-data snapshot asks
     # for 9 + shuffle (HDF5 built-ins, so every reader handles them): ~9 %
     # smaller on the float chains; xz at its maximum gains only ~2 % more.
+    # iteration: pin the stored row count instead of reading it, and record it
+    # in the extract. A live run keeps saving rows during a long extract; the
+    # output-data snapshot pins it so the extract and the residual snapshot it
+    # ships describe the same rows.
     cold_keep = keep if cold_keep is None else max(int(cold_keep), keep)
 
     def _filters(obj):
@@ -116,11 +120,12 @@ def extract(src_path, dst_path, keep, fallback_path=None, cold_keep=None,
             torn.append(f"{name}[{sel}] SKIPPED (zeros)")
             return None
 
-    it = None
-    try:
-        it = int(src["global_fit"].attrs.get("iteration"))
-    except Exception:
-        pass
+    it = None if iteration is None else int(iteration)
+    if it is None:
+        try:
+            it = int(src["global_fit"].attrs.get("iteration"))
+        except Exception:
+            pass
     print(f"[extract] {src_path} -> {dst_path}  (iteration attr: {it}, "
           f"keep last {keep} rows of the big iteration-axis datasets, "
           f"last {cold_keep} of the cold chains"
@@ -178,6 +183,8 @@ def extract(src_path, dst_path, keep, fallback_path=None, cold_keep=None,
     for k, v in src.attrs.items():
         dst.attrs[k] = v
     src.visititems(visit)
+    if iteration is not None:
+        dst["global_fit"].attrs["iteration"] = it
     if torn:
         # record the torn reads IN the extract so the analysis side can see
         # exactly what came from the backup or was zeroed

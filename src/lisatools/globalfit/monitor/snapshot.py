@@ -37,10 +37,13 @@ arrays (the all-rung GB chain is ~12 MB per row) keep only the rows from
 the snapshot's ``store_row`` to the store's last row: the snapshot is
 written every ``GF_RESIDUAL_SNAPSHOT_EVERY`` rows and can sit a few rows
 behind the last one, so a one-row window (``short``) would drop the very
-row the residual belongs to. Its extract is written at gzip level 9 with
-HDF5's byte-shuffle filter (both built into HDF5): ~9 % smaller than the
-level-4 extract of the other recipes on the float chains; LZMA at its
-maximum gains only ~2 % more on the same data.
+row the residual belongs to. On a live run the builder copies the snapshot
+first, waits for the saver to store its row, and pins the extract to the
+rows stored at that moment, so the tar stays consistent while the run saves
+rows and rewrites the snapshot during the extract. Its extract is written
+at gzip level 9 with HDF5's byte-shuffle filter (both built into HDF5):
+~9 % smaller than the level-4 extract of the other recipes on the float
+chains; LZMA at its maximum gains only ~2 % more on the same data.
 """
 
 from __future__ import annotations
@@ -267,25 +270,48 @@ def _short_members(run_dir: str, store: str, young_bytes: int):
     return out
 
 
-def _output_data_rows(store: str, sidecar: Optional[str]):
-    """``(keep, cold_keep)`` of an output-data extract.
+#: Seconds an output-data snapshot waits for the saver to store the residual
+#: snapshot's row before it extracts without that row (and warns).
+_OUTPUT_DATA_WAIT_S = 1800.0
 
-    ``cold_keep`` is every stored row: the cold chains are the posterior
-    samples. ``keep``, for the large tempered arrays, reaches the residual
-    snapshot's ``store_row`` from the last row (1 without a snapshot). Both
-    carry one row of margin: a row the saver writes while the extract runs
-    moves the extract's window forward by one.
+
+def _output_data_rows(store: str, sidecar: Optional[str]):
+    """``(iteration, keep, cold_keep)`` of an output-data extract.
+
+    ``iteration`` pins the rows the extract covers, so rows the run saves
+    while the extract reads (minutes for the full cold chains) stay out and
+    the extract matches the residual snapshot it ships (9-month run,
+    2026-10-22: a 2016-row extract shipped with a snapshot from row 2021).
+    The head writes the snapshot when an iteration ends and the saver stores
+    that row afterwards, so this waits up to :data:`_OUTPUT_DATA_WAIT_S` for
+    the store to hold the snapshot's ``store_row``. ``cold_keep`` is every row
+    (the cold chains are the posterior samples); ``keep``, for the large
+    tempered arrays, runs from the snapshot's row to the last row (1 without
+    a snapshot).
     """
     import h5py
     import numpy as np
 
-    with h5py.File(store, "r") as f:
-        it = int(f["global_fit"].attrs["iteration"])
+    def _rows():
+        with h5py.File(store, "r") as f:
+            return int(f["global_fit"].attrs["iteration"])
+
+    it = _rows()
     if sidecar is None:
-        return 1, it + 1
+        return it, 1, it
     with np.load(sidecar) as z:
         row = int(z["store_row"])
-    return max(1, it - row + 1), it + 1
+    if it <= row:
+        logger.info("output-data snapshot: the residual snapshot is from row %d and the "
+                    "store holds %d rows; waiting for the saver", row, it)
+    deadline = time.monotonic() + _OUTPUT_DATA_WAIT_S
+    while it <= row and time.monotonic() < deadline:
+        time.sleep(10.0)
+        it = _rows()
+    if it <= row:
+        logger.warning("output-data snapshot: the store still holds %d rows; the residual "
+                       "snapshot's row %d is NOT in the extract", it, row)
+    return it, max(1, it - row), it
 
 
 def _members(run_dir: str, include_fstat: bool, skip_raw_log,
@@ -393,10 +419,12 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
 
     ``output_data=True`` builds ``<run_dir>_output_data.tar.gz``: the store
     extract, the residual snapshot and the run folder's WDM lookup tables
-    only (see the module docstring). Its ``cold_keep`` defaults to every
-    stored row (plus one) and its ``keep`` to the rows from the snapshot's
-    ``store_row`` to the store's last row, plus one; without a snapshot file
-    it ships the extract alone with a one-row ``keep``, and a warning. It
+    only (see the module docstring). It ships a copy of the residual
+    snapshot taken before the extract and pins the extract's rows to what
+    the store holds then (see :func:`_output_data_rows`): ``cold_keep``
+    defaults to every stored row and ``keep`` to the rows from the
+    snapshot's ``store_row`` to the store's last row; without a snapshot
+    file it ships the extract alone with a one-row ``keep``, and a warning. It
     cannot be combined with ``short`` (returns ``None`` with a warning).
 
     Never raises: this runs on the writer rank, where a failed diagnostic
@@ -424,21 +452,31 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
         else "_output_data.tar.gz" if output_data
         else "_snapshot.tar.gz"))
     st = time.perf_counter()
+    # output_data: the frozen copy of the residual snapshot, its name in the
+    # tar, and the stored row count the extract is pinned to
+    frozen, arcnames, _it = None, {}, None
     try:
         store = _live_store(run_dir)
         if store is None:
             logger.warning("snapshot: no live *testing*.h5 under %s", run_dir)
             return None
         if output_data:
+            import shutil
+
             from ..residual_snapshot import snapshot_path
 
             sidecar = snapshot_path(store)
-            if not os.path.exists(sidecar):
+            if os.path.exists(sidecar):
+                # The run overwrites the snapshot every few rows: ship the copy
+                # taken now, the one the extract below is pinned to.
+                frozen = out_path + ".residual_snapshot.tmp"
+                shutil.copyfile(sidecar, frozen)
+                arcnames[frozen] = os.path.relpath(sidecar, os.path.dirname(run_dir))
+            else:
                 logger.warning("output-data snapshot: no residual snapshot "
                                "%s; shipping the store extract alone",
                                sidecar)
-                sidecar = None
-            _keep, _cold_keep = _output_data_rows(store, sidecar)
+            _it, _keep, _cold_keep = _output_data_rows(store, frozen)
             if keep is None:
                 keep = _keep
             if cold_keep is None:
@@ -446,13 +484,14 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
         from ._store_extract import extract
 
         extract(store, store[:-3] + "_extract.h5", keep, cold_keep=cold_keep,
-                **(dict(gzip_level=9, shuffle=True) if output_data else {}))
+                **(dict(gzip_level=9, shuffle=True, iteration=_it)
+                   if output_data else {}))
         if output_data:
             # the run's WDM lookup table(s): the EMRI direct template and the SOBBH
             # lookup likelihood read them, so regenerating those sources needs them
             tables = sorted(os.path.join(run_dir, fn) for fn in os.listdir(run_dir)
                             if fn.startswith("wdm_lookup_") and fn.endswith(".h5"))
-            members = ([store[:-3] + "_extract.h5"] + ([sidecar] if sidecar else [])
+            members = ([store[:-3] + "_extract.h5"] + ([frozen] if frozen else [])
                        + tables)
         elif short:
             # ALLOWLIST. No log filtering at all: the newest stdout
@@ -481,7 +520,7 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
         with tarfile.open(tmp, "w:gz") as tf:
             for p in members:
                 try:
-                    tf.add(p, arcname=os.path.relpath(
+                    tf.add(p, arcname=arcnames.get(p) or os.path.relpath(
                         p, os.path.dirname(run_dir)))
                 except (FileNotFoundError, OSError) as e:
                     # A live file can vanish or change mid-archive. Benign:
@@ -492,11 +531,12 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
     except Exception as e:                       # noqa: BLE001 -- see docstring
         logger.warning("snapshot NOT built (%s: %s). The run is unaffected.",
                        type(e).__name__, e)
-        try:
-            if os.path.exists(out_path + ".tmp"):
-                os.remove(out_path + ".tmp")
-        except Exception:
-            pass
+        for _p in (out_path + ".tmp", frozen):
+            try:
+                if _p and os.path.exists(_p):
+                    os.remove(_p)
+            except Exception:
+                pass
         return None
     _mb = os.path.getsize(out_path) / 1048576.0
     if short or output_data:
@@ -506,8 +546,8 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
         _rows = []
         for _p in members:
             try:
-                _rows.append((os.path.getsize(_p) / 1048576.0,
-                              os.path.relpath(_p, os.path.dirname(run_dir))))
+                _rows.append((os.path.getsize(_p) / 1048576.0, arcnames.get(_p)
+                              or os.path.relpath(_p, os.path.dirname(run_dir))))
             except OSError:
                 continue
         _rows.sort(reverse=True)
@@ -519,4 +559,9 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
             "\n".join(f"    {r[0]:8.2f} MB  {r[1]}" for r in _rows))
     logger.info("snapshot %s (%.1f MB) in %.1f s", out_path, _mb,
                 time.perf_counter() - st)
+    try:
+        if frozen and os.path.exists(frozen):
+            os.remove(frozen)
+    except OSError:
+        pass
     return out_path

@@ -489,10 +489,11 @@ class OutputDataSnapshotTest(unittest.TestCase):
 
     def test_the_cold_chains_keep_every_row_and_the_tempered_window_reaches_the_snapshot_row(self):
         """10 rows stored, snapshot at row 7: every row of the cold chains (the
-        posterior samples), the tempered arrays from row 7 to row 9; each
-        with one row of margin for a save landing during the extract."""
+        posterior samples), the tempered arrays from row 7 to row 9, and the
+        extract pinned to those 10 rows."""
         self._build(output_data=True)
-        self.assertEqual(self.seen_keep, (4, 11))
+        self.assertEqual(self.seen_keep, (3, 10))
+        self.assertEqual(self.seen_filters["iteration"], 10)
 
     def test_an_explicit_keep_still_wins(self):
         self._build(output_data=True, keep=2, cold_keep=3)
@@ -502,14 +503,60 @@ class OutputDataSnapshotTest(unittest.TestCase):
         os.remove(self.sidecar)
         self.assertEqual(self._names(), ["gf_prod_testing_extract.h5",
                                          "wdm_lookup_emri_cx_NF1440_DT2p5_TL32_fd8x0p01_nld2.h5"])
-        self.assertEqual(self.seen_keep, (1, 11))
+        self.assertEqual(self.seen_keep, (1, 10))
 
     def test_short_and_output_data_together_build_nothing(self):
         self.assertIsNone(self._build(output_data=True, short=True))
 
+    def _set(self, iteration=None, store_row=None):
+        import h5py
+        import numpy as np
+
+        if iteration is not None:
+            with h5py.File(self.store, "a") as f:
+                f["global_fit"].attrs["iteration"] = iteration
+        if store_row is not None:
+            np.savez(self.sidecar, store_row=store_row)
+
+    def test_the_snapshot_shipped_is_the_one_taken_before_the_extract(self):
+        """The run overwrites the snapshot while a long extract reads (the
+        9-month tar of 2026-10-22 shipped a 2016-row extract with a snapshot
+        from row 2021): the tar carries the copy the extract is pinned to."""
+        import io
+
+        import numpy as np
+
+        def extract_while_the_run_moves_on(src, dst, keep, cold_keep=None, **filters):
+            self._fake_extract(src, dst, keep, cold_keep, **filters)
+            self._set(iteration=13, store_row=12)
+
+        with mock.patch("lisatools.globalfit.monitor._store_extract.extract",
+                        side_effect=extract_while_the_run_moves_on):
+            out = snap.build_snapshot(self.run, output_data=True)
+        with tarfile.open(out) as tf:
+            row = int(np.load(io.BytesIO(tf.extractfile(
+                "gf_run/gf_prod_testing_residual_snapshot.npz").read()))["store_row"])
+        self.assertEqual(row, 7)
+        self.assertEqual(self.seen_filters["iteration"], 10)
+        self.assertEqual(sorted(os.listdir(self.d)), ["gf_run", "gf_run_output_data.tar.gz"])
+
+    def test_it_waits_for_the_saver_to_store_the_snapshot_row(self):
+        self._set(store_row=12)
+        with mock.patch("lisatools.globalfit.monitor.snapshot.time.sleep",
+                        side_effect=lambda s: self._set(iteration=13)):
+            self._build(output_data=True)
+        self.assertEqual(self.seen_filters["iteration"], 13)
+        self.assertEqual(self.seen_keep, (1, 13))
+
+    def test_it_gives_up_after_the_wait_and_still_builds(self):
+        self._set(store_row=12)
+        with mock.patch.object(snap, "_OUTPUT_DATA_WAIT_S", 0.0):
+            self.assertIsNotNone(self._build(output_data=True))
+        self.assertEqual(self.seen_filters["iteration"], 10)
+
     def test_the_extract_is_written_at_maximal_compression(self):
         self._build(output_data=True)
-        self.assertEqual(self.seen_filters, {"gzip_level": 9, "shuffle": True})
+        self.assertEqual((self.seen_filters["gzip_level"], self.seen_filters["shuffle"]), (9, True))
 
 
 class ExtractFiltersTest(unittest.TestCase):
@@ -551,6 +598,10 @@ class ExtractFiltersTest(unittest.TestCase):
             self.assertEqual((d.compression, d.compression_opts, d.shuffle), ("gzip", 9, True))
             np.testing.assert_array_equal(d[...], self.chain)
             self.assertFalse(f["global_fit/saved_after"].shuffle)
+
+    def test_iteration_pins_the_rows_and_is_recorded(self):
+        with self._extract(iteration=4, cold_keep=4) as f:
+            self.assertEqual(int(f["global_fit"].attrs["iteration"]), 4)
 
     def test_the_default_is_unchanged(self):
         with self._extract() as f:
