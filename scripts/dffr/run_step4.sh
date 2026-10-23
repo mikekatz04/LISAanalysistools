@@ -4,7 +4,7 @@
 # What each part records, and the results, are in docs/response/dffr/tests.md.
 #
 # Usage: run_step4.sh --device cpu|gpu OUTPUT_ROOT [PART ...]
-#   PART: environment golden oracle accuracy tests unit_numbers exchange against_existing benchmarks
+#   PART: environment golden oracle accuracy tests exchange against_existing benchmarks
 #                                                  (the default, in order)
 #         golden_l1 benchmarks_l1                  (need MOJITO_L1, a Mojito L1 file)
 #         gbgpu_tests lat_tests                    (the two halves of tests)
@@ -24,8 +24,7 @@ output_root=${3:?$usage}
 shift 3
 parts=("$@")
 [ ${#parts[@]} -gt 0 ] ||
-    parts=(environment golden oracle accuracy tests unit_numbers exchange against_existing
-        benchmarks)
+    parts=(environment golden oracle accuracy tests exchange against_existing benchmarks)
 
 python_bin=${PYTHON:-python}
 mojito_l1=${MOJITO_L1:-}
@@ -155,11 +154,6 @@ for name in ('lisaanalysistools', 'gbgpu', 'gpubackendtools', 'numpy', 'scipy', 
                 echo "pytest exit status $status" >> "$regression_dir/accuracy_base_cpu.log"
             fi
             grep -hE "^\[(e2e|accuracy)\]|exit status" "$regression_dir"/accuracy_*cpu.log
-            ;;
-        unit_numbers)
-            (cd "$lat_root" &&
-                "$python_bin" "$script_dir/dffr_unit_numbers.py" --device "$device") \
-                | tee "$regression_dir/unit_numbers_$device.txt"
             ;;
         exchange)
             # * LAT stores its inputs and outputs, standalone dffr recomputes the outputs in its own

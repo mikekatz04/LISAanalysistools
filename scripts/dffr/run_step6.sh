@@ -23,10 +23,17 @@
 #         mojito             the 5 galactic binaries of highest frequency in the Mojito-light data
 #                            (MOJITO_FOLDER), preprocessed as the global fit does over 1.92 years:
 #                            mismatch, SNR and likelihood surfaces of the four waveforms
+#         globalfit_smoke    the high-frequency GB global fit of the Mojito-light data
+#                            (gb_high_freq_globalfit_settings.py) for a few iterations, both
+#                            responses one after the other, into validation/globalfit_smoke/
+#         globalfit_tdi_on_the_fly, globalfit_dffr
+#                            one full run of that response (1.45 days of wall clock) into
+#                            GLOBAL_FIT_RUNS_DIR/gb_high_freq_<response>/ (run_globalfit.sbatch)
 # Environment: PYTHON (default python), DFFR_PYTHON (the Python of the standalone dffr
 #   environment, for the truth), DAYS (default 365), N_SIDE_BINS (default 60, side bins of the
 #   templates; production takes 10), SURFACE_PROCESSES (default 4, part surfaces), MOJITO_FOLDER
-#   (default /project/lisa_nlddpc/Data/mojito_light, part mojito).
+#   (default /project/lisa_nlddpc/Data/mojito_light, parts mojito and globalfit_*),
+#   GLOBAL_FIT_RUNS_DIR (parts globalfit_tdi_on_the_fly and globalfit_dffr).
 set -euo pipefail
 
 usage="usage: run_step6.sh --device cpu|gpu OUTPUT_ROOT [PART ...]"
@@ -163,10 +170,49 @@ mojito() {
         --output "$mojito_dir" --mojito "$mojito_folder" > "$mojito_dir/run.log" 2>&1
 }
 
+# ! A second MPI start in one Slurm step hangs, so each global-fit run starts as an MPI singleton.
+singleton_env=()
+for name in $(compgen -e | grep -E '^(SLURM|PMI|PMIX|OMPI)'); do
+    singleton_env+=(-u "$name")
+done
+
+globalfit_run() {
+    local settings_function=$1 runs_dir=$2 name=$3 interval_s=$4 monitor status=0
+    local run_dir="$runs_dir/$name"
+    local backend="$run_dir/${name}_parameter_estimation_main.h5"
+    # ! The global fit resumes from an existing backend, so a new run needs a clean folder.
+    [ ! -e "$backend" ] || { echo "$backend exists; move it away first" >&2; return 2; }
+    mkdir -p "$run_dir"
+    nvidia-smi --query-gpu=timestamp,memory.used,utilization.gpu --format=csv -l "$interval_s" \
+        > "$run_dir/gpu_memory.csv" 2>&1 &
+    monitor=$!
+    env "${singleton_env[@]}" GLOBAL_FIT_RUNS_DIR="$runs_dir" MOJITO_FOLDER="$mojito_folder" \
+        "$python_bin" -u "$script_dir/../run_global.py" \
+        -sfp "$script_dir/gb_high_freq_globalfit_settings.py" -sff "$settings_function" \
+        > "$run_dir/run.log" 2>&1 || status=1
+    kill "$monitor" 2> /dev/null || true
+    return "$status"
+}
+
+globalfit_smoke() {
+    local smoke_dir="$output_root/validation/globalfit_smoke" status=0 response
+    for response in tdi_on_the_fly dffr; do
+        globalfit_run "get_${response}_smoke_settings" "$smoke_dir" \
+            "gb_high_freq_${response}_smoke" 10 || status=1
+    done
+    return "$status"
+}
+
+globalfit_response() {
+    local runs_dir=${GLOBAL_FIT_RUNS_DIR:?set GLOBAL_FIT_RUNS_DIR for the full global-fit runs}
+    globalfit_run "get_$1_settings" "$runs_dir" "gb_high_freq_$1" 60
+}
+
 for part in "${parts[@]}"; do
     echo "[step6] $(date +%T) part $part"
     case "$part" in
-    accuracy | truth_chains | accuracy_response | step0 | surfaces | mojito) "$part" ;;
+    accuracy | truth_chains | accuracy_response | step0 | surfaces | mojito | globalfit_smoke) "$part" ;;
+    globalfit_tdi_on_the_fly | globalfit_dffr) globalfit_response "${part#globalfit_}" ;;
     *) echo "unknown part $part" >&2 && exit 2 ;;
     esac
 done

@@ -10,9 +10,8 @@ and of the instrument noise, read and preprocessed as the global fit does with t
 ``mojito_input/gb_high_freq_global_fit_settings.py``: ``L1ProcessingStep`` with the L1 orbits of
 the noise file (ICRS, Mojito mean arm length), a high-pass at 1e-5 Hz and a low-pass at 0.1 Hz
 (order-2 Butterworth, zero phase), downsampling to 5 s (Kaiser window, beta 31) and 200 h trimmed
-from each end, then the first 1.92 years, the longest span the trim leaves (author's choice for
-item 4; the settings file takes 9 months). Both domains use the 701 whole one-day segments of that
-span. The processed streams of the galaxy, of the noise and of their sum are cached in DIR/data
+from each end, then the first 1.92 years (author's choice for item 4; the settings file takes 9
+months; the trim leaves 713.8 days). Both domains use the 701 whole one-day segments of that span. The processed streams of the galaxy, of the noise and of their sum are cached in DIR/data
 with the chosen sources; delete that folder to build them again.
 
 Sources: the NUM_SOURCES binaries of highest GW22 frequency, at the catalogue's amplitudes, with
@@ -135,7 +134,7 @@ from td_injection import PARAMETER_NAMES  # noqa: E402
 DEFAULT_MOJITO = Path("/project/lisa_nlddpc/Data/mojito_light")
 NUM_SOURCES = 5
 # * The preprocessing of mojito_input/gb_high_freq_global_fit_settings.py, with 1.92 years in
-# * place of its 9 months: the longest span that 200 h trimmed at each end leave of 731 days.
+# * place of its 9 months; 200 h trimmed at each end leave 713.8 of the 730.5 days.
 OBSERVATION_YEARS = 1.92
 PREPROCESS_KWARGS = dict(
     highpass_kwargs=dict(cutoff=1e-5, order=2, zero_phase=True),
