@@ -450,10 +450,18 @@ class OutputDataSnapshotTest(unittest.TestCase):
         self.run = os.path.join(self.d, "gf_run")
         os.makedirs(self.run)
         self.store = os.path.join(self.run, "gf_prod_testing.h5")
+        # 16 allocated rows, 10 stored; row r's two walkers have lnL -r-0.1, -r-0.2
+        self.log_like = -(np.arange(16)[:, None] + np.array([0.1, 0.2])).reshape(16, 1, 1, 2)
         with h5py.File(self.store, "w") as f:
-            f.create_group("global_fit").attrs["iteration"] = 10
+            g = f.create_group("global_fit")
+            g.attrs["iteration"] = 10
+            g.create_dataset("log_like", data=self.log_like)
         self.sidecar = os.path.join(self.run, "gf_prod_testing_residual_snapshot.npz")
-        np.savez(self.sidecar, store_row=7)
+        self._set(store_row=7)
+        # no real waiting: a test that waits sets its own budget and a fake clock
+        _p = mock.patch.object(snap, "_OUTPUT_DATA_WAIT_S", 0.0)
+        _p.start()
+        self.addCleanup(_p.stop)
         _touch(os.path.join(self.run, "wdm_lookup_emri_cx_NF1440_DT2p5_TL32_fd8x0p01_nld2.h5"), 64)
         for rel in ("slurm_stdout_662.log", "run_settings.log", "gb_setup.log",
                     "gf_prod_eigen_tables.pkl", "gb_truth_3to21.npz",
@@ -508,7 +516,9 @@ class OutputDataSnapshotTest(unittest.TestCase):
     def test_short_and_output_data_together_build_nothing(self):
         self.assertIsNone(self._build(output_data=True, short=True))
 
-    def _set(self, iteration=None, store_row=None):
+    def _set(self, iteration=None, store_row=None, lnl_row=None):
+        """Move the store to ``iteration`` rows and/or write a snapshot of
+        ``store_row`` carrying the lnL of ``lnl_row`` (default: its own row)."""
         import h5py
         import numpy as np
 
@@ -516,16 +526,22 @@ class OutputDataSnapshotTest(unittest.TestCase):
             with h5py.File(self.store, "a") as f:
                 f["global_fit"].attrs["iteration"] = iteration
         if store_row is not None:
-            np.savez(self.sidecar, store_row=store_row)
+            r = store_row if lnl_row is None else lnl_row
+            np.savez(self.sidecar, store_row=store_row, lnl=self.log_like[r, 0, 0])
+
+    def _shipped_row(self, out):
+        import io
+
+        import numpy as np
+
+        with tarfile.open(out) as tf:
+            return int(np.load(io.BytesIO(tf.extractfile(
+                "gf_run/gf_prod_testing_residual_snapshot.npz").read()))["store_row"])
 
     def test_the_snapshot_shipped_is_the_one_taken_before_the_extract(self):
         """The run overwrites the snapshot while a long extract reads (the
         9-month tar of 2026-10-22 shipped a 2016-row extract with a snapshot
         from row 2021): the tar carries the copy the extract is pinned to."""
-        import io
-
-        import numpy as np
-
         def extract_while_the_run_moves_on(src, dst, keep, cold_keep=None, **filters):
             self._fake_extract(src, dst, keep, cold_keep, **filters)
             self._set(iteration=13, store_row=12)
@@ -533,20 +549,66 @@ class OutputDataSnapshotTest(unittest.TestCase):
         with mock.patch("lisatools.globalfit.monitor._store_extract.extract",
                         side_effect=extract_while_the_run_moves_on):
             out = snap.build_snapshot(self.run, output_data=True)
-        with tarfile.open(out) as tf:
-            row = int(np.load(io.BytesIO(tf.extractfile(
-                "gf_run/gf_prod_testing_residual_snapshot.npz").read()))["store_row"])
-        self.assertEqual(row, 7)
+        self.assertEqual(self._shipped_row(out), 7)
         self.assertEqual(self.seen_filters["iteration"], 10)
         self.assertEqual(sorted(os.listdir(self.d)), ["gf_run", "gf_run_output_data.tar.gz"])
 
+    def _waiting(self, on_sleep, budget=600.0):
+        clock = iter(range(0, 100000, 30))
+        return mock.patch.multiple(
+            "lisatools.globalfit.monitor.snapshot.time",
+            sleep=mock.Mock(side_effect=on_sleep),
+            monotonic=mock.Mock(side_effect=lambda: next(clock))), \
+            mock.patch.object(snap, "_OUTPUT_DATA_WAIT_S", budget)
+
     def test_it_waits_for_the_saver_to_store_the_snapshot_row(self):
         self._set(store_row=12)
-        with mock.patch("lisatools.globalfit.monitor.snapshot.time.sleep",
-                        side_effect=lambda s: self._set(iteration=13)):
+        a, b = self._waiting(lambda s: self._set(iteration=13))
+        with a, b, mock.patch("builtins.print"):
             self._build(output_data=True)
         self.assertEqual(self.seen_filters["iteration"], 13)
         self.assertEqual(self.seen_keep, (1, 13))
+
+    def test_a_stale_snapshot_is_not_shipped_while_the_run_writes_a_new_one(self):
+        """The row it names is stored but holds other lnL (a snapshot left from
+        an earlier trajectory): wait for the run's next snapshot."""
+        self._set(store_row=8, lnl_row=14)
+        a, b = self._waiting(lambda s: self._set(store_row=9))
+        with a, b, mock.patch("builtins.print"):
+            out = self._build(output_data=True)
+        self.assertEqual(self._shipped_row(out), 9)
+        self.assertEqual(self.seen_keep, (1, 10))
+
+    def test_a_lagging_saver_is_awaited_not_chased(self):
+        """Row 12 not stored yet and the head writes row 15 meanwhile: the
+        copy of row 12 ships once the saver stores it."""
+        self._set(store_row=12)
+        steps = iter([lambda: self._set(store_row=15), lambda: self._set(iteration=13)])
+        a, b = self._waiting(lambda s: next(steps, lambda: None)())
+        with a, b, mock.patch("builtins.print"):
+            out = self._build(output_data=True)
+        self.assertEqual(self._shipped_row(out), 12)
+        self.assertEqual(self.seen_filters["iteration"], 13)
+
+    def test_after_the_wait_it_ships_what_it_has_and_says_why(self):
+        self._set(store_row=8, lnl_row=4)
+        with mock.patch.object(snap, "_OUTPUT_DATA_WAIT_S", 0.0), \
+                self.assertLogs(snap.logger, "WARNING") as logs:
+            self.assertIsNotNone(self._build(output_data=True))
+        self.assertIn("does not match the stored row 8 (it matches the stored row 4)",
+                      logs.output[0])
+
+    def test_the_wait_says_so_and_reports_every_minute(self):
+        """A wait is printed, not logged at INFO (which the CLI does not show),
+        with the store's last-write age so a stopped run is recognisable."""
+        self._set(store_row=12)
+        a, b = self._waiting(None, budget=200.0)
+        with a, b, mock.patch("builtins.print") as out:
+            self._build(output_data=True)
+        said = [c.args[0] for c in out.call_args_list if "waiting for" in str(c.args)]
+        self.assertIn("its row 12 is not stored yet; the store holds 10 rows", said[0])
+        self.assertIn("last written", said[0])
+        self.assertGreater(len(said), 1)
 
     def test_it_gives_up_after_the_wait_and_still_builds(self):
         self._set(store_row=12)
@@ -603,6 +665,22 @@ class ExtractFiltersTest(unittest.TestCase):
         with self._extract(iteration=4, cold_keep=4) as f:
             self.assertEqual(int(f["global_fit"].attrs["iteration"]), 4)
 
+    def test_a_long_window_reports_its_progress(self):
+        import h5py
+        import numpy as np
+
+        with h5py.File(self.src, "a") as f:
+            f["global_fit"].attrs["iteration"] = 250
+            f["global_fit"].create_dataset("chain/gb", data=np.ones((250, 1, 1, 2, 3, 4)))
+        from lisatools.globalfit.monitor import _store_extract as se
+
+        with mock.patch.object(se, "LISTED_CAP", 0), mock.patch("builtins.print") as out:
+            se.extract(self.src, os.path.join(self.d, "x.h5"), 1, cold_keep=250)
+        lines = [str(c.args[0]) for c in out.call_args_list]
+        self.assertEqual([m.split(" (")[0] for m in lines if "..." in m],
+                         ["  ... global_fit/chain/gb row 100/250",
+                          "  ... global_fit/chain/gb row 200/250"])
+
     def test_the_default_is_unchanged(self):
         with self._extract() as f:
             d = f["global_fit/chain/mbh"]
@@ -631,6 +709,15 @@ class OutputDataCLITest(unittest.TestCase):
         bsm.assert_not_called()
         self.assertTrue(bs.call_args.kwargs["output_data"])
         self.assertFalse(bs.call_args.kwargs["short"])
+
+    def test_verbose_shows_the_monitor_info_log(self):
+        import logging
+
+        lg = logging.getLogger("lisatools.globalfit.monitor")
+        self.addCleanup(lg.setLevel, lg.level)
+        with mock.patch("logging.basicConfig"):
+            self._main("RUN", "--output-data", "-v")
+        self.assertEqual(lg.level, logging.INFO)
 
     def test_it_refuses_the_other_tar_and_page_flags(self):
         for other in ("--short", "--short-page", "--snapshot"):

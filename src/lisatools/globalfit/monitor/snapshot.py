@@ -37,10 +37,11 @@ arrays (the all-rung GB chain is ~12 MB per row) keep only the rows from
 the snapshot's ``store_row`` to the store's last row: the snapshot is
 written every ``GF_RESIDUAL_SNAPSHOT_EVERY`` rows and can sit a few rows
 behind the last one, so a one-row window (``short``) would drop the very
-row the residual belongs to. On a live run the builder copies the snapshot
-first, waits for the saver to store its row, and pins the extract to the
-rows stored at that moment, so the tar stays consistent while the run saves
-rows and rewrites the snapshot during the extract. Its extract is written
+row the residual belongs to. The builder ships a copy of the snapshot only
+once its log likelihoods equal the stored row it names (waiting for the run
+to store that row or write a new snapshot), and pins the extract to the rows
+stored at that moment, so the tar stays consistent while the run saves rows
+and rewrites the snapshot during the extract. Its extract is written
 at gzip level 9 with HDF5's byte-shuffle filter (both built into HDF5):
 ~9 % smaller than the level-4 extract of the other recipes on the float
 chains; LZMA at its maximum gains only ~2 % more on the same data.
@@ -270,48 +271,95 @@ def _short_members(run_dir: str, store: str, young_bytes: int):
     return out
 
 
-#: Seconds an output-data snapshot waits for the saver to store the residual
-#: snapshot's row before it extracts without that row (and warns).
+#: Seconds an output-data snapshot waits for a residual snapshot that matches
+#: the store before it ships the one it has (and warns).
 _OUTPUT_DATA_WAIT_S = 1800.0
 
 
-def _output_data_rows(store: str, sidecar: Optional[str]):
-    """``(iteration, keep, cold_keep)`` of an output-data extract.
-
-    ``iteration`` pins the rows the extract covers, so rows the run saves
-    while the extract reads (minutes for the full cold chains) stay out and
-    the extract matches the residual snapshot it ships (9-month run,
-    2026-10-22: a 2016-row extract shipped with a snapshot from row 2021).
-    The head writes the snapshot when an iteration ends and the saver stores
-    that row afterwards, so this waits up to :data:`_OUTPUT_DATA_WAIT_S` for
-    the store to hold the snapshot's ``store_row``. ``cold_keep`` is every row
-    (the cold chains are the posterior samples); ``keep``, for the large
-    tempered arrays, runs from the snapshot's row to the last row (1 without
-    a snapshot).
-    """
+def _stored_log_like(store: str):
+    """``(iteration, log_like)``: the store's stored row count and the cold
+    chain's log likelihood of each stored row, walkers flattened."""
     import h5py
+
+    with h5py.File(store, "r") as f:
+        g = f["global_fit"]
+        it = int(g.attrs["iteration"])
+        ll = g["log_like"][:it]
+    return it, ll.reshape(it, -1)
+
+
+def _output_data_rows(store: str, sidecar: Optional[str] = None,
+                      frozen: Optional[str] = None):
+    """``(iteration, keep, cold_keep)`` of an output-data extract, with the
+    residual snapshot it ships copied to ``frozen``.
+
+    The snapshot names its row (``store_row``) and carries that row's cold
+    log likelihoods (``lnl``). It is shipped only once its ``lnl`` equals the
+    stored row it names: the 9-month tars of 2026-10-22 paired a 2016-row
+    extract with a snapshot of row 2021, twice, so the label alone is not
+    trusted. Until they match it re-reads the store every 10 s for up to
+    :data:`_OUTPUT_DATA_WAIT_S` and prints why every minute, with the age of
+    each file's last write (a stopped run writes neither): a row not stored
+    yet keeps the copy (the saver can lag the head, and the head writes newer
+    snapshots meanwhile); a stored row with other log likelihoods (a snapshot
+    left from an earlier trajectory) takes the run's next snapshot. Then it
+    ships the copy it has and warns. ``iteration`` pins the rows the extract
+    covers to the store at the match, so rows saved during the extract stay
+    out. ``cold_keep`` is every row (the cold chains are the posterior
+    samples); ``keep``, for the large tempered arrays, runs from the
+    snapshot's row to the last row (1 without a snapshot).
+    """
+    import shutil
+
     import numpy as np
 
-    def _rows():
-        with h5py.File(store, "r") as f:
-            return int(f["global_fit"].attrs["iteration"])
-
-    it = _rows()
     if sidecar is None:
+        it = _stored_log_like(store)[0]
         return it, 1, it
-    with np.load(sidecar) as z:
-        row = int(z["store_row"])
-    if it <= row:
-        logger.info("output-data snapshot: the residual snapshot is from row %d and the "
-                    "store holds %d rows; waiting for the saver", row, it)
-    deadline = time.monotonic() + _OUTPUT_DATA_WAIT_S
-    while it <= row and time.monotonic() < deadline:
+
+    def _age(p):
+        try:
+            return f"{(time.time() - os.path.getmtime(p)) / 60.0:.0f} min ago"
+        except OSError:
+            return "never"
+
+    t0, said, copied, row, stale = time.monotonic(), None, None, None, True
+    while True:
+        it = None
+        try:
+            m = os.path.getmtime(sidecar)
+            if stale and m != copied:
+                shutil.copyfile(sidecar, frozen)
+                copied = m
+                with np.load(frozen) as z:
+                    row, lnl = int(z["store_row"]), np.ravel(z["lnl"])
+            it, ll = _stored_log_like(store)
+            if row < it and np.array_equal(ll[row], lnl):
+                return it, it - row, it
+            stale = row < it
+            why = (f"its row {row} is not stored yet" if row >= it
+                   else f"its lnl does not match the stored row {row}")
+            if ll.shape[1] == lnl.size:
+                hits = np.flatnonzero(np.all(ll == lnl, axis=1))
+                if hits.size:
+                    why += f" (it matches the stored row {int(hits[0])})"
+            why += f"; the store holds {it} rows"
+        except (OSError, KeyError, ValueError) as e:
+            copied, stale = None, True
+            why = f"unreadable ({type(e).__name__}: {e})"
+        now = time.monotonic()
+        if now - t0 >= _OUTPUT_DATA_WAIT_S:
+            logger.warning("output-data snapshot: the residual snapshot shipped does NOT "
+                           "match the extract: %s", why)
+            it = _stored_log_like(store)[0] if it is None else it
+            return it, (it - row if row is not None and 0 <= row < it else 1), it
+        if said is None or now - said >= 60.0:
+            said = now
+            print(f"[monitor] output-data: waiting for a residual snapshot that matches "
+                  f"the store ({(now - t0) / 60:.0f} of {_OUTPUT_DATA_WAIT_S / 60:.0f} "
+                  f"min): {why}; the store was last written {_age(store)}, the "
+                  f"snapshot {_age(sidecar)}", flush=True)
         time.sleep(10.0)
-        it = _rows()
-    if it <= row:
-        logger.warning("output-data snapshot: the store still holds %d rows; the residual "
-                       "snapshot's row %d is NOT in the extract", it, row)
-    return it, max(1, it - row), it
 
 
 def _members(run_dir: str, include_fstat: bool, skip_raw_log,
@@ -420,8 +468,8 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
     ``output_data=True`` builds ``<run_dir>_output_data.tar.gz``: the store
     extract, the residual snapshot and the run folder's WDM lookup tables
     only (see the module docstring). It ships a copy of the residual
-    snapshot taken before the extract and pins the extract's rows to what
-    the store holds then (see :func:`_output_data_rows`): ``cold_keep``
+    snapshot that matches the store and pins the extract's rows to what the
+    store holds then (see :func:`_output_data_rows`): ``cold_keep``
     defaults to every stored row and ``keep`` to the rows from the
     snapshot's ``store_row`` to the store's last row; without a snapshot
     file it ships the extract alone with a one-row ``keep``, and a warning. It
@@ -461,22 +509,20 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
             logger.warning("snapshot: no live *testing*.h5 under %s", run_dir)
             return None
         if output_data:
-            import shutil
-
             from ..residual_snapshot import snapshot_path
 
             sidecar = snapshot_path(store)
             if os.path.exists(sidecar):
-                # The run overwrites the snapshot every few rows: ship the copy
-                # taken now, the one the extract below is pinned to.
+                # The run overwrites the snapshot every few rows: ship a copy
+                # that matches the store, the one the extract is pinned to.
                 frozen = out_path + ".residual_snapshot.tmp"
-                shutil.copyfile(sidecar, frozen)
                 arcnames[frozen] = os.path.relpath(sidecar, os.path.dirname(run_dir))
             else:
                 logger.warning("output-data snapshot: no residual snapshot "
                                "%s; shipping the store extract alone",
                                sidecar)
-            _it, _keep, _cold_keep = _output_data_rows(store, frozen)
+            _it, _keep, _cold_keep = _output_data_rows(
+                store, sidecar if frozen else None, frozen)
             if keep is None:
                 keep = _keep
             if cold_keep is None:
@@ -491,6 +537,7 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
             # lookup likelihood read them, so regenerating those sources needs them
             tables = sorted(os.path.join(run_dir, fn) for fn in os.listdir(run_dir)
                             if fn.startswith("wdm_lookup_") and fn.endswith(".h5"))
+            print("[monitor] output-data: writing the tar", flush=True)
             members = ([store[:-3] + "_extract.h5"] + ([frozen] if frozen else [])
                        + tables)
         elif short:

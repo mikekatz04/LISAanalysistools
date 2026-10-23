@@ -49,6 +49,7 @@ and the L1 orbit bricks.
 """
 
 import argparse
+import logging
 import sys
 import time
 
@@ -121,6 +122,9 @@ def _parser():
                          "residual snapshot and the run's WDM "
                          "lookup tables (wdm_lookup_*.h5). No logs, no page. "
                          "For postprocessing (LATW tutorial 09).")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="also print the monitor's INFO log (what a snapshot "
+                         "ships, its size, how long it took)")
     ap.add_argument("--snapshot-only", action="store_true",
                     help="build ONLY the tar, skip the page. The page can "
                          "then be rendered offline from it with "
@@ -195,6 +199,9 @@ def main(argv=None):
     if a.output_data and (a.short or a.short_page or a.snapshot):
         ap.error("--output-data builds only the data tar; it does not combine "
                  "with --short, --short-page or --snapshot")
+    if a.verbose:
+        logging.basicConfig(format="[%(name)s] %(message)s")
+        logging.getLogger("lisatools.globalfit.monitor").setLevel(logging.INFO)
     for _flag, _val in (("--catalogue", a.catalogue),
                         ("--l1-brick", a.l1_brick)):
         if _val:

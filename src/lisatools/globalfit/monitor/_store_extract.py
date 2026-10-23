@@ -26,6 +26,7 @@ Typical size: a few hundred MB against a multi-GB store.
 import argparse
 import os
 import sys
+import time
 
 import h5py
 import numpy as np
@@ -129,7 +130,8 @@ def extract(src_path, dst_path, keep, fallback_path=None, cold_keep=None,
     print(f"[extract] {src_path} -> {dst_path}  (iteration attr: {it}, "
           f"keep last {keep} rows of the big iteration-axis datasets, "
           f"last {cold_keep} of the cold chains"
-          + (f"; torn-read fallback: {fallback_path}" if fb else "") + ")")
+          + (f"; torn-read fallback: {fallback_path}" if fb else "") + ")",
+          flush=True)
     dst = h5py.File(dst_path, "w")
     stats = {"full": 0, "partial": 0, "bytes_in": 0}
 
@@ -171,12 +173,19 @@ def extract(src_path, dst_path, keep, fallback_path=None, cold_keep=None,
             this_keep = (cold_keep if any(name.endswith(s)
                                           for s in COLD_DEEP) else keep)
             lo, hi = _wanted_rows(obj, this_keep, it)
+            # a long window (the output-data cold chains: every row) reports
+            # its progress every tenth of the rows, at least 100 apart
+            t0, step = time.perf_counter(), max(100, (hi - lo) // 10)
             for r in range(lo, hi):
                 val = _read(name, r)
                 if val is not None:
                     d[r] = val
+                if (r + 1 - lo) % step == 0 and r + 1 < hi:
+                    print(f"  ... {name} row {r + 1 - lo}/{hi - lo} "
+                          f"({time.perf_counter() - t0:.0f} s)", flush=True)
             stats["partial"] += 1
-            print(f"  [last-{hi-lo}] {name} {obj.shape}")
+            print(f"  [last-{hi-lo}] {name} {obj.shape} "
+                  f"({time.perf_counter() - t0:.0f} s)", flush=True)
         for k, v in obj.attrs.items():
             d.attrs[k] = v
 
