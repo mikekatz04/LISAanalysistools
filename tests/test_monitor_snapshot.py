@@ -496,12 +496,13 @@ class OutputDataSnapshotTest(unittest.TestCase):
                         .endswith("gf_run_output_data.tar.gz"))
 
     def test_the_cold_chains_keep_every_row_and_the_tempered_window_reaches_the_snapshot_row(self):
-        """10 rows stored, snapshot at row 7: every row of the cold chains (the
-        posterior samples), the tempered arrays from row 7 to row 9, and the
-        extract pinned to those 10 rows."""
+        """10 rows stored, snapshot at row 7: every row of everything but the
+        all-rung GB chain, which keeps rows 7 to 9, and the extract pinned to
+        those 10 rows."""
         self._build(output_data=True)
         self.assertEqual(self.seen_keep, (3, 10))
         self.assertEqual(self.seen_filters["iteration"], 10)
+        self.assertEqual(self.seen_filters["window"], ("sub_backend/gb/chain",))
 
     def test_an_explicit_keep_still_wins(self):
         self._build(output_data=True, keep=2, cold_keep=3)
@@ -680,6 +681,38 @@ class ExtractFiltersTest(unittest.TestCase):
         self.assertEqual([m.split(" (")[0] for m in lines if "..." in m],
                          ["  ... global_fit/chain/gb row 100/250",
                           "  ... global_fit/chain/gb row 200/250"])
+
+    def _partial_rows(self, **kw):
+        """Rows written per dataset of a store holding the windowed GB
+        sub-backend family, 6 rows stored, keep 2 and cold_keep 6."""
+        import h5py
+        import numpy as np
+
+        from lisatools.globalfit.monitor import _store_extract as se
+
+        names = ("chain/gb", "sub_backend/gb/chain", "sub_backend/gb/d_h",
+                 "sub_backend/gb/band_temps", "sub_backend/vgb/chain")
+        with h5py.File(self.src, "a") as f:
+            for n in names:
+                f["global_fit"].create_dataset(n, data=np.ones((6, 3)))
+        dst = os.path.join(self.d, "w.h5")
+        with mock.patch.object(se, "LISTED_CAP", 0), mock.patch("builtins.print"):
+            se.extract(self.src, dst, 2, cold_keep=6, **kw)
+        with h5py.File(dst, "r") as f:
+            return {n: int(np.count_nonzero(f["global_fit/" + n][:, 0]))
+                    for n in names}
+
+    def test_window_keeps_only_the_named_datasets_to_keep(self):
+        self.assertEqual(self._partial_rows(window=("sub_backend/gb/chain",)),
+                         {"chain/gb": 6, "sub_backend/gb/chain": 2,
+                          "sub_backend/gb/d_h": 6, "sub_backend/gb/band_temps": 6,
+                          "sub_backend/vgb/chain": 6})
+
+    def test_without_window_only_the_cold_chains_go_deep(self):
+        self.assertEqual(self._partial_rows(),
+                         {"chain/gb": 6, "sub_backend/gb/chain": 2,
+                          "sub_backend/gb/d_h": 2, "sub_backend/gb/band_temps": 2,
+                          "sub_backend/vgb/chain": 2})
 
     def test_the_default_is_unchanged(self):
         with self._extract() as f:

@@ -31,10 +31,12 @@ tables (``wdm_lookup_*.h5``) and nothing else -- no logs, no page, no truth
 set, no warm start. It is what a postprocessing reader needs (LATW
 tutorial 09): every stored row of every cold chain (the posterior samples;
 the GB cold chain is ~1 MB per row compressed, ~1.6 GB for 1685 rows of the
-9-month run), the full history of the small arrays, the residual, and the
-tables the EMRI and SOBBH templates are built from. The large tempered
-arrays (the all-rung GB chain is ~12 MB per row) keep only the rows from
-the snapshot's ``store_row`` to the store's last row: the snapshot is
+9-month run), the full history of every other array (the GB and VGB
+sub-backend's per-band arrays, ``d_h``/``h_h`` and tempered VGB chain
+included, ~0.75 MB per row together), the residual, and the tables the
+EMRI and SOBBH templates are built from. Only the all-rung GB chain (~12 MB
+per row, ~24 GB over 2000 rows) keeps just the rows from the snapshot's
+``store_row`` to the store's last row: the snapshot is
 written every ``GF_RESIDUAL_SNAPSHOT_EVERY`` rows and can sit a few rows
 behind the last one, so a one-row window (``short``) would drop the very
 row the residual belongs to. The builder ships a copy of the snapshot only
@@ -306,8 +308,9 @@ def _output_data_rows(store: str, sidecar: Optional[str] = None,
     ships the copy it has and warns. ``iteration`` pins the rows the extract
     covers to the store at the match, so rows saved during the extract stay
     out. ``cold_keep`` is every row (the cold chains are the posterior
-    samples); ``keep``, for the large tempered arrays, runs from the
-    snapshot's row to the last row (1 without a snapshot).
+    samples, and every array but the all-rung GB chain keeps it too);
+    ``keep``, for the all-rung GB chain, runs from the snapshot's row to the
+    last row (1 without a snapshot).
     """
     import shutil
 
@@ -470,8 +473,9 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
     only (see the module docstring). It ships a copy of the residual
     snapshot that matches the store and pins the extract's rows to what the
     store holds then (see :func:`_output_data_rows`): ``cold_keep``
-    defaults to every stored row and ``keep`` to the rows from the
-    snapshot's ``store_row`` to the store's last row; without a snapshot
+    defaults to every stored row, for every dataset but the all-rung GB
+    chain, whose ``keep`` defaults to the rows from the snapshot's
+    ``store_row`` to the store's last row; without a snapshot
     file it ships the extract alone with a one-row ``keep``, and a warning. It
     cannot be combined with ``short`` (returns ``None`` with a warning).
 
@@ -530,7 +534,8 @@ def build_snapshot(run_dir: str, out_path: Optional[str] = None, *,
         from ._store_extract import extract
 
         extract(store, store[:-3] + "_extract.h5", keep, cold_keep=cold_keep,
-                **(dict(gzip_level=9, shuffle=True, iteration=_it)
+                **(dict(gzip_level=9, shuffle=True, iteration=_it,
+                        window=("sub_backend/gb/chain",))
                    if output_data else {}))
         if output_data:
             # the run's WDM lookup table(s): the EMRI direct template and the SOBBH

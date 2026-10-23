@@ -82,7 +82,7 @@ def _wanted_rows(ds, keep, it):
 
 
 def extract(src_path, dst_path, keep, fallback_path=None, cold_keep=None,
-            gzip_level=4, shuffle=False, iteration=None):
+            gzip_level=4, shuffle=False, iteration=None, window=None):
     # gzip_level / shuffle: the dataset filters. The output-data snapshot asks
     # for 9 + shuffle (HDF5 built-ins, so every reader handles them): ~9 %
     # smaller on the float chains; xz at its maximum gains only ~2 % more.
@@ -90,6 +90,10 @@ def extract(src_path, dst_path, keep, fallback_path=None, cold_keep=None,
     # in the extract. A live run keeps saving rows during a long extract; the
     # output-data snapshot pins it so the extract and the residual snapshot it
     # ships describe the same rows.
+    # window: the partial datasets (path suffixes) that keep the last ``keep``
+    # rows; every other partial dataset keeps ``cold_keep``. Default: all but
+    # the cold chains (COLD_DEEP) keep ``keep``. The output-data snapshot
+    # windows only the all-rung GB chain (~12 MB per row compressed).
     cold_keep = keep if cold_keep is None else max(int(cold_keep), keep)
 
     def _filters(obj):
@@ -170,8 +174,11 @@ def extract(src_path, dst_path, keep, fallback_path=None, cold_keep=None,
                                       else obj.shape[1:]))
             d = dst.create_dataset(name, shape=obj.shape, dtype=obj.dtype,
                                    chunks=chunks, fillvalue=0, **_filters(obj))
-            this_keep = (cold_keep if any(name.endswith(s)
-                                          for s in COLD_DEEP) else keep)
+            if window is None:
+                deep = any(name.endswith(s) for s in COLD_DEEP)
+            else:
+                deep = not any(name.endswith(s) for s in window)
+            this_keep = cold_keep if deep else keep
             lo, hi = _wanted_rows(obj, this_keep, it)
             # a long window (the output-data cold chains: every row) reports
             # its progress every tenth of the rows, at least 100 apart
