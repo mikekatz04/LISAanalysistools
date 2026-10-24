@@ -26,6 +26,7 @@
 #     warm start copies its SNR > 10 leaves by catalogue id: MBHB 2,5,16,18, every EMRI / SOBHB; the monitor page overlays
 #     it: GF_MONITOR_ADD_INFO=/shared/data/global_fit_output/gf_prod_6mo_v9_4gpu).
 #     The parent store must be COMPLETE and readable when this launches.
+#   OVERRIDES (level 2, rewritten export lines): GB_LIKELIHOOD=chunked
 #
 # NOTES:
 #   THE BASE OF THE SERIES: the launched 9mo v9 (job 751, 2026-10-09; store
@@ -2062,7 +2063,7 @@ export SIGHET_INFOMAT_ENGINE=${SIGHET_INFOMAT_ENGINE-lookup}
 #   from the chunked value. Reads the GB lookup table of SIGHET_REF_BUILD=lookup.
 #   WATCH: "GB per-row likelihood: LOOKUP" and "VGB per-row likelihood: LOOKUP"
 #   at build. Back out on the launch line with GB_LIKELIHOOD=chunked.
-export GB_LIKELIHOOD=${GB_LIKELIHOOD:-lookup}
+export GB_LIKELIHOOD=${GB_LIKELIHOOD:-chunked}
 export GB_CHOL_CACHE=${GB_CHOL_CACHE:-1}
 export GB_CHOL_CACHE_EVERY=${GB_CHOL_CACHE_EVERY:-40}
 export GB_CHOL_CACHE_TOL=${GB_CHOL_CACHE_TOL:-5}

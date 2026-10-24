@@ -2567,7 +2567,7 @@ export SIGHET_INFOMAT_ENGINE=${SIGHET_INFOMAT_ENGINE-lookup}
 #   from the chunked value. Reads the GB lookup table of SIGHET_REF_BUILD=lookup.
 #   WATCH: "GB per-row likelihood: LOOKUP" and "VGB per-row likelihood: LOOKUP"
 #   at build. Back out on the launch line with GB_LIKELIHOOD=chunked.
-export GB_LIKELIHOOD=${GB_LIKELIHOOD:-lookup}
+export GB_LIKELIHOOD=${GB_LIKELIHOOD:-chunked}
 export GB_CHOL_CACHE=${GB_CHOL_CACHE:-1}
 export GB_CHOL_CACHE_EVERY=${GB_CHOL_CACHE_EVERY:-40}
 export GB_CHOL_CACHE_TOL=${GB_CHOL_CACHE_TOL:-5}

@@ -672,6 +672,9 @@ class EveryOtherKnobIsTheNineMonthsTest(unittest.TestCase):
             if name == "9mo":
                 continue
             allowed = self.TOBS_DRIVEN | self.PARENT_DRIVEN
+            # a level-2 override is declared by definition, on either side (the
+            # 9mo keeps the chunked GB likelihood, Mike 2026-10-24)
+            allowed |= set(fr.RUNS[name].overrides) | set(fr.RUNS["9mo"].overrides)
             if fr.RUNS[name].parent is None:
                 allowed |= self.NO_PARENT
             with self.subTest(run=name):

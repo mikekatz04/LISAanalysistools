@@ -260,6 +260,10 @@ _add(Run(
     gb_nleaves_max=20000, gb_n_subbands=4096, gb_rj_inmodel_chunk=16384,
     edge_crop_wavelets=60,
     store_dirname="gf_prod_9mo_v9", job_name="gf9mo_v9",
+    # Mike 2026-10-24: the 9mo keeps the chunked-het per-row GB likelihood;
+    # the lookup scorer (GB_LIKELIHOOD=lookup, the template's default) is for
+    # the other runs. Level 2, so it lands in the 9mo v9 launcher's twin too.
+    overrides={"GB_LIKELIHOOD": "chunked"},
     notes=(
         "THE BASE OF THE SERIES: the launched 9mo v9 (job 751, 2026-10-09; store",
         "gf_prod_9mo_v9, parent = the LIVE 6mo v9 store gf_prod_6mo_v9_4gpu). This",
