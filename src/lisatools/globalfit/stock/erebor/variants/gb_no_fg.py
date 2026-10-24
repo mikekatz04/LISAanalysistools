@@ -79,7 +79,7 @@ from ....recipe import (
 from ...base import env_default, env_resolve
 from ..common import tdi_generation_info
 from ..fit import EreborFit, EreborGeneralSettings
-from ..gb import GBSettings, GBSetup, build_sighet_engine
+from ..gb import GBSettings, GBSetup, build_gb_wdm_comp, build_sighet_engine
 
 logger = logging.getLogger(__name__)
 
@@ -267,7 +267,8 @@ class GBNoFgGBSettings(GBSettings):
             Default ``"chunked"``; launchers ``lookup``.
         likelihood: Per-row GB likelihood of the chunked delegate,
             ``"chunked"`` or ``"lookup"``. Env ``GB_LIKELIHOOD``. Default
-            ``"chunked"`` (launchers unset).
+            ``"chunked"``; launchers ``lookup`` (see
+            :func:`~lisatools.globalfit.stock.erebor.gb.build_gb_wdm_comp`).
         lookup_table_path: Explicit GB lookup table. Env
             ``GB_LOOKUP_TABLE_PATH``. Default ``""``.
         lookup_table_dir: Directory of the recipe table. Env
@@ -535,12 +536,14 @@ class GBNoFgGBSettings(GBSettings):
     sighet_anchor_engine: str = dataclasses.field(
         default_factory=env_default("SIGHET_ANCHOR_ENGINE", "chunked", str)
     )
-    # Per-row GB likelihood of the chunked delegate (RJ, removals, swaps' scoring
-    # and every non-in-model get_ll): "chunked" (default) or "lookup" -- GBGPU's
-    # fused direct-to-WDM lookup scorer (gbgpu.gblookupcomputations.
+    # Per-row GB likelihood of the chunked delegate (RJ births / removals and
+    # every score outside an in-model block): "chunked" (default) or "lookup" --
+    # GBGPU's fused direct-to-WDM lookup scorer (gbgpu.gblookupcomputations.
     # GBLookupWDMComputations: the chunked comp with only get_ll_wdm swapped, so
-    # fills / swaps / F-stat / sig-het's delegate are unchanged). Needs a GBGPU
-    # wheel with gb_lookup_get_ll (dev >= 8a6762c). Env: GB_LIKELIHOOD.
+    # fills / swaps / F-stat / sig-het's delegate are unchanged; built by
+    # erebor.gb.build_gb_wdm_comp for the GB and VGB branches). Needs a GBGPU
+    # wheel with gb_lookup_get_ll (dev >= 8a6762c). Env: GB_LIKELIHOOD; the
+    # production launchers export lookup.
     likelihood: str = dataclasses.field(
         default_factory=env_default("GB_LIKELIHOOD", "chunked", str)
     )
@@ -1311,7 +1314,9 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
     ``GB_RJ_PHASE_MAXIMIZE=1`` with ``os.environ.setdefault`` (a launcher
     export, even an empty one, wins); on WDM build the chunked-het
     ``GBWDMComputations`` (or ``GBLookupWDMComputations`` with
-    ``GB_LIKELIHOOD=lookup``) and wrap it in the sig-het engine when
+    ``GB_LIKELIHOOD=lookup``, both through
+    :func:`~lisatools.globalfit.stock.erebor.gb.build_gb_wdm_comp`) and wrap it
+    in the sig-het engine when
     ``sighet_inmodel``, logging the resolved sig-het configuration; on FD
     attach the orbits / TDI handles; optional catalogue-source subtraction
     (``subtract_out_of_band`` / ``subtract_neighbors``); PE-mode seeding
@@ -1360,74 +1365,16 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
     os.environ.setdefault("GB_DEBUG_PLOT_BAND", str(_n_layers_for_plot // 2))
 
     # Build the WDM-domain GB likelihood here (after the deepcopy in
-    # ``CurrentInfoGlobalFit.__init__``) — the underlying C++ orbits wrap
-    # is not picklable, so it must live outside the settings dataclass.
-    # Chunked-heterodyne ``GBWDMComputations`` is the only WDM backend.
+    # ``CurrentInfoGlobalFit.__init__``) -- the underlying C++ orbits wrap
+    # is not picklable, so it must live outside the settings dataclass. ONE
+    # builder with the VGB branch (erebor.gb.build_gb_wdm_comp): the
+    # chunked-het ``GBWDMComputations``, or ``GBLookupWDMComputations`` with
+    # GB_LIKELIHOOD=lookup (the production launchers).
     if (
         isinstance(general_info.domain_settings, WDMSettings)
         and gb_info.gb_wdm_comp is None
     ):
-        from gbgpu.gbcomps import GBWDMComputations
-
-        _wdm = general_info.domain_settings
-        # Anchor the WDM domain t0 on the absolute data start so the het
-        # samples the orbits inside their span (WDM coefficient addressing
-        # is t0-independent; only absolute orbit-evaluation times depend on
-        # this).
-        _t_obs_start = float(getattr(general_info, "data_t0", 0.0))
-        _orig_wdm_t0 = float(_wdm.t0)
-        _wdm.t0 = _t_obs_start
-        _gb_like = str(getattr(gb_info, "likelihood", "chunked") or "chunked").lower()
-        if _gb_like not in ("chunked", "lookup"):
-            raise ValueError(f"GB_LIKELIHOOD={_gb_like!r}: 'chunked' or 'lookup'.")
-        _comp_cls, _lookup_kw = GBWDMComputations, {}
-        if _gb_like == "lookup":
-            from gbgpu.gblookupcomputations import GBLookupWDMComputations
-            from lisatools.wdm_lookup_store import resolve_gb_lookup_table
-
-            _comp_cls = GBLookupWDMComputations
-            _lookup_kw = dict(
-                lookup_table=resolve_gb_lookup_table(
-                    getattr(gb_info, "lookup_table_path", "") or None,
-                    getattr(gb_info, "lookup_table_dir", "") or None),
-                lookup_n_nodes=int(getattr(gb_info, "lookup_n_nodes", -1)),
-                lookup_k_coarse=bool(getattr(gb_info, "lookup_k_coarse", True)),
-                lookup_fill=bool(getattr(gb_info, "lookup_fill", False)),
-            )
-        gb_info.gb_wdm_comp = _comp_cls(
-            _wdm,
-            t_ref=gb_info.t0,
-            Nt_sub=int(gb_info.nt_sub),
-            n_pad=int(gb_info.n_pad),
-            N_sparse=int(gb_info.n_sparse),
-            N_cp_sig=int(gb_info.n_cp_sig),
-            N_cp_orbit=int(gb_info.n_cp_orbit),
-            orbits=general_info.gpu_orbits,
-            tdi_config=tdi_gen_str,
-            force_backend=general_info.force_backend,
-            tdi_type="XYZ",
-            **_lookup_kw,
-        )
-        if _gb_like == "lookup":
-            logger.info(
-                "GB per-row likelihood: LOOKUP (GBLookupWDMComputations; table %s, "
-                "n_nodes=%d, k_coarse=%s, fills %s) -- swaps / F-stat stay chunked-het",
-                _lookup_kw["lookup_table"], _lookup_kw["lookup_n_nodes"],
-                _lookup_kw["lookup_k_coarse"],
-                "LOOKUP" if _lookup_kw["lookup_fill"] else "chunked-het")
-        logger.info(
-            "Chunked-het GB likelihood: Nf=%d Nt=%d Nt_sub=%d N_sparse=%d "
-            "N_cp_sig=%d N_cp_orbit=%d (domain t0 %.6e -> het t_obs_start=%.6e, "
-            "t_ref=%.6e, chunk_t_starts=[%.6e, %.6e])",
-            _wdm.Nf, _wdm.Nt,
-            gb_info.gb_wdm_comp.Nt_sub,
-            gb_info.gb_wdm_comp.N_sparse,
-            gb_info.gb_wdm_comp.N_cp_sig,
-            gb_info.gb_wdm_comp.N_cp_orbit,
-            _orig_wdm_t0, gb_info.gb_wdm_comp.t_obs_start, gb_info.t0,
-            float(gb_info.gb_wdm_comp.chunk_t_starts.min()),
-            float(gb_info.gb_wdm_comp.chunk_t_starts.max()),
-        )
+        gb_info.gb_wdm_comp = build_gb_wdm_comp(gb_info, general_info, branch="gb")
 
         # Sig-het in-model scoring: the move receives a
         # GBSignalHetComputations wrapping the chunked comp; RJ / fills /

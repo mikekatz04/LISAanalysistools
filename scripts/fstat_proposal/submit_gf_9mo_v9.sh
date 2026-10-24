@@ -2557,6 +2557,17 @@ export GB_INFOMAT_PER_BLOCK=1
 export SIGHET_REF_BUILD=${SIGHET_REF_BUILD:-lookup}
 export SIGHET_ANCHOR_ENGINE=${SIGHET_ANCHOR_ENGINE:-lookup}
 export SIGHET_INFOMAT_ENGINE=${SIGHET_INFOMAT_ENGINE-lookup}
+# GB_LIKELIHOOD=lookup (Settings field likelihood, GB and VGB blocks; built by
+#   erebor.gb.build_gb_wdm_comp): the per-row GB likelihood -- RJ births /
+#   removals and every score outside an in-model block -- runs GBGPU's fused
+#   direct-to-WDM lookup scorer (GBLookupWDMComputations) instead of the
+#   chunked-het kernel. Fills, swaps, the F-stat and the sig-het delegate stay
+#   chunked-het. H100 harness (2026-10-05): 4.4 / 7.0 / 19 us per row at 180 /
+#   360 / 720 d vs chunked 88 / 172 / 345; median 1-3e-5 nats, max 5e-3 nats
+#   from the chunked value. Reads the GB lookup table of SIGHET_REF_BUILD=lookup.
+#   WATCH: "GB per-row likelihood: LOOKUP" and "VGB per-row likelihood: LOOKUP"
+#   at build. Back out on the launch line with GB_LIKELIHOOD=chunked.
+export GB_LIKELIHOOD=${GB_LIKELIHOOD:-lookup}
 export GB_CHOL_CACHE=${GB_CHOL_CACHE:-1}
 export GB_CHOL_CACHE_EVERY=${GB_CHOL_CACHE_EVERY:-40}
 export GB_CHOL_CACHE_TOL=${GB_CHOL_CACHE_TOL:-5}

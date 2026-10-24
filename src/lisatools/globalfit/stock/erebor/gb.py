@@ -396,6 +396,103 @@ def check_sighet_build_config(info, comp, *, branch: str) -> None:
             )
 
 
+def build_gb_wdm_comp(info, general_info, *, branch: str):
+    """Build a branch's WDM GB comp: ``GBWDMComputations``, or with
+    ``likelihood="lookup"`` (``GB_LIKELIHOOD``) ``GBLookupWDMComputations``.
+
+    ONE builder for the GB and VGB branches, like :func:`build_sighet_engine`,
+    so their per-row likelihoods can never drift apart. The lookup comp IS the
+    chunked-het comp for every purpose but ``get_ll_wdm`` (fills, swaps, the
+    F-stat and the sig-het engine's delegate are unchanged); that one call --
+    RJ births and removals, every score outside an in-model block -- runs
+    GBGPU's fused direct-to-WDM lookup scorer, which reads each row's WDM
+    coefficients from the GB lookup table (the table the sig-het reference,
+    anchor and information matrix read). H100 harness, 2026-10-05: 4.4 / 7.0 /
+    19 us per row at 180 / 360 / 720 d against 88 / 172 / 345 us chunked;
+    median 1-3e-5 nats and at most 5e-3 nats from the chunked value. The
+    production launchers export ``GB_LIKELIHOOD=lookup``; ``lookup_fill`` stays
+    off (fills chunked-het).
+
+    The domain settings' ``t0`` is moved to the absolute data start first: the
+    het samples the orbits inside their span, and WDM coefficient addressing
+    is t0-independent.
+
+    Args:
+        info (Settings): The GB or VGB block: ``likelihood``, ``t0``, ``nt_sub``,
+            ``n_pad``, ``n_sparse``, ``n_cp_sig``, ``n_cp_orbit``, ``use_tdi2``
+            and, on the lookup path, ``lookup_table_path``, ``lookup_table_dir``,
+            ``lookup_n_nodes``, ``lookup_k_coarse``, ``lookup_fill``.
+        general_info: The run's general block: ``domain_settings`` (a
+            :class:`~lisatools.domains.WDMSettings`), ``data_t0``,
+            ``gpu_orbits``, ``force_backend``.
+        branch (str): Branch name for the log lines (``"gb"`` / ``"vgb"``).
+
+    Returns:
+        gbgpu.gbcomps.GBWDMComputations: The comp; a
+        ``gbgpu.gblookupcomputations.GBLookupWDMComputations`` on the lookup
+        path.
+
+    Raises:
+        ValueError: ``likelihood`` is neither ``"chunked"`` nor ``"lookup"``.
+    """
+    from gbgpu.gbcomps import GBWDMComputations
+
+    log = logging.getLogger(__name__)
+    tdi_gen = 2 if getattr(info, "use_tdi2", True) else 1
+    tdi_gen_str = f"{tdi_gen}{'nd' if tdi_gen == 2 else 'st'} generation"
+    wdm = general_info.domain_settings
+    orig_t0 = float(wdm.t0)
+    wdm.t0 = float(getattr(general_info, "data_t0", 0.0))
+    like = str(getattr(info, "likelihood", "chunked") or "chunked").lower()
+    if like not in ("chunked", "lookup"):
+        raise ValueError(f"[{branch}] GB_LIKELIHOOD={like!r}: 'chunked' or 'lookup'.")
+    comp_cls, lookup_kw = GBWDMComputations, {}
+    if like == "lookup":
+        from gbgpu.gblookupcomputations import GBLookupWDMComputations
+        from lisatools.wdm_lookup_store import resolve_gb_lookup_table
+
+        comp_cls = GBLookupWDMComputations
+        lookup_kw = dict(
+            lookup_table=resolve_gb_lookup_table(
+                getattr(info, "lookup_table_path", "") or None,
+                getattr(info, "lookup_table_dir", "") or None),
+            lookup_n_nodes=int(getattr(info, "lookup_n_nodes", -1)),
+            lookup_k_coarse=bool(getattr(info, "lookup_k_coarse", True)),
+            lookup_fill=bool(getattr(info, "lookup_fill", False)),
+        )
+    comp = comp_cls(
+        wdm,
+        t_ref=info.t0,
+        Nt_sub=int(info.nt_sub),
+        n_pad=int(info.n_pad),
+        N_sparse=int(info.n_sparse),
+        N_cp_sig=int(info.n_cp_sig),
+        N_cp_orbit=int(info.n_cp_orbit),
+        orbits=general_info.gpu_orbits,
+        tdi_config=tdi_gen_str,
+        force_backend=general_info.force_backend,
+        tdi_type="XYZ",
+        **lookup_kw,
+    )
+    if like == "lookup":
+        log.info(
+            "%s per-row likelihood: LOOKUP (GBLookupWDMComputations; table %s, "
+            "n_nodes=%d, k_coarse=%s, fills %s) -- fills / swaps / F-stat stay "
+            "chunked-het",
+            branch.upper(), lookup_kw["lookup_table"], lookup_kw["lookup_n_nodes"],
+            lookup_kw["lookup_k_coarse"],
+            "LOOKUP" if lookup_kw["lookup_fill"] else "chunked-het")
+    log.info(
+        "Chunked-het %s likelihood: Nf=%d Nt=%d Nt_sub=%d N_sparse=%d "
+        "N_cp_sig=%d N_cp_orbit=%d (domain t0 %.6e -> het t_obs_start=%.6e, "
+        "t_ref=%.6e, chunk_t_starts=[%.6e, %.6e])",
+        branch.upper(), wdm.Nf, wdm.Nt, comp.Nt_sub, comp.N_sparse, comp.N_cp_sig,
+        comp.N_cp_orbit, orig_t0, comp.t_obs_start, info.t0,
+        float(comp.chunk_t_starts.min()), float(comp.chunk_t_starts.max()),
+    )
+    return comp
+
+
 def build_sighet_engine(info, comp, *, branch: str):
     """Wrap the chunked-het ``comp`` in the sig-het in-model engine.
 

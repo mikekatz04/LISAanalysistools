@@ -57,7 +57,7 @@ from ....moves import Move, MoveBuildContext
 from ....recipe import Recipe, Stage, build_vgb_moves
 from ...base import env_default
 from ..fit import EreborFit, EreborGeneralSettings
-from ..gb import build_sighet_engine
+from ..gb import build_gb_wdm_comp, build_sighet_engine
 from ..vgb import VGBSettings, VGBSetup, prepare_vgb_branch
 
 logger = logging.getLogger(__name__)
@@ -301,32 +301,15 @@ def setup_vgb_moves(engine_info, curr, acs, priors, state) -> dict:
     tdi_gen = 2 if getattr(vgb_info, "use_tdi2", True) else 1
     tdi_gen_str = f"{tdi_gen}{'nd' if tdi_gen == 2 else 'st'} generation"
 
+    # ONE builder with the GB branch (erebor.gb.build_gb_wdm_comp): the
+    # chunked-het ``GBWDMComputations``, or ``GBLookupWDMComputations`` with
+    # GB_LIKELIHOOD=lookup (the production launchers; the VGB block reads the
+    # GB env name, like its lookup_* fields).
     if (
         isinstance(general_info.domain_settings, WDMSettings)
         and vgb_info.gb_wdm_comp is None
     ):
-        from gbgpu.gbcomps import GBWDMComputations
-
-        _wdm = general_info.domain_settings
-        _wdm.t0 = float(getattr(general_info, "data_t0", 0.0))
-        vgb_info.gb_wdm_comp = GBWDMComputations(
-            _wdm,
-            t_ref=vgb_info.t0,
-            Nt_sub=int(vgb_info.nt_sub),
-            n_pad=int(vgb_info.n_pad),
-            N_sparse=int(vgb_info.n_sparse),
-            N_cp_sig=int(vgb_info.n_cp_sig),
-            N_cp_orbit=int(vgb_info.n_cp_orbit),
-            orbits=general_info.gpu_orbits,
-            tdi_config=tdi_gen_str,
-            force_backend=general_info.force_backend,
-            tdi_type="XYZ",
-        )
-        logger.info(
-            "Chunked-het VGB likelihood: Nf=%d Nt=%d Nt_sub=%d N_sparse=%d",
-            _wdm.Nf, _wdm.Nt,
-            vgb_info.gb_wdm_comp.Nt_sub, vgb_info.gb_wdm_comp.N_sparse,
-        )
+        vgb_info.gb_wdm_comp = build_gb_wdm_comp(vgb_info, general_info, branch="vgb")
 
     # Sig-het in-model scoring: wrap the chunked comp so ONLY the in-model
     # repeat proposals route through the sig-het kernel; fills / swaps /
