@@ -391,7 +391,7 @@ class STFTComputationGroup(DomainKernelStrategy):
         force_backend: str = "cpu",
         window_alpha: float = 0.0,
         use_midpoint: bool = False,
-        linear_envelope: bool = False,
+        linear_envelope: bool = True,
     ):
         """
         Args:
@@ -408,7 +408,9 @@ class STFTComputationGroup(DomainKernelStrategy):
                 amplitude slope is derived for free from the estimator's
                 ``t +- D`` stencil samples, so this models the within-segment
                 TDI amplitude drift the const-envelope kernel otherwise freezes.
-                Defaults ``False`` (byte-identical to the const-envelope path).
+                Defaults ``True``; ``False`` gives the const-envelope path, byte for
+                byte the kernel of before. ``STFTGBComputations`` defaults to ``True``
+                as well and checks that the two agree.
         """
         from .domains import STFTSettings
 
