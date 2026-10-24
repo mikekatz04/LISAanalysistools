@@ -31,7 +31,7 @@ def _general_info(t0):
                                  force_backend="cpu")
 
 
-def _info(likelihood, t0, lookup_fill=False):
+def _info(likelihood, t0, lookup_fill=True):
     return types.SimpleNamespace(
         likelihood=likelihood, t0=t0, nt_sub=256, n_pad=32, n_sparse=256, n_cp_sig=48,
         n_cp_orbit=32, use_tdi2=True, lookup_table_path="", lookup_table_dir="",
@@ -55,7 +55,7 @@ class BuildGBWDMCompTest(unittest.TestCase):
 
         comp, gi = self._build("lookup")
         self.assertIsInstance(comp, GBLookupWDMComputations)
-        self.assertFalse(comp.lookup_fill)
+        self.assertTrue(comp.lookup_fill)
         self.assertEqual(float(gi.domain_settings.t0), float(self.t0))
         self.assertEqual(float(comp.t_obs_start), float(self.t0))
 
@@ -71,9 +71,9 @@ class BuildGBWDMCompTest(unittest.TestCase):
         comp, _ = self._build("chunked")
         self.assertIs(type(comp), GBWDMComputations)
 
-    def test_lookup_fill_is_passed_through(self):
-        comp, _ = self._build("lookup", lookup_fill=True)
-        self.assertTrue(comp.lookup_fill)
+    def test_lookup_fill_off_is_passed_through(self):
+        comp, _ = self._build("lookup", lookup_fill=False)
+        self.assertFalse(comp.lookup_fill)
 
     def test_another_value_is_refused(self):
         with self.assertRaises(ValueError):
@@ -96,9 +96,16 @@ class LikelihoodFieldTest(unittest.TestCase):
         self.assertEqual((gb.likelihood, vgb.likelihood), ("lookup", "lookup"))
 
     def test_the_env_sets_both_blocks(self):
-        with mock.patch.dict(os.environ, {"GB_LIKELIHOOD": "chunked"}):
+        with mock.patch.dict(os.environ, {"GB_LIKELIHOOD": "chunked", "GB_LOOKUP_FILL": "0"}):
             gb, vgb = self._blocks()
         self.assertEqual((gb.likelihood, vgb.likelihood), ("chunked", "chunked"))
+        self.assertEqual((gb.lookup_fill, vgb.lookup_fill), (False, False))
+
+    def test_the_lookup_fill_is_on_by_default(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("GB_LOOKUP_FILL", None)
+            gb, vgb = self._blocks()
+        self.assertEqual((gb.lookup_fill, vgb.lookup_fill), (True, True))
 
 
 if __name__ == "__main__":

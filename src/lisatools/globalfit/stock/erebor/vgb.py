@@ -562,7 +562,7 @@ class VGBSettings(GBSettings):
             Env ``GB_LIKELIHOOD`` (the GB block's name). Default ``"lookup"``;
             the 9mo launcher ``chunked``.
         lookup_fill: ``likelihood="lookup"`` only: also write the lookup template
-            on fills. Env ``GB_LOOKUP_FILL``. Default ``False``.
+            on fills. Env ``GB_LOOKUP_FILL``. Default ``True``; the 9mo launcher 0.
         fixed_params: ``(nleaves, len(fixed basis))`` per-leaf fixed values in
             sampling units (``f0`` mHz); filled by :func:`prepare_vgb_branch`.
         injection: ``(nleaves, ndim)`` sampling-basis truth rows (the
@@ -807,7 +807,7 @@ class VGBSettings(GBSettings):
         default_factory=env_default("GB_LIKELIHOOD", "lookup", str)
     )
     lookup_fill: bool = dataclasses.field(
-        default_factory=env_default("GB_LOOKUP_FILL", False, bool)
+        default_factory=env_default("GB_LOOKUP_FILL", True, bool)
     )
     # (nleaves, len(fixed basis)) per-leaf fixed values in SAMPLING units
     # (f0 in mHz), ordered like the active fixed basis (vgb_fixed_basis);

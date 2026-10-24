@@ -2064,7 +2064,14 @@ export SIGHET_INFOMAT_ENGINE=${SIGHET_INFOMAT_ENGINE-lookup}
 #   from the chunked value. Reads the GB lookup table of SIGHET_REF_BUILD=lookup.
 #   WATCH: "GB per-row likelihood: LOOKUP" and "VGB per-row likelihood: LOOKUP"
 #   at build. Back out on the launch line with GB_LIKELIHOOD=chunked.
+# GB_LOOKUP_FILL=1 (field lookup_fill): with the lookup likelihood, the adds
+#   and removals write the LOOKUP template into the residual too (GBGPU
+#   gb_lookup_fill), so every template in the residual is the model the
+#   likelihood scored; swaps and the F-stat grid scoring stay chunked-het
+#   (no lookup kernel). The build line says "fills LOOKUP". Inert with
+#   GB_LIKELIHOOD=chunked.
 export GB_LIKELIHOOD=${GB_LIKELIHOOD:-lookup}
+export GB_LOOKUP_FILL=${GB_LOOKUP_FILL:-1}
 export GB_CHOL_CACHE=${GB_CHOL_CACHE:-1}
 export GB_CHOL_CACHE_EVERY=${GB_CHOL_CACHE_EVERY:-40}
 export GB_CHOL_CACHE_TOL=${GB_CHOL_CACHE_TOL:-5}

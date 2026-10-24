@@ -401,18 +401,20 @@ def build_gb_wdm_comp(info, general_info, *, branch: str):
     ``likelihood="lookup"`` (``GB_LIKELIHOOD``) ``GBLookupWDMComputations``.
 
     ONE builder for the GB and VGB branches, like :func:`build_sighet_engine`,
-    so their per-row likelihoods can never drift apart. The lookup comp IS the
-    chunked-het comp for every purpose but ``get_ll_wdm`` (fills, swaps, the
-    F-stat and the sig-het engine's delegate are unchanged); that one call --
-    RJ births and removals, every score outside an in-model block -- runs
-    GBGPU's fused direct-to-WDM lookup scorer, which reads each row's WDM
-    coefficients from the GB lookup table (the table the sig-het reference,
-    anchor and information matrix read). H100 harness, 2026-10-05: 4.4 / 7.0 /
+    so their per-row likelihoods can never drift apart. The lookup comp is the
+    chunked-het comp with ``get_ll_wdm`` -- RJ births and removals, every score
+    outside an in-model block -- running GBGPU's fused direct-to-WDM lookup
+    scorer, which reads each row's WDM coefficients from the GB lookup table
+    (the table the sig-het reference, anchor and information matrix read), and
+    with ``lookup_fill`` (default on) ``fill_global_wdm`` writing that same
+    lookup template into the residual on every add and removal, so the fit
+    never writes a template its likelihood did not score. Swaps and the F-stat
+    grid scoring have no lookup kernel and stay on the chunked comp. H100 harness, 2026-10-05: 4.4 / 7.0 /
     19 us per row at 180 / 360 / 720 d against 88 / 172 / 345 us chunked;
     median 1-3e-5 nats and at most 5e-3 nats from the chunked value. Lookup is
     the default of both blocks and of the launcher template; the 9mo launcher
-    exports ``GB_LIKELIHOOD=chunked`` (that run finishes on chunked-het);
-    ``lookup_fill`` stays off (fills chunked-het).
+    exports ``GB_LIKELIHOOD=chunked`` and ``GB_LOOKUP_FILL=0`` (that run
+    finishes on chunked-het).
 
     The domain settings' ``t0`` is moved to the absolute data start first: the
     het samples the orbits inside their span, and WDM coefficient addressing

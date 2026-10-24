@@ -276,7 +276,7 @@ class GBNoFgGBSettings(GBSettings):
         lookup_n_nodes: Lookup nodes (<= 0 auto). Env ``GB_LOOKUP_N_NODES``.
             Default ``-1``.
         lookup_k_coarse: Env ``GB_LOOKUP_K_COARSE``. Default ``True``.
-        lookup_fill: ``likelihood="lookup"`` only: also write lookup
+        lookup_fill: ``likelihood="lookup"`` only (default ``True``): also write lookup
             templates on fills. Env ``GB_LOOKUP_FILL``. Default ``False``.
     """
 
@@ -563,10 +563,12 @@ class GBNoFgGBSettings(GBSettings):
         default_factory=env_default("GB_LOOKUP_K_COARSE", True, bool)
     )
     # likelihood="lookup" only: also WRITE the lookup template on fills (adds /
-    # removals / the engine's templates), so every GB template is the model the
-    # likelihood scores. Default off (fills stay chunked-het). GBGPU >= f97aadc.
+    # removals / the engine's templates), so every GB template the fit writes
+    # into the residual is the model the likelihood scores. Default on (Mike
+    # 2026-10-24: no chunked-het outside the 9mo run); the 9mo launcher exports
+    # 0 with its chunked likelihood. GBGPU >= f97aadc.
     lookup_fill: bool = dataclasses.field(
-        default_factory=env_default("GB_LOOKUP_FILL", False, bool)
+        default_factory=env_default("GB_LOOKUP_FILL", True, bool)
     )
     # NOTE: no __post_init__ here — Setup.__init__ re-runs this dataclass's
     # __init__ on the (non-dataclass) GBSetup instance, which cannot resolve
