@@ -152,7 +152,7 @@ arguments.
 | Setting | Default | Meaning for DFFR |
 | --- | --- | --- |
 | `response` | `"dffr"` | `"tdi_on_the_fly"` selects the response that existed before. |
-| `first_order_delays` | `False` | `True` carries every light travel time to first order across a segment. The validation numbers of `results.md` were taken with `True`; without it, the templates of the production fixtures change by up to 1.0e-4 of their peak and (d\|h) by 8.5e-5, and the accuracy against a truth is not measured. |
+| `first_order_delays` | `False` | `True` carries every light travel time to first order across a segment. The validation numbers of `results.md` were taken with `True`; without it, the templates of the production fixtures change by up to 1.0e-4 of their peak and (d\|h) by 8.5e-5, and the accuracy against a truth is not measured; every DFFR method is 2.6 % to 6.6 % faster on an A100 at 1000 to 10 000 sources, about 15 s of a 17 minute iteration of the GB block. |
 | `linear_envelope` | `True` | Must equal the `linear_envelope` of the bound computation group, `True` by default as well since the review of this effort; the group's value is the one the kernels use (the amplitude and antenna slopes within a segment). An explicit mismatch raises `ValueError`. |
 | `linear_envelope` of the gradients and the Fisher | `RESPONSE_DEFAULT` | The group's setting for DFFR, `False` for the existing response, as before. The existing response turns the envelope off in its derivatives because its slope comes from its TDI stencil, whose rounding would enter the differences; DFFR's slopes are closed forms, and with the envelope on its finite-difference noise in f0, ḟ, f̈, φ0, λ and β is unchanged. `True`, `False` and `None` apply to both responses. |
 

@@ -507,6 +507,20 @@ name):
   default: on the production fixtures the DFFR templates change by up to 1.0e-4 of their peak,
   (d|h) by up to 8.5e-5 and (h|h) by up to 8.0e-6 relative, and the swap cross terms by up to
   6.5e-4. Against a time-domain truth it is not measured.
+- Speed with `first_order_delays=False` against `True` (2026-10-24; the A100, the ESA production
+  fixture, a year of one-day segments, 1000 and 10 000 sources, three runs of each setting in
+  turn; `stft_benchmarks.py --response dffr --dffr-first-order-delays 0|1`, files in
+  `$OUT/benchmarks/step7_delays/`): every DFFR method is 2.6 % to 6.6 % faster without the
+  first-order terms (ratio 0.934 to 0.974, median 0.950), beyond the run-to-run spread at 15 of
+  the 16 points. At 10 000 sources `get_ll` takes 7.36 µs per source instead of 7.74,
+  `fill_global` 6.32 instead of 6.72, the F-statistic 259 instead of 276, the `get_ll` gradient
+  195 instead of 208, the swap gradient 2500 instead of 2569, and the Fisher matrix 295 instead
+  of 311 (9 parameters) and 250 instead of 267 (8). The saving sits in the segment-table build,
+  where the first-order terms add six increments per channel and row; the pixel loop computes
+  the moment either way, so the methods that evaluate the most pixels per table (the swap
+  gradient) gain the least. In the galactic-binary block of the global fit of item 5, whose
+  in-model likelihood evaluations and Fisher matrices took 306 s of a 1019 s iteration with
+  DFFR, the saving is about 15 s per iteration.
 
 ## Reproducing the checks
 

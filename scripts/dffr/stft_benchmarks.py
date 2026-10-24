@@ -8,7 +8,9 @@ Each point is one warm-up call followed by ``--repeats`` timed calls; on the GPU
 synchronised before each clock reading. The times include the Python work of each method, which
 the global fit pays as well. ``--response`` selects the response. ``--dffr-rows`` times the DFFR
 swap, F-statistic and swap gradient at 16 or 32 rows per pass, and ``--dffr-fisher-rows`` the DFFR
-Fisher matrix at 4 or 8, in place of the comp's constants.
+Fisher matrix at 4 or 8, in place of the comp's constants; ``--dffr-first-order-delays 0|1``
+times DFFR with the light travel times held constant across a segment or carried to first order,
+in place of the fixture's setting (first order, the value of the validation).
 
 Usage:
     python stft_benchmarks.py --device cpu --mojito-l1 FILE.h5 --output OUT.json
@@ -129,11 +131,19 @@ def main(argv=None):
         help="rows per pass of the DFFR Fisher matrix in place of the comp's constant, for an A/B "
         "of the two instantiations (--response dffr only)",
     )
+    parser.add_argument(
+        "--dffr-first-order-delays",
+        type=int,
+        choices=(0, 1),
+        default=None,
+        help="first_order_delays of the DFFR comp in place of the fixture's setting, for an A/B of "
+        "the two (--response dffr only)",
+    )
     parser.add_argument("--output", required=True, metavar="OUT_JSON")
     args = parser.parse_args(argv)
     if args.without_swap:
         args.methods = [method for method in args.methods if "swap" not in method]
-    for option in ("dffr_rows", "dffr_fisher_rows"):
+    for option in ("dffr_rows", "dffr_fisher_rows", "dffr_first_order_delays"):
         if getattr(args, option) is not None and args.response != "dffr":
             parser.error(f"--{option.replace('_', '-')} needs --response dffr")
 
@@ -150,6 +160,8 @@ def main(argv=None):
         fixture.comp._DFFR_ROWS_PER_PASS = args.dffr_rows
     if args.dffr_fisher_rows is not None:
         fixture.comp._DFFR_FISHER_ROWS_PER_PASS = args.dffr_fisher_rows
+    if args.dffr_first_order_delays is not None:
+        fixture.comp.first_order_delays = bool(args.dffr_first_order_delays)
     results = []
     for batch_size in args.batch_sizes:
         calls = method_calls(fixture, batch_size)
@@ -178,6 +190,7 @@ def main(argv=None):
         response=args.response,
         dffr_rows=args.dffr_rows,
         dffr_fisher_rows=args.dffr_fisher_rows,
+        dffr_first_order_delays=args.dffr_first_order_delays,
         fixture=fixture.description,
         repeats=args.repeats,
         results=results,
