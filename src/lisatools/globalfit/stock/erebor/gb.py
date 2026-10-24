@@ -409,9 +409,10 @@ def build_gb_wdm_comp(info, general_info, *, branch: str):
     coefficients from the GB lookup table (the table the sig-het reference,
     anchor and information matrix read). H100 harness, 2026-10-05: 4.4 / 7.0 /
     19 us per row at 180 / 360 / 720 d against 88 / 172 / 345 us chunked;
-    median 1-3e-5 nats and at most 5e-3 nats from the chunked value. The
-    production launchers export ``GB_LIKELIHOOD=lookup``; ``lookup_fill`` stays
-    off (fills chunked-het).
+    median 1-3e-5 nats and at most 5e-3 nats from the chunked value. Lookup is
+    the default of both blocks and of the launcher template; the 9mo launcher
+    exports ``GB_LIKELIHOOD=chunked`` (that run finishes on chunked-het);
+    ``lookup_fill`` stays off (fills chunked-het).
 
     The domain settings' ``t0`` is moved to the absolute data start first: the
     het samples the orbits inside their span, and WDM coefficient addressing

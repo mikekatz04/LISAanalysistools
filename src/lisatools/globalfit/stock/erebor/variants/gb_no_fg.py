@@ -267,7 +267,7 @@ class GBNoFgGBSettings(GBSettings):
             Default ``"chunked"``; launchers ``lookup``.
         likelihood: Per-row GB likelihood of the chunked delegate,
             ``"chunked"`` or ``"lookup"``. Env ``GB_LIKELIHOOD``. Default
-            ``"chunked"``; launchers ``lookup`` (see
+            ``"lookup"`` (the 9mo launcher exports ``chunked``; see
             :func:`~lisatools.globalfit.stock.erebor.gb.build_gb_wdm_comp`).
         lookup_table_path: Explicit GB lookup table. Env
             ``GB_LOOKUP_TABLE_PATH``. Default ``""``.
@@ -537,15 +537,15 @@ class GBNoFgGBSettings(GBSettings):
         default_factory=env_default("SIGHET_ANCHOR_ENGINE", "chunked", str)
     )
     # Per-row GB likelihood of the chunked delegate (RJ births / removals and
-    # every score outside an in-model block): "chunked" (default) or "lookup" --
+    # every score outside an in-model block): "lookup" (default) or "chunked" --
     # GBGPU's fused direct-to-WDM lookup scorer (gbgpu.gblookupcomputations.
     # GBLookupWDMComputations: the chunked comp with only get_ll_wdm swapped, so
     # fills / swaps / F-stat / sig-het's delegate are unchanged; built by
     # erebor.gb.build_gb_wdm_comp for the GB and VGB branches). Needs a GBGPU
     # wheel with gb_lookup_get_ll (dev >= 8a6762c). Env: GB_LIKELIHOOD; the
-    # production launchers export lookup.
+    # 9mo launcher exports chunked (Mike 2026-10-24: that run finishes on it).
     likelihood: str = dataclasses.field(
-        default_factory=env_default("GB_LIKELIHOOD", "chunked", str)
+        default_factory=env_default("GB_LIKELIHOOD", "lookup", str)
     )
     # The lookup table: an explicit file, else the GB recipe table
     # (lisatools.wdm_lookup_store.GB_TABLE_RECIPE) in lookup_table_dir, built

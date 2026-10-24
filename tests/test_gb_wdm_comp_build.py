@@ -1,10 +1,9 @@
 """``erebor.gb.build_gb_wdm_comp``: the one GB / VGB comp builder.
 
-``GB_LIKELIHOOD=lookup`` (the production launchers) gives a
-``GBLookupWDMComputations`` built on the GB lookup table, for the GB block and
-the VGB block alike; ``chunked`` (the code default) the plain
-``GBWDMComputations``; anything else is refused. Both settings blocks read the
-one env name. The grid's ``t0`` is moved to the data start by the builder.
+``GB_LIKELIHOOD=lookup`` (the default) gives a ``GBLookupWDMComputations``
+built on the GB lookup table, for the GB block and the VGB block alike;
+``chunked`` (the 9mo launcher) the plain ``GBWDMComputations``; anything else
+is refused. Both settings blocks read the one env name. The grid's ``t0`` is moved to the data start by the builder.
 
 The lookup table is the recipe table in ``~/.cache/gb_lookup_tables`` (or
 ``$GB_LOOKUP_TABLE_DIR``), built once by ``resolve_gb_lookup_table`` when it is
@@ -82,7 +81,7 @@ class BuildGBWDMCompTest(unittest.TestCase):
 
 
 class LikelihoodFieldTest(unittest.TestCase):
-    """The GB and VGB settings blocks read ``GB_LIKELIHOOD``; default chunked."""
+    """The GB and VGB settings blocks read ``GB_LIKELIHOOD``; default lookup."""
 
     def _blocks(self):
         from lisatools.globalfit.stock.erebor.variants.gb_no_fg import GBNoFgGBSettings
@@ -90,16 +89,16 @@ class LikelihoodFieldTest(unittest.TestCase):
 
         return GBNoFgGBSettings(), VGBSettings()
 
-    def test_default_is_chunked(self):
+    def test_default_is_lookup(self):
         with mock.patch.dict(os.environ):
             os.environ.pop("GB_LIKELIHOOD", None)
             gb, vgb = self._blocks()
-        self.assertEqual((gb.likelihood, vgb.likelihood), ("chunked", "chunked"))
+        self.assertEqual((gb.likelihood, vgb.likelihood), ("lookup", "lookup"))
 
     def test_the_env_sets_both_blocks(self):
-        with mock.patch.dict(os.environ, {"GB_LIKELIHOOD": "lookup"}):
+        with mock.patch.dict(os.environ, {"GB_LIKELIHOOD": "chunked"}):
             gb, vgb = self._blocks()
-        self.assertEqual((gb.likelihood, vgb.likelihood), ("lookup", "lookup"))
+        self.assertEqual((gb.likelihood, vgb.likelihood), ("chunked", "chunked"))
 
 
 if __name__ == "__main__":
