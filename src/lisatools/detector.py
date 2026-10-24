@@ -1036,6 +1036,10 @@ class L1Orbits(Orbits):
         linear_interp_dt: Cap in seconds on the position / unit-vector grid step used with
             ``linear_interp_setup=True``; ``None`` keeps the file's native cadence. Default
             ``500.0``. See :meth:`_configure`.
+        ltt_stride: Keep every ``ltt_stride``-th light-travel-time sample, read from the file
+            that way. Default ``1`` (all). The backend interpolates the light travel times
+            linearly and they change on orbital timescales, so ``200`` (500 s on a 2.5 s
+            brick) moves them by ~1e-15 s and turns a two-year brick's 1.2 GB table into 6 MB.
         **kwargs: Forwarded to :class:`Orbits` (``t0``, ``t_arr``, ``dt``,
             ``linear_interp_setup``; the latter defaults to ``True``).
 
@@ -1059,8 +1063,13 @@ class L1Orbits(Orbits):
         force_backend: Optional[str] = None,
         frame: str = "icrs",
         linear_interp_dt: Optional[float] = 500.0,
+        ltt_stride: int = 1,
         **kwargs,
     ):
+        if int(ltt_stride) < 1:
+            raise ValueError(f"ltt_stride must be a positive integer, got {ltt_stride!r}.")
+        # read by ``_setup``, which the Orbits base class runs
+        self.ltt_stride = int(ltt_stride)
         # frame is validated and stored by the Orbits base class (before
         # ``_setup`` runs, which reads ``self.frame`` to decide whether to
         # rotate the mojito ICRS positions to ecliptic).
@@ -1078,6 +1087,7 @@ class L1Orbits(Orbits):
             "force_backend": self.backend.backend_name.split("_")[-1],
             "frame": self.frame,
             "linear_interp_dt": self._configure_kwargs.get("linear_interp_dt", 500.0),
+            "ltt_stride": self.ltt_stride,
         }
         
     def open(self):
@@ -1104,13 +1114,13 @@ class L1Orbits(Orbits):
         Reads the LTTs ``(N_ltt, 6)`` and their times, the positions and velocities
         ``(N_pos, 3, 3)`` (rotated to the ecliptic when ``frame == "ecliptic"``) and their
         times, and the per-grid steps and start times (``ltt_dt``, ``sc_dt``, ``dt_base``,
-        ``ltt_t0``, ``sc_t0``).
+        ``ltt_t0``, ``sc_t0``). The LTTs, their times and ``ltt_dt`` follow ``ltt_stride``.
         """
-
+        stride = self.ltt_stride
         with self.open() as f:
             # Load light travel times and their time array
-            self.ltt = f.ltts.ltts[:]  # Shape: (N_ltt_times, 6) 
-            self.ltt_t = f.ltts.time_sampling.t()  # Shape: (N_ltt_times,)
+            self.ltt = f.ltts.ltts[::stride]  # Shape: (N_ltt_times, 6)
+            self.ltt_t = f.ltts.time_sampling.t(slice(0, None, stride))  # Shape: (N_ltt_times,)
             
             # Load spacecraft positions and their time array
             pos_icrs = f.orbits.positions[:]  # Shape: (N_pos_times, 3, 3)
@@ -1129,7 +1139,7 @@ class L1Orbits(Orbits):
             self.dt_base = float(f.orbits.time_sampling.dt)
 
             # Store dt from each dataset (they may differ)
-            self.ltt_dt = f.ltts.time_sampling.dt
+            self.ltt_dt = f.ltts.time_sampling.dt * stride
             self.sc_dt = f.orbits.time_sampling.dt
 
             # Store t0 values
