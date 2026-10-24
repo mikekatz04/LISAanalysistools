@@ -3,7 +3,7 @@
 Builds ``gbgpu.gbcomps.STFTGBComputations`` on deterministic grids, data, inverse covariances and
 source batches, on the CPU or the GPU backend. ``stft_golden_outputs.py`` and
 ``stft_benchmarks.py`` evaluate the kernels on them. What each fixture covers, and why, is
-described in ``docs/response/dffr/tests.md``.
+described in ``docs/response/dffr/results.md``.
 """
 
 import os
@@ -239,6 +239,7 @@ def build_oracle_fixture(name, backend):
         n_side_bins=4,
         window_factor=1.0,
         freq_from_tdi_phase=config["freq_from_tdi_phase"],
+        response=RESPONSES[0],
     )
 
     num_sources = 24
@@ -453,6 +454,8 @@ def build_production_fixture(
         use_midpoint=True,
         linear_envelope=config["linear_envelope"],
         response=response,
+        # * The value of every capture of the effort; the comp defaults to False since the review.
+        first_order_delays=True,
     )
     params, cells = make_production_params(rng, band_settings, num_sources)
     xp = array_module(backend)

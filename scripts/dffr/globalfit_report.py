@@ -1,4 +1,4 @@
-"""Report of DFFR validation item 5: two global-fit runs of the high-frequency GBs, one per response.
+"""Report of two global-fit runs of the high-frequency GBs, one per STFT response, compared.
 
 Reads two run folders written by gb_high_freq_globalfit_settings.py and writes into OUTPUT:
 report.txt and summary.json (run health, speed and GPU memory, offsets of the posterior means from
@@ -768,7 +768,8 @@ def write_report(
     names = [run.name for run in runs]
     common = convergence["common_iterations"]
     lines = [
-        f"DFFR validation item 5: {names[0]} (A, reference) against {names[1]} (B). Cold chain, "
+        f"Global fit with each STFT response: {names[0]} (A, reference) against {names[1]} (B). "
+        "Cold chain, "
         f"first {args.discard:.0%} of the iterations dropped. Offsets of angles use the mode "
         "(phi0, psi) of the injection. Truth offsets use each run's iterations; the comparison of "
         f"the two runs and the corners use the first {common} iterations of each, dropping "

@@ -1,4 +1,4 @@
-"""Timings of two sets of benchmark runs side by side, for the records in tests.md.
+"""Timings of two sets of benchmark runs side by side, for the records in results.md.
 
     python compare_benchmarks.py --reference step0/cpu_esa_run*.json \\
         --candidate step1/cpu_esa_run*.json

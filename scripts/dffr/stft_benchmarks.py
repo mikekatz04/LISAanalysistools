@@ -15,7 +15,7 @@ Usage:
     python stft_benchmarks.py --device gpu --mojito-l1 FILE.h5 --num-segments 365 \\
         --batch-sizes 1 10 100 1000 10000 --output OUT.json
 
-Results and the commands of each run are recorded in ``docs/response/dffr/tests.md``.
+Results and the commands of each run are recorded in ``docs/response/dffr/results.md``.
 """
 
 import argparse
@@ -110,7 +110,7 @@ def main(argv=None):
     parser.add_argument(
         "--without-swap",
         action="store_true",
-        help="leave out get_swap_ll_stft and get_swap_ll_grad_stft (CPU runs from step 2 on)",
+        help="leave out get_swap_ll_stft and get_swap_ll_grad_stft, 70 % of a CPU run",
     )
     parser.add_argument("--response", choices=fixtures.RESPONSES, default=fixtures.RESPONSES[0])
     parser.add_argument(

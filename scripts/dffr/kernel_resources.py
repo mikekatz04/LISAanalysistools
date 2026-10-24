@@ -20,7 +20,7 @@ reference build tree, the report then compares the module without and with it. p
 link only, so the column of each kernel's own registers stays empty for the candidate. For -dlto,
 nvlink opens bin/../nvvm/lib64/libnvvm.so next to itself, which the pip wheels of the CUDA toolkit
 do not hold (they keep libnvvm in lib/). ``--toolkit`` then names a copy of the toolkit that holds
-that path; its bin/nvcc replaces the recorded one (docs/response/dffr/tests.md, step 4).
+that path; its bin/nvcc replaces the recorded one (docs/response/dffr/results.md).
 
 Blocks of 128 threads per SM follow from the registers (64 K per SM, allocated per warp in steps
 of 8 per thread) and from the shared memory. The shared memory of a block is the static part, the
@@ -66,7 +66,7 @@ TEMPLATES_PER_KERNEL = {
 CALLEE_REGISTER_FLOOR = 129
 
 DFFR_TEMPLATE_PROBE = """#include <cstdio>
-#include "gb_dffr_source.hh"
+#include "gb_dffr.hh"
 #include "lat_dffr_kernels.hh"
 int main() {
   std::printf("16 %zu\\n", DFFRTile<GBDFFRSource, 16>::table_bytes());
@@ -77,7 +77,7 @@ int main() {
 # * The dynamic shared memory of the DFFR Fisher matrix depends on the parameters it differences:
 # * the 8 of the global fit (fddot filled) and all 9, at 4 and 8 rows per pass.
 DFFR_FISHER_PROBE = """#include <cstdio>
-#include "gb_dffr_source.hh"
+#include "gb_dffr.hh"
 #include "lat_dffr_kernels.hh"
 int main() {
   const int all_params[9] = {0, 1, 2, 3, 4, 5, 6, 7, 8};

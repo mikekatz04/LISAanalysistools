@@ -20,9 +20,9 @@ production band starts (0.1 mHz). The
 inverse covariance is the XYZ instrument noise of ``XYZSensitivityBackend`` (TDI 2nd generation,
 its default noise levels); every metric is normalised, so the noise level only weights pixels.
 
-Source sets (``--source-set``): ``validation``, the eight sources of the validation items 1 and 3
-(0.5 and 20 mHz, the two fdot bounds of the global fit's GB prior at each, two sky positions),
-on the grid above; ``step0``, the eight cases of the step 0 truth (3, 20 and 40 mHz, and 20 mHz
+Source sets (``--source-set``): ``validation``, the eight validation sources (0.5 and 20 mHz, the two fdot bounds of the global fit's GB prior at each, two sky positions),
+on the grid above; ``step0``, the eight cases of the standalone package's own time-domain
+comparison, its step 0 truth (3, 20 and 40 mHz, and 20 mHz
 with fdot 1e-13 Hz/s, at the same two sky positions) on its grid: taper 0.116, data from 5 days
 after the start of the orbit file, and the flat metrics over every bin within 3e-4 Hz of the
 carrier instead of the template's pixels.
@@ -31,7 +31,7 @@ Metrics per source, response and data window, with d the data and h the template
 
 * over the pixels that the template fills: the flat mismatch 1 - |<d, h>| / (|d| |h|) and, per
   segment and channel, max |h - d| / max |d|: the metrics of the standalone package's
-  time-domain comparison, so they compare with step 0;
+  time-domain comparison, so they compare with its numbers;
 * with the noise weights of the likelihood, over the whole domain: the mismatch
   1 - Re(d|h) / sqrt((d|d)(h|h)) from ``get_ll_stft`` and the group's (d|d), the amplitude ratio
   sqrt((h|h)/(d|d)), the phase of (d|h) and the residual (d-h|d-h)/(d|d);
@@ -41,7 +41,7 @@ The two data transforms against each other give the window convention alone. Bef
 sources, the script compares the injection with ``GBTDIonTheFly`` in the time domain, which shows
 whether the two codes share their conventions (sign of the cross polarisation, polarisation
 angle, phase offset, strain factor, time origin). There is no threshold; the results are
-recorded in ``docs/response/dffr/tests.md``.
+recorded in ``docs/response/dffr/results.md``.
 """
 
 from __future__ import annotations
@@ -182,7 +182,7 @@ class SourceSet:
 
 
 def make_source_set(name):
-    """``"validation"``: the sources of items 1 and 3; ``"step0"``: the cases of the step 0 truth."""
+    """``"validation"``: the eight validation sources; ``"step0"``: the cases of the step 0 truth."""
     if name == "validation":
         return SourceSet(validation_sources(), PRODUCTION_WINDOW_ALPHA, DATA_START_OFFSET, None)
     return SourceSet(
@@ -398,6 +398,8 @@ def build_comp(group, orbits, t_ref, num_segments, n_side_bins, window_alpha, re
         use_midpoint=True,
         linear_envelope=True,
         response=response,
+        # * The value of every validation run; the comp defaults to False since the review.
+        first_order_delays=True,
     )
 
 

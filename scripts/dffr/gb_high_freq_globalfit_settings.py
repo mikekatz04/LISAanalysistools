@@ -1,4 +1,4 @@
-"""Global-fit settings of DFFR validation item 5: the high-frequency GB run with both responses.
+"""Global-fit settings of the high-frequency GB run with each STFT response, DFFR and TDI on the fly.
 
 Derived from mojito_input/gb_high_freq_global_fit_settings.py, with these changes: all 713
 one-day segments after the 200 h trims, an STFT grid of 9.514-23.0 mHz (f0 sampled over
@@ -206,13 +206,15 @@ def get_gb_settings(general_set: GeneralSetup, response: str) -> tuple[GBSetup, 
         window_alpha=general_set.window_alpha,
     )
 
-    # * The two runs differ only in "response"; DFFR ignores the TDI-on-the-fly knobs.
+    # * The two runs differ only in "response"; DFFR ignores the TDI-on-the-fly knobs and ran with
+    # * first-order delays, which is no longer its default.
     gb_stft_kwargs = dict(
         n_side_bins=N_SIDE_BINS,
         freq_from_tdi_phase=True,
         use_midpoint=True,
         linear_envelope=True,
         response=response,
+        first_order_delays=True,
     )
 
     debug_settings = GBDebugSettings(
@@ -367,7 +369,7 @@ def get_general_settings(name: str, num_iterations: int) -> GeneralSetup:
         noise_model="parametric",
         noise_model_code_link="https://github.com/Erebor-L2D",
         submission_parent_folder=None,
-        comment="DFFR validation item 5: high-frequency GB global fit, one run per STFT response",
+        comment="High-frequency GB global fit, one run per STFT response (DFFR, TDI on the fly)",
     )
     return GeneralSetup(general_settings)
 

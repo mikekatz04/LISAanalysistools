@@ -12,11 +12,11 @@ template and b the existing one, summed over the three channels with unit weight
 * the norm ratio (a|a) / (b|b).
 
 There is no threshold. The numbers describe how far apart the two models are; how far each lies
-from a time-domain truth is measured in step 6.
+from a time-domain truth is measured by ``stft_accuracy.py``.
 
-Fixture: that of dffr_exchange_lat.py (ESA orbits, 32 one-day segments from 10 days after their
-start, the production band as one domain, the Tukey taper 0.1157 with the segment midpoints,
-n_side_bins = 10, the 24 sources of the production fixtures). The settings are the two production
+Fixture: ESA orbits, 32 one-day segments from 10 days after their start, the production band as
+one domain, the Tukey taper 0.1157 with the segment midpoints, n_side_bins = 10, and the 24
+sources of the production fixtures of ``stft_fixtures.py``. The settings are the two production
 settings of the existing response on ESA orbits, TDI 2nd generation with the linear envelope and
 TDI 1st generation without it, and the two crossed ones, which tell the TDI generation and the
 envelope apart. DFFR takes the same generation and envelope, with its first-order delay terms on.
@@ -48,7 +48,6 @@ from stft_fixtures import (  # noqa: E402
 
 NUM_SEGMENTS = 32
 NUM_SOURCES = 24
-CHIRP_RATE_FLOOR = 1.0e-22
 FIRST_ORDER_DELAYS = True
 #: (name, TDI generation, linear envelope): the production settings on ESA orbits, then the
 #: crossed ones.
@@ -85,7 +84,6 @@ def templates_of_both(device, orbits, band, params, data, generation, linear_env
             linear_envelope=linear_envelope,
             response=response,
             first_order_delays=FIRST_ORDER_DELAYS,
-            chirp_rate_floor=CHIRP_RATE_FLOOR,
         )
 
     comp, dffr_comp = comp_of("tdi_on_the_fly"), comp_of("dffr")

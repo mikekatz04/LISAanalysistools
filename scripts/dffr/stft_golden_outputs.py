@@ -13,11 +13,11 @@ Usage:
 
 Comparisons ask for bit identity unless ``--rtol`` is given; differences are then normalised by
 the largest absolute value of each reference array. The exit status is 1 when any array fails.
-``--without-swap`` leaves out the two swap kernels, in captures and comparisons; the CPU runs use
-it from step 2 on. ``--response dffr`` evaluates the DFFR response on its configurations
+``--without-swap`` leaves out the two swap kernels, in captures and comparisons; they take about
+70 % of a CPU run. ``--response dffr`` evaluates the DFFR response on its configurations
 (``stft_fixtures.DFFR_CONFIGS``); its Fisher matrices have no TDI-track variant, since DFFR has
 one chirp model. Fixtures, tolerances and results are recorded in
-``docs/response/dffr/tests.md``.
+``docs/response/dffr/results.md``.
 """
 
 import argparse
@@ -70,7 +70,7 @@ def is_swap_output(key):
 def evaluate(fixture, with_swap=True):
     """Every kernel output of one fixture, as host arrays keyed like the oracle script.
 
-    ``with_swap=False`` leaves out the two swap kernels, as the CPU runs do from step 2 on.
+    ``with_swap=False`` leaves out the two swap kernels, as the CPU benchmarks do.
     """
     comp = fixture.comp
     xp = comp.xp

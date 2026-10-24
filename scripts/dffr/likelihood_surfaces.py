@@ -4,15 +4,14 @@
         [--sources NAME ...] [--days 365] [--check-only] [--no-figures] [--no-summary]
     python likelihood_surfaces.py --output DIR --summarize-only
 
-Step 6 of the DFFR integration, validation item 3. The data are the noiseless X2, Y2 and Z2 that
-``td_truth.py`` made for the eight validation sources of ``stft_accuracy.py`` (lisagwresponse and
+The data are the noiseless X2, Y2 and Z2 that ``td_truth.py`` made for the eight validation sources of ``stft_accuracy.py`` (lisagwresponse and
 pytdi, a year on the ESA orbits that LAT ships), scaled to an optimal SNR of 100. SNR² is the STFT
 (d|d) with the periodic Tukey window and 60 side bins. Each waveform is evaluated in its own
 domain, against the transform of the same data, always on X, Y and Z with the full 3 x 3
 cross-spectral density (CSD) of ``XYZSensitivityBackend``:
 
 * STFT: both responses of ``STFTGBComputations`` (TDI on the fly and DFFR), through
-  ``get_ll_stft``, on the STFT of the data with the periodic Tukey window, as in item 1; one CSD
+  ``get_ll_stft``, on the STFT of the data with the periodic Tukey window, as in ``stft_accuracy.py``; one CSD
   per segment;
 * FD: ``GBFDComputations`` (``GBTDIonTheFly`` sampled on N points over the year, then Fourier
   transformed) and ``gbgpu.gbgpu.GBGPU`` (FastGB), on dt rfft of the data with the window of the
@@ -39,7 +38,7 @@ orbit-averaged arm lengths) for comparison.
 Every run writes NAME.json, NAME.npz and NAME.png per source and then, unless ``--no-summary``,
 the combined summary.json, report.txt and summary figures of every source in the output folder;
 ``--summarize-only`` writes only those. There is no threshold; the results are recorded in
-``docs/response/dffr/tests.md``.
+``docs/response/dffr/results.md``.
 """
 
 from __future__ import annotations
@@ -104,7 +103,7 @@ FASTGB_COMPILED_MAX = 2048
 # * FD sample counts: four times the smallest power of two, at least 2048, that holds the
 # * Doppler-shifted frequency track from the carrier at the data start with a margin. At the base
 # * length the FD heterodyne's own sampling error reached 2.2 in ln L at the truth; at four times
-# * it, at most 0.1 (author's choice of 2026-10-21, docs/response/dffr/tests.md).
+# * it, at most 0.1 (author's choice of 2026-10-21, docs/response/dffr/results.md).
 FD_BASE_LENGTH = 2048
 FD_LENGTH_FACTOR = 4
 FD_MARGIN_BINS = 64
@@ -125,7 +124,7 @@ WAVEFORM_LABELS = {
     "fd_tdi_on_the_fly": "TDI on the fly (FD)",
     "fastgb": "FastGB (FD)",
 }
-# * Categorical slots 1 to 4 in fixed order; the STFT responses keep the colours of item 1.
+# * Categorical slots 1 to 4 in fixed order; the STFT responses keep stft_accuracy.py's colours.
 WAVEFORM_COLORS = {
     "dffr": RESPONSE_COLORS["dffr"],
     "tdi_on_the_fly": RESPONSE_COLORS["tdi_on_the_fly"],
@@ -188,7 +187,7 @@ def fd_inner(first, second, inverse_covariance, df):
 def release_device_memory(xp):
     """Return the blocks that CuPy's memory pool keeps to the device, between the large phases.
 
-    Processes run side by side on one GPU (``run_step6.sh`` part ``surfaces``); each would
+    Processes run side by side on one GPU (``run_dffr.sh`` part ``surfaces``); each would
     otherwise keep the peak of its data phase, 2 to 4.5 GB, for the rest of the run.
     """
     if hasattr(xp, "get_default_memory_pool"):
@@ -1030,7 +1029,7 @@ def main():
     if unknown:
         raise SystemExit(f"unknown sources {unknown}; choose from {all_names}")
     num_samples = arguments.days * int(round(SEGMENT_DURATION / SAMPLING_INTERVAL))
-    # * Times count from the start of the ESA orbit file, where t_ref sits, as in item 1.
+    # * Times count from the start of the ESA orbit file, where t_ref sits, as in stft_accuracy.py.
     t_ref = 0.0
     data_start = t_ref + chosen.start_offset
     orbits, orbits_start = load_orbits("esa", arguments.device)

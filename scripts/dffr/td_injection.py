@@ -4,9 +4,9 @@ The barycentric strain follows ``GBDFFRSource`` and ``LISATDIonTheFly::get_hp_hc
 frame ``h+ = -A (1 + cos^2 iota) cos(Phi)`` and ``hx = -2 A cos(iota) sin(Phi)``, rotated by twice
 the polarisation angle, with the phase and amplitude of ``gb_physics.hh``. ``pyResponseTDI``
 projects it on the six links at the retarded times (Lagrange interpolation of order 25) and forms
-the TDI combinations with the delays of the same orbits. ``stft_accuracy.py`` and the likelihood
-surfaces of step 6 build their time-domain data with it; ``docs/response/dffr/tests.md`` records
-what it is checked against.
+the TDI combinations with the delays of the same orbits. ``stft_accuracy.py`` and
+``likelihood_surfaces.py`` build their time-domain data with it; ``docs/response/dffr/results.md``
+records what it is checked against.
 """
 
 from __future__ import annotations

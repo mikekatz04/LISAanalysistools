@@ -4,13 +4,12 @@
         [--parts mismatch snr surfaces] [--no-figures] [--no-summary]
     python mojito_dffr_validation.py --output DIR --summarize-only
 
-Step 6 of the DFFR integration, validation item 4. The data are the Mojito-light L1 time series of
-the galactic binaries (the white-dwarf population of ``catalogues/wdwd_cat_mojito_lite_processed``)
+The data are the Mojito-light L1 time series of the galactic binaries (the white-dwarf population of ``catalogues/wdwd_cat_mojito_lite_processed``)
 and of the instrument noise, read and preprocessed as the global fit does with the settings of
 ``mojito_input/gb_high_freq_global_fit_settings.py``: ``L1ProcessingStep`` with the L1 orbits of
 the noise file (ICRS, Mojito mean arm length), a high-pass at 1e-5 Hz and a low-pass at 0.1 Hz
 (order-2 Butterworth, zero phase), downsampling to 5 s (Kaiser window, beta 31) and 200 h trimmed
-from each end, then the first 1.92 years (author's choice for item 4; the settings file takes 9
+from each end, then the first 1.92 years (author's choice; the settings file takes 9
 months; the trim leaves 713.8 days). Both domains use the 701 whole one-day segments of that span. The processed streams of the galaxy, of the noise and of their sum are cached in DIR/data
 with the chosen sources; delete that folder to build them again.
 
@@ -21,7 +20,7 @@ out: phi0 = +TrueAnomaly; sky angles and polarisation in ICRS). A catalogue bina
 band reaches a source's STFT band is a neighbour of that source; a neighbour inside the source's
 side bins makes the source "overlapping".
 
-The four waveforms of item 3 (``likelihood_surfaces.py``) and the two of jaxgb, each in its own
+The four waveforms of ``likelihood_surfaces.py`` and the two of jaxgb, each in its own
 domain, on X, Y and Z with the full complex 3 x 3 CSD:
 
 * STFT: DFFR and TDI on the fly in ``STFTGBComputations``, t_ref = MOJITO_REFERENCE_TIME as in the
@@ -29,7 +28,7 @@ domain, on X, Y and Z with the full complex 3 x 3 CSD:
 * FD: ``GBFDComputations``, FastGB, JaxGB and JaxGBaccurate on dt rfft of the data with LAT's
   symmetric Tukey of taper 1e4 s, their parameters carried to the data start (frequency and phase;
   the amplitude too for the codes whose model evolves it). FastGB runs with
-  ``flip_ref_phase=True``, the conventions of item 3. ``GBFDComputations``, FastGB and JaxGB give
+  ``flip_ref_phase=True``, the conventions of ``likelihood_surfaces.py``. ``GBFDComputations``, FastGB and JaxGB give
   the transform of the data span without a window, which no FD code can taper. JaxGBaccurate gives
   the transform of a span twice as long, [t0 - T/2, t0 + 3T/2) under its own window, which is flat
   over the data; its template goes back to the time domain, where the data span takes the FD data
@@ -60,14 +59,14 @@ Parts (``--parts``, all by default):
 * snr: the optimal SNR sqrt((h|h)) of every waveform, the SNR of "isolated" and "gb" in the band,
   the matched-filter SNR Re(d|h) / sqrt((h|h)) on "data", and the noise level (n|n) / (6 N) of the
   noise alone over the N pixels (STFT) or bins (FD) of the band, 1 when the CSD describes it;
-* surfaces: the scans of item 3 (8 parameters, +-4 sigma in 81 points, sigma = 1/sqrt(F_ii) of
+* surfaces: the scans of ``likelihood_surfaces.py`` (8 parameters, +-4 sigma in 81 points, sigma = 1/sqrt(F_ii) of
   DFFR's information matrix at the truth, up to 3 rescans of a far peak of "data") on all three
   data sets.
 
 Every run writes NAME.json, NAME.npz and NAME.png per source and then, unless ``--no-summary``,
 summary.json, report.txt and the summary figures; ``--summarize-only`` writes only those and
 draws the figures again. There is no threshold; the results are recorded in
-``docs/response/dffr/tests.md``. Besides the Erebor stack the script needs jaxgb (PyPI, 0.2.2
+``docs/response/dffr/results.md``. Besides the Erebor stack the script needs jaxgb (PyPI, 0.2.2
 measured) and the lisaorbits it brings.
 """
 
@@ -166,13 +165,13 @@ CATALOGUE_FIELDS = (
 #: Catalogue fields recorded per source and neighbour, besides CATALOGUE_FIELDS.
 RECORDED_FIELDS = ("ChirpMassSSBFrame", "Eccentricity", "TimeReferenceSSBFrame")
 # * A neighbour leaves the FD data through GBFDComputations on 16 times its own sample count,
-# * where item 3 measured its sampling error at about 1e-3 in ln L at SNR 100.
+# * where likelihood_surfaces.py measured its sampling error at about 1e-3 in ln L at SNR 100.
 NEIGHBOUR_FD_FACTOR = FD_RESOLUTION_FACTORS[-1]
 #: Tolerance of the DFFR template that fill_global_stft writes against get_ll_stft's (h|h).
 WRITE_PARITY_TOLERANCE = 1e-10
 WAVEFORMS = ITEM3_WAVEFORMS + ("jaxgb", "jaxgb_accurate")
 WAVEFORM_LABELS = {**ITEM3_LABELS, "jaxgb": "JaxGB (FD)", "jaxgb_accurate": "JaxGBaccurate (FD)"}
-# * Categorical slots 5 and 6 after the four of item 3, in the fixed order of the palette.
+# * Categorical slots 5 and 6 after the four of likelihood_surfaces.py, in the palette's order.
 WAVEFORM_COLORS = {**ITEM3_COLORS, "jaxgb": "#e87ba4", "jaxgb_accurate": "#008300"}
 FD_WAVEFORMS = ("fd_tdi_on_the_fly", "fastgb", "jaxgb", "jaxgb_accurate")
 #: Link order of lisaorbits, which jaxgb follows.
