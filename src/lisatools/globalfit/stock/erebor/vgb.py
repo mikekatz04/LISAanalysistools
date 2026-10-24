@@ -559,10 +559,9 @@ class VGBSettings(GBSettings):
         lookup_k_coarse: Env ``GB_LOOKUP_K_COARSE``. Default ``True``.
         likelihood: Per-row likelihood of the chunked delegate, ``"chunked"`` or
             ``"lookup"`` (:func:`~lisatools.globalfit.stock.erebor.gb.build_gb_wdm_comp`).
-            Env ``GB_LIKELIHOOD`` (the GB block's name). Default ``"lookup"``;
-            the 9mo launcher ``chunked``.
+            Env ``GB_LIKELIHOOD`` (the GB block's name). Default ``"lookup"``.
         lookup_fill: ``likelihood="lookup"`` only: also write the lookup template
-            on fills. Env ``GB_LOOKUP_FILL``. Default ``True``; the 9mo launcher 0.
+            on fills. Env ``GB_LOOKUP_FILL``. Default ``True``.
         fixed_params: ``(nleaves, len(fixed basis))`` per-leaf fixed values in
             sampling units (``f0`` mHz); filled by :func:`prepare_vgb_branch`.
         injection: ``(nleaves, ndim)`` sampling-basis truth rows (the
@@ -802,7 +801,7 @@ class VGBSettings(GBSettings):
     # in-model block; VGB has no RJ leg): "chunked" or "lookup" -- GBGPU's fused
     # lookup scorer (GBLookupWDMComputations, built by erebor.gb.build_gb_wdm_comp
     # for both branches). The GB block's env name, shared like the lookup_*
-    # fields: GB_LIKELIHOOD (the 9mo launcher exports chunked).
+    # fields: GB_LIKELIHOOD.
     likelihood: str = dataclasses.field(
         default_factory=env_default("GB_LIKELIHOOD", "lookup", str)
     )

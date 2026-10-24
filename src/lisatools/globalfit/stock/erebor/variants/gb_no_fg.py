@@ -267,7 +267,7 @@ class GBNoFgGBSettings(GBSettings):
             Default ``"chunked"``; launchers ``lookup``.
         likelihood: Per-row GB likelihood of the chunked delegate,
             ``"chunked"`` or ``"lookup"``. Env ``GB_LIKELIHOOD``. Default
-            ``"lookup"`` (the 9mo launcher exports ``chunked``; see
+            ``"lookup"`` (every launcher; see
             :func:`~lisatools.globalfit.stock.erebor.gb.build_gb_wdm_comp`).
         lookup_table_path: Explicit GB lookup table. Env
             ``GB_LOOKUP_TABLE_PATH``. Default ``""``.
@@ -542,8 +542,8 @@ class GBNoFgGBSettings(GBSettings):
     # GBLookupWDMComputations: the chunked comp with only get_ll_wdm swapped, so
     # fills / swaps / F-stat / sig-het's delegate are unchanged; built by
     # erebor.gb.build_gb_wdm_comp for the GB and VGB branches). Needs a GBGPU
-    # wheel with gb_lookup_get_ll (dev >= 8a6762c). Env: GB_LIKELIHOOD; the
-    # 9mo launcher exports chunked (Mike 2026-10-24: that run finishes on it).
+    # wheel with gb_lookup_get_ll (dev >= 8a6762c). Env: GB_LIKELIHOOD (every
+    # launcher: lookup, Mike 2026-10-24).
     likelihood: str = dataclasses.field(
         default_factory=env_default("GB_LIKELIHOOD", "lookup", str)
     )
@@ -565,8 +565,8 @@ class GBNoFgGBSettings(GBSettings):
     # likelihood="lookup" only: also WRITE the lookup template on fills (adds /
     # removals / the engine's templates), so every GB template the fit writes
     # into the residual is the model the likelihood scores. Default on (Mike
-    # 2026-10-24: no chunked-het outside the 9mo run); the 9mo launcher exports
-    # 0 with its chunked likelihood. GBGPU >= f97aadc.
+    # 2026-10-24: no chunked-het per-row scoring or fills anywhere). GBGPU >=
+    # f97aadc.
     lookup_fill: bool = dataclasses.field(
         default_factory=env_default("GB_LOOKUP_FILL", True, bool)
     )

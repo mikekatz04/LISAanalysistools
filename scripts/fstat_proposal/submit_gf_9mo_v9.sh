@@ -2573,8 +2573,8 @@ export SIGHET_INFOMAT_ENGINE=${SIGHET_INFOMAT_ENGINE-lookup}
 #   likelihood scored; swaps and the F-stat grid scoring stay chunked-het
 #   (no lookup kernel). The build line says "fills LOOKUP". Inert with
 #   GB_LIKELIHOOD=chunked.
-export GB_LIKELIHOOD=${GB_LIKELIHOOD:-chunked}
-export GB_LOOKUP_FILL=${GB_LOOKUP_FILL:-0}
+export GB_LIKELIHOOD=${GB_LIKELIHOOD:-lookup}
+export GB_LOOKUP_FILL=${GB_LOOKUP_FILL:-1}
 export GB_CHOL_CACHE=${GB_CHOL_CACHE:-1}
 export GB_CHOL_CACHE_EVERY=${GB_CHOL_CACHE_EVERY:-40}
 export GB_CHOL_CACHE_TOL=${GB_CHOL_CACHE_TOL:-5}

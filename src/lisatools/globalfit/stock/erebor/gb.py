@@ -412,9 +412,8 @@ def build_gb_wdm_comp(info, general_info, *, branch: str):
     grid scoring have no lookup kernel and stay on the chunked comp. H100 harness, 2026-10-05: 4.4 / 7.0 /
     19 us per row at 180 / 360 / 720 d against 88 / 172 / 345 us chunked;
     median 1-3e-5 nats and at most 5e-3 nats from the chunked value. Lookup is
-    the default of both blocks and of the launcher template; the 9mo launcher
-    exports ``GB_LIKELIHOOD=chunked`` and ``GB_LOOKUP_FILL=0`` (that run
-    finishes on chunked-het).
+    the default of both blocks and of every launcher (Mike 2026-10-24);
+    ``GB_LIKELIHOOD=chunked`` on a launch line is the rollback.
 
     The domain settings' ``t0`` is moved to the absolute data start first: the
     het samples the orbits inside their span, and WDM coefficient addressing
