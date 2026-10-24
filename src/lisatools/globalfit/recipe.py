@@ -1368,7 +1368,7 @@ def build_gb_moves(
             linear_envelope=gb_info.gb_stft_kwargs["linear_envelope"],
             # * Optional keys: the response and the DFFR settings; without them the comp's defaults hold.
             **{key: gb_info.gb_stft_kwargs[key]
-               for key in ("response", "first_order_delays", "chirp_rate_floor")
+               for key in ("response", "first_order_delays")
                if key in gb_info.gb_stft_kwargs},
         )
         gb_info.gb_stft_comp = gb_stft_comp

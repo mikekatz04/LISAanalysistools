@@ -38,8 +38,8 @@
 // !   The kinematics table holds the midpoints of the grid's segments, in the time frame of the
 // !   orbits, the frame of t_ref.
 // !   XYZ channels, with the combinations of TDIConfig("1st generation") or ("2nd generation").
-// ! The chirp-rate floor (default 1e-22 Hz/s) changes the phase by at most pi floor (dt / 2)^2,
-// ! 6e-13 rad on a one-day segment.
+// ! The chirp-rate floor, STFT_FDOT_FLOOR of the existing response (1e-22 Hz/s), changes the
+// ! phase by at most pi floor (dt / 2)^2, 6e-13 rad on a one-day segment.
 // * Speed: everything that does not depend on the bin is in the segment table, built once per
 // * pass by all threads of a block. A pixel then costs three windowed transforms, of six bounded
 // * integrals each (one on a boxcar), and 18 complex multiply-adds that apply the weights.
@@ -62,8 +62,6 @@
 #define DFFR_LIGHT_SPEED 299792458.0
 #define DFFR_TWO_PI 6.283185307179586476925286766559
 #define DFFR_LAT_STRAIN_FACTOR (-2.0)
-// * Default floor on the local chirp rate [Hz/s], the STFT_FDOT_FLOOR of the existing response.
-#define DFFR_CHIRP_RATE_FLOOR 1.0e-22
 
 // ===========================================================================
 // Links
@@ -117,8 +115,6 @@ inline cmplx dffr_polar_unit(double theta) {
 #endif
 }
 
-// ! Complex product without the infinity recovery of the library operator: every operand here is
-// ! finite, and the recovery code costs instruction cache.
 CUDA_CALLABLE_MEMBER
 inline cmplx dffr_mul(const cmplx &left, const cmplx &right) {
   return cmplx(left.real() * right.real() - left.imag() * right.imag(),
@@ -149,14 +145,13 @@ struct DFFRSettings {
   bool first_order_delays;  // carry every delay to first order across the segment
   int tdi_generation;       // 1 or 2
   int num_side_bins;        // half-width of a row's band around its carrier bin
-  double chirp_rate_floor;  // sign-preserving floor on the local chirp rate [Hz/s]
 };
 
-// Settings of a launch: the grid and window of an STFTFresnel and the DFFR knobs. Host only.
+// Settings of a launch: the grid and window of an STFTFresnel and the DFFR settings. Host only.
 // ! Raises std::invalid_argument for a setup DFFR cannot represent.
 inline DFFRSettings dffr_make_settings(const STFTFresnel &fresnel, bool linear_envelope,
                                        bool first_order_delays, int tdi_generation,
-                                       int num_side_bins, double chirp_rate_floor) {
+                                       int num_side_bins) {
   const double segment_duration = fresnel.dt;
   const double window_taper = fresnel.window_alpha;
   if (!(segment_duration > 0.0))
@@ -175,8 +170,6 @@ inline DFFRSettings dffr_make_settings(const STFTFresnel &fresnel, bool linear_e
                                 std::to_string(tdi_generation) + ".");
   if (num_side_bins < 0)
     throw std::invalid_argument("dffr: n_side_bins must not be negative.");
-  if (!(chirp_rate_floor > 0.0))
-    throw std::invalid_argument("dffr: chirp_rate_floor must be positive.");
 
   DFFRSettings settings;
   settings.num_time_segments = fresnel.num_times;
@@ -202,7 +195,6 @@ inline DFFRSettings dffr_make_settings(const STFTFresnel &fresnel, bool linear_e
   settings.first_order_delays = first_order_delays;
   settings.tdi_generation = tdi_generation;
   settings.num_side_bins = num_side_bins;
-  settings.chirp_rate_floor = chirp_rate_floor;
   return settings;
 }
 
@@ -240,11 +232,13 @@ struct DFFRQuadPhaseExpansion {
   double amplitude_ratio;          // A(T) over the amplitude that enters the link amplitude
 };
 
-// Sign-preserving floor on the local chirp rate. The transform carries 1 / sqrt(2 |alpha|) and a
-// stationary offset (f_eff - f) / alpha, and the Doppler-dominated alpha crosses zero twice a year.
+// Sign-preserving floor on the local chirp rate, STFT_FDOT_FLOOR of the existing response. The
+// transform carries 1 / sqrt(2 |alpha|) and a stationary offset (f_eff - f) / alpha, and the
+// Doppler-dominated alpha crosses zero twice a year.
 CUDA_DEVICE
-inline double dffr_apply_chirp_rate_floor(double chirp_rate, double floor_value) {
-  if (std::fabs(chirp_rate) < floor_value) return (chirp_rate < 0.0) ? -floor_value : floor_value;
+inline double dffr_apply_chirp_rate_floor(double chirp_rate) {
+  if (std::fabs(chirp_rate) < STFT_FDOT_FLOOR)
+    return (chirp_rate < 0.0) ? -STFT_FDOT_FLOOR : STFT_FDOT_FLOOR;
   return chirp_rate;
 }
 
@@ -574,8 +568,7 @@ inline DFFRReceptionScalars dffr_make_reception_scalars(const DFFRSettings &sett
                                                         double second_derivative) {
   const double chirp_rate = dffr_apply_chirp_rate_floor(
       expansion.frequency_rate * first_derivative * first_derivative +
-          expansion.instantaneous_frequency * second_derivative,
-      settings.chirp_rate_floor);
+      expansion.instantaneous_frequency * second_derivative);
   DFFRReceptionScalars state;
   state.quad_phase = dffr_make_quad_phase_scalars(chirp_rate);
   state.effective_frequency = expansion.instantaneous_frequency * first_derivative;
@@ -1454,8 +1447,9 @@ struct DFFRTile {
   };
 };
 
-// Launch inputs of the tile from the bound grid, the kinematics table and the knobs; *stft_launch
-// receives the domain pointer the consumers read, the device copy on the GPU. Host only.
+// Launch inputs of the tile from the bound grid, the kinematics table and the settings;
+// *stft_launch receives the domain pointer the consumers read, the device copy on the GPU. Host
+// only.
 // ! Raises std::invalid_argument for a setup DFFR cannot represent.
 template <class SourceT>
 inline DFFRTileInputs<SourceT> dffr_tile_inputs(STFTFresnel *fresnel, STFTDomain *stft,
@@ -1463,7 +1457,6 @@ inline DFFRTileInputs<SourceT> dffr_tile_inputs(STFTFresnel *fresnel, STFTDomain
                                                const typename SourceT::Model &model,
                                                int n_side_bins, int tdi_generation,
                                                bool linear_envelope, bool first_order_delays,
-                                               double chirp_rate_floor,
                                                STFTDomain **stft_launch) {
   if (stft->tdi_type != TDI_XYZ || stft->num_channels != DFFR_NUM_CHANNELS)
     throw std::invalid_argument("dffr: the response computes the X, Y and Z channels; the domain "
@@ -1476,7 +1469,7 @@ inline DFFRTileInputs<SourceT> dffr_tile_inputs(STFTFresnel *fresnel, STFTDomain
         "dffr: the STFTFresnel and the STFTDomain describe different grids.");
   DFFRTileInputs<SourceT> inputs;
   inputs.settings = dffr_make_settings(*fresnel, linear_envelope, first_order_delays,
-                                       tdi_generation, n_side_bins, chirp_rate_floor);
+                                       tdi_generation, n_side_bins);
   dffr_check_table(inputs.settings, *kinematics, stft->t0);
   inputs.kinematics = *kinematics;
   inputs.model = model;
