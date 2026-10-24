@@ -184,6 +184,7 @@ def build_fixture(seed=42):
         n_side_bins=3,
         window_factor=1.0,
         freq_from_tdi_phase=False,
+        response="tdi_on_the_fly",
     )
 
     # K_SOURCES live sources per walker, identical across temperatures.

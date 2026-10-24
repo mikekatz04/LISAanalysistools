@@ -148,7 +148,7 @@ def build_case(backend: str = "cpu", seed: int = 7) -> dict:
         stft_comps=aca.cpp_splits[0], T=TOBS, t_ref=0.0, orbits=orbits,
         tdi_config=TDIConfig("1st generation", force_backend=backend),
         force_backend=backend, n_side_bins=N_SIDE_BINS, window_factor=1.0,
-        freq_from_tdi_phase=False,
+        freq_from_tdi_phase=False, response="tdi_on_the_fly",
     )
 
     band_edges = _band_edges()

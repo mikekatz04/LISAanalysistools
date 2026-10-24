@@ -96,7 +96,7 @@ def build(n_stft=16, nf=128, big_dt=21600.0, ind_lo=40, ind_hi=100,
         stft_comps=shim, T=NT * big_dt, t_ref=0.0, orbits=orbits,
         tdi_config="2nd generation", force_backend="cpu",
         n_side_bins=n_side_bins, window_factor=1.0,
-        freq_from_tdi_phase=freq_from_tdi_phase,
+        freq_from_tdi_phase=freq_from_tdi_phase, response="tdi_on_the_fly",
     )
     return settings, comp
 

@@ -95,6 +95,7 @@ class TestBufferPreloadLimits(unittest.TestCase):
             stft_comps=aca.cpp_splits[0],
             T=NT * stft_dt,
             t_ref=0.0,
+            response="tdi_on_the_fly",
         )
 
         combos = np.array([

@@ -651,7 +651,7 @@ class STFTEngineNumericTest(unittest.TestCase):
         return aca, gb, engine, params
 
     def test_fill_get_ll_and_swap_self_consistency(self):
-        self._check_self_consistency()
+        self._check_self_consistency(response="tdi_on_the_fly")
 
     def test_fill_get_ll_and_swap_self_consistency_dffr(self):
         aca, gb = self._check_self_consistency(response="dffr")

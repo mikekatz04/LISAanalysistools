@@ -415,7 +415,7 @@ def main(argv=None):
         stft_comps=shim, T=n_stft * args.stft_big_dt, t_ref=t_ref,
         orbits=orbits, tdi_config=tdi_config, force_backend=args.backend,
         n_side_bins=args.stft_n_side, window_factor=1.0,
-        freq_from_tdi_phase=bool(args.freq_from_tdi_phase),
+        freq_from_tdi_phase=bool(args.freq_from_tdi_phase), response="tdi_on_the_fly",
     )
 
     print(f"FD grid: N={n_win} df={df:.4e}  band=[{f_lo:.6e},{f_hi:.6e}] Hz  "
